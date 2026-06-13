@@ -1206,36 +1206,48 @@
     return { close() { closedByUs = true; clearHeartbeat(); if (ws) try { ws.close(); } catch (_) { /* ignore */ } } };
   }
 
-  // Coinbase Advanced Trade adapter (§3.3): public ticker channel on
-  // wss://advanced-trade-ws.coinbase.com. MUST subscribe within 5s of connect;
-  // channels go stale ~60–90s without updates so we co-subscribe heartbeats.
-  // PUBLIC channel — no auth, no signing. product id is BTC-USD (dash).
+  // Coinbase Advanced Trade adapter (§3.3) on wss://advanced-trade-ws.coinbase.com.
+  // THREE public channels, no auth/signing (product id BTC-USD, dash):
+  //   • ticker        → header price + live candle (high-frequency price stream)
+  //   • market_trades → the tape (real per-trade size + aggressor side + trade time;
+  //                     the ticker channel carries NO size, hence the old "—" column)
+  //   • heartbeats    → keepalive (~1/s). MUST subscribe within 5s of connect;
+  //                     channels go stale ~60–90s without updates.
   const coinbaseAdapter = {
     url: 'wss://advanced-trade-ws.coinbase.com',
     pingMs: 20000,
     subscribe(ws) {
       ws.send(JSON.stringify({ type: 'subscribe', product_ids: ['BTC-USD'], channel: 'ticker' }));
+      ws.send(JSON.stringify({ type: 'subscribe', product_ids: ['BTC-USD'], channel: 'market_trades' }));
       ws.send(JSON.stringify({ type: 'subscribe', product_ids: ['BTC-USD'], channel: 'heartbeats' }));
     },
     // Coinbase has no client ping frame for this feed; the heartbeats channel is
-    // the keepalive/gap-detector. Re-assert the subscription as a liveness nudge.
+    // the keepalive. Re-assert the subscription as a liveness nudge.
     ping(ws) { ws.send(JSON.stringify({ type: 'subscribe', product_ids: ['BTC-USD'], channel: 'heartbeats' })); },
     onMessage(msg, api) {
-      if (msg.channel === 'ticker' && Array.isArray(msg.events)) {
+      if (!Array.isArray(msg.events)) return;
+      if (msg.channel === 'ticker') {
+        // Price feed only → header + candle. (ticker has no per-trade size field.)
         for (const ev of msg.events) {
           for (const t of (ev.tickers || [])) {
             const price = Number(t.price);
-            if (Number.isFinite(price)) api.onTick({ price, size: Number(t.last_size), time: Date.now() });
+            if (Number.isFinite(price)) api.onTick({ price, time: Date.now() });
           }
         }
+      } else if (msg.channel === 'market_trades') {
+        // The tape: each event batch is a 'snapshot' (initial / on re-subscribe) or
+        // an 'update'. onTrades seeds once from the first snapshot and ignores later
+        // ones, so a reconnect never re-dumps the whole batch into the tape.
+        for (const ev of msg.events) api.onTrades(ev.trades || [], ev.type === 'snapshot');
       }
-      // heartbeats channel: liveness only; no UI action needed beyond "connected".
+      // heartbeats channel: liveness only. NOTE: not yet consumed as a tick-staleness
+      // watchdog — a silent stall (socket open, data stopped) is not flagged today.
     },
   };
 
   // Live state: header price flash + Live tape + live candle (separate from
   // the backtest series — never merged, §3.5).
-  const live = { socket: null, lastPrice: NaN, tape: [], lcChart: null, lcCandles: null, lastBarSec: NaN };
+  const live = { socket: null, lastPrice: NaN, tape: [], tradesSeeded: false, lastTradeId: -1, lcChart: null, lcCandles: null, lastBarSec: NaN };
   const TAPE_MAX = 40;
 
   function fmtUsd(x) { return Number.isFinite(x) ? '$' + x.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'; }
@@ -1278,22 +1290,48 @@
       setText('conn-text', 'live · ' + new Date(tick.time).toISOString().slice(11, 19) + ' UTC');
     }
 
-    // Live tape (newest first, capped). Tabular-nums via the .num class.
-    live.tape.unshift(tick);
-    if (live.tape.length > TAPE_MAX) live.tape.length = TAPE_MAX;
-    renderTape(prev);
-
     // Push the tick into the live candle panel (updates the CURRENT bar only).
+    // The tape is fed by market_trades (onLiveTrades), NOT by ticker — ticker
+    // carries no trade size, which is what left the size column blank.
     updateLiveCandle(tick);
   }
 
-  function renderTape(prevForFlash) {
+  // Live tape ← Coinbase market_trades: real per-trade size + aggressor side +
+  // trade timestamp. Newest-first, capped. The FIRST snapshot seeds the tape;
+  // later snapshots (re-fired on every re-subscribe/reconnect) are ignored so the
+  // batch is never re-dumped. Updates are deduped by the monotonic trade_id.
+  function onLiveTrades(trades, isSnapshot) {
+    const norm = (trades || []).map((tr) => ({
+      price: Number(tr.price), size: Number(tr.size), side: tr.side,
+      time: Date.parse(tr.time), id: Number(tr.trade_id),
+    })).filter((t) => Number.isFinite(t.price) && Number.isFinite(t.id));
+    if (!norm.length) return;
+    norm.sort((a, b) => b.id - a.id);              // newest first (trade_id is monotonic)
+    if (isSnapshot) {
+      if (live.tradesSeeded) return;               // ignore reconnect snapshots
+      live.tape = norm.slice(0, TAPE_MAX);
+      live.lastTradeId = norm[0].id;
+      live.tradesSeeded = true;
+    } else {
+      if (!live.tradesSeeded) return;              // wait for the seed snapshot first
+      const fresh = norm.filter((t) => t.id > live.lastTradeId);
+      if (!fresh.length) return;
+      live.lastTradeId = fresh[0].id;              // fresh is desc → [0] is the max id
+      live.tape = fresh.concat(live.tape);         // newest on top
+      if (live.tape.length > TAPE_MAX) live.tape.length = TAPE_MAX;
+    }
+    renderTape();
+  }
+
+  // Price colored by AGGRESSOR side (BUY lifts the offer → up; SELL hits the bid →
+  // down) — the conventional time-&-sales read, CVD-safe via the .delta glyphs.
+  // Timestamp is the real trade time, so a stalled tape shows OLD times, not "now".
+  function renderTape() {
     const root = $('live-tape');
     if (!root) return;
-    const rows = live.tape.map((t, i) => {
-      const ts = new Date(t.time).toISOString().slice(11, 19);
-      const ref = i + 1 < live.tape.length ? live.tape[i + 1].price : prevForFlash;
-      const dir = Number.isFinite(ref) ? (t.price > ref ? 'up' : t.price < ref ? 'down' : '') : '';
+    const rows = live.tape.map((t) => {
+      const ts = Number.isFinite(t.time) ? new Date(t.time).toISOString().slice(11, 19) : '—';
+      const dir = t.side === 'BUY' ? 'up' : t.side === 'SELL' ? 'down' : '';
       const sz = Number.isFinite(t.size) ? t.size.toFixed(4) : '—';
       return `<div style="display:flex; justify-content:space-between; gap:var(--sp-3); padding:1px 0;">`
         + `<span class="num" style="color:var(--muted)">${ts}</span>`
@@ -1412,6 +1450,7 @@
     updateLiveStatus('reconnecting', 'connecting to live feed…');
     live.socket = makeSocket(coinbaseAdapter, {
       onTick: onLiveTick,
+      onTrades: onLiveTrades,
       onStatus: (kind, msg) => updateLiveStatus(kind, msg),
     });
   }
