@@ -306,6 +306,7 @@
       costBps, slippageBps: slipBps, periodsPerYear: p,
       nTrials, varTrialsSr: 0.5, oosFrac: 0.3,
     });
+    state.last = { o, bt, zSeries, p, key };   // cached so a tab switch can re-render without recomputing
 
     renderStats(bt, key, p);
     renderKpiStrip(bt, key, p);
@@ -1376,6 +1377,65 @@
   function currentStrategy() { const s = $('strategy-select'); return s ? s.value : 'ma_trend'; }
 
   // ── Command palette (Cmd/Ctrl+K) ──────────────────────────────────────
+  // ─── Module 3: tabbed information architecture ──────────────────────────
+  // Each panel belongs to a region; the tab bar shows one region at a time so
+  // the page stops being a wall. SVG charts measure clientWidth, so a region's
+  // charts are RE-RENDERED when its tab is shown (a hidden panel reports width 0).
+  const REGIONS = {
+    backtest: ['panel-leaderboard', 'panel-performance', 'panel-candles', 'panel-equity', 'panel-drawdown', 'panel-hist', 'panel-rolling'],
+    live: ['panel-live'],
+    vol: ['panel-funding', 'panel-vrp', 'panel-smile', 'panel-term', 'panel-rrbf'],
+    onchain: ['panel-onchain'],
+  };
+  const REGION_ORDER = ['backtest', 'live', 'vol', 'onchain'];
+  const TAB_KEY = 'btcq-tab';
+  let activeRegion = 'backtest';
+
+  function regionOfPanel(id) {
+    for (const r of REGION_ORDER) if (REGIONS[r].includes(id)) return r;
+    return null;
+  }
+
+  function setActiveTab(name, opts = {}) {
+    if (!REGIONS[name]) name = 'backtest';
+    activeRegion = name;
+    for (const r of REGION_ORDER) {
+      const show = r === name;
+      for (const id of REGIONS[r]) { const el = $(id); if (el) el.style.display = show ? '' : 'none'; }
+    }
+    document.querySelectorAll('.region-tab').forEach((b) => {
+      const on = b.dataset.tab === name;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    try { localStorage.setItem(TAB_KEY, name); } catch (_) { /* ignore */ }
+    renderRegion(name);                       // re-render now-visible charts at real width
+    if (!opts.noScroll) { const t = $('region-tabs'); if (t) t.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start' }); }
+  }
+
+  // Re-render the charts in a region from cached state (cheap; SVG redraw only).
+  function renderRegion(name) {
+    const L = state.last;
+    try {
+      if (name === 'backtest' && L) renderCharts(L.o, L.bt, L.zSeries, L.p);
+      else if (name === 'live' && L) renderLiveCandle(L.o, L.bt);
+      else if (name === 'vol') { renderFunding(); renderVrp(state.ohlcv); renderOptionChain(); }
+      else if (name === 'onchain') renderOnchain();
+    } catch (_) { /* a degraded panel must never break the tab switch */ }
+  }
+
+  function wireTabs() {
+    document.querySelectorAll('.region-tab').forEach((b) => {
+      b.addEventListener('click', () => setActiveTab(b.dataset.tab));
+    });
+  }
+
+  function applyActiveTab() {
+    let saved = 'backtest';
+    try { saved = localStorage.getItem(TAB_KEY) || 'backtest'; } catch (_) { /* ignore */ }
+    setActiveTab(saved, { noScroll: true });   // initial apply: no scroll jump
+  }
+
   // Commands: jump to any panel (built from .panel[data-panel-title]) + switch
   // strategy + switch timeframe. Substring "fuzzy-ish" filter, arrow-key nav,
   // Enter runs, Esc closes. Focus is restored to the trigger on close.
@@ -1401,11 +1461,17 @@
         run: () => { const t = $('granularity-select'); if (t && state.gran !== g) { t.value = g; state.gran = g; init(); } },
       });
     });
+    // Switch-section (tab) commands.
+    [['backtest', 'Backtest'], ['live', 'Live charts'], ['vol', 'Volatility'], ['onchain', 'On-chain']].forEach(([k, label]) => {
+      items.push({ kind: 'section', label: 'Section → ' + label, run: () => setActiveTab(k) });
+    });
     cmdk.items = items;
   }
 
   function jumpToPanel(panel) {
     if (!panel) return;
+    const r = regionOfPanel(panel.id);                       // reveal its tab if hidden
+    if (r && r !== activeRegion) setActiveTab(r, { noScroll: true });
     panel.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start' });
     // Briefly mark focus so keyboard users land on the right region.
     const prev = panel.getAttribute('tabindex');
@@ -1597,6 +1663,9 @@
     if (!ohlcvRes.data) renderLiveCandle(null, null);
     // Live WS tape/price (Coinbase, public, keyless) — starts once, survives reloads.
     startLive();
+    // Module 3: apply the persisted section tab (after all panels have rendered
+    // once at full width), hiding the others + re-rendering the active region.
+    applyActiveTab();
   }
 
   function wireControls() {
@@ -1635,6 +1704,7 @@
     if (reload) reload.addEventListener('click', () => init());
     window.addEventListener('resize', debounce(() => { if (state.ohlcv) runStrategy(sel ? sel.value : 'ma_trend'); renderFunding(); }, 250));
 
+    wireTabs();   // Module 3: section tab bar (Backtest / Live / Volatility / On-chain)
     // §5.1-5.2 power-user affordances (command palette, help, density + CVD toggles).
     wirePowerUserUX();
   }

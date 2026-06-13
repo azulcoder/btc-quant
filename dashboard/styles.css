@@ -638,6 +638,33 @@ body.density-compact main { gap: var(--sp-2); }
   .kpi-cards { grid-template-columns: repeat(2, 1fr); }
 }
 
+/* ─── Module 3: section tabs (Backtest / Live / Volatility / On-chain) ──── */
+.region-tabs {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  margin: var(--sp-1) 0 calc(-1 * var(--sp-1));
+  flex-wrap: wrap;
+}
+.region-tab {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+}
+.region-tab:hover { color: var(--fg); filter: none; }
+.region-tab.active { color: var(--accent); border-bottom-color: var(--accent); }   /* amber active */
+.region-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
 /* ─── Accessibility: respect prefers-reduced-motion (§4.8/§4.9) ─────────── */
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }

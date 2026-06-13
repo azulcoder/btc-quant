@@ -160,6 +160,16 @@
       <p class="hint" id="granularity-note">The <strong>Timeframe</strong> selector switches between daily (365 bars/yr) and hourly (8760 bars/yr) bars — annualization is threaded through every Sharpe/vol/CAGR calc, so the headline stats stay honest. On <strong>1h</strong>, strategy lookbacks (50/200/20) are in <strong>bars</strong> (hours), not days, and only a <strong>recent window</strong> (~30 days / ~720 bars) is fetched. For long-history hourly backtests use the Python engine: <code>python3 scripts/run_backtest.py --granularity 1h --start 2025-01-01</code>.</p>
     </section>
 
+    <!-- Module 3: section tabs — group the analysis into Backtest / Live /
+         Volatility / On-chain so the page is not one long wall. Persisted +
+         ⌘K-jumpable. The KPI strip + Strategy controls above stay global. -->
+    <nav class="region-tabs wide" id="region-tabs" role="tablist" aria-label="Sections">
+      <button class="region-tab active" type="button" role="tab" data-tab="backtest" aria-selected="true">Backtest</button>
+      <button class="region-tab" type="button" role="tab" data-tab="live" aria-selected="false">Live</button>
+      <button class="region-tab" type="button" role="tab" data-tab="vol" aria-selected="false">Volatility</button>
+      <button class="region-tab" type="button" role="tab" data-tab="onchain" aria-selected="false">On-chain</button>
+    </nav>
+
     <!-- Strategy leaderboard — the honest centerpiece -->
     <section class="panel wide" id="panel-leaderboard" data-panel-title="Strategy leaderboard">
       <h2>Strategy leaderboard — every strategy on the loaded data, sorted by deflated Sharpe</h2>
