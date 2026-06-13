@@ -179,6 +179,7 @@
   function showBanner(kind, msg) {
     const b = $('stale-banner');
     if (!b) return;
+    state._bannerKind = msg ? (kind || 'warn') : null;   // so the age watchdog only re-arms when the banner is clear
     if (!msg) { b.hidden = true; return; }
     b.hidden = false;
     b.textContent = msg;
@@ -192,11 +193,32 @@
   // panel — exactly the §4.8 "do not wipe to a skeleton on background refresh"
   // rule. `panelId` is the <section> id, `stampId` the .updated-at span id.
   function utcHMS() { return new Date().toISOString().slice(11, 19) + ' UTC'; }
-  function setPanelState(panelId, status, stampId) {
+  function fmtAge(ms) {
+    const s = Math.round(ms / 1000);
+    if (s < 90) return s + 's';
+    const m = Math.round(s / 60);
+    if (m < 90) return m + 'm';
+    return Math.round(m / 60) + 'h';
+  }
+  function setPanelState(panelId, status, stampId, ageMs) {
     const panel = $(panelId);
     if (panel) {
       panel.classList.toggle('is-stale', status === 'stale');
       panel.classList.toggle('is-error', status === 'error');
+      // One stale/error chip per panel, created on demand so every panel is uniform
+      // (some markup shipped a .stale-chip, some did not). CSS reveals it only when
+      // the panel is .is-stale/.is-error. Age text makes silent aging visible.
+      let chip = panel.querySelector('.stale-chip');
+      if (!chip && (status === 'stale' || status === 'error')) {
+        chip = document.createElement('span');
+        chip.className = 'stale-chip';
+        (panel.querySelector('h2') || panel).appendChild(chip);
+      }
+      if (chip) {
+        if (status === 'stale') chip.textContent = Number.isFinite(ageMs) ? 'stale · ' + fmtAge(ageMs) + ' old' : 'stale';
+        else if (status === 'error') chip.textContent = 'unavailable';
+        else chip.textContent = '';            // ready → clear so no stale text lingers (even though CSS hides it)
+      }
     }
     if (stampId) {
       const stamp = $(stampId);
@@ -208,6 +230,8 @@
       }
     }
   }
+  // Record a feed's last successful load (drives the staleness watchdog).
+  function markFeed(key) { state.feedAt[key] = Date.now(); }
 
   // ─── State ────────────────────────────────────────────────────────────
   // state.gran is the bar timeframe ('1d' | '1h'). It drives BOTH the candle
@@ -215,7 +239,7 @@
   // annualized. Threading one ppy() through every site is the fix for the bug
   // that forced the 1h selector's removal (a literal 365 left at any
   // annualization site silently mis-annualizes hourly Sharpe/vol by sqrt(24)).
-  const state = { ohlcv: null, eth: null, funding: null, gran: '1d', optionChain: null };
+  const state = { ohlcv: null, eth: null, funding: null, gran: '1d', optionChain: null, feedAt: {}, _bannerKind: null, ohlcvLastMs: NaN, ohlcvStaleH: 36 };
 
   // Bars per year for annualization — mirrors the Python engine's
   // run_backtest._periods_per_year (24*365 hourly, 365 daily). 24/7 crypto, so
@@ -451,7 +475,7 @@
       return;
     }
     C.fundingBars(root, f.rate, { height: 160 });
-    setPanelState('panel-funding', 'ready', 'funding-updated');
+    setPanelState('panel-funding', 'ready', 'funding-updated'); markFeed('funding');
     const avg = Q.mean(f.rate);
     const annual = avg * 3 * 365; // 8h intervals → 3/day
     const negShare = f.rate.filter((r) => r < 0).length / f.rate.length;
@@ -508,7 +532,7 @@
     setText('oi-summary', `latest ${(latest / 1e3).toFixed(1)}k BTC`
       + (Number.isFinite(notional) ? ` ≈ $${(notional / 1e9).toFixed(2)}B notional` : '')
       + (Number.isFinite(chg) ? ` · ${chg >= 0 ? '+' : ''}${chg.toFixed(0)}% over ${oi.oi.length} days` : ''));
-    setText('oi-updated', 'updated ' + new Date().toISOString().slice(11, 19) + ' UTC');
+    setPanelState('panel-oi', 'ready', 'oi-updated'); markFeed('oi');
   }
 
   function renderLongShort() {
@@ -521,7 +545,7 @@
     setText('ls-summary', `${latest.toFixed(0)}% of accounts net-long`
       + (latest > 60 ? ' — crowded long (contrarian caution)' : latest < 40 ? ' — crowded short (contrarian caution)' : ' — roughly balanced')
       + '. Retail account-ratio is a weak, noisy signal.');
-    setText('ls-updated', 'updated ' + new Date().toISOString().slice(11, 19) + ' UTC');
+    setPanelState('panel-lsratio', 'ready', 'ls-updated'); markFeed('ls');
   }
 
   function renderBasis() {
@@ -543,7 +567,7 @@
       + cell('Next funding in', nextStr)
       + cell('Open interest', Number.isFinite(t.oi) ? (t.oi / 1e3).toFixed(1) + 'k BTC' : '—')
       + cell('OI notional', Number.isFinite(t.oiValue) ? '$' + (t.oiValue / 1e9).toFixed(2) + 'B' : '—');
-    setText('basis-updated', 'updated ' + new Date().toISOString().slice(11, 19) + ' UTC');
+    setPanelState('panel-basis', 'ready', 'basis-updated'); markFeed('basis');
   }
 
   function renderLeaderboard(o) {
@@ -632,7 +656,7 @@
       { values: impl, color: 'var(--c1)', label: 'Implied (DVOL %)' },
       { values: real, color: 'var(--down)', label: 'Realized 30d (%)' },
     ], { height: 200, fmt: (v) => v.toFixed(0) + '%' });
-    setPanelState('panel-vrp', 'ready', 'vrp-updated');
+    setPanelState('panel-vrp', 'ready', 'vrp-updated'); markFeed('vrp');
     const m = vrp.length ? vrp.reduce((a, b) => a + b, 0) / vrp.length : NaN;
     const posShare = vrp.length ? vrp.filter((v) => v > 0).length / vrp.length : NaN;
     setText('vrp-summary',
@@ -942,6 +966,7 @@
     // Successful load: stamp + clear stale/error on all three option-chain panels.
     [['panel-smile', 'smile-updated'], ['panel-term', 'term-updated'], ['panel-rrbf', 'rrbf-updated']]
       .forEach(([p, s]) => setPanelState(p, 'ready', s));
+    markFeed('options');
 
     // Populate the expiry selector once (keep selection across reloads).
     const sel = $('smile-expiry');
@@ -1146,7 +1171,7 @@
     C.lineChart(root, [{ values: oc.y, color: 'var(--accent-2)', label: oc.name }],
       { height: 180, fmt: (v) => (v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(0) + 'k' : v.toFixed(0)) });
     setText('onchain-summary', 'DESCRIPTIVE context only — on-chain/sentiment metrics are dominated by a revision/look-ahead trap and do NOT reliably predict returns (RESEARCH.md §2.17). Not a tradeable signal.');
-    setPanelState('panel-onchain', 'ready', 'onchain-updated');
+    setPanelState('panel-onchain', 'ready', 'onchain-updated'); markFeed('onchain');
   }
 
   // ─── Live charts: WebSocket tape + candle overlay (brief §3) ────────────
@@ -1499,6 +1524,58 @@
 
   // Start the live feed once (Coinbase default — no geoblock, §3.3). Graceful:
   // if the browser blocks the WSS upgrade, the page is fully usable without it.
+  // ─── Per-feed staleness watchdog (REST analog of the live-feed watchdog) ────
+  // The perp / options / on-chain panels are one-shot REST snapshots (no WS), so a
+  // tab left open ages them silently — and there is no live candle beside them to
+  // betray a frozen value. markFeed(key) stamps each successful load; this watchdog
+  // flips a panel to an honest "stale · Nh old" once it exceeds a per-feed max-age
+  // matched to that feed's natural cadence (conservative, so a slow daily feed does
+  // not false-positive). The basis / perp-ticker feed — the one genuinely live-ish
+  // panel — is additionally refreshed in the background so it stays current rather
+  // than merely honestly-stale. All public, keyless; no new endpoints.
+  const FEEDS = [
+    { key: 'basis',   panels: [['panel-basis', 'basis-updated']],     maxAge: 240000 },    // live-ish (refreshed) → ~4 min
+    { key: 'funding', panels: [['panel-funding', 'funding-updated']], maxAge: 7200000 },   // 8h funding cadence → ~2h
+    { key: 'oi',      panels: [['panel-oi', 'oi-updated']],           maxAge: 21600000 },  // daily bars → ~6h
+    { key: 'ls',      panels: [['panel-lsratio', 'ls-updated']],      maxAge: 21600000 },  // daily bars → ~6h
+    { key: 'vrp',     panels: [['panel-vrp', 'vrp-updated']],         maxAge: 21600000 },  // DVOL daily → ~6h
+    { key: 'options', panels: [['panel-smile', 'smile-updated'], ['panel-term', 'term-updated'], ['panel-rrbf', 'rrbf-updated']], maxAge: 3600000 }, // live option marks → ~1h
+    { key: 'onchain', panels: [['panel-onchain', 'onchain-updated']], maxAge: 43200000 },  // daily, revision-lagged → ~12h
+  ];
+
+  function checkFeedAges() {
+    const now = Date.now();
+    for (const f of FEEDS) {
+      const at = state.feedAt[f.key];
+      if (!at) continue;                                   // never loaded OK → the panel already shows its own error/NA state
+      const age = now - at;
+      if (age > f.maxAge) f.panels.forEach(([p, s]) => setPanelState(p, 'stale', null, age));
+    }
+    // Re-arm the OHLCV last-bar banner — but only when the banner is otherwise clear,
+    // so this never clobbers a loading / degraded / error message.
+    if (Number.isFinite(state.ohlcvLastMs) && state.ohlcv && !state.ohlcv.derivedOHLC && state._bannerKind == null) {
+      const ageH = (now - state.ohlcvLastMs) / 36e5;
+      if (ageH > state.ohlcvStaleH) showBanner('warn', `STALE DATA: last bar is ${ageH.toFixed(ageH < 10 ? 1 : 0)}h old. Endpoint may be lagging or rate-limited.`);
+    }
+  }
+
+  // Background refresh for the one live-ish panel. On success it re-renders + re-stamps
+  // (clearing any stale state); on failure it keeps the last-good values and lets the
+  // age watchdog flag it — a transient miss never wipes the panel.
+  async function refreshBasis() {
+    try {
+      const t = await fetchPerpTicker();
+      if (t) { state.perpTicker = t; renderBasis(); }
+    } catch (_) { /* keep last-good; watchdog handles staleness */ }
+  }
+
+  let feedWatch = null;
+  function startFeedWatchdog() {
+    if (feedWatch) return;                                 // start once; init() re-runs on reload/timeframe change
+    feedWatch = setInterval(checkFeedAges, 30000);
+    setInterval(refreshBasis, 90000);
+  }
+
   function startLive() {
     if (typeof WebSocket === 'undefined' || live.socket) return;
     updateLiveStatus('reconnecting', 'connecting to live feed…');
@@ -1873,6 +1950,7 @@
       // Granularity-aware staleness: a fresh hourly bar is ~hours old, a daily
       // bar can legitimately be a day-plus old before the next one prints.
       const staleH = state.gran === '1h' ? 3 : 36;
+      state.ohlcvLastMs = last.getTime(); state.ohlcvStaleH = staleH;   // for the watchdog re-arm
       const lastLabel = state.gran === '1h' ? last.toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : last.toISOString().slice(0, 10);
       const srcLine = `Source: ${state.ohlcv.source} · ${state.ohlcv.close.length} ${state.gran} bars · last bar ${lastLabel}`;
       setText('source-line', srcLine);
@@ -1896,6 +1974,8 @@
     if (!ohlcvRes.data) renderLiveCandle(null, null);
     // Live WS tape/price (Coinbase, public, keyless) — starts once, survives reloads.
     startLive();
+    // Per-feed staleness watchdog + basis live-refresh — starts once, survives reloads.
+    startFeedWatchdog();
     // Module 3: apply the persisted section tab (after all panels have rendered
     // once at full width), hiding the others + re-rendering the active region.
     applyActiveTab();
