@@ -305,6 +305,8 @@ button:hover { filter: brightness(1.08); }
   display: block;
 }
 .stat .v { font-size: var(--fs-lg); font-weight: 700; }
+.stat .v.pos { color: var(--up); }
+.stat .v.neg { color: var(--down); }
 .stat .vs { color: var(--muted); font-size: var(--fs-xs); }
 .stat.headline { background: var(--bg-panel-2); }
 .stat.headline .v { color: var(--accent-2); }

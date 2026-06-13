@@ -466,6 +466,86 @@
   }
 
   // ─── Strategy leaderboard: run EVERY strategy, rank by deflated Sharpe ──
+  // ─── Perpetual extras: open interest, basis/premium, long/short ratio ────
+  // All Bybit v5 public/keyless. Positioning + carry context, kept honest:
+  // funding/basis is the (risk-premium) carry SIGNAL; OI + L/S are DESCRIPTIVE.
+  async function fetchOpenInterest() {
+    try {
+      const d = await fetchJSON('https://api.bybit.com/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=1d&limit=60');
+      const l = (d && d.result && d.result.list) || [];
+      if (!l.length) throw new Error('empty oi');
+      const s = l.slice().sort((a, b) => +a.timestamp - +b.timestamp);
+      return { time: s.map((r) => +r.timestamp), oi: s.map((r) => +r.openInterest) };
+    } catch (_) { return null; }
+  }
+  async function fetchLongShort() {
+    try {
+      const d = await fetchJSON('https://api.bybit.com/v5/market/account-ratio?category=linear&symbol=BTCUSDT&period=1d&limit=40');
+      const l = (d && d.result && d.result.list) || [];
+      if (!l.length) throw new Error('empty ls');
+      const s = l.slice().sort((a, b) => +a.timestamp - +b.timestamp);
+      return { time: s.map((r) => +r.timestamp), buy: s.map((r) => +r.buyRatio) };
+    } catch (_) { return null; }
+  }
+  async function fetchPerpTicker() {
+    try {
+      const d = await fetchJSON('https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT');
+      const r = d && d.result && d.result.list && d.result.list[0];
+      if (!r) throw new Error('empty ticker');
+      return { last: +r.lastPrice, mark: +r.markPrice, index: +r.indexPrice, funding: +r.fundingRate, nextFunding: +r.nextFundingTime, oi: +r.openInterest, oiValue: +r.openInterestValue };
+    } catch (_) { return null; }
+  }
+
+  function renderOpenInterest() {
+    const root = $('chart-oi'); if (!root) return;
+    const oi = state.oi;
+    if (!oi || !oi.oi.length) { root.innerHTML = '<div class="chart-na">Open interest unavailable (Bybit CORS/geo/rate-limit).</div>'; setText('oi-summary', 'no OI data'); return; }
+    C.lineChart(root, [{ values: oi.oi, color: 'var(--accent-2)', label: 'Open interest (BTC)' }], { height: 170, fmt: (v) => (v / 1e3).toFixed(0) + 'k' });
+    const latest = oi.oi[oi.oi.length - 1], first = oi.oi[0];
+    const chg = first ? (latest / first - 1) * 100 : NaN;
+    const t = state.perpTicker;
+    const notional = t && Number.isFinite(t.oiValue) ? t.oiValue : (t ? latest * t.mark : NaN);
+    setText('oi-summary', `latest ${(latest / 1e3).toFixed(1)}k BTC`
+      + (Number.isFinite(notional) ? ` ≈ $${(notional / 1e9).toFixed(2)}B notional` : '')
+      + (Number.isFinite(chg) ? ` · ${chg >= 0 ? '+' : ''}${chg.toFixed(0)}% over ${oi.oi.length} days` : ''));
+    setText('oi-updated', 'updated ' + new Date().toISOString().slice(11, 19) + ' UTC');
+  }
+
+  function renderLongShort() {
+    const root = $('chart-lsratio'); if (!root) return;
+    const ls = state.ls;
+    if (!ls || !ls.buy.length) { root.innerHTML = '<div class="chart-na">Long/short ratio unavailable (Bybit CORS/geo/rate-limit).</div>'; setText('ls-summary', 'no long/short data'); return; }
+    const longPct = ls.buy.map((b) => b * 100);
+    C.lineChart(root, [{ values: longPct, color: 'var(--accent-2)', label: '% accounts net-long' }], { height: 160, baseline: 50, fmt: (v) => v.toFixed(0) + '%' });
+    const latest = longPct[longPct.length - 1];
+    setText('ls-summary', `${latest.toFixed(0)}% of accounts net-long`
+      + (latest > 60 ? ' — crowded long (contrarian caution)' : latest < 40 ? ' — crowded short (contrarian caution)' : ' — roughly balanced')
+      + '. Retail account-ratio is a weak, noisy signal.');
+    setText('ls-updated', 'updated ' + new Date().toISOString().slice(11, 19) + ' UTC');
+  }
+
+  function renderBasis() {
+    const root = $('basis-grid'); if (!root) return;
+    const t = state.perpTicker;
+    if (!t) { root.innerHTML = '<div class="chart-na">Perp ticker unavailable (Bybit CORS/geo/rate-limit).</div>'; return; }
+    const premium = Number.isFinite(t.index) && t.index ? (t.mark / t.index - 1) : NaN;   // perp mark vs spot index
+    const fundingApr = Number.isFinite(t.funding) ? t.funding * 3 * 365 : NaN;             // 8h funding → APR
+    const mins = Number.isFinite(t.nextFunding) ? Math.max(0, (t.nextFunding - Date.now()) / 60000) : NaN;
+    const nextStr = Number.isFinite(mins) ? (mins >= 60 ? (mins / 60).toFixed(1) + 'h' : mins.toFixed(0) + 'm') : '—';
+    const usd = (x) => '$' + (x || 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
+    const cell = (k, v, cls) => `<div class="stat"><span class="k">${k}</span><span class="v num${cls ? ' ' + cls : ''}">${v}</span></div>`;
+    root.innerHTML =
+      cell('Last / Mark', usd(t.last))
+      + cell('Spot index', usd(t.index))
+      + cell('Premium (mark−index)', Number.isFinite(premium) ? (premium * 100).toFixed(3) + '%' : '—', premium >= 0 ? 'pos' : 'neg')
+      + cell('Funding / 8h', Number.isFinite(t.funding) ? (t.funding * 100).toFixed(4) + '%' : '—', t.funding >= 0 ? 'pos' : 'neg')
+      + cell('Funding APR', Number.isFinite(fundingApr) ? (fundingApr * 100).toFixed(1) + '%' : '—', fundingApr >= 0 ? 'pos' : 'neg')
+      + cell('Next funding in', nextStr)
+      + cell('Open interest', Number.isFinite(t.oi) ? (t.oi / 1e3).toFixed(1) + 'k BTC' : '—')
+      + cell('OI notional', Number.isFinite(t.oiValue) ? '$' + (t.oiValue / 1e9).toFixed(2) + 'B' : '—');
+    setText('basis-updated', 'updated ' + new Date().toISOString().slice(11, 19) + ' UTC');
+  }
+
   function renderLeaderboard(o) {
     const body = $('leaderboard-body');
     if (!body || !o) return;
@@ -1384,10 +1464,11 @@
   const REGIONS = {
     backtest: ['panel-leaderboard', 'panel-performance', 'panel-candles', 'panel-equity', 'panel-drawdown', 'panel-hist', 'panel-rolling'],
     live: ['panel-live'],
-    vol: ['panel-funding', 'panel-vrp', 'panel-smile', 'panel-term', 'panel-rrbf'],
+    perpetual: ['panel-funding', 'panel-basis', 'panel-oi', 'panel-lsratio'],
+    options: ['panel-vrp', 'panel-smile', 'panel-term', 'panel-rrbf'],
     onchain: ['panel-onchain'],
   };
-  const REGION_ORDER = ['backtest', 'live', 'vol', 'onchain'];
+  const REGION_ORDER = ['backtest', 'live', 'perpetual', 'options', 'onchain'];
   const TAB_KEY = 'btcq-tab';
   let activeRegion = 'backtest';
 
@@ -1419,7 +1500,8 @@
     try {
       if (name === 'backtest' && L) renderCharts(L.o, L.bt, L.zSeries, L.p);
       else if (name === 'live' && L) renderLiveCandle(L.o, L.bt);
-      else if (name === 'vol') { renderFunding(); renderVrp(state.ohlcv); renderOptionChain(); }
+      else if (name === 'perpetual') { renderFunding(); renderBasis(); renderOpenInterest(); renderLongShort(); }
+      else if (name === 'options') { renderVrp(state.ohlcv); renderOptionChain(); }
       else if (name === 'onchain') renderOnchain();
     } catch (_) { /* a degraded panel must never break the tab switch */ }
   }
@@ -1462,7 +1544,7 @@
       });
     });
     // Switch-section (tab) commands.
-    [['backtest', 'Backtest'], ['live', 'Live charts'], ['vol', 'Volatility'], ['onchain', 'On-chain']].forEach(([k, label]) => {
+    [['backtest', 'Backtest'], ['live', 'Live charts'], ['perpetual', 'Perpetual'], ['options', 'Options'], ['onchain', 'On-chain']].forEach(([k, label]) => {
       items.push({ kind: 'section', label: 'Section → ' + label, run: () => setActiveTab(k) });
     });
     cmdk.items = items;
@@ -1621,13 +1703,16 @@
   async function init() {
     if (!wired) { wireControls(); wired = true; } // wire once; init() re-runs on reload/timeframe change
     showBanner('warn', 'Loading live public data…');
-    const [ohlcvRes, eth, fundingRes, dvol, onchain, optionChain] = await Promise.all([
+    const [ohlcvRes, eth, fundingRes, dvol, onchain, optionChain, oi, ls, perpTicker] = await Promise.all([
       loadOHLCV(),
       fetchETH().catch(() => null),
       fetchFunding().then((d) => ({ data: d, ok: true })).catch((e) => ({ data: null, ok: false, err: e.message })),
       loadVrp(),
       loadOnchain(),
       loadOptionChain(),
+      fetchOpenInterest(),
+      fetchLongShort(),
+      fetchPerpTicker(),
     ]);
 
     state.eth = eth;
@@ -1635,6 +1720,9 @@
     state.dvol = dvol;
     state.onchain = onchain;
     state.optionChain = optionChain;
+    state.oi = oi;
+    state.ls = ls;
+    state.perpTicker = perpTicker;
 
     if (ohlcvRes.data) {
       state.ohlcv = ohlcvRes.data;
@@ -1656,6 +1744,9 @@
       setText('source-line', 'all sources failed');
     }
     renderFunding();
+    renderBasis();
+    renderOpenInterest();
+    renderLongShort();
     renderVrp(state.ohlcv);
     renderOnchain();
     renderOptionChain();
