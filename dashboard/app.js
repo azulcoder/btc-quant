@@ -422,7 +422,7 @@
       { values: bt.equity, color: 'var(--c1)', label: 'Strategy (net)' },
     ], { height: 240, baseline: 1, fmt: (v) => v.toFixed(2) + 'x' });
 
-    C.drawdownArea($('chart-drawdown'), Q.drawdownSeries(bt.equity), { height: 150 });
+    C.drawdownArea($('chart-drawdown'), Q.drawdownSeries(bt.equity), { height: 150, dates: o.time });
 
     C.histogram($('chart-hist'), bt.returns.filter((r) => r !== 0), { height: 170, bins: 35 });
 

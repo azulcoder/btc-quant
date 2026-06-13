@@ -217,7 +217,7 @@
     const { svg, w, h } = makeSvg(root, opts);
     if (!dd.length) return drawEmpty(svg, w, h);
     const lo = Math.min(0, ...dd.filter(Number.isFinite));
-    const { x0, x1, yScale } = drawGrid(svg, w, h, lo, 0, { fmt: (v) => (v * 100).toFixed(0) + '%' });
+    const { x0, x1, y0, y1, yScale } = drawGrid(svg, w, h, lo, 0, { fmt: (v) => (v * 100).toFixed(0) + '%' });
     const xScale = scaleLin(0, dd.length - 1, x0, x1);
     const pts = [[x0, yScale(0)]];
     for (let i = 0; i < dd.length; i++) pts.push([xScale(i), yScale(Number.isFinite(dd[i]) ? dd[i] : 0)]);
@@ -226,6 +226,21 @@
     const line = [];
     for (let i = 0; i < dd.length; i++) line.push([xScale(i), yScale(Number.isFinite(dd[i]) ? dd[i] : 0)]);
     svg.appendChild(el('path', { d: path(line), fill: 'none', stroke: COLORS.down(), 'stroke-width': 1.3 }));
+    // Hover (reuse attachHover — a single series fits): drawdown depth + date, plus the
+    // running-peak date it is measured from. The peak is the most recent bar where the
+    // drawdown returned to 0 (a new equity high), recoverable from dd alone.
+    const dates = opts.dates || [];
+    const fmtDate = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 10) : '—');
+    const cols = [];
+    let peakIdx = 0;
+    for (let i = 0; i < dd.length; i++) {
+      const v = Number.isFinite(dd[i]) ? dd[i] : 0;
+      if (v >= -1e-9) peakIdx = i;                   // back to a high → new running peak
+      const items = [{ label: 'drawdown', color: COLORS.down(), py: yScale(v), valText: (v * 100).toFixed(1) + '%' }];
+      if (dates.length) items.push({ label: 'from peak', color: COLORS.axis(), py: yScale(0), valText: fmtDate(dates[peakIdx]), dot: false });
+      cols.push({ px: xScale(i), xLabel: dates.length ? fmtDate(dates[i]) : ('bar ' + (i + 1)), items });
+    }
+    attachHover(root, svg, { w, x0, x1, y0, y1, cols });
   }
 
   // ─── Returns histogram ────────────────────────────────────────────────
@@ -250,17 +265,64 @@
     const xScale = scaleLin(lo, hi, x0, x1);
     const yScale = scaleLin(0, maxC, y1, y0);
     const cw = (x1 - x0) / bins;
+    const bars = [];
     for (let i = 0; i < bins; i++) {
       const binMid = lo + (i + 0.5) * bw;
       const bx = xScale(lo + i * bw);
       const by = yScale(counts[i]);
-      svg.appendChild(el('rect', {
+      const r = el('rect', {
         x: bx + 0.5, y: by, width: Math.max(1, cw - 1), height: Math.max(0, y1 - by),
         fill: binMid >= 0 ? COLORS.up() : COLORS.down(), opacity: 0.8,
-      }));
+      });
+      svg.appendChild(r);
+      bars.push(r);
     }
     // zero line
     if (lo < 0 && hi > 0) svg.appendChild(el('line', { x1: xScale(0), y1: y0, x2: xScale(0), y2: y1, stroke: COLORS.axis(), 'stroke-width': 1, 'stroke-dasharray': '3 3' }));
+    // Mean marker — a reference annotation (amber UI marker, not a data series).
+    const total = fin.length;
+    const mean = fin.reduce((a, b) => a + b, 0) / total;
+    if (mean >= lo && mean <= hi) {
+      const mx = xScale(mean);
+      svg.appendChild(el('line', { x1: mx, y1: y0, x2: mx, y2: y1, stroke: COLORS.accent(), 'stroke-width': 1, 'stroke-dasharray': '2 3', opacity: 0.9 }));
+      const ml = el('text', { x: mx + 3, y: y0 + 9, 'text-anchor': 'start', class: 'chart-axis-label', fill: COLORS.accent() });
+      ml.textContent = 'μ ' + (mean * 100).toFixed(2) + '%';
+      svg.appendChild(ml);
+    }
+    // Per-bin hover: the BAR is the hit target (a column-snap crosshair is wrong for a
+    // histogram). A transparent full-height rect per bin makes even short bars easy to
+    // hit; the tooltip shows the bucket range + count/frequency. Self-contained here,
+    // reusing the .chart-tip styling. Fail-safe: any error disables hover, not the chart.
+    try {
+      const pct = (v) => (v * 100).toFixed(1) + '%';
+      let tip = root.querySelector('.chart-tip');
+      if (!tip) { tip = document.createElement('div'); tip.className = 'chart-tip'; root.appendChild(tip); }
+      tip.hidden = true;
+      for (let i = 0; i < bins; i++) {
+        const bx = xScale(lo + i * bw);
+        const hit = el('rect', { x: bx, y: y0, width: Math.max(1, cw), height: y1 - y0, fill: 'transparent' });
+        const bi = i;
+        hit.addEventListener('mouseenter', () => { if (bars[bi]) bars[bi].setAttribute('opacity', '1'); });
+        hit.addEventListener('mouseleave', () => { if (bars[bi]) bars[bi].setAttribute('opacity', '0.8'); tip.hidden = true; });
+        hit.addEventListener('mousemove', (ev) => {
+          try {
+            const e0 = lo + bi * bw, e1 = lo + (bi + 1) * bw, c = counts[bi];
+            const sw = ((e0 + e1) / 2) >= 0 ? COLORS.up() : COLORS.down();
+            tip.innerHTML = '<div class="chart-tip-x">[' + pct(e0) + ', ' + pct(e1) + ')</div>'
+              + '<div class="chart-tip-row"><span class="sw" style="background:' + sw + '"></span>count<b>' + c + ' days</b></div>'
+              + '<div class="chart-tip-row"><span class="sw" style="background:transparent"></span>freq<b>' + (total ? (c / total * 100).toFixed(1) + '%' : '—') + '</b></div>';
+            tip.hidden = false;
+            const rr = root.getBoundingClientRect();
+            const tw = tip.offsetWidth || 130;
+            let left = ev.clientX - rr.left + 14;
+            if (left + tw > rr.width - 4) left = ev.clientX - rr.left - tw - 14;
+            tip.style.left = Math.max(4, left) + 'px';
+          } catch (_) { tip.hidden = true; }
+        });
+        svg.appendChild(hit);
+      }
+      svg.style.cursor = 'crosshair';
+    } catch (_) { /* hover disabled, chart unaffected */ }
   }
 
   // ─── Rolling vol / Sharpe ─────────────────────────────────────────────
