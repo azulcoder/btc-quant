@@ -1584,11 +1584,37 @@
 
   function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
+  // Subsequence fuzzy score: prefix > contiguous substring > scattered subsequence
+  // (chars in order). Returns -1 for no match. Earlier + adjacent matches rank higher,
+  // so "smile" finds "IV Smile" and "rrbf" finds "RR25 / BF25".
+  function fuzzyScore(text, needle) {
+    const hay = text.toLowerCase();
+    if (!needle) return 0;
+    const sub = hay.indexOf(needle);
+    if (sub === 0) return 10000;            // prefix — best
+    if (sub > 0) return 6000 - sub;         // contiguous substring
+    let hi = 0, score = 2000, last = -2;
+    for (let i = 0; i < needle.length; i++) {
+      const found = hay.indexOf(needle[i], hi);
+      if (found < 0) return -1;             // a needle char is missing → no match
+      if (found === last + 1) score += 18;  // reward adjacency
+      score -= found;                        // reward earlier matches
+      last = found; hi = found + 1;
+    }
+    return score;
+  }
+
   function filterCmdk(q) {
     const needle = q.trim().toLowerCase();
-    cmdk.filtered = !needle
-      ? cmdk.items.slice()
-      : cmdk.items.filter((it) => (it.kind + ' ' + it.label).toLowerCase().includes(needle));
+    if (!needle) {
+      cmdk.filtered = cmdk.items.slice();
+    } else {
+      cmdk.filtered = cmdk.items
+        .map((it) => ({ it, s: fuzzyScore(it.kind + ' ' + it.label, needle) }))
+        .filter((r) => r.s >= 0)
+        .sort((a, b) => b.s - a.s)
+        .map((r) => r.it);
+    }
     cmdk.sel = 0;
     renderCmdkList();
   }
@@ -1700,8 +1726,31 @@
 
   // ─── Boot ─────────────────────────────────────────────────────────────
   let wired = false;
+  // Module 5: keep --header-h in sync with the sticky app-header's real height so
+  // the (also-sticky) section tabs dock exactly beneath it — the header grows/shrinks
+  // as the stale banner toggles or the topbar wraps on narrow widths.
+  function syncHeaderHeight() {
+    try {
+      const h = document.querySelector('.app-header');
+      if (h) document.documentElement.style.setProperty('--header-h', h.offsetHeight + 'px');
+    } catch (_) { /* fall back to the CSS default */ }
+  }
+
+  // Module 5: drop a shimmer placeholder into each empty chart box before the
+  // fetch resolves. Charts.* clears the container on first render, so skeletons
+  // disappear on their own — and .chart's min-height means no layout shift.
+  function showSkeletons() {
+    try {
+      document.querySelectorAll('.chart').forEach((c) => {
+        if (!c.children.length) { const s = document.createElement('div'); s.className = 'skel'; c.appendChild(s); }
+      });
+    } catch (_) { /* purely cosmetic — never block load */ }
+  }
+
   async function init() {
     if (!wired) { wireControls(); wired = true; } // wire once; init() re-runs on reload/timeframe change
+    syncHeaderHeight();
+    showSkeletons();
     showBanner('warn', 'Loading live public data…');
     const [ohlcvRes, eth, fundingRes, dvol, onchain, optionChain, oi, ls, perpTicker] = await Promise.all([
       loadOHLCV(),
@@ -1793,7 +1842,9 @@
 
     const reload = $('reload-btn');
     if (reload) reload.addEventListener('click', () => init());
-    window.addEventListener('resize', debounce(() => { if (state.ohlcv) runStrategy(sel ? sel.value : 'ma_trend'); renderFunding(); }, 250));
+    window.addEventListener('resize', debounce(() => { syncHeaderHeight(); if (state.ohlcv) runStrategy(sel ? sel.value : 'ma_trend'); renderFunding(); }, 250));
+    // Keep the sticky-tabs offset exact as the header reflows (banner toggles, wrap).
+    try { if (window.ResizeObserver) { const ro = new ResizeObserver(() => syncHeaderHeight()); const hdr = document.querySelector('.app-header'); if (hdr) ro.observe(hdr); } } catch (_) { /* ignore */ }
 
     wireTabs();   // Module 3: section tab bar (Backtest / Live / Volatility / On-chain)
     // §5.1-5.2 power-user affordances (command palette, help, density + CVD toggles).

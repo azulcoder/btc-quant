@@ -279,7 +279,20 @@ button:hover { filter: brightness(1.08); }
 .signal-tag.research    { color: var(--warn-fg);  border: 1px solid var(--warn-fg); }
 
 /* ─── Charts (§4.7 plot on the DARKEST surface) ─────────────────────────── */
-.chart { width: 100%; position: relative; }   /* positioning context for the hover tooltip */
+.chart { width: 100%; position: relative; min-height: 160px; }   /* positioning context for the hover tooltip; min-height reserves space so populating a chart doesn't shift the page */
+
+/* Module 5: skeleton placeholder — reserves the chart area with a quiet shimmer
+   during the initial fetch, then is cleared on first render (no layout shift). */
+.skel {
+  position: absolute;
+  inset: 0;
+  border-radius: 4px;
+  background:
+    linear-gradient(90deg, transparent 0%, var(--bg-hover) 50%, transparent 100%) 0 0 / 220% 100%,
+    var(--bg);
+  animation: skelshimmer 1.4s ease-in-out infinite;
+}
+@keyframes skelshimmer { 0% { background-position: 120% 0; } 100% { background-position: -120% 0; } }
 
 /* Module 4b: crosshair + hover tooltip (shared across line/candle/xy charts). */
 .chart-crosshair { pointer-events: none; }
@@ -546,8 +559,9 @@ footer code { color: var(--accent-2); }
   min-width: 84px;
 }
 .cmdk-item .cmdk-label { color: var(--fg); }
-.cmdk-item[aria-selected="true"] { background: var(--bg-hover); }
+.cmdk-item[aria-selected="true"] { background: var(--bg-hover); box-shadow: inset 2px 0 0 var(--accent-2); }   /* Module 5: clear keyboard-selected marker */
 .cmdk-item[aria-selected="true"] .cmdk-kind { color: var(--accent-2); }
+.cmdk-item[aria-selected="true"] .cmdk-label { color: var(--fg); font-weight: 600; }
 .cmdk-empty { padding: var(--sp-3) var(--sp-4); color: var(--muted); font-size: var(--fs-sm); }
 .cmdk-foot {
   display: flex;
@@ -679,8 +693,15 @@ body.density-compact main { gap: var(--sp-2); }
   display: flex;
   gap: var(--sp-1);
   border-bottom: 1px solid var(--border);
-  margin: var(--sp-1) 0 calc(-1 * var(--sp-1));
   flex-wrap: wrap;
+  /* Module 5: stick the section tabs just below the (also-sticky) app-header so
+     the active section is always switchable while scrolling. --header-h is kept
+     in sync with the header's real height in app.js (falls back to 80px). */
+  position: sticky;
+  top: var(--header-h, 80px);
+  z-index: 40;
+  background: var(--bg);
+  padding: var(--sp-2) 0 0;
 }
 .region-tab {
   background: transparent;
@@ -700,7 +721,29 @@ body.density-compact main { gap: var(--sp-2); }
 .region-tab.active { color: var(--accent); border-bottom-color: var(--accent); }   /* amber active */
 .region-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
+/* ─── Module 5: responsive finish — single-column degrade, legible charts ── */
+@media (max-width: 860px) {
+  /* Section tabs stay on one swipeable row rather than stacking and eating
+     vertical space in the sticky header zone. */
+  .region-tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
+  .region-tab { white-space: nowrap; padding-left: var(--sp-2); padding-right: var(--sp-2); }
+  header.topbar { padding: var(--sp-2) var(--sp-3); gap: var(--sp-2); }
+  .controls { gap: var(--sp-3); }
+  .control { flex: 1 1 100%; }
+}
+@media (max-width: 560px) {
+  main { padding: var(--sp-2); gap: var(--sp-2); }
+  .kpi-cards { grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
+  .kpi-hero-value { font-size: 34px; }
+  header.topbar h1 { font-size: var(--fs-base); }
+  header.topbar .price { font-size: var(--fs-lg); }
+  .statusbar { width: 100%; order: 3; }       /* status chips drop to their own line */
+  .cmdk-item .cmdk-kind { min-width: 60px; }
+  .chart { min-height: 140px; }
+}
+
 /* ─── Accessibility: respect prefers-reduced-motion (§4.8/§4.9) ─────────── */
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
+  .skel { animation: none; opacity: 0.6; }     /* static placeholder, no shimmer */
 }
