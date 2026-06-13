@@ -368,7 +368,28 @@
     svg.appendChild(t);
   }
 
-  const Charts = { candles, lineChart, drawdownArea, histogram, rollingChart, fundingBars, xyChart };
+  // ─── Sparkline: minimal axis-less trend line for KPI cards ──────────────
+  function sparkline(root, values, opts = {}) {
+    if (!root) return;
+    const vals = (values || []).filter((v) => Number.isFinite(v));
+    clear(root);
+    if (vals.length < 2) return;
+    const { svg, w, h } = makeSvg(root, { height: opts.height || 26 });
+    const min = Math.min(...vals), max = Math.max(...vals), span = (max - min) || 1;
+    const n = vals.length;
+    const xAt = (i) => (i / (n - 1)) * w;
+    const yAt = (v) => (h - 2) - ((v - min) / span) * (h - 4);
+    const color = opts.color || COLORS.accent();
+    if (opts.baseline === 0 && min < 0 && max > 0) {
+      const y0 = yAt(0);
+      svg.appendChild(el('line', { x1: 0, y1: y0, x2: w, y2: y0, stroke: COLORS.grid(), 'stroke-width': 1, 'stroke-dasharray': '2 3', opacity: 0.7 }));
+    }
+    const pts = vals.map((v, i) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`).join(' ');
+    svg.appendChild(el('polyline', { points: pts, fill: 'none', stroke: color, 'stroke-width': 1.4, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+    svg.appendChild(el('circle', { cx: xAt(n - 1).toFixed(1), cy: yAt(vals[n - 1]).toFixed(1), r: 1.9, fill: color }));
+  }
+
+  const Charts = { candles, lineChart, drawdownArea, histogram, rollingChart, fundingBars, xyChart, sparkline };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = Charts;
   if (typeof global !== 'undefined') global.Charts = Charts;

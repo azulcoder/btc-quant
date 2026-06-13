@@ -43,28 +43,36 @@
   </style>
 </head>
 <body>
-  <!-- Persistent disclaimer — never removed. -->
-  <div class="disclaimer">NOT FINANCIAL ADVICE · a backtest is not a forecast · research only — no orders, no keys</div>
+  <!-- Sticky chrome: disclaimer + data-health banner + status bar pin together. -->
+  <div class="app-header">
+    <!-- Persistent disclaimer — never removed. -->
+    <div class="disclaimer">NOT FINANCIAL ADVICE · a backtest is not a forecast · research only — no orders, no keys</div>
 
-  <!-- Data-health banner (CORS / geo / rate-limit / stale). -->
-  <div id="stale-banner" class="stale-banner warn" hidden></div>
+    <!-- Data-health banner (CORS / geo / rate-limit / stale). -->
+    <div id="stale-banner" class="stale-banner warn" hidden></div>
 
-  <header class="topbar">
-    <h1>btc<span class="tick">·</span>quant</h1>
-    <span class="subtitle">Bitcoin quant research terminal — live public data, client-side backtests</span>
-    <span class="price" id="last-price">—</span>
-    <!-- Power-user affordances (§4.10 / §5.1-5.2): all vanilla JS, no deps, unobtrusive.
-         Command palette = Cmd/Ctrl+K, shortcut help = ?, density + CVD-safe toggles persist. -->
-    <nav class="ux-toolbar" aria-label="Display options">
-      <button id="cmdk-open" type="button" class="ux-btn" title="Command palette — jump to any panel, switch strategy/timeframe (Cmd/Ctrl-K)">⌘K</button>
-      <button id="density-toggle" type="button" class="ux-btn" aria-pressed="false"
-              title="Toggle comfortable / compact spacing (§4.6)">density</button>
-      <button id="cvd-toggle" type="button" class="ux-btn" aria-pressed="false"
-              title="Strict Okabe-Ito blue/orange palette — maximally CVD-separable (§4.1)">CVD-safe</button>
-      <button id="help-open" type="button" class="ux-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
-    </nav>
-    <span id="source-line">connecting…</span>
-  </header>
+    <header class="topbar">
+      <h1>btc<span class="tick">·</span>quant</h1>
+      <!-- Status: live connection · active strategy · timeframe (pinned, monospace). -->
+      <div class="statusbar" aria-label="Terminal status">
+        <span class="statchip" id="conn-status" title="Live feed connection"><span class="dot"></span><span id="conn-text">connecting…</span></span>
+        <span class="statchip" id="status-strategy" title="Active strategy">—</span>
+        <span class="statchip" id="status-tf" title="Timeframe">—</span>
+      </div>
+      <span class="price" id="last-price">—</span>
+      <!-- Power-user affordances (§4.10 / §5.1-5.2): all vanilla JS, no deps, unobtrusive.
+           Command palette = Cmd/Ctrl+K, shortcut help = ?, density + CVD-safe toggles persist. -->
+      <nav class="ux-toolbar" aria-label="Display options">
+        <button id="cmdk-open" type="button" class="ux-btn" title="Command palette — jump to any panel, switch strategy/timeframe (Cmd/Ctrl-K)">⌘K</button>
+        <button id="density-toggle" type="button" class="ux-btn" aria-pressed="false"
+                title="Toggle comfortable / compact spacing (§4.6)">density</button>
+        <button id="cvd-toggle" type="button" class="ux-btn" aria-pressed="false"
+                title="Strict Okabe-Ito blue/orange palette — maximally CVD-separable (§4.1)">CVD-safe</button>
+        <button id="help-open" type="button" class="ux-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+      </nav>
+      <span id="source-line">connecting…</span>
+    </header>
+  </div>
 
   <!-- §5.1 Command palette (Cmd/Ctrl+K): jump to a panel or switch strategy/timeframe.
        Vanilla JS, substring filter, Esc closes, arrow-key navigation. Hidden until summoned. -->
@@ -101,6 +109,24 @@
   </div>
 
   <main>
+    <!-- Headline KPI strip — the deflated Sharpe is the hero (the headline metric,
+         NOT the equity curve). Secondary KPIs carry the B&H delta + a sparkline.
+         The full metric breakdown lives in the Performance panel below. -->
+    <section class="kpi-strip wide" id="panel-kpi" data-panel-title="Headline KPIs">
+      <div class="kpi-hero" id="kpi-hero">
+        <div class="kpi-hero-label">Deflated Sharpe <span class="kpi-hero-n">N=<span id="kpi-ntrials">—</span></span></div>
+        <div class="kpi-hero-value" id="kpi-dsr">—</div>
+        <div class="kpi-hero-sub" id="kpi-dsr-verdict">The headline metric — significant only above 0.95 (deflated for the multiple-testing penalty). A pretty equity curve is not the headline.</div>
+        <div class="kpi-hero-spark" id="kpi-hero-spark" aria-hidden="true"></div>
+      </div>
+      <div class="kpi-cards">
+        <div class="kpi"><span class="kpi-k">Sharpe (net)</span><span class="kpi-v num" id="kpi-sharpe">—</span><span class="kpi-d" id="kpi-sharpe-d">—</span><div class="kpi-spark" id="kpi-sharpe-spark" aria-hidden="true"></div></div>
+        <div class="kpi"><span class="kpi-k">CAGR (net)</span><span class="kpi-v num" id="kpi-cagr">—</span><span class="kpi-d" id="kpi-cagr-d">—</span><div class="kpi-spark" id="kpi-cagr-spark" aria-hidden="true"></div></div>
+        <div class="kpi"><span class="kpi-k">Max drawdown</span><span class="kpi-v num" id="kpi-mdd">—</span><span class="kpi-d" id="kpi-mdd-d">—</span><div class="kpi-spark" id="kpi-mdd-spark" aria-hidden="true"></div></div>
+        <div class="kpi"><span class="kpi-k">Prob. Sharpe</span><span class="kpi-v num" id="kpi-psr">—</span><span class="kpi-d" id="kpi-psr-d">P(SR&gt;0)</span><div class="kpi-spark" id="kpi-psr-spark" aria-hidden="true"></div></div>
+      </div>
+    </section>
+
     <!-- Strategy selector + cost knobs -->
     <section class="panel wide" id="panel-strategy" data-panel-title="Strategy selector + cost knobs">
       <h2>Strategy</h2>

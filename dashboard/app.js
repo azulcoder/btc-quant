@@ -277,6 +277,8 @@
     const spec = STRATEGIES[key] || STRATEGIES.buy_and_hold;
     setText('strat-note', spec.note);
     setText('strat-tag', spec.tag);
+    setText('status-strategy', spec.label || key);
+    setText('status-tf', state.gran === '1h' ? '1h · hourly' : '1d · daily');
 
     const p = ppy();
     let positions, zSeries = null;
@@ -306,6 +308,7 @@
     });
 
     renderStats(bt, key, p);
+    renderKpiStrip(bt, key, p);
     renderCharts(o, bt, zSeries, p);
     renderLeaderboard(o);
     // Live candle panel reflects the CURRENT backtest's markers + stop/target,
@@ -349,6 +352,46 @@
     // Highlight the net-vs-gross gap (the cost-fragility tell).
     const grossSharpe = Q.sharpe(bt.grossReturns, p);
     setText('stat-gross-sharpe', num(grossSharpe));
+  }
+
+  // Headline KPI strip: the deflated Sharpe is the hero; secondaries carry the
+  // B&H delta + a sparkline. The Performance panel below holds the full detail.
+  function renderKpiStrip(bt, key, p) {
+    const s = bt.stats;
+    const isBH = key === 'buy_and_hold';
+    const ds = (a, n = 72) => {                       // downsample for a tiny sparkline
+      const f = (a || []).filter(Number.isFinite);
+      if (f.length <= n) return f;
+      const k = Math.ceil(f.length / n);
+      return f.filter((_, i) => i % k === 0);
+    };
+    // Hero — deflated Sharpe (amber by default = "treat as noise"; green if it
+    // actually clears 0.95). Honest framing: the curve is NOT the headline.
+    setText('kpi-dsr', pct(s.deflatedSharpe, 1));
+    setText('kpi-ntrials', String(s.nTrials));
+    const sig = Number.isFinite(s.deflatedSharpe) && s.deflatedSharpe > 0.95;
+    const hero = $('kpi-hero'); if (hero) hero.classList.toggle('is-sig', sig);
+    setText('kpi-dsr-verdict', isBH
+      ? 'The baseline. Every strategy is measured against this, net of cost.'
+      : sig ? 'Above 0.95 — survives the multiple-testing deflation in-sample. Verify out-of-sample + live before believing it.'
+            : `At/below 0.95 — not distinguishable from luck after deflating for ${s.nTrials} trials. Treat as noise, not alpha.`);
+    // Secondary KPIs — value sign-coloured, with the B&H delta arrow.
+    const setV = (id, txt, cls) => { const e = $(id); if (e) { e.textContent = txt; e.classList.remove('pos', 'neg'); if (cls) e.classList.add(cls); } };
+    const setD = (id, txt, dir) => { const e = $(id); if (e) { e.textContent = txt; e.classList.remove('up', 'down'); if (dir) e.classList.add(dir); } };
+    setV('kpi-sharpe', num(s.sharpe), s.sharpe >= 0 ? 'pos' : 'neg');
+    setD('kpi-sharpe-d', 'B&H ' + num(s.bhSharpe), isBH ? '' : (s.sharpe > s.bhSharpe ? 'up' : 'down'));
+    setV('kpi-cagr', pct(s.cagr), s.cagr >= 0 ? 'pos' : 'neg');
+    setD('kpi-cagr-d', 'B&H ' + pct(s.bhCagr), isBH ? '' : (s.cagr > s.bhCagr ? 'up' : 'down'));
+    setV('kpi-mdd', pct(s.maxDrawdown), 'neg');
+    setD('kpi-mdd-d', 'B&H ' + pct(s.bhMaxDrawdown), isBH ? '' : (s.maxDrawdown > s.bhMaxDrawdown ? 'up' : 'down')); // less-negative = better
+    setText('kpi-psr', pct(s.probabilisticSharpe, 1));
+    // Sparklines (static downsampled history — never a live tick, §3.5).
+    if (C.sparkline) {
+      C.sparkline($('kpi-hero-spark'), ds(bt.equity), { color: sig ? 'var(--up)' : 'var(--accent)' });
+      C.sparkline($('kpi-sharpe-spark'), ds(Q.rollingSharpe(bt.returns, 90, p)), { baseline: 0, color: 'var(--accent-2)' });
+      C.sparkline($('kpi-cagr-spark'), ds(bt.equity), { color: s.cagr >= 0 ? 'var(--up)' : 'var(--down)' });
+      C.sparkline($('kpi-mdd-spark'), ds(Q.drawdownSeries(bt.equity)), { color: 'var(--down)' });
+    }
   }
 
   function renderCharts(o, bt, zSeries, p) {
@@ -1121,6 +1164,14 @@
     setText('live-updated', kind === 'open' ? 'live · ' + stamp : msg);
     const na = $('live-tape-na');
     if (na && kind !== 'open') na.textContent = msg + ' — page works fully without the live feed.';
+    // Status-bar connection chip: green = live, amber = reconnecting, red = offline.
+    const cs = $('conn-status');
+    if (cs) {
+      cs.classList.remove('live', 'stale', 'error');
+      if (kind === 'open') { cs.classList.add('live'); setText('conn-text', 'live · ' + stamp); }
+      else if (kind === 'reconnecting') { cs.classList.add('stale'); setText('conn-text', 'reconnecting…'); }
+      else if (kind === 'error') { cs.classList.add('error'); setText('conn-text', 'live feed offline'); }
+    }
   }
 
   function onLiveTick(tick) {
@@ -1138,6 +1189,12 @@
         void priceEl.offsetWidth;             // restart the CSS animation
         priceEl.classList.add(cls);
       }
+    }
+
+    // Keep the status-bar "live · HH:MM:SS" stamp fresh while ticks flow.
+    const cs = $('conn-status');
+    if (cs && cs.classList.contains('live')) {
+      setText('conn-text', 'live · ' + new Date(tick.time).toISOString().slice(11, 19) + ' UTC');
     }
 
     // Live tape (newest first, capped). Tabular-nums via the .num class.

@@ -129,9 +129,6 @@ table.leaderboard td,
 
 /* ─── Persistent disclaimer banner (NOT FINANCIAL ADVICE) ─────────────── */
 .disclaimer {
-  position: sticky;
-  top: 0;
-  z-index: 50;
   background: repeating-linear-gradient(45deg, #2a1a0a, #2a1a0a 10px, #241608 10px, #241608 20px);
   color: var(--warn-fg);
   border-bottom: 1px solid #4a3416;
@@ -153,8 +150,8 @@ table.leaderboard td,
 /* ─── Layout ──────────────────────────────────────────────────────────── */
 header.topbar {
   display: flex;
-  align-items: baseline;
-  gap: var(--sp-4);
+  align-items: center;
+  gap: var(--sp-3);
   flex-wrap: wrap;
   padding: var(--sp-3) var(--sp-5);
   border-bottom: 1px solid var(--border);
@@ -571,6 +568,74 @@ body.density-compact main { gap: var(--sp-2); }
 @media (max-width: 860px) {
   main { grid-template-columns: 1fr; }
   select { min-width: 0; width: 100%; }
+}
+
+/* ─── Module 2: sticky app-header + status bar + headline KPI strip ─────── */
+.app-header { position: sticky; top: 0; z-index: 50; }
+
+.statusbar { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
+.statchip {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px var(--sp-2);
+  display: inline-flex; align-items: center; gap: 6px;
+  white-space: nowrap;
+}
+#status-strategy { color: var(--fg); }   /* the active strategy reads as primary */
+#conn-status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--g-400); flex: none; }
+#conn-status.live  { color: var(--fg); }
+#conn-status.live  .dot { background: var(--up);   box-shadow: 0 0 6px var(--up); animation: connpulse 2.4s ease-in-out infinite; }
+#conn-status.stale .dot { background: var(--accent); }      /* amber */
+#conn-status.error .dot { background: var(--down); }
+@keyframes connpulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+.kpi-strip {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(220px, 1.05fr) 3fr;
+  gap: var(--sp-4);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--sp-3) var(--sp-4);
+}
+.kpi-hero {
+  display: flex; flex-direction: column; gap: 2px;
+  border-right: 1px solid var(--border);
+  padding-right: var(--sp-4);
+}
+.kpi-hero-label { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.kpi-hero-n { color: var(--g-400); }
+.kpi-hero-value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-size: 46px; line-height: 1.04; font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--accent);                 /* amber hero by default ("treat as noise") */
+}
+.kpi-hero.is-sig .kpi-hero-value { color: var(--up); }    /* DSR>0.95 → genuinely significant */
+.kpi-hero-sub { font-size: var(--fs-xs); color: var(--muted); margin-top: 2px; max-width: 36ch; line-height: 1.4; }
+.kpi-hero-spark { height: 30px; margin-top: auto; }
+
+.kpi-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-4); }
+.kpi { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.kpi-k { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.kpi-v { font-family: var(--mono); font-variant-numeric: tabular-nums slashed-zero; font-size: var(--fs-xl); font-weight: 600; line-height: 1.1; color: var(--fg); }
+.kpi-v.pos { color: var(--up); } .kpi-v.neg { color: var(--down); }
+.kpi-d { font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); }
+.kpi-d.up::before { content: '▲ '; } .kpi-d.down::before { content: '▼ '; }
+.kpi-d.up { color: var(--up); } .kpi-d.down { color: var(--down); }
+.kpi-spark { height: 24px; margin-top: 3px; }
+
+@media (max-width: 860px) {
+  .kpi-strip { grid-template-columns: 1fr; }
+  .kpi-hero { border-right: none; border-bottom: 1px solid var(--border); padding-right: 0; padding-bottom: var(--sp-3); }
+  .kpi-hero-value { font-size: 38px; }
+  .kpi-cards { grid-template-columns: repeat(2, 1fr); }
 }
 
 /* ─── Accessibility: respect prefers-reduced-motion (§4.8/§4.9) ─────────── */
