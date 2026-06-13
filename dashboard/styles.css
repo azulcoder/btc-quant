@@ -329,24 +329,37 @@ button:hover { filter: brightness(1.08); }
 .chart-summary { padding: var(--sp-2) 2px 0; }
 
 /* ─── Module B: TradingView Advanced Chart embed ──────────────────────────
-   The widget runs autosize:true, so it fills WHATEVER box we give it — the fix
-   is to constrain that box and clip it, instead of a fixed 520px with default
-   overflow:visible (which let the rendered widget paint past its reserved space
-   and over the following footer). Responsive height with a sane floor/ceiling;
-   overflow:hidden guarantees the sealed cross-origin iframe never escapes the
-   panel. Matches the live-candle div convention (bg + radius, no nested border).
-   The mandatory "Track all markets on TradingView" attribution row is untouched. */
+   Verified against the real embed-widget-advanced-chart.js (read, not assumed):
+   • The element carrying class `tradingview-widget-container` IS the widget's
+     own `iframeContainer`, and the script writes an INLINE pixel height onto it
+     (postMessage resize handler: iframeContainer.style.height = N+"px"). Inline
+     beats a plain class, so our height was overridden and overflow:hidden had a
+     content-sized box to clip against (nothing). → pin height with !important.
+   • The script REPLACES .tradingview-widget-container__widget with its injected
+     <iframe> (replaceChild) and sets an inline height on the iframe too. → target
+     the iframe directly and force it to fill the box minus the 32px attribution
+     row, overriding the inline styles.
+   overflow:hidden + position:relative are the safety net (clip + containing block
+   for any absolutely-injected node), NOT the sole container. The mandatory
+   "Track all markets on TradingView" attribution row stays visible below the iframe. */
 .tv-embed {
+  position: relative;
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
-  height: clamp(400px, 58vh, 600px);
+  height: clamp(400px, 58vh, 600px) !important;   /* !important: beat the inline px the widget script writes on this very element */
   overflow: hidden;
   border-radius: 4px;
   background: var(--bg);
 }
-.tv-embed > .tradingview-widget-container__widget { height: calc(100% - 32px); width: 100%; }
-@media (max-width: 560px) { .tv-embed { height: clamp(340px, 64vh, 480px); } }
+.tv-embed iframe {
+  display: block;
+  width: 100% !important;
+  height: calc(100% - 32px) !important;            /* fill the box minus the attribution row; override the script's inline iframe height */
+  border: 0;
+}
+.tv-embed .tradingview-widget-copyright { height: 32px; }   /* reserve the mandatory attribution row (matches the calc above) */
+@media (max-width: 560px) { .tv-embed { height: clamp(340px, 64vh, 480px) !important; } }
 
 /* ─── Stats grid ──────────────────────────────────────────────────────── */
 /* §4.5 hairline separators via 1px grid gap (border colour shows through). */
