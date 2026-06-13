@@ -1,0 +1,558 @@
+/* styles.css — btc-quant terminal, dark theme. No framework, no CDN.
+   One source of truth for colours via CSS custom properties; charts.js reads
+   the same variables (--up --down --grid --muted --accent --accent-2 --fg) so
+   the SVG matches the chrome. app.js/index.html reference the SEMANTIC alias
+   names below — those names are preserved exactly; only their VALUES change.
+
+   Implements DESIGN-BRIEF §4:
+     §4.4 grey ladder + semantic aliases   §4.6 spacing + type scales
+     §4.1 CVD-safe up/down + ▲/▼ glyph      §4.3 tabular-nums slashed-zero
+     §4.5 layered dark surfaces             §4.2 WCAG ≥4.5:1 data / ≥3:1 chrome
+     §4.8 per-panel state (stale/skeleton)  §4.9 tick flash on recompute
+     §4.10 sticky thead + pinned first col  prefers-reduced-motion guard
+*/
+
+/* ─── §4.4 Color system — hand-tuned grey ladder (HSL-balanced, dark) ───── */
+:root {
+  /* Raw grey scale: --g-900 darkest canvas → --g-050 brightest text.
+     Elevation is by LIGHTNESS (§4.5), not shadow. No pure #000 (halation). */
+  --g-900: #0b0f18;   /* base canvas (darkest)            */
+  --g-800: #111726;   /* panel surface (one step up)      */
+  --g-700: #0e1420;   /* recessed / inset surface         */
+  --g-600: #1d2840;   /* hairline borders                 */
+  --g-500: #23314a;   /* chart grid lines                 */
+  --g-400: #4a5a78;   /* disabled / faint chrome (<4.5:1) */
+  --g-300: #96a6c8;   /* muted DATA labels — clears 4.5:1 */
+  --g-200: #b1bac4;   /* secondary text                   */
+  --g-100: #c9d1d9;   /* primary-ish text                 */
+  --g-050: #d6e0f5;   /* foreground text (brightest)      */
+
+  /* Semantic aliases — KEEP these names (app.js / charts.js / index.html use
+     them). Components reference INTENT, not raw scale. */
+  --bg:         var(--g-900);
+  --bg-panel:   var(--g-800);
+  --bg-panel-2: var(--g-700);
+  --border:     var(--g-600);
+  --grid:       var(--g-500);
+  --muted:      var(--g-300);   /* §4.2: lifted from #7b8db0 → 7.3:1 on panel */
+  --fg:         var(--g-050);
+
+  /* §4.5 hover / elevated nested surface (one step lighter than panel). */
+  --bg-hover:   #16203a;
+
+  /* Accents — 1 primary + a highlight; desaturated-large-fill discipline. */
+  --accent:   #7aa2ff;   /* 7.2:1 on panel */
+  --accent-2: #ffcf6b;   /* 12.3:1 on panel */
+
+  /* §4.1 CVD-safe up/down: differ in LIGHTNESS (survive grayscale), teal-green
+     up vs deeper-red down. Both clear 4.5:1 as data text on panels. */
+  --up:   #26A69A;   /* L≈0.300 */
+  --down: #EF5350;   /* L≈0.251 — darker than up */
+  --good: var(--up); /* legacy alias (app.js verdict.good) */
+
+  /* State chrome (sub-4.5:1 allowed: non-data) */
+  --warn-bg: #3a2a12; --warn-fg: #ffd591;
+  --error-bg: #3a1414; --error-fg: #ff9b9b;
+
+  /* §4.6 8pt spacing grid (4px half-steps) — drives all padding/gaps. */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 24px; --sp-6: 32px; --sp-8: 48px;
+
+  /* §4.6 separate ~1.25 modular type scale (NOT forced onto the 8pt grid). */
+  --fs-xs: 11px; --fs-sm: 12px; --fs-base: 13px;
+  --fs-lg: 16px; --fs-xl: 20px; --fs-2xl: 28px;
+
+  --radius: 6px;
+  --mono: "SF Mono", "JetBrains Mono", "Menlo", "Consolas", ui-monospace, monospace;
+}
+
+/* §4.1 strict Okabe-Ito alt palette (user toggle: body.cvd-strict).
+   Blue/orange — maximally separable for all CVD types. */
+body.cvd-strict {
+  --up:   #009E73;   /* bluish-green */
+  --down: #D55E00;   /* vermillion   */
+  --good: var(--up);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: var(--fs-base);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); }
+
+/* ─── §4.3 Tabular numerals — kill jitter, enable column scanning ───────── */
+/* Every changing/scannable number uses tabular figures + slashed-zero (0/O). */
+.num,
+.stat .v,
+.stat-value,
+.price,
+table.leaderboard td.num {
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-feature-settings: 'tnum' 1, 'zero' 1;
+}
+
+/* ─── §4.1 Delta glyph classes — redundant non-color cue (WCAG 1.4.1) ───── */
+.delta { font-variant-numeric: tabular-nums slashed-zero; }
+.delta.up   { color: var(--up); }
+.delta.down { color: var(--down); }
+.delta.up::before   { content: '▲ '; }   /* never color alone */
+.delta.down::before { content: '▼ '; }
+.delta.flat { color: var(--muted); }
+.delta.flat::before { content: '· '; }
+
+/* ─── Persistent disclaimer banner (NOT FINANCIAL ADVICE) ─────────────── */
+.disclaimer {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: repeating-linear-gradient(45deg, #2a1a0a, #2a1a0a 10px, #241608 10px, #241608 20px);
+  color: var(--warn-fg);
+  border-bottom: 1px solid #4a3416;
+  text-align: center;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-sm);
+}
+
+.stale-banner {
+  padding: var(--sp-2) var(--sp-4);
+  font-size: var(--fs-sm);
+  border-bottom: 1px solid var(--border);
+}
+.stale-banner.warn { background: var(--warn-bg); color: var(--warn-fg); }
+.stale-banner.error { background: var(--error-bg); color: var(--error-fg); }
+
+/* ─── Layout ──────────────────────────────────────────────────────────── */
+header.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel-2);
+}
+header.topbar h1 {
+  font-size: var(--fs-lg);
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+header.topbar h1 .tick { color: var(--accent-2); }
+header.topbar .subtitle { color: var(--muted); font-size: var(--fs-sm); }
+header.topbar .price {
+  margin-left: auto;
+  font-size: var(--fs-xl);
+  color: var(--up);
+  font-weight: 700;
+}
+#source-line { color: var(--muted); font-size: var(--fs-xs); width: 100%; }
+
+main {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: var(--sp-4);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);   /* §4.5 1px border, not drop shadow */
+  border-radius: var(--radius);
+  padding: var(--sp-3) var(--sp-4);
+  min-width: 0;
+  position: relative;
+}
+.panel.wide { grid-column: 1 / -1; }
+.panel h2 {
+  font-size: var(--fs-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 0 0 var(--sp-3);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.panel .hint { color: var(--muted); font-size: var(--fs-xs); margin-top: var(--sp-2); }
+
+/* ─── Controls ────────────────────────────────────────────────────────── */
+.controls {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.control { display: flex; flex-direction: column; gap: var(--sp-1); }
+.control label {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+select, input[type="number"], button {
+  background: var(--bg-panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: var(--fs-base);
+  padding: var(--sp-2) var(--sp-2);
+}
+select { min-width: 220px; }
+input[type="number"] { width: 80px; }
+select:hover, input[type="number"]:hover { border-color: var(--g-400); }
+button {
+  cursor: pointer;
+  background: var(--accent);
+  color: #07101f;
+  font-weight: 700;
+  border: none;
+  padding: var(--sp-2) var(--sp-3);
+}
+button:hover { filter: brightness(1.08); }
+
+/* §4.2 visible ≥3:1 focus ring on all interactive chrome (keyboard-first). */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.tag {
+  font-size: var(--fs-xs);
+  padding: 2px var(--sp-2);
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  color: var(--accent-2);
+  background: var(--bg-panel-2);
+}
+
+/* §2 SIGNAL vs DESCRIPTIVE labels for option/signal panels. */
+.signal-tag {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 1px var(--sp-2);
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+.signal-tag.signal      { color: var(--accent-2); border: 1px solid var(--accent-2); }
+.signal-tag.descriptive { color: var(--muted);    border: 1px solid var(--g-400); }
+.signal-tag.research    { color: var(--warn-fg);  border: 1px solid var(--warn-fg); }
+
+/* ─── Charts (§4.7 plot on the DARKEST surface) ─────────────────────────── */
+.chart { width: 100%; }
+.chart-svg { display: block; background: var(--bg); border-radius: 4px; }
+.chart-axis-label { fill: var(--muted); font-size: 9px; font-family: var(--mono); }
+.chart-legend-label { fill: var(--fg); font-size: 10px; font-family: var(--mono); }
+.chart-empty { fill: var(--muted); font-size: var(--fs-sm); font-family: var(--mono); }
+.chart-na, .chart-summary {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  padding: var(--sp-3) var(--sp-1);
+}
+.chart-summary { padding: var(--sp-2) 2px 0; }
+
+/* ─── Stats grid ──────────────────────────────────────────────────────── */
+/* §4.5 hairline separators via 1px grid gap (border colour shows through). */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.stat {
+  background: var(--bg-panel);
+  padding: var(--sp-2) var(--sp-3);
+}
+.stat .k {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: block;
+}
+.stat .v { font-size: var(--fs-lg); font-weight: 700; }
+.stat .vs { color: var(--muted); font-size: var(--fs-xs); }
+.stat.headline { background: var(--bg-panel-2); }
+.stat.headline .v { color: var(--accent-2); }
+
+.verdict {
+  margin-top: var(--sp-3);
+  padding: var(--sp-3) var(--sp-3);
+  border-radius: 4px;
+  font-size: var(--fs-sm);
+  border: 1px solid var(--border);
+}
+.verdict.good { background: rgba(38, 166, 154, 0.10); border-color: var(--good); color: var(--up); }
+.verdict.warn { background: var(--warn-bg); color: var(--warn-fg); }
+.verdict.neutral { background: var(--bg-panel-2); color: var(--muted); }
+
+#strat-note { color: var(--muted); font-size: var(--fs-xs); margin: var(--sp-2) 0 0; }
+
+/* ─── §4.10 Leaderboard: sticky thead + pinned first column ─────────────── */
+table.leaderboard {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-base);
+}
+table.leaderboard th,
+table.leaderboard td {
+  padding: var(--sp-1) var(--sp-2);    /* §4.6 dense table padding */
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+table.leaderboard th {
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: var(--fs-xs);
+}
+table.leaderboard td.num { text-align: right; }
+table.leaderboard thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel);
+  z-index: 2;
+}
+/* pinned first column (strategy name) stays visible while scrolling. */
+table.leaderboard th:first-child,
+table.leaderboard td:first-child {
+  text-align: left;
+  position: sticky;
+  left: 0;
+  background: var(--bg-panel);
+  z-index: 1;
+}
+table.leaderboard thead th:first-child { z-index: 3; }   /* corner above both */
+table.leaderboard tbody tr:hover td { background: var(--bg-hover); }
+table.leaderboard tbody tr:hover td:first-child,
+table.leaderboard tbody tr:hover thead { background: var(--bg-hover); }
+table.leaderboard .baseline-row td { color: var(--muted); font-style: italic; }
+
+/* ─── §4.8 Per-panel state machine: loading | empty | ready | stale | error ── */
+/* Stale: keep numbers visible, dim + amber chip + "updated …" — never wipe. */
+.panel.is-stale { opacity: 0.6; }
+.stale-chip {
+  display: inline-block;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  padding: 1px var(--sp-2);
+  border-radius: 3px;
+  vertical-align: middle;
+}
+.panel.is-error .stale-chip { background: var(--error-bg); color: var(--error-fg); }
+.panel:not(.is-stale):not(.is-error) .stale-chip { display: none; }
+
+/* "Updated HH:MM:SS" per data panel + calm research/delayed label. */
+.updated-at {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Loading: skeleton placeholders matching final shape, reduced-motion-safe. */
+.skeleton {
+  background: linear-gradient(90deg,
+    var(--bg-panel-2) 25%, var(--g-600) 50%, var(--bg-panel-2) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  border-radius: 3px;
+  color: transparent !important;
+  min-height: 1em;
+}
+.skeleton-line { height: 0.9em; margin: var(--sp-2) 0; }
+.skeleton-line.short { width: 45%; }
+@keyframes skeleton-shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+.panel[aria-busy="true"] .skeleton { /* honoured automatically */ }
+
+/* ─── §4.9 Tick flash on a genuine value change (user-triggered recompute) ─ */
+.tick-up   { animation: flashUp   0.4s ease-out; }
+.tick-down { animation: flashDown 0.4s ease-out; }
+@keyframes flashUp   { from { background: rgba(38, 166, 154, 0.35); } to { background: transparent; } }
+@keyframes flashDown { from { background: rgba(239, 83, 80, 0.35); }  to { background: transparent; } }
+
+footer {
+  max-width: 1280px;
+  margin: var(--sp-2) auto var(--sp-6);
+  padding: 0 var(--sp-4);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+footer code { color: var(--accent-2); }
+
+/* ─── §5.1-5.2 Power-user UX: toolbar toggles + command palette + help ──────
+   All unobtrusive, keyboard-first, vanilla. Motion is gated by the global
+   prefers-reduced-motion guard at the bottom of this file. */
+
+/* Header toolbar — sits next to the live price, never crowds the chrome. */
+.ux-toolbar { display: flex; gap: var(--sp-2); align-items: center; }
+.ux-btn {
+  background: var(--bg-panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: var(--sp-1) var(--sp-2);
+  cursor: pointer;
+}
+.ux-btn:hover { color: var(--fg); border-color: var(--g-400); }
+/* aria-pressed reflects persisted toggle state (density, CVD-safe). */
+.ux-btn[aria-pressed="true"] {
+  color: #07101f;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Shared overlay scaffold for the command palette + help dialog. */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+}
+.overlay[hidden] { display: none; }
+.overlay-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 7, 12, 0.66);
+}
+
+/* §5.1 Command palette (Cmd/Ctrl+K). */
+.cmdk-box, .help-box {
+  position: relative;
+  width: min(640px, 92vw);
+  background: var(--bg-panel);
+  border: 1px solid var(--g-400);   /* ≥3:1 chrome border */
+  border-radius: var(--radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.cmdk-input {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--bg-panel-2);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: var(--fs-lg);
+  padding: var(--sp-3) var(--sp-4);
+}
+.cmdk-input:focus-visible { outline: none; }   /* the box itself is the focus frame */
+.cmdk-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1);
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.cmdk-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.cmdk-item .cmdk-kind {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  min-width: 84px;
+}
+.cmdk-item .cmdk-label { color: var(--fg); }
+.cmdk-item[aria-selected="true"] { background: var(--bg-hover); }
+.cmdk-item[aria-selected="true"] .cmdk-kind { color: var(--accent-2); }
+.cmdk-empty { padding: var(--sp-3) var(--sp-4); color: var(--muted); font-size: var(--fs-sm); }
+.cmdk-foot {
+  display: flex;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-4);
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  background: var(--bg-panel-2);
+}
+
+kbd {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  padding: 0 5px;
+  color: var(--g-100);
+}
+
+/* §4.10 "?" help overlay. */
+.help-box { padding: var(--sp-4) var(--sp-5) var(--sp-5); }
+.help-box h2 {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.help-keys {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--sp-2) var(--sp-4);
+  margin: 0;
+}
+.help-keys dt { white-space: nowrap; }
+.help-keys dd { margin: 0; color: var(--fg); font-size: var(--fs-sm); align-self: center; }
+.help-box .hint { color: var(--muted); font-size: var(--fs-xs); margin: var(--sp-4) 0 0; }
+
+/* §4.6 Density toggle: compact tightens the spacing vars (and the type base a
+   touch) WITHOUT hard-coding the densest setting. Comfortable is the default.
+   Only the spacing/size SCALE changes; every component reads the same tokens. */
+body.density-compact {
+  --sp-1: 3px; --sp-2: 6px;  --sp-3: 9px;  --sp-4: 12px;
+  --sp-5: 18px; --sp-6: 24px; --sp-8: 36px;
+  --fs-xs: 10px; --fs-sm: 11px; --fs-base: 12px;
+  --fs-lg: 15px; --fs-xl: 18px; --fs-2xl: 25px;
+}
+body.density-compact main { gap: var(--sp-2); }
+
+@media (max-width: 860px) {
+  main { grid-template-columns: 1fr; }
+  select { min-width: 0; width: 100%; }
+}
+
+/* ─── Accessibility: respect prefers-reduced-motion (§4.8/§4.9) ─────────── */
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}

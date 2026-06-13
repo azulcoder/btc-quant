@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>btc-quant — Bitcoin quant research terminal</title>
+  <meta name="description" content="An honest Bitcoin quant research & backtest terminal: live public data, deflated-Sharpe-first backtests, a real Deribit option chain, and live charts. No live trading, no API keys, no orders." />
+  <style>
+    :root{
+      --bg:#0b0f18; --panel:#111726; --panel2:#0e1420; --border:#1d2840;
+      --fg:#d6e0f5; --muted:#96a6c8; --accent:#7aa2ff; --up:#26A69A; --down:#EF5350;
+      --mono:'SFMono-Regular',ui-monospace,'JetBrains Mono',Menlo,Consolas,monospace;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--mono);
+      font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased}
+    .disclaimer{background:#2a1f10;color:#e8c98a;text-align:center;font-size:12px;
+      padding:7px 12px;letter-spacing:.02em;border-bottom:1px solid var(--border)}
+    .wrap{max-width:760px;margin:0 auto;padding:56px 24px 72px}
+    h1{font-size:34px;margin:0 0 6px;letter-spacing:-.01em}
+    h1 .dot{color:var(--accent)}
+    .tagline{color:var(--muted);font-size:15px;margin:0 0 32px}
+    .cta{display:inline-block;background:var(--accent);color:#0b0f18;font-weight:700;
+      text-decoration:none;padding:13px 26px;border-radius:8px;font-size:15px;margin:4px 10px 4px 0}
+    .cta.ghost{background:transparent;color:var(--fg);border:1px solid var(--border)}
+    .cta:hover{filter:brightness(1.08)}
+    section{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+      padding:20px 24px;margin:28px 0}
+    h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 14px}
+    ul{margin:0;padding-left:18px} li{margin:7px 0}
+    b{color:var(--fg)} .up{color:var(--up)} .dn{color:var(--down)}
+    code{background:var(--panel2);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:12px}
+    .note{color:var(--muted);font-size:12.5px;margin-top:34px;border-top:1px solid var(--border);padding-top:18px}
+    a{color:var(--accent)}
+  </style>
+</head>
+<body>
+  <div class="disclaimer">NOT FINANCIAL ADVICE · a backtest is not a forecast · research only — no orders, no API keys</div>
+  <div class="wrap">
+    <h1>btc<span class="dot">·</span>quant</h1>
+    <p class="tagline">An <b>honest</b> Bitcoin quant research &amp; backtest terminal — live public data, client-side backtests, a real option chain, and live charts. Built to see <em>through</em> a flattering backtest, not to sell one.</p>
+
+    <a class="cta" href="dashboard/index.html">Open the live terminal →</a>
+    <a class="cta ghost" href="https://github.com/azulcoder/btc-quant">View source on GitHub</a>
+
+    <section>
+      <h2>What it does</h2>
+      <ul>
+        <li><b>Honesty-first backtests</b> — every result is net of cost, with out-of-sample / walk-forward, a <b>Deflated Sharpe</b> (Bailey &amp; López de Prado), and <b>buy-and-hold as the baseline</b>. The headline is the deflated Sharpe, never a pretty curve.</li>
+        <li><b>Strategy leaderboard</b> — every strategy ranked vs buy-and-hold; most don't beat it after costs + deflation, and the terminal shows you that plainly.</li>
+        <li><b>Live option chain</b> (Deribit) — IV smile/skew, ATM term structure vs DVOL, 25Δ risk-reversal, and a VRP / short-vol view framed by <span class="dn">CVaR &amp; max-drawdown</span>, not Sharpe.</li>
+        <li><b>Live charts</b> — TradingView Advanced Chart + exchange WebSocket ticking, kept visually separate from the discrete backtest bars.</li>
+        <li><b>Python engine</b> — pandas/numpy/scipy; daily &amp; hourly; a <code>compare</code> leaderboard CLI and a matplotlib tearsheet.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>The honest stance</h2>
+      <ul>
+        <li>No one can predict markets; most retail edges <b>decay</b>. A backtested Sharpe &gt; 2 in crypto is a red flag; &gt; 3 is almost certainly an artifact.</li>
+        <li>The durable edge here is <b>risk management + the variance-risk-premium exposure</b>, not directional alpha — and the tool is built to demonstrate that skepticism.</li>
+        <li>It places <b>no orders</b> and holds <b>no API keys</b>. Every data source is public. Nothing is fabricated — on failure a panel says so.</li>
+      </ul>
+    </section>
+
+    <p class="note">Run the Python engine locally: <code>pip install -r requirements.txt</code> then <code>make compare</code> / <code>make backtest STRAT=tsmom</code> / <code>make dash</code>. See <a href="DISCLAIMER.md">DISCLAIMER</a> · <a href="README.md">README</a> · <a href="RESEARCH.md">research notes</a>. Educational use only; do your own research.</p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>btc-quant terminal — research / backtest</title>
+  <meta name="description" content="A Bitcoin quant research & backtest terminal. No live trading, no API keys, no orders. Honesty rails (costs, out-of-sample, deflated Sharpe) are the product." />
+  <link rel="stylesheet" href="styles.css" />
+  <!-- Panel-specific styling for the additions (leaderboard table + VRP/on-chain).
+       styles.css is the shared theme; these reuse its CSS custom properties. -->
+  <style>
+    .table-wrap { overflow-x: auto; }
+    table.leaderboard {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    table.leaderboard th, table.leaderboard td {
+      padding: 6px 10px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    table.leaderboard th {
+      color: var(--muted);
+      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      user-select: none;
+    }
+    table.leaderboard th:hover { color: var(--fg); }
+    table.leaderboard th.num, table.leaderboard td.num { text-align: right; }
+    table.leaderboard th.sorted::after { content: " \25BC"; color: var(--accent-2); }
+    table.leaderboard tbody tr:hover { background: var(--bg-panel-2); }
+    table.leaderboard tr.baseline { background: rgba(122, 162, 255, 0.10); }
+    table.leaderboard tr.baseline td:first-child { font-weight: 700; }
+    table.leaderboard .dsr-good { color: var(--good); font-weight: 700; }
+    table.leaderboard .dsr-muted { color: var(--muted); }
+    table.leaderboard .beats-yes { color: var(--up); }
+    table.leaderboard .beats-no { color: var(--muted); }
+    table.leaderboard .baseline-tag { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <!-- Persistent disclaimer — never removed. -->
+  <div class="disclaimer">NOT FINANCIAL ADVICE · a backtest is not a forecast · research only — no orders, no keys</div>
+
+  <!-- Data-health banner (CORS / geo / rate-limit / stale). -->
+  <div id="stale-banner" class="stale-banner warn" hidden></div>
+
+  <header class="topbar">
+    <h1>btc<span class="tick">·</span>quant</h1>
+    <span class="subtitle">Bitcoin quant research terminal — live public data, client-side backtests</span>
+    <span class="price" id="last-price">—</span>
+    <!-- Power-user affordances (§4.10 / §5.1-5.2): all vanilla JS, no deps, unobtrusive.
+         Command palette = Cmd/Ctrl+K, shortcut help = ?, density + CVD-safe toggles persist. -->
+    <nav class="ux-toolbar" aria-label="Display options">
+      <button id="cmdk-open" type="button" class="ux-btn" title="Command palette — jump to any panel, switch strategy/timeframe (Cmd/Ctrl-K)">⌘K</button>
+      <button id="density-toggle" type="button" class="ux-btn" aria-pressed="false"
+              title="Toggle comfortable / compact spacing (§4.6)">density</button>
+      <button id="cvd-toggle" type="button" class="ux-btn" aria-pressed="false"
+              title="Strict Okabe-Ito blue/orange palette — maximally CVD-separable (§4.1)">CVD-safe</button>
+      <button id="help-open" type="button" class="ux-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+    </nav>
+    <span id="source-line">connecting…</span>
+  </header>
+
+  <!-- §5.1 Command palette (Cmd/Ctrl+K): jump to a panel or switch strategy/timeframe.
+       Vanilla JS, substring filter, Esc closes, arrow-key navigation. Hidden until summoned. -->
+  <div id="cmdk" class="overlay" hidden role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="overlay-backdrop" data-cmdk-dismiss></div>
+    <div class="cmdk-box" role="document">
+      <input id="cmdk-input" type="text" class="cmdk-input" placeholder="Jump to a panel, or type a strategy / timeframe…"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+             role="combobox" aria-expanded="true" aria-controls="cmdk-list" aria-autocomplete="list" />
+      <ul id="cmdk-list" class="cmdk-list" role="listbox" aria-label="Commands"></ul>
+      <div class="cmdk-foot">
+        <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+        <span><kbd>↵</kbd> run</span>
+        <span><kbd>esc</kbd> close</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- §4.10 "?" keyboard-shortcut help overlay. -->
+  <div id="help" class="overlay" hidden role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+    <div class="overlay-backdrop" data-help-dismiss></div>
+    <div class="help-box" role="document">
+      <h2>Keyboard shortcuts</h2>
+      <dl class="help-keys">
+        <dt><kbd>Cmd</kbd>/<kbd>Ctrl</kbd>+<kbd>K</kbd></dt><dd>Command palette — jump to a panel, switch strategy / timeframe</dd>
+        <dt><kbd>?</kbd></dt><dd>This shortcut help</dd>
+        <dt><kbd>d</kbd></dt><dd>Toggle comfortable / compact density</dd>
+        <dt><kbd>v</kbd></dt><dd>Toggle strict CVD-safe (Okabe-Ito) colors</dd>
+        <dt><kbd>r</kbd></dt><dd>Reload live data</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Close any overlay</dd>
+      </dl>
+      <p class="hint">Keys are ignored while typing in an input or select, so they never interfere with the cost / strategy controls. All preferences persist locally — research only, no keys, no orders.</p>
+    </div>
+  </div>
+
+  <main>
+    <!-- Strategy selector + cost knobs -->
+    <section class="panel wide" id="panel-strategy" data-panel-title="Strategy selector + cost knobs">
+      <h2>Strategy</h2>
+      <div class="controls">
+        <div class="control">
+          <label for="strategy-select">Strategy</label>
+          <select id="strategy-select"></select>
+        </div>
+        <div class="control">
+          <label for="granularity-select">Timeframe</label>
+          <select id="granularity-select">
+            <option value="1d">1d (daily)</option>
+            <option value="1h">1h (hourly)</option>
+          </select>
+        </div>
+        <div class="control">
+          <label for="cost-bps">Fee (bps/side)</label>
+          <input type="number" id="cost-bps" value="10" min="0" max="100" step="1" />
+        </div>
+        <div class="control">
+          <label for="slip-bps">Slippage (bps/side)</label>
+          <input type="number" id="slip-bps" value="2" min="0" max="100" step="1" />
+        </div>
+        <div class="control">
+          <label>&nbsp;</label>
+          <button id="reload-btn" type="button">Reload live data</button>
+        </div>
+        <span class="tag" id="strat-tag">—</span>
+      </div>
+      <p id="strat-note">Select a strategy. All signals trade the NEXT bar (no look-ahead); costs are charged on turnover; buy-and-hold is the baseline.</p>
+      <p class="hint" id="granularity-note">The <strong>Timeframe</strong> selector switches between daily (365 bars/yr) and hourly (8760 bars/yr) bars — annualization is threaded through every Sharpe/vol/CAGR calc, so the headline stats stay honest. On <strong>1h</strong>, strategy lookbacks (50/200/20) are in <strong>bars</strong> (hours), not days, and only a <strong>recent window</strong> (~30 days / ~720 bars) is fetched. For long-history hourly backtests use the Python engine: <code>python3 scripts/run_backtest.py --granularity 1h --start 2025-01-01</code>.</p>
+    </section>
+
+    <!-- Strategy leaderboard — the honest centerpiece -->
+    <section class="panel wide" id="panel-leaderboard" data-panel-title="Strategy leaderboard">
+      <h2>Strategy leaderboard — every strategy on the loaded data, sorted by deflated Sharpe</h2>
+      <div class="table-wrap">
+        <table class="leaderboard" id="leaderboard">
+          <thead>
+            <tr>
+              <th data-sort="label">Strategy</th>
+              <th data-sort="cagr" class="num">CAGR (net)</th>
+              <th data-sort="sharpe" class="num">Sharpe (net)</th>
+              <th data-sort="dsr" class="num">Deflated Sharpe</th>
+              <th data-sort="mdd" class="num">Max DD</th>
+              <th data-sort="trades" class="num">Trades</th>
+              <th data-sort="beats" class="num">Beats B&amp;H?</th>
+            </tr>
+          </thead>
+          <tbody id="leaderboard-body"></tbody>
+        </table>
+      </div>
+      <p class="hint" id="leaderboard-note">Most strategies do NOT beat buy-and-hold after costs + deflation — <strong>that is the point</strong>. Deflated Sharpe is green only when &gt; 0.95 (distinguishable from luck after the multiple-testing penalty); the buy-and-hold row is the BASELINE. Click a header to re-sort. Same costs/timeframe as the selector above.</p>
+    </section>
+
+    <!-- Headline honesty stats -->
+    <section class="panel wide" id="panel-performance" data-panel-title="Performance — net of cost vs buy-and-hold">
+      <h2>Performance — net of cost, vs buy-and-hold (the headline is the deflated Sharpe, not the curve)</h2>
+      <div class="stats-grid">
+        <div class="stat"><span class="k">CAGR (net)</span><span class="v" id="stat-net-cagr">—</span><span class="vs">B&amp;H <span id="stat-bh-cagr">—</span></span></div>
+        <div class="stat"><span class="k">Sharpe (net)</span><span class="v" id="stat-sharpe">—</span><span class="vs">B&amp;H <span id="stat-bh-sharpe">—</span> · gross <span id="stat-gross-sharpe">—</span></span></div>
+        <div class="stat"><span class="k">Sortino</span><span class="v" id="stat-sortino">—</span></div>
+        <div class="stat"><span class="k">Volatility (ann.)</span><span class="v" id="stat-vol">—</span></div>
+        <div class="stat"><span class="k">Max drawdown</span><span class="v" id="stat-mdd">—</span><span class="vs">B&amp;H <span id="stat-bh-mdd">—</span></span></div>
+        <div class="stat"><span class="k">Calmar</span><span class="v" id="stat-calmar">—</span></div>
+        <div class="stat"><span class="k">Hit rate</span><span class="v" id="stat-hit">—</span></div>
+        <div class="stat"><span class="k">Trades</span><span class="v" id="stat-trades">—</span></div>
+        <div class="stat"><span class="k">Skew</span><span class="v" id="stat-skew">—</span></div>
+        <div class="stat"><span class="k">Kurtosis</span><span class="v" id="stat-kurt">—</span></div>
+        <div class="stat"><span class="k">Sharpe (in-sample)</span><span class="v" id="stat-sr-is">—</span></div>
+        <div class="stat"><span class="k">Sharpe (OOS 30%)</span><span class="v" id="stat-sr-oos">—</span></div>
+        <div class="stat headline"><span class="k">Probabilistic Sharpe</span><span class="v" id="stat-psr">—</span></div>
+        <div class="stat headline"><span class="k">Deflated Sharpe (N=<span id="stat-ntrials">—</span>)</span><span class="v" id="stat-dsr">—</span></div>
+      </div>
+      <div class="verdict neutral" id="verdict">—</div>
+    </section>
+
+    <!-- Price + MA -->
+    <section class="panel wide" id="panel-candles" data-panel-title="BTC-USD candles + SMA 50 / 200">
+      <h2 id="candles-heading">BTC-USD daily candles + SMA 50 / 200</h2>
+      <div class="chart" id="chart-candles"></div>
+    </section>
+
+    <!-- ─── Live charts (research CONTEXT — visually separate from backtest bars, §3.5) ─── -->
+    <section class="panel wide" id="panel-live" data-panel-title="Live charts — current price context" style="border-top:2px solid var(--accent);">
+      <h2>Live charts — current price context
+        <span class="signal-tag descriptive" title="Brief §3.5: live ticks are a CONTEXT panel showing the current price/tape. They are never blended into a backtested series and the historical, discrete backtest bars above are never flash-animated. A backtest is not a forecast.">CONTEXT · live price, not a backtest</span>
+        <span class="updated-at" id="live-updated"></span>
+      </h2>
+      <p class="hint" style="margin-top:0">
+        These panels show the <strong>live, current</strong> market — a context reference, kept deliberately separate from the historical
+        backtest bars above. <strong>Live ticks are never blended into a backtested series</strong> and static history is never flash-animated
+        as if it were real-time (brief §3.5). Public, keyless feeds only — no orders, no signing. If a feed is unreachable (geo / proxy /
+        rate-limit) the page degrades gracefully and stays fully usable. <strong>A backtest is not a forecast.</strong>
+      </p>
+
+      <!-- (a) Native live candle + backtest overlay on ONE UTC-seconds scale (Lightweight Charts, Apache-2.0, vendored locally). -->
+      <div class="live-grid" style="display:grid; grid-template-columns: 2fr 1fr; gap: var(--sp-4); align-items:start;">
+        <div>
+          <h3 style="font-size:var(--fs-base); color:var(--muted); margin:0 0 var(--sp-2);">
+            Live BTC candles + backtest entry/exit markers &amp; stop/target lines
+          </h3>
+          <!-- Lightweight Charts mounts here when vendored OK; else app.js renders our native SVG candle panel into it. -->
+          <div id="chart-live" style="height:360px; width:100%; background:var(--bg); border-radius:4px;"></div>
+          <p class="chart-summary" id="live-candle-summary">—</p>
+          <p class="hint" style="margin-top:var(--sp-2)">
+            Historical OHLC from this terminal's cached/paginated feed, the live tail appended from the WebSocket tick (Coinbase
+            <code>BTC-USD</code> ticker), on <strong>one UTC-epoch-seconds time scale</strong> (brief §3.2). Markers (▲ BUY / ▼ EXIT) and the
+            dashed stop/target price lines come from the <em>currently selected backtest</em> — they annotate history, they are not live orders.
+            The live tick updates only the right-most (current) candle; it is never spliced into the backtested return series.
+          </p>
+        </div>
+        <div>
+          <h3 style="font-size:var(--fs-base); color:var(--muted); margin:0 0 var(--sp-2);">Live tape</h3>
+          <div id="live-tape" style="height:360px; overflow-y:auto; background:var(--bg); border-radius:4px; padding:var(--sp-2);
+               font-size:var(--fs-sm); border:1px solid var(--border);">
+            <div class="chart-na" id="live-tape-na">Connecting to live feed…</div>
+          </div>
+          <p class="hint" style="margin-top:var(--sp-2)">
+            Last price/size prints from the public Coinbase Advanced-Trade <code>ticker</code> channel (co-subscribed
+            <code>heartbeats</code> to detect gaps; capped exponential-backoff reconnect with jitter and re-subscribe on reopen, §3.3).
+            <strong>Public channel only — no keys, no signing.</strong>
+          </p>
+        </div>
+      </div>
+
+      <!-- (b) TradingView Advanced Chart widget — polished live panel. Attribution link is CONTRACTUALLY MANDATORY (brief §3.1/§3.6). -->
+      <h3 style="font-size:var(--fs-base); color:var(--muted); margin:var(--sp-5) 0 var(--sp-2);">
+        TradingView Advanced Chart (official embed — data served by TradingView)
+      </h3>
+      <!-- TradingView Widget BEGIN -->
+      <div class="tradingview-widget-container" style="height:520px;width:100%">
+        <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%"></div>
+        <div class="tradingview-widget-copyright">
+          <a href="https://www.tradingview.com/" rel="noopener nofollow" target="_blank">
+            <span class="blue-text">Track all markets on TradingView</span></a>
+        </div>
+        <script type="text/javascript"
+          src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+        {
+          "autosize": true,
+          "symbol": "COINBASE:BTCUSD",
+          "interval": "60",
+          "timezone": "Etc/UTC",
+          "theme": "dark",
+          "style": "1",
+          "locale": "en",
+          "allow_symbol_change": true,
+          "calendar": false,
+          "studies": ["RSI@tv-basicstudies"],
+          "support_host": "https://www.tradingview.com"
+        }
+        </script>
+      </div>
+      <!-- TradingView Widget END -->
+      <p class="hint" style="margin-top:var(--sp-2)">
+        Free, no API key, no datafeed of ours — TradingView serves the data. <code>theme:dark</code> and <code>timezone:Etc/UTC</code>
+        match our chrome and our UTC-epoch data; <code>allow_symbol_change</code> lets you switch venues (COINBASE / BYBIT / BINANCE / BITSTAMP /
+        DERIBIT). The widget is a sealed cross-origin iframe (we cannot draw our backtest overlays into it — that is what the native panel above is
+        for, §3.4). The <strong>"Track all markets on TradingView" attribution is contractually mandatory and must stay</strong> (brief §3.1/§3.6).
+      </p>
+    </section>
+
+    <!-- Equity curve -->
+    <section class="panel" id="panel-equity" data-panel-title="Equity curve — net vs gross vs buy-and-hold">
+      <h2>Equity curve — net vs gross vs buy-and-hold</h2>
+      <div class="chart" id="chart-equity"></div>
+    </section>
+
+    <!-- Drawdown -->
+    <section class="panel" id="panel-drawdown" data-panel-title="Strategy drawdown (underwater)">
+      <h2>Strategy drawdown (underwater)</h2>
+      <div class="chart" id="chart-drawdown"></div>
+    </section>
+
+    <!-- Returns histogram -->
+    <section class="panel" id="panel-hist" data-panel-title="Daily returns distribution">
+      <h2>Daily returns distribution (non-flat bars)</h2>
+      <div class="chart" id="chart-hist"></div>
+    </section>
+
+    <!-- Rolling vol / Sharpe -->
+    <section class="panel" id="panel-rolling" data-panel-title="Rolling volatility &amp; Sharpe">
+      <h2>Rolling volatility &amp; Sharpe</h2>
+      <div class="chart" id="chart-rolling"></div>
+    </section>
+
+    <!-- Funding + carry -->
+    <section class="panel wide" id="panel-funding" data-panel-title="Perp funding (Bybit) &amp; carry sleeve">
+      <h2>Perp funding (Bybit BTCUSDT) &amp; carry sleeve
+        <span class="updated-at" id="funding-updated"></span>
+        <span class="stale-chip">stale</span>
+      </h2>
+      <div class="chart" id="chart-funding"></div>
+      <p class="chart-summary" id="funding-summary">—</p>
+      <p class="chart-summary" id="carry-summary">—</p>
+      <p class="hint">Funding is a perpetual-only metric — the spot OHLCV backtests above do not use it. Carry harvests funding delta-neutrally; it inverts when funding goes negative (FTX Nov 2022; parts of 2025).</p>
+    </section>
+
+    <!-- VRP / short-vol risk-premium exposure (§2.1 SIGNAL) -->
+    <section class="panel wide" id="panel-vrp" data-panel-title="VRP / short-vol risk-premium exposure">
+      <h2>VRP / short-vol risk-premium exposure — implied (Deribit DVOL) vs realized vol
+        <span class="signal-tag signal" title="Brief §2.1: the only option finding robust enough to surface as a (risk-)signal — and it is a risk-premium EXPOSURE, direction-agnostic, NOT directional alpha.">SIGNAL · risk-premium</span>
+        <span class="updated-at" id="vrp-updated"></span>
+        <span class="stale-chip">stale</span>
+      </h2>
+      <div class="chart" id="chart-vrp"></div>
+      <p class="chart-summary" id="vrp-summary">—</p>
+      <p class="chart-summary" id="vrp-tail-summary">—</p>
+      <p class="hint">DVOL is Deribit's BTC 30-day implied-vol index; realized is the trailing 30-bar annualized vol from this terminal's own returns. <strong>VRP = implied − realized</strong>, large and persistently positive (IV &gt; RV ~70% of the time) — the price paid for crash/vol-spike protection (Carr-Wu 2009; Almeida et al. 2025: BTC VRP ≈ 7× equity). Harvest it by being <em>short</em> vol, but the payoff is <strong>sharply negatively skewed and tail-lethal</strong>: Deribit's cost-inclusive weekend-strangle backtest made +29.7% APR yet drew down 23.8% (≈45% on daily). <strong>Report it with CVaR / max-DD, never headline Sharpe — and it is NOT a sell button</strong> (the BTC VRP→return relation is <em>negative</em>, the opposite of equities; brief §2.1). Degrades gracefully if Deribit is unreachable.</p>
+    </section>
+
+    <!-- ─── Option-chain panels (Deribit, one public call, no keys) ───── -->
+
+    <!-- IV smile / skew per expiry (§1.4a · DESCRIPTIVE) -->
+    <section class="panel wide" id="panel-smile" data-panel-title="Option IV smile / skew per expiry">
+      <h2>Option IV smile / skew — OTM-only, per expiry
+        <span class="signal-tag descriptive" title="Brief §2.3: smile shape is a sentiment / positioning gauge, never backtested as return alpha.">DESCRIPTIVE · sentiment</span>
+        <span class="updated-at" id="smile-updated"></span>
+        <span class="stale-chip">stale</span>
+      </h2>
+      <div class="controls" style="margin-bottom:var(--sp-2)">
+        <div class="control">
+          <label for="smile-expiry">Expiry</label>
+          <select id="smile-expiry"></select>
+        </div>
+        <div class="control">
+          <label for="smile-x">x-axis</label>
+          <select id="smile-x">
+            <option value="logm">log-moneyness ln(K/F)</option>
+            <option value="strike">strike</option>
+          </select>
+        </div>
+      </div>
+      <div class="chart" id="chart-smile"></div>
+      <p class="chart-summary" id="smile-summary">—</p>
+      <p class="hint">A <strong>MARK smile</strong> from <code>mark_iv</code> only (the one public <code>get_book_summary_by_currency</code> call has no per-contract bid/ask IV), gated to the <strong>OTM side</strong> (puts below F, calls above F), <strong>both bid&amp;ask present</strong>, and <strong>|BS-delta| ≥ 0.05</strong>; interpolated shape-preserving (PCHIP, linear fallback) — never a wiggly cubic spline that manufactures butterfly arbitrage (brief §1.4a, §1.7). Forward F is <code>underlying_price</code> (parity fast-path). <strong>Descriptive sentiment only</strong> — over-aggressive wing filtering flattens measured skew, so the |delta| cut is visible.</p>
+    </section>
+
+    <!-- ATM term structure + DVOL overlay (§1.4b/§1.6 · SIGNAL vol-forecast) -->
+    <section class="panel wide" id="panel-term" data-panel-title="ATM IV term structure + DVOL overlay">
+      <h2>ATM IV term structure + DVOL overlay
+        <span class="signal-tag signal" title="Brief §2.2: term/smile slope forecasts realized vol &amp; classifies regime (Caporin et al. 2024) — a sizing/regime input, NOT a return-timing signal.">SIGNAL · vol-forecast / regime</span>
+        <span class="updated-at" id="term-updated"></span>
+        <span class="stale-chip">stale</span>
+      </h2>
+      <div class="chart" id="chart-term"></div>
+      <p class="chart-summary" id="term-summary">—</p>
+      <p class="hint">ATMF IV (interpolated at F) vs days-to-expiry across the live chain, ACT/365 to 08:00 UTC (brief §1.5). The existing <strong>DVOL</strong> line is overlaid as the 30-day model-free benchmark: <strong>DVOL sits ABOVE pure ATM IV by roughly the convexity (BF) premium</strong> — the gap is the smile's contribution, not an error (brief §1.6). Cross-tenor interpolation, where done, must be in <strong>total variance</strong> (w = IV²·T), never in IV, or you manufacture calendar arbitrage. <strong>Use the slope (e.g. front vs ~90d) for regime &amp; vol-sizing, never as a buy/sell</strong> (brief §2.2).</p>
+    </section>
+
+    <!-- RR25 / BF25 readouts (§1.4d-e · DESCRIPTIVE) -->
+    <section class="panel wide" id="panel-rrbf" data-panel-title="25-delta risk reversal &amp; butterfly">
+      <h2>25-delta risk reversal (RR25) &amp; butterfly (BF25)
+        <span class="signal-tag descriptive" title="Brief §2.3: skew/RR is a sentiment gauge with a structural carry component — the z-score timing rule underperformed naive carry; NOT a validated return-timing signal.">DESCRIPTIVE · sentiment</span>
+        <span class="updated-at" id="rrbf-updated"></span>
+        <span class="stale-chip">stale</span>
+      </h2>
+      <div class="stats-grid" id="rrbf-grid">
+        <div class="stat"><span class="k">ATM IV (front)</span><span class="v num" id="rrbf-atm">—</span></div>
+        <div class="stat"><span class="k">RR25 (front)</span><span class="v num" id="rrbf-rr">—</span><span class="vs">25dC − 25dP</span></div>
+        <div class="stat"><span class="k">BF25 (front)</span><span class="v num" id="rrbf-bf">—</span><span class="vs">½(C+P) − ATM</span></div>
+      </div>
+      <div class="chart" id="chart-rr-term"></div>
+      <p class="chart-summary" id="rrbf-summary">—</p>
+      <p class="hint">Pinned sign convention (brief §1.4d-e): <strong>RR25 = IV(25Δ call) − IV(25Δ put)</strong> (call-minus-put). <strong>RR25 &lt; 0 ⇒ the 25Δ put is richer ⇒ downside protection bid up</strong> (the typical BTC "put skew" / fear read); RR25 &gt; 0 ⇒ call skew (euphoria). BF25 = ½(IV<sub>25c</sub>+IV<sub>25p</sub>) − IV<sub>ATM</sub> is smile convexity. The ±25Δ strikes are solved on a <strong>plain Black-Scholes spot delta</strong> on the observed IV (F as forward, r=0) — a <strong>Deribit-style 25Δ, NOT the FX premium-adjusted 25Δ</strong> (brief §1.4d caveat). The lower chart is RR25(T), the term-of-skew (front-end noisier/steeper). <strong>Sentiment gauge, not a return-timing signal</strong> (brief §2.3).</p>
+    </section>
+
+    <!-- On-chain context (descriptive only) -->
+    <section class="panel wide" id="panel-onchain" data-panel-title="On-chain context (descriptive)">
+      <h2>On-chain context — <span id="onchain-metric-name">network activity</span> (descriptive, NOT a signal)
+        <span class="updated-at" id="onchain-updated"></span>
+        <span class="stale-chip">stale</span>
+      </h2>
+      <div class="chart" id="chart-onchain"></div>
+      <p class="chart-summary" id="onchain-summary">—</p>
+      <p class="hint"><strong>Context only — explicitly NOT a tradeable signal.</strong> On-chain / sentiment series are mostly <em>descriptive, not predictive</em>, and carry a look-ahead / revision trap larger than trading cost: values for past dates get retroactively revised, so a backtest on today's series is lying about what was knowable then (RESEARCH.md 2.17). Shown as background context, never deflated/backtested as alpha. Source: blockchain.info charts API; degrades gracefully on failure.</p>
+    </section>
+  </main>
+
+  <footer>
+    <p>Engine mirror in vanilla JS: <code>quant.js</code> reimplements features / backtest / risk from the Python <code>btcquant</code> package (shift-by-1, turnover cost, deflated Sharpe). Charts are dependency-free SVG (<code>charts.js</code>). Data is live and public (Coinbase / Kraken / CoinGecko / Bybit); on failure the terminal shows a stale-data banner rather than fabricating anything.</p>
+    <p>Edges decay; treat every signal as a hypothesis to re-test. A backtested Sharpe &gt; 2 in crypto is a red flag; &gt; 3 is almost certainly an artifact. See <code>DISCLAIMER.md</code>.</p>
+  </footer>
+
+  <script src="quant.js"></script>
+  <script src="charts.js"></script>
+  <!-- TradingView Lightweight Charts (Apache-2.0) — vendored locally, NO CDN at runtime (brief §3.6).
+       Exposes window.LightweightCharts; app.js feature-detects it and falls back to the native SVG
+       live panel if it ever fails to load, so the page never carries a broken <script>. -->
+  <script src="vendor/lightweight-charts.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
