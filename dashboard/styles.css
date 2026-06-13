@@ -12,20 +12,28 @@
      §4.10 sticky thead + pinned first col  prefers-reduced-motion guard
 */
 
+/* ─── Self-hosted type (no CDN): IBM Plex Mono = data/numbers, Inter = prose.
+   Both SIL OFL, latin subset, woff2; font-display:swap → graceful FOUT to the
+   system fallback, then swaps in. ─────────────────────────────────────────── */
+@font-face { font-family:'IBM Plex Mono'; font-style:normal; font-weight:400; font-display:swap; src:url('vendor/fonts/ibm-plex-mono-400.woff2') format('woff2'); }
+@font-face { font-family:'IBM Plex Mono'; font-style:normal; font-weight:600; font-display:swap; src:url('vendor/fonts/ibm-plex-mono-600.woff2') format('woff2'); }
+@font-face { font-family:'Inter'; font-style:normal; font-weight:400; font-display:swap; src:url('vendor/fonts/inter-400.woff2') format('woff2'); }
+@font-face { font-family:'Inter'; font-style:normal; font-weight:600; font-display:swap; src:url('vendor/fonts/inter-600.woff2') format('woff2'); }
+
 /* ─── §4.4 Color system — hand-tuned grey ladder (HSL-balanced, dark) ───── */
 :root {
   /* Raw grey scale: --g-900 darkest canvas → --g-050 brightest text.
      Elevation is by LIGHTNESS (§4.5), not shadow. No pure #000 (halation). */
-  --g-900: #0b0f18;   /* base canvas (darkest)            */
-  --g-800: #111726;   /* panel surface (one step up)      */
-  --g-700: #0e1420;   /* recessed / inset surface         */
-  --g-600: #1d2840;   /* hairline borders                 */
-  --g-500: #23314a;   /* chart grid lines                 */
-  --g-400: #4a5a78;   /* disabled / faint chrome (<4.5:1) */
-  --g-300: #96a6c8;   /* muted DATA labels — clears 4.5:1 */
-  --g-200: #b1bac4;   /* secondary text                   */
-  --g-100: #c9d1d9;   /* primary-ish text                 */
-  --g-050: #d6e0f5;   /* foreground text (brightest)      */
+  --g-900: #0a0b0d;   /* base canvas (near-black, neutral) */
+  --g-800: #15171b;   /* panel surface (one step up)      */
+  --g-700: #0f1114;   /* recessed / inset surface         */
+  --g-600: #23262d;   /* hairline borders                 */
+  --g-500: #2a2e36;   /* chart grid lines                 */
+  --g-400: #5a606e;   /* disabled / faint chrome (<4.5:1) */
+  --g-300: #9aa3b2;   /* muted DATA labels — clears 4.5:1 */
+  --g-200: #b8bdc6;   /* secondary text                   */
+  --g-100: #ccd1d8;   /* primary-ish text                 */
+  --g-050: #e4e8ee;   /* foreground text (brightest)      */
 
   /* Semantic aliases — KEEP these names (app.js / charts.js / index.html use
      them). Components reference INTENT, not raw scale. */
@@ -38,11 +46,16 @@
   --fg:         var(--g-050);
 
   /* §4.5 hover / elevated nested surface (one step lighter than panel). */
-  --bg-hover:   #16203a;
+  --bg-hover:   #1c1f25;
 
-  /* Accents — 1 primary + a highlight; desaturated-large-fill discipline. */
-  --accent:   #7aa2ff;   /* 7.2:1 on panel */
-  --accent-2: #ffcf6b;   /* 12.3:1 on panel */
+  /* Single brand/UI accent = amber (--accent). --accent-2 = cool blue. Together
+     they're a CVD-safe warm/cool pair for the 2-series charts (charts.js reads
+     both via cssVar). Amber has terminal heritage and — crucially — never
+     collides with the green/red P&L semantic, so the brand never competes with
+     profit/loss colour. (A dedicated categorical series palette lands in the
+     chart-chrome module.) */
+  --accent:   #E0A33E;   /* amber — UI accent + chart series 1 */
+  --accent-2: #5BA3F5;   /* cool blue — chart series 2         */
 
   /* §4.1 CVD-safe up/down: differ in LIGHTNESS (survive grayscale), teal-green
      up vs deeper-red down. Both clear 4.5:1 as data text on panels. */
@@ -62,8 +75,10 @@
   --fs-xs: 11px; --fs-sm: 12px; --fs-base: 13px;
   --fs-lg: 16px; --fs-xl: 20px; --fs-2xl: 28px;
 
-  --radius: 6px;
-  --mono: "SF Mono", "JetBrains Mono", "Menlo", "Consolas", ui-monospace, monospace;
+  --radius: 5px;   /* terminals are sharp — one small radius everywhere */
+  /* Dual type: mono for all data/numbers/tickers, a grotesque for prose. */
+  --mono: 'IBM Plex Mono', "SF Mono", "JetBrains Mono", Menlo, Consolas, ui-monospace, monospace;
+  --font-sans: 'Inter', system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
 }
 
 /* §4.1 strict Okabe-Ito alt palette (user toggle: body.cvd-strict).
@@ -80,10 +95,11 @@ html, body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font-family: var(--mono);
+  font-family: var(--font-sans);   /* prose/labels/headings = Inter; data = --mono (below) */
   font-size: var(--fs-base);
-  line-height: 1.45;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 a { color: var(--accent); }
@@ -94,7 +110,10 @@ a { color: var(--accent); }
 .stat .v,
 .stat-value,
 .price,
-table.leaderboard td.num {
+.delta,
+table.leaderboard td,
+.cmdk-input {
+  font-family: var(--mono);   /* data/numbers/tickers stay monospace */
   font-variant-numeric: tabular-nums slashed-zero;
   font-feature-settings: 'tnum' 1, 'zero' 1;
 }
@@ -142,11 +161,13 @@ header.topbar {
   background: var(--bg-panel-2);
 }
 header.topbar h1 {
+  font-family: var(--mono);   /* the wordmark stays terminal-mono */
   font-size: var(--fs-lg);
   margin: 0;
   letter-spacing: 0.02em;
+  font-weight: 600;
 }
-header.topbar h1 .tick { color: var(--accent-2); }
+header.topbar h1 .tick { color: var(--accent); }   /* amber brand dot */
 header.topbar .subtitle { color: var(--muted); font-size: var(--fs-sm); }
 header.topbar .price {
   margin-left: auto;
