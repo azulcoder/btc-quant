@@ -328,6 +328,26 @@ button:hover { filter: brightness(1.08); }
 }
 .chart-summary { padding: var(--sp-2) 2px 0; }
 
+/* ─── Module B: TradingView Advanced Chart embed ──────────────────────────
+   The widget runs autosize:true, so it fills WHATEVER box we give it — the fix
+   is to constrain that box and clip it, instead of a fixed 520px with default
+   overflow:visible (which let the rendered widget paint past its reserved space
+   and over the following footer). Responsive height with a sane floor/ceiling;
+   overflow:hidden guarantees the sealed cross-origin iframe never escapes the
+   panel. Matches the live-candle div convention (bg + radius, no nested border).
+   The mandatory "Track all markets on TradingView" attribution row is untouched. */
+.tv-embed {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  height: clamp(400px, 58vh, 600px);
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--bg);
+}
+.tv-embed > .tradingview-widget-container__widget { height: calc(100% - 32px); width: 100%; }
+@media (max-width: 560px) { .tv-embed { height: clamp(340px, 64vh, 480px); } }
+
 /* ─── Stats grid ──────────────────────────────────────────────────────── */
 /* §4.5 hairline separators via 1px grid gap (border colour shows through). */
 .stats-grid {
