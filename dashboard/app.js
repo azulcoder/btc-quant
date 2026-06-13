@@ -411,7 +411,7 @@
     C.candles($('chart-candles'), oWin, {
       height: 260,
       overlays: [
-        { values: sl(ma50), color: 'var(--accent)', label: 'SMA50' },
+        { values: sl(ma50), color: 'var(--c1)', label: 'SMA50' },
         { values: sl(ma200), color: 'var(--accent-2)', label: 'SMA200' },
       ],
     });
@@ -419,7 +419,7 @@
     C.lineChart($('chart-equity'), [
       { values: bt.bhEquity, color: 'var(--muted)', label: 'Buy & Hold', dash: '5 4' },
       { values: Q.compound(bt.grossReturns), color: 'var(--accent-2)', label: 'Strategy (gross)', width: 1.2 },
-      { values: bt.equity, color: 'var(--accent)', label: 'Strategy (net)' },
+      { values: bt.equity, color: 'var(--c1)', label: 'Strategy (net)' },
     ], { height: 240, baseline: 1, fmt: (v) => v.toFixed(2) + 'x' });
 
     C.drawdownArea($('chart-drawdown'), Q.drawdownSeries(bt.equity), { height: 150 });
@@ -430,7 +430,7 @@
     const rollSharpe = Q.rollingSharpe(bt.returns, 90, p);
     C.rollingChart($('chart-rolling'), [
       { values: rollVol, color: 'var(--down)', label: `Rolling vol (30 ${bars}, ann.)` },
-      { values: rollSharpe, color: 'var(--accent)', label: `Rolling Sharpe (90 ${bars})` },
+      { values: rollSharpe, color: 'var(--c1)', label: `Rolling Sharpe (90 ${bars})` },
     ], { height: 180 });
   }
 
@@ -629,7 +629,7 @@
       if (Number.isFinite(dvol.iv[i]) && Number.isFinite(r)) vrp.push(dvol.iv[i] - r);
     }
     C.lineChart(root, [
-      { values: impl, color: 'var(--accent)', label: 'Implied (DVOL %)' },
+      { values: impl, color: 'var(--c1)', label: 'Implied (DVOL %)' },
       { values: real, color: 'var(--down)', label: 'Realized 30d (%)' },
     ], { height: 200, fmt: (v) => v.toFixed(0) + '%' });
     setPanelState('panel-vrp', 'ready', 'vrp-updated');
@@ -1025,7 +1025,7 @@
     if (dvol && dvol.iv && dvol.iv.length) {
       for (let i = dvol.iv.length - 1; i >= 0; i--) { if (Number.isFinite(dvol.iv[i])) { dvolLast = dvol.iv[i]; break; } }
       if (Number.isFinite(dvolLast)) {
-        series.push({ x: [30], y: [dvolLast], color: 'var(--accent)', label: 'DVOL (30d benchmark)' });
+        series.push({ x: [30], y: [dvolLast], color: 'var(--c1)', label: 'DVOL (30d benchmark)' });
       }
     }
     C.xyChart(root, series, {

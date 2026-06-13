@@ -42,9 +42,16 @@
     grid: () => cssVar('--grid', '#23314a'),
     axis: () => cssVar('--muted', '#7b8db0'),
     accent: () => cssVar('--accent', '#7aa2ff'),
-    accent2: () => cssVar('--accent-2', '#ffcf6b'),
+    accent2: () => cssVar('--accent-2', '#5BA3F5'),
     baseline: () => cssVar('--muted', '#7b8db0'),
     text: () => cssVar('--fg', '#d6e0f5'),
+    // Categorical data-series palette (Module 4) — data colours live here, NOT
+    // on the amber brand accent. Auto-assigned by series index, wraps at 6.
+    series: (i) => {
+      const PAL = ['#C792EA', '#5BA3F5', '#F2A6C2', '#58C7E0', '#A8B0C0', '#D6B3FF'];
+      const k = ((i | 0) % PAL.length + PAL.length) % PAL.length;
+      return cssVar('--c' + (k + 1), PAL[k]);
+    },
   };
 
   // Build an <svg> sized to the host element (responsive via viewBox).
@@ -137,12 +144,12 @@
         fill: color, opacity: 0.9,
       }));
     }
-    (opts.overlays || []).forEach((ov) => {
+    (opts.overlays || []).forEach((ov, oi) => {
       const pts = [];
       for (let i = 0; i < n; i++) {
         if (Number.isFinite(ov.values[i])) pts.push([x0 + (i + 0.5) * cw, yScale(ov.values[i])]);
       }
-      if (pts.length > 1) svg.appendChild(el('path', { d: path(pts), fill: 'none', stroke: ov.color || COLORS.accent(), 'stroke-width': 1.5, opacity: 0.95 }));
+      if (pts.length > 1) svg.appendChild(el('path', { d: path(pts), fill: 'none', stroke: ov.color || COLORS.series(oi), 'stroke-width': 1.5, opacity: 0.95 }));
     });
     if (opts.overlays && opts.overlays.length) drawLegend(svg, w, opts.overlays);
   }
@@ -168,11 +175,11 @@
     if (opts.baseline != null && opts.baseline >= lo && opts.baseline <= hi) {
       svg.appendChild(el('line', { x1: x0, y1: yScale(opts.baseline), x2: x1, y2: yScale(opts.baseline), stroke: COLORS.baseline(), 'stroke-width': 1, 'stroke-dasharray': '4 4', opacity: 0.6 }));
     }
-    series.forEach((s) => {
+    series.forEach((s, si) => {
       const pts = [];
       for (let i = 0; i < s.values.length; i++) if (Number.isFinite(s.values[i])) pts.push([xScale(i), yScale(s.values[i])]);
       if (pts.length > 1) {
-        const attrs = { d: path(pts), fill: 'none', stroke: s.color || COLORS.accent(), 'stroke-width': s.width || 1.6 };
+        const attrs = { d: path(pts), fill: 'none', stroke: s.color || COLORS.series(si), 'stroke-width': s.width || 1.6 };
         if (s.dash) attrs['stroke-dasharray'] = s.dash;
         svg.appendChild(el('path', attrs));
       }
@@ -327,12 +334,12 @@
       }
     });
 
-    series.forEach((s) => {
+    series.forEach((s, si) => {
       const pts = [];
       const n = Math.min(s.x.length, s.y.length);
       for (let i = 0; i < n; i++) if (Number.isFinite(s.x[i]) && Number.isFinite(s.y[i])) pts.push([xScale(s.x[i]), yScale(s.y[i])]);
       pts.sort((a, b) => a[0] - b[0]);   // monotone x for a clean polyline
-      const color = s.color || COLORS.accent();
+      const color = s.color || COLORS.series(si);
       if (pts.length > 1) {
         const attrs = { d: path(pts), fill: 'none', stroke: color, 'stroke-width': s.width || 1.6 };
         if (s.dash) attrs['stroke-dasharray'] = s.dash;
@@ -347,17 +354,22 @@
 
   // ─── Shared decorations ───────────────────────────────────────────────
 
+  // Legend swatch is a LINE that mirrors the series' dash pattern, so the legend
+  // encodes line-style as well as colour (CVD-safe redundant channel, §4.7).
   function drawLegend(svg, w, items) {
     const g = el('g', { class: 'chart-legend' });
     let x = PAD.l + 4;
     const y = PAD.t + 4;
-    items.forEach((it) => {
+    items.forEach((it, i) => {
       if (!it.label) return;
-      g.appendChild(el('rect', { x, y: y - 7, width: 10, height: 3, fill: it.color || COLORS.accent() }));
-      const t = el('text', { x: x + 14, y: y - 2, class: 'chart-legend-label' });
+      const color = it.color || COLORS.series(i);
+      const sw = el('line', { x1: x, y1: y - 5, x2: x + 15, y2: y - 5, stroke: color, 'stroke-width': 2.4, 'stroke-linecap': 'round' });
+      if (it.dash) sw.setAttribute('stroke-dasharray', it.dash);
+      g.appendChild(sw);
+      const t = el('text', { x: x + 19, y: y - 2, class: 'chart-legend-label' });
       t.textContent = it.label;
       g.appendChild(t);
-      x += 16 + (it.label.length * 6.2);
+      x += 26 + (it.label.length * 6.2);
     });
     svg.appendChild(g);
   }

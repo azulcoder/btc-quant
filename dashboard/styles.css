@@ -54,8 +54,17 @@
      collides with the green/red P&L semantic, so the brand never competes with
      profit/loss colour. (A dedicated categorical series palette lands in the
      chart-chrome module.) */
-  --accent:   #E0A33E;   /* amber — UI accent + chart series 1 */
-  --accent-2: #5BA3F5;   /* cool blue — chart series 2         */
+  --accent:   #E0A33E;   /* amber — UI accent ONLY (focus/active/brand) + chart reference markers */
+  --accent-2: #5BA3F5;   /* cool blue — 2nd data line / annotations */
+  /* Categorical data-series palette (Module 4): CVD-safe, and deliberately
+     avoids the amber brand + the green/red P&L semantic, so a data line never
+     reads as chrome or as profit/loss. charts.js auto-assigns these by index. */
+  --c1: #C792EA;  /* lavender (primary data line — replaces amber on data) */
+  --c2: #5BA3F5;  /* blue       */
+  --c3: #F2A6C2;  /* pink       */
+  --c4: #58C7E0;  /* cyan       */
+  --c5: #A8B0C0;  /* grey-blue  */
+  --c6: #D6B3FF;  /* light violet */
 
   /* §4.1 CVD-safe up/down: differ in LIGHTNESS (survive grayscale), teal-green
      up vs deeper-red down. Both clear 4.5:1 as data text on panels. */
