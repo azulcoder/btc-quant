@@ -1161,9 +1161,26 @@
   // An adapter supplies { url, subscribe(ws), onMessage(msg, api), ping }.
   function makeSocket(adapter, api) {
     let ws = null, attempt = 0, hbTimer = null, closedByUs = false;
-    const MAX_BACKOFF = 30000;
+    // Module D — liveness watchdog. A socket can stay OPEN while the feed silently
+    // stalls (proxy, dozing tab, dropped subscription); onclose never fires, so the
+    // status would otherwise stay green "live" over a frozen price — an honesty-rail
+    // violation. The adapter stamps lastAliveAt via api.markAlive() on every ticker/
+    // heartbeat frame (NOT trades — a quiet market_trades window is normal). While the
+    // socket is OPEN we flip to amber "stale" after STALE_MS, and force ONE reconnect
+    // after DEAD_MS which routes through the EXISTING backoff (we never fight it).
+    let lastAliveAt = 0, stale = false, forcedDead = false, wdTimer = null;
+    const MAX_BACKOFF = 30000, STALE_MS = 12000, DEAD_MS = 40000, WATCHDOG_MS = 2000;
 
     function clearHeartbeat() { if (hbTimer) { clearInterval(hbTimer); hbTimer = null; } }
+
+    // Adapter calls this on a healthy-feed frame (ticker tick / heartbeat). Recovery
+    // is a single clean transition back to green — no flicker.
+    const liveApi = Object.assign({}, api, {
+      markAlive() {
+        lastAliveAt = Date.now();
+        if (stale) { stale = false; forcedDead = false; api.onStatus('open', 'live feed recovered'); }
+      },
+    });
 
     function scheduleReconnect() {
       clearHeartbeat();
@@ -1183,6 +1200,8 @@
 
       ws.onopen = () => {
         attempt = 0;                       // reset backoff on a clean open
+        lastAliveAt = Date.now();          // fresh liveness baseline → no instant false-stale
+        stale = false; forcedDead = false;
         api.onStatus('open', 'live feed connected');
         try { adapter.subscribe(ws); }     // (re-)subscribe on EVERY (re)open
         catch (_) { /* subscribe error -> socket will close, backoff handles it */ }
@@ -1196,14 +1215,40 @@
       };
       ws.onmessage = (ev) => {
         let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
-        try { adapter.onMessage(msg, api); } catch (_) { /* never let a bad frame kill the socket */ }
+        try { adapter.onMessage(msg, liveApi); } catch (_) { /* never let a bad frame kill the socket */ }
       };
       ws.onerror = () => { /* onclose fires next; handled there */ };
       ws.onclose = () => { clearHeartbeat(); scheduleReconnect(); };
     }
 
+    // Judge ONLY an OPEN socket — a CONNECTING/closed one is the backoff's job, so the
+    // watchdog never double-drives reconnection. One interval for the socket's lifetime.
+    function startWatchdog() {
+      if (wdTimer) return;
+      wdTimer = setInterval(() => {
+        if (closedByUs || !ws || ws.readyState !== WebSocket.OPEN) return;
+        const gap = Date.now() - lastAliveAt;
+        if (gap >= DEAD_MS) {
+          if (!forcedDead) {
+            forcedDead = true;
+            api.onStatus('reconnecting', 'live feed stalled — reconnecting');
+            try { ws.close(); } catch (_) { /* onclose → scheduleReconnect (existing backoff) */ }
+          }
+          return;
+        }
+        if (gap >= STALE_MS) { stale = true; api.onStatus('stale', `stale — no data for ${Math.round(gap / 1000)}s`); }
+      }, WATCHDOG_MS);
+    }
+
     connect();
-    return { close() { closedByUs = true; clearHeartbeat(); if (ws) try { ws.close(); } catch (_) { /* ignore */ } } };
+    startWatchdog();
+    return {
+      close() {
+        closedByUs = true; clearHeartbeat();
+        if (wdTimer) { clearInterval(wdTimer); wdTimer = null; }
+        if (ws) try { ws.close(); } catch (_) { /* ignore */ }
+      },
+    };
   }
 
   // Coinbase Advanced Trade adapter (§3.3) on wss://advanced-trade-ws.coinbase.com.
@@ -1225,9 +1270,13 @@
     // the keepalive. Re-assert the subscription as a liveness nudge.
     ping(ws) { ws.send(JSON.stringify({ type: 'subscribe', product_ids: ['BTC-USD'], channel: 'heartbeats' })); },
     onMessage(msg, api) {
+      // heartbeats (~1/s) are the steady liveness signal → feed the watchdog and stop.
+      if (msg.channel === 'heartbeats') { if (api.markAlive) api.markAlive(); return; }
       if (!Array.isArray(msg.events)) return;
       if (msg.channel === 'ticker') {
-        // Price feed only → header + candle. (ticker has no per-trade size field.)
+        // Price feed → header + candle, and a liveness signal for the watchdog.
+        // (ticker has no per-trade size field; the tape comes from market_trades.)
+        if (api.markAlive) api.markAlive();
         for (const ev of msg.events) {
           for (const t of (ev.tickers || [])) {
             const price = Number(t.price);
@@ -1237,11 +1286,10 @@
       } else if (msg.channel === 'market_trades') {
         // The tape: each event batch is a 'snapshot' (initial / on re-subscribe) or
         // an 'update'. onTrades seeds once from the first snapshot and ignores later
-        // ones, so a reconnect never re-dumps the whole batch into the tape.
+        // ones, so a reconnect never re-dumps the whole batch into the tape. Trades do
+        // NOT mark liveness — a quiet (low-volume) window is normal, not a stall.
         for (const ev of msg.events) api.onTrades(ev.trades || [], ev.type === 'snapshot');
       }
-      // heartbeats channel: liveness only. NOTE: not yet consumed as a tick-staleness
-      // watchdog — a silent stall (socket open, data stopped) is not flagged today.
     },
   };
 
@@ -1262,6 +1310,7 @@
     if (cs) {
       cs.classList.remove('live', 'stale', 'error');
       if (kind === 'open') { cs.classList.add('live'); setText('conn-text', 'live · ' + stamp); }
+      else if (kind === 'stale') { cs.classList.add('stale'); setText('conn-text', msg); }   // socket open but no data — honest "stale", not a fake "live"
       else if (kind === 'reconnecting') { cs.classList.add('stale'); setText('conn-text', 'reconnecting…'); }
       else if (kind === 'error') { cs.classList.add('error'); setText('conn-text', 'live feed offline'); }
     }
