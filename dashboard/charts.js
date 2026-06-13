@@ -152,6 +152,22 @@
       if (pts.length > 1) svg.appendChild(el('path', { d: path(pts), fill: 'none', stroke: ov.color || COLORS.series(oi), 'stroke-width': 1.5, opacity: 0.95 }));
     });
     if (opts.overlays && opts.overlays.length) drawLegend(svg, w, opts.overlays);
+    // Crosshair + tooltip: per-bar OHLC + overlays, x-label = the bar's date.
+    const cols = [];
+    for (let i = 0; i < n; i++) {
+      const o = ohlc.open[i], c = ohlc.close[i], hg = ohlc.high[i], lw = ohlc.low[i];
+      if (![o, c, hg, lw].every(Number.isFinite)) continue;
+      const cc = c >= o ? COLORS.up() : COLORS.down();
+      const items = [
+        { label: 'O', color: cc, py: yScale(o), valText: fmtNum(o), dot: false },
+        { label: 'H', color: cc, py: yScale(hg), valText: fmtNum(hg), dot: false },
+        { label: 'L', color: cc, py: yScale(lw), valText: fmtNum(lw), dot: false },
+        { label: 'C', color: cc, py: yScale(c), valText: fmtNum(c) },
+      ];
+      (opts.overlays || []).forEach((ov, oi) => { if (Number.isFinite(ov.values[i])) items.push({ label: ov.label || 'MA', color: ov.color || COLORS.series(oi), py: yScale(ov.values[i]), valText: fmtNum(ov.values[i]) }); });
+      cols.push({ px: x0 + (i + 0.5) * cw, xLabel: ohlc.time ? new Date(ohlc.time[i]).toISOString().slice(0, 10) : ('bar ' + (i + 1)), items });
+    }
+    attachHover(root, svg, { w, x0, x1, y0: PAD.t, y1: h - PAD.b, cols });
   }
 
   // ─── Multi-line chart (equity curves etc.) ────────────────────────────
@@ -185,6 +201,14 @@
       }
     });
     drawLegend(svg, w, series);
+    // Crosshair + tooltip: one column per bar index; each series' value at i.
+    const cols = [];
+    for (let i = 0; i < len; i++) {
+      const items = [];
+      series.forEach((s, si) => { if (Number.isFinite(s.values[i])) items.push({ label: s.label || 'series', color: s.color || COLORS.series(si), py: yScale(s.values[i]), valText: (opts.fmt || fmtNum)(s.values[i]) }); });
+      if (items.length) cols.push({ px: xScale(i), xLabel: (opts.xLabels && opts.xLabels[i]) || ('bar ' + (i + 1)), items });
+    }
+    attachHover(root, svg, { w, x0, x1, y0: PAD.t, y1: h - PAD.b, cols });
   }
 
   // ─── Drawdown (underwater) area ───────────────────────────────────────
@@ -350,6 +374,18 @@
       }
     });
     drawLegend(svg, w, series);
+    // Crosshair + tooltip: irregular x, so each data point is its own column;
+    // hover snaps to the nearest point and shows its series / x / y.
+    const cols = [];
+    series.forEach((s, si) => {
+      const color = s.color || COLORS.series(si);
+      const m = Math.min(s.x.length, s.y.length);
+      for (let i = 0; i < m; i++) if (Number.isFinite(s.x[i]) && Number.isFinite(s.y[i])) {
+        cols.push({ px: xScale(s.x[i]), xLabel: (opts.xFmt || fmtNum)(s.x[i]), items: [{ label: s.label || 'series', color, py: yScale(s.y[i]), valText: (opts.yFmt || fmtNum)(s.y[i]) }] });
+      }
+    });
+    cols.sort((a, b) => a.px - b.px);
+    attachHover(root, svg, { w, x0, x1, y0, y1, cols });
   }
 
   // ─── Shared decorations ───────────────────────────────────────────────
@@ -378,6 +414,49 @@
     const t = el('text', { x: w / 2, y: h / 2, 'text-anchor': 'middle', class: 'chart-empty' });
     t.textContent = 'no data';
     svg.appendChild(t);
+  }
+
+  // ─── Module 4b: shared crosshair + hover tooltip ────────────────────────
+  // model = { w, x0, x1, y0, y1, cols:[{ px, xLabel, items:[{label,color,py,valText,dot}] }] }
+  // The tooltip is an HTML div inside `root` (which is position:relative via CSS).
+  // FAIL-SAFE: any error just disables hover — it never breaks the rendered chart.
+  function attachHover(root, svg, model) {
+    try {
+      if (!root || !svg || !model || !model.cols || model.cols.length < 2) return;
+      const cross = el('line', { class: 'chart-crosshair', x1: model.x0, x2: model.x0, y1: model.y0, y2: model.y1, stroke: COLORS.axis(), 'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0 });
+      svg.appendChild(cross);
+      const dots = el('g', { opacity: 0 });
+      svg.appendChild(dots);
+      let tip = root.querySelector('.chart-tip');
+      if (!tip) { tip = document.createElement('div'); tip.className = 'chart-tip'; root.appendChild(tip); }
+      tip.hidden = true;
+      const vbX = (clientX) => { const r = svg.getBoundingClientRect(); return r.width ? (clientX - r.left) / r.width * model.w : 0; };
+      const leave = () => { cross.setAttribute('opacity', 0); dots.setAttribute('opacity', 0); tip.hidden = true; };
+      function move(ev) {
+        try {
+          const vx = vbX(ev.clientX);
+          if (vx < model.x0 - 3 || vx > model.x1 + 3) return leave();
+          let bi = 0, bd = Infinity;
+          for (let i = 0; i < model.cols.length; i++) { const d = Math.abs(model.cols[i].px - vx); if (d < bd) { bd = d; bi = i; } }
+          const col = model.cols[bi];
+          cross.setAttribute('x1', col.px); cross.setAttribute('x2', col.px); cross.setAttribute('opacity', 0.6);
+          while (dots.firstChild) dots.removeChild(dots.firstChild);
+          col.items.forEach((it) => { if (it.dot !== false && Number.isFinite(it.py)) dots.appendChild(el('circle', { cx: col.px, cy: it.py, r: 3, fill: it.color, stroke: 'var(--bg)', 'stroke-width': 1 })); });
+          dots.setAttribute('opacity', 1);
+          tip.innerHTML = '<div class="chart-tip-x">' + col.xLabel + '</div>'
+            + col.items.map((it) => '<div class="chart-tip-row"><span class="sw" style="background:' + it.color + '"></span>' + it.label + '<b>' + it.valText + '</b></div>').join('');
+          tip.hidden = false;
+          const rr = root.getBoundingClientRect();
+          const tw = tip.offsetWidth || 150;
+          let left = ev.clientX - rr.left + 14;
+          if (left + tw > rr.width - 4) left = ev.clientX - rr.left - tw - 14;
+          tip.style.left = Math.max(4, left) + 'px';
+        } catch (_) { leave(); }
+      }
+      svg.addEventListener('mousemove', move);
+      svg.addEventListener('mouseleave', leave);
+      svg.style.cursor = 'crosshair';
+    } catch (_) { /* hover disabled, chart unaffected */ }
   }
 
   // ─── Sparkline: minimal axis-less trend line for KPI cards ──────────────

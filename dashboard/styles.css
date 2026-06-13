@@ -279,7 +279,31 @@ button:hover { filter: brightness(1.08); }
 .signal-tag.research    { color: var(--warn-fg);  border: 1px solid var(--warn-fg); }
 
 /* ─── Charts (§4.7 plot on the DARKEST surface) ─────────────────────────── */
-.chart { width: 100%; }
+.chart { width: 100%; position: relative; }   /* positioning context for the hover tooltip */
+
+/* Module 4b: crosshair + hover tooltip (shared across line/candle/xy charts). */
+.chart-crosshair { pointer-events: none; }
+.chart-tip {
+  position: absolute;
+  top: 8px;
+  pointer-events: none;
+  z-index: 6;
+  min-width: 96px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--g-400);
+  border-radius: 4px;
+  padding: var(--sp-1) var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--fg);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  white-space: nowrap;
+}
+.chart-tip[hidden] { display: none; }
+.chart-tip-x { color: var(--muted); margin-bottom: 3px; }
+.chart-tip-row { display: flex; align-items: center; gap: var(--sp-2); }
+.chart-tip-row b { margin-left: var(--sp-3); font-weight: 600; }
+.chart-tip-row .sw { width: 10px; height: 2px; border-radius: 1px; display: inline-block; flex: none; }
 .chart-svg { display: block; background: var(--bg); border-radius: 4px; }
 .chart-axis-label { fill: var(--muted); font-size: 9px; font-family: var(--mono); }
 .chart-legend-label { fill: var(--fg); font-size: 10px; font-family: var(--mono); }
