@@ -1323,19 +1323,24 @@
     renderTape();
   }
 
-  // Price colored by AGGRESSOR side (BUY lifts the offer → up; SELL hits the bid →
-  // down) — the conventional time-&-sales read, CVD-safe via the .delta glyphs.
-  // Timestamp is the real trade time, so a stalled tape shows OLD times, not "now".
+  // Color by AGGRESSOR side. Coinbase market_trades `side` is the MAKER's side
+  // (verified live: side=BUY trades tick DOWN, side=SELL tick UP), so the aggressor
+  // is the OPPOSITE: side=SELL ⇒ a resting ask was lifted by an aggressive BUYER
+  // (up/green); side=BUY ⇒ a resting bid was hit by an aggressive SELLER (down/red).
+  // CVD-safe via the .delta glyphs. Price shows CENTS so sub-dollar moves are visible
+  // (whole-dollar rounding made a busy same-$ second look frozen). Real trade time, so
+  // a stalled tape shows OLD timestamps rather than "now".
   function renderTape() {
     const root = $('live-tape');
     if (!root) return;
     const rows = live.tape.map((t) => {
       const ts = Number.isFinite(t.time) ? new Date(t.time).toISOString().slice(11, 19) : '—';
-      const dir = t.side === 'BUY' ? 'up' : t.side === 'SELL' ? 'down' : '';
+      const dir = t.side === 'SELL' ? 'up' : t.side === 'BUY' ? 'down' : '';
+      const px = Number.isFinite(t.price) ? '$' + t.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
       const sz = Number.isFinite(t.size) ? t.size.toFixed(4) : '—';
       return `<div style="display:flex; justify-content:space-between; gap:var(--sp-3); padding:1px 0;">`
         + `<span class="num" style="color:var(--muted)">${ts}</span>`
-        + `<span class="num delta ${dir}">${fmtUsd(t.price)}</span>`
+        + `<span class="num delta ${dir}">${px}</span>`
         + `<span class="num" style="color:var(--muted)">${sz}</span></div>`;
     }).join('');
     root.innerHTML = `<div style="display:flex; justify-content:space-between; gap:var(--sp-3); color:var(--muted); font-size:var(--fs-xs); border-bottom:1px solid var(--border); padding-bottom:2px; margin-bottom:2px;">`
