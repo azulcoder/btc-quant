@@ -608,6 +608,90 @@
     return { net, equity };
   }
 
+  // ─── Options structural analytics (mirror btcquant.features) ───────────────
+  // Standard-normal PDF (for gamma/vega).
+  function normPdf(x) { return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI); }
+
+  /**
+   * Black-76 greeks (forward, optional r) on the MARK iv — mirror of
+   * features.black76_greeks. delta_call=e^{-rT}Φ(d1), delta_put=e^{-rT}(Φ(d1)-1),
+   * gamma=e^{-rT}φ(d1)/(Fσ√T), vega=F·e^{-rT}φ(d1)√T·0.01 (per 1 vol-pt). gamma/vega
+   * identical for calls & puts. Validated vs Deribit ticker (RESEARCH-options-runlog.md).
+   * Returns NaN greeks for degenerate inputs (callers filter T→0 + deep wings).
+   */
+  function black76Greeks(fwd, strike, iv, t, type, r) {
+    r = r || 0;
+    if (!(Number.isFinite(fwd) && Number.isFinite(strike) && Number.isFinite(iv) && Number.isFinite(t))) return { delta: NaN, gamma: NaN, vega: NaN };
+    if (iv <= 0 || t <= 0 || strike <= 0 || fwd <= 0) return { delta: NaN, gamma: NaN, vega: NaN };
+    const sq = Math.sqrt(t);
+    const d1 = (Math.log(fwd / strike) + 0.5 * iv * iv * t) / (iv * sq);
+    const disc = Math.exp(-r * t), cdf = normCdf(d1), pdf = normPdf(d1);
+    const isPut = String(type).toUpperCase().charAt(0) === 'P';
+    return {
+      delta: disc * (isPut ? cdf - 1 : cdf),
+      gamma: disc * pdf / (fwd * iv * sq),
+      vega: fwd * disc * pdf * sq * 0.01,
+    };
+  }
+
+  function _medianFinite(arr) {
+    const a = arr.filter(Number.isFinite).slice().sort((x, y) => x - y);
+    if (!a.length) return NaN;
+    const m = Math.floor(a.length / 2);
+    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+  }
+
+  /**
+   * Max-pain strike + OI-by-strike for one expiry's contract slice — mirror of
+   * features.max_pain. Forward F = median(underlying) else median(strike). DESCRIPTIVE
+   * positioning: where OI clusters, NOT a forecast. slice rows: {strike,type,oi,underlying}.
+   */
+  function maxPain(slice) {
+    const out = { maxPain: NaN, strikes: [], callOi: [], putOi: [], pcRatio: NaN, forward: NaN };
+    let fwd = _medianFinite(slice.map((r) => r.underlying));
+    if (!Number.isFinite(fwd)) fwd = _medianFinite(slice.map((r) => r.strike));
+    out.forward = fwd;
+    const byK = new Map();
+    for (const r of slice) {
+      if (!Number.isFinite(r.strike)) continue;
+      const oi = Number.isFinite(r.oi) ? r.oi : 0;
+      const g = byK.get(r.strike) || { c: 0, p: 0 };
+      if (r.type === 'C') g.c += oi; else if (r.type === 'P') g.p += oi;
+      byK.set(r.strike, g);
+    }
+    const strikes = Array.from(byK.keys()).sort((a, b) => a - b);
+    if (!strikes.length) return out;
+    const callOi = strikes.map((k) => byK.get(k).c);
+    const putOi = strikes.map((k) => byK.get(k).p);
+    let best = NaN, bestPain = Infinity;
+    for (const s of strikes) {
+      let pain = 0;
+      for (let i = 0; i < strikes.length; i++) pain += callOi[i] * Math.max(s - strikes[i], 0) + putOi[i] * Math.max(strikes[i] - s, 0);
+      if (pain < bestPain) { bestPain = pain; best = s; }
+    }
+    const totC = callOi.reduce((a, b) => a + b, 0), totP = putOi.reduce((a, b) => a + b, 0);
+    Object.assign(out, { maxPain: best, strikes, callOi, putOi, pcRatio: totC > 0 ? totP / totC : NaN });
+    return out;
+  }
+
+  /**
+   * Unsigned gamma concentration GC(K)=Σ|gamma|·OI by strike — mirror of
+   * features.gamma_concentration. Gamma density from OI, NOT dealer positioning (no
+   * signed GEX, no flip level). slice rows: {strike,type,oi,iv}.
+   */
+  function gammaConcentration(slice, fwd, t) {
+    const byK = new Map();
+    for (const r of slice) {
+      if (!Number.isFinite(r.strike) || !Number.isFinite(r.iv) || r.iv <= 0) continue;
+      const g = black76Greeks(fwd, r.strike, r.iv, t, r.type).gamma;
+      if (!Number.isFinite(g)) continue;
+      const oi = Number.isFinite(r.oi) ? r.oi : 0;
+      byK.set(r.strike, (byK.get(r.strike) || 0) + Math.abs(g) * oi);
+    }
+    const strikes = Array.from(byK.keys()).sort((a, b) => a - b);
+    return { strikes, gammaOi: strikes.map((k) => byK.get(k)) };
+  }
+
   // ─── Public API ────────────────────────────────────────────────────────
 
   // ─── OOS validation harness (mirrors btcquant/{backtest,risk}.py) ──────────
@@ -757,6 +841,8 @@
     // strategy signals
     sigBuyAndHold, sigMaTrend, sigMaCross, sigTsmom, applyVolTarget, sigPairs,
     ouHalfLife, carryBacktest,
+    // options structural analytics
+    normPdf, black76Greeks, maxPain, gammaConcentration,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = Quant;

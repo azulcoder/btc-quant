@@ -1003,6 +1003,82 @@
   function expiryLabel(ms) { return new Date(ms).toISOString().slice(0, 10); }
 
   // ── option-chain renderers ────────────────────────────────────────────
+  // ── Structural positioning mirrors (RESEARCH-options-runlog.md) ───────────
+  const fmtK = (v) => (Number.isFinite(v) ? (v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v.toFixed(0)) : '—');
+  // max-pain / gamma-concentration / Black-76 greeks live in quant.js (Q.*) — the
+  // requireable JS source-of-truth mirror of btcquant.features, JS↔Python parity-checked.
+  function selectedExpiryMs() { const s = $('smile-expiry'); return s ? +s.value : NaN; }
+
+  // P1 — OI by strike + max-pain (DESCRIPTIVE · positioning).
+  function renderMaxPain() {
+    const root = $('chart-maxpain'); const chain = state.optionChain;
+    if (!root || !chain) return;
+    const expiryMs = selectedExpiryMs();
+    if (!Number.isFinite(expiryMs)) { setText('maxpain-summary', 'no expiry selected'); return; }
+    const slice = chain.filter((r) => r.expiryMs === expiryMs);
+    const mp = Q.maxPain(slice);
+    if (mp.strikes.length < 2) { root.innerHTML = '<div class="chart-na">No open interest by strike for this expiry.</div>'; setText('maxpain-summary', 'no open interest'); return; }
+    const vlines = [{ x: mp.forward, color: 'var(--accent)', label: 'F' }];
+    if (Number.isFinite(mp.maxPain)) vlines.push({ x: mp.maxPain, color: 'var(--c6)', label: 'max-pain' });
+    C.xyChart(root, [
+      { x: mp.strikes, y: mp.callOi, color: 'var(--up)', label: 'call OI' },
+      { x: mp.strikes, y: mp.putOi, color: 'var(--down)', label: 'put OI' },
+    ], { height: 220, xFmt: fmtK, yFmt: (v) => v.toFixed(0), xLabel: 'strike', vlines });
+    setText('maxpain-summary',
+      `${expiryLabel(expiryMs)} · max-pain ≈ ${fmtUsd(mp.maxPain)} · put/call OI ${Number.isFinite(mp.pcRatio) ? mp.pcRatio.toFixed(2) : '—'}. DESCRIPTIVE positioning — where OI clusters, NOT a forecast or a price magnet.`);
+  }
+
+  // P2 — Black-76 greeks surface (DESCRIPTIVE · surface). Validated vs Deribit ticker.
+  function renderGreeks() {
+    const root = $('chart-greeks'); const chain = state.optionChain;
+    if (!root || !chain) return;
+    const expiryMs = selectedExpiryMs();
+    if (!Number.isFinite(expiryMs)) { setText('greeks-summary', 'no expiry selected'); return; }
+    const slice = chain.filter((r) => r.expiryMs === expiryMs);
+    const fwd = expiryForward(slice);
+    const t = yearFractionToExpiry(expiryMs, Date.now());
+    if (!(t > 1 / 365) || !Number.isFinite(fwd)) { root.innerHTML = '<div class="chart-na">Expiry within ~1 day: gamma/theta are singular as T→0 — greeks suppressed (not meaningful).</div>'; setText('greeks-summary', 'expiry within ~1 day — greeks singular, suppressed'); return; }
+    const ladder = otmLadder(slice, fwd);   // (strike, iv) OTM-gated, averaged
+    const rows = [];
+    for (const p of ladder) {
+      const g = Q.black76Greeks(fwd, p.strike, p.iv, t, 'C');   // call greeks across strikes
+      if (!Number.isFinite(g.delta) || g.delta < 0.05 || g.delta > 0.95) continue;  // wing cut
+      rows.push({ k: p.strike, ...g });
+    }
+    if (rows.length < 2) { root.innerHTML = '<div class="chart-na">Too few gated strikes (|delta|∈[0.05,0.95]) for a greeks surface.</div>'; setText('greeks-summary', 'surface too sparse after the wing gate'); return; }
+    const ks = rows.map((r) => r.k);
+    const gMax = Math.max.apply(null, rows.map((r) => r.gamma)) || 1;
+    const vMax = Math.max.apply(null, rows.map((r) => r.vega)) || 1;
+    C.xyChart(root, [
+      { x: ks, y: rows.map((r) => r.delta), color: 'var(--c1)', label: 'call delta (0–1)' },
+      { x: ks, y: rows.map((r) => r.gamma / gMax), color: 'var(--c2)', label: 'gamma (scaled)' },
+      { x: ks, y: rows.map((r) => r.vega / vMax), color: 'var(--c3)', label: 'vega (scaled)' },
+    ], { height: 220, xFmt: fmtK, yFmt: (v) => v.toFixed(2), xLabel: 'strike', vlines: [{ x: fwd, color: 'var(--accent)', label: 'F' }] });
+    const atm = Q.black76Greeks(fwd, fwd, interpIvAtStrike(ladder, fwd), t, 'C');
+    const gPeak = ks[rows.reduce((bi, r, i, a) => (r.gamma > a[bi].gamma ? i : bi), 0)];
+    setText('greeks-summary',
+      `${expiryLabel(expiryMs)} · ATM Δ≈${Number.isFinite(atm.delta) ? atm.delta.toFixed(2) : '—'}, Γ≈${Number.isFinite(atm.gamma) ? atm.gamma.toExponential(1) : '—'}, vega≈${Number.isFinite(atm.vega) ? '$' + atm.vega.toFixed(0) : '—'}/vol-pt · gamma peaks near ${fmtUsd(gPeak)}. MARK greeks (Black-76, r=0); gamma/vega scaled to their peak. DESCRIPTIVE surface — not a hedge recommendation.`);
+  }
+
+  // P3 — unsigned gamma concentration (DESCRIPTIVE · structure). The honest GEX substitute.
+  function renderGammaConc() {
+    const root = $('chart-gammaconc'); const chain = state.optionChain;
+    if (!root || !chain) return;
+    const expiryMs = selectedExpiryMs();
+    if (!Number.isFinite(expiryMs)) { setText('gammaconc-summary', 'no expiry selected'); return; }
+    const slice = chain.filter((r) => r.expiryMs === expiryMs);
+    const fwd = expiryForward(slice);
+    const t = yearFractionToExpiry(expiryMs, Date.now());
+    if (!(t > 1 / 365) || !Number.isFinite(fwd)) { root.innerHTML = '<div class="chart-na">Expiry within ~1 day: gamma singular — concentration suppressed.</div>'; setText('gammaconc-summary', 'expiry within ~1 day — gamma singular, suppressed'); return; }
+    const gc = Q.gammaConcentration(slice, fwd, t);
+    if (gc.strikes.length < 2) { root.innerHTML = '<div class="chart-na">No gamma×OI by strike for this expiry.</div>'; setText('gammaconc-summary', 'no open interest'); return; }
+    C.xyChart(root, [{ x: gc.strikes, y: gc.gammaOi, color: 'var(--c4)', label: 'Σ|gamma|·OI' }],
+      { height: 200, xFmt: fmtK, yFmt: (v) => v.toExponential(0), xLabel: 'strike', vlines: [{ x: fwd, color: 'var(--accent)', label: 'F' }] });
+    const peak = gc.strikes[gc.gammaOi.reduce((bi, v, i, a) => (v > a[bi] ? i : bi), 0)];
+    setText('gammaconc-summary',
+      `${expiryLabel(expiryMs)} · gamma densest near ${fmtUsd(peak)}. DESCRIPTIVE structure — gamma density from open interest, NOT dealer positioning. There is no signed GEX and no flip / pin level here (the dealer sign is unknowable from public data).`);
+  }
+
   function renderOptionChain() {
     const smileRoot = $('chart-smile'), termRoot = $('chart-term'),
       rrTermRoot = $('chart-rr-term');
@@ -1012,16 +1088,17 @@
       // refresh; only show the empty message + clear readouts on first load.
       const haveSurface = !!(smileRoot && smileRoot.querySelector('.chart-svg'));
       if (haveSurface) {
-        [['panel-smile', 'smile-updated'], ['panel-term', 'term-updated'], ['panel-rrbf', 'rrbf-updated']]
+        [['panel-smile', 'smile-updated'], ['panel-term', 'term-updated'], ['panel-rrbf', 'rrbf-updated'], ['panel-maxpain', 'maxpain-updated'], ['panel-greeks', 'greeks-updated'], ['panel-gammaconc', 'gammaconc-updated']]
           .forEach(([p, s]) => setPanelState(p, 'stale', s));
       } else {
         const na = '<div class="chart-na">Deribit option chain unavailable (CORS/geo/rate-limit). One public get_book_summary call; spot backtests above are unaffected.</div>';
-        [smileRoot, termRoot, rrTermRoot].forEach((r) => { if (r) r.innerHTML = na; });
+        [smileRoot, termRoot, rrTermRoot, $('chart-maxpain'), $('chart-greeks'), $('chart-gammaconc')].forEach((r) => { if (r) r.innerHTML = na; });
         setText('smile-summary', 'no option-chain data');
         setText('term-summary', 'no option-chain data');
         setText('rrbf-summary', 'no option-chain data');
+        ['maxpain-summary', 'greeks-summary', 'gammaconc-summary'].forEach((id) => setText(id, 'no option-chain data'));
         ['rrbf-atm', 'rrbf-rr', 'rrbf-bf'].forEach((id) => setText(id, '—'));
-        [['panel-smile', 'smile-updated'], ['panel-term', 'term-updated'], ['panel-rrbf', 'rrbf-updated']]
+        [['panel-smile', 'smile-updated'], ['panel-term', 'term-updated'], ['panel-rrbf', 'rrbf-updated'], ['panel-maxpain', 'maxpain-updated'], ['panel-greeks', 'greeks-updated'], ['panel-gammaconc', 'gammaconc-updated']]
           .forEach(([p, s]) => setPanelState(p, 'error', s));
       }
       return;
@@ -1029,7 +1106,7 @@
     const nowMs = Date.now();
     const exps = expiriesByT(chain, nowMs);
     // Successful load: stamp + clear stale/error on all three option-chain panels.
-    [['panel-smile', 'smile-updated'], ['panel-term', 'term-updated'], ['panel-rrbf', 'rrbf-updated']]
+    [['panel-smile', 'smile-updated'], ['panel-term', 'term-updated'], ['panel-rrbf', 'rrbf-updated'], ['panel-maxpain', 'maxpain-updated'], ['panel-greeks', 'greeks-updated'], ['panel-gammaconc', 'gammaconc-updated']]
       .forEach(([p, s]) => setPanelState(p, 'ready', s));
     markFeed('options');
 
@@ -1051,6 +1128,9 @@
     renderSmile();
     renderTerm(exps, nowMs);
     renderRrBf(exps, nowMs);
+    renderMaxPain();
+    renderGreeks();
+    renderGammaConc();
   }
 
   function renderSmile() {
@@ -1604,7 +1684,7 @@
     { key: 'oi',      panels: [['panel-oi', 'oi-updated']],           maxAge: 21600000 },  // daily bars → ~6h
     { key: 'ls',      panels: [['panel-lsratio', 'ls-updated']],      maxAge: 21600000 },  // daily bars → ~6h
     { key: 'vrp',     panels: [['panel-vrp', 'vrp-updated']],         maxAge: 21600000 },  // DVOL daily → ~6h
-    { key: 'options', panels: [['panel-smile', 'smile-updated'], ['panel-term', 'term-updated'], ['panel-rrbf', 'rrbf-updated']], maxAge: 3600000 }, // live option marks → ~1h
+    { key: 'options', panels: [['panel-smile', 'smile-updated'], ['panel-term', 'term-updated'], ['panel-rrbf', 'rrbf-updated'], ['panel-maxpain', 'maxpain-updated'], ['panel-greeks', 'greeks-updated'], ['panel-gammaconc', 'gammaconc-updated']], maxAge: 3600000 }, // live option marks → ~1h
     { key: 'onchain', panels: [['panel-onchain', 'onchain-updated']], maxAge: 43200000 },  // daily, revision-lagged → ~12h
   ];
 
@@ -1700,7 +1780,7 @@
     backtest: ['panel-leaderboard', 'panel-performance', 'panel-candles', 'panel-equity', 'panel-drawdown', 'panel-hist', 'panel-rolling'],
     live: ['panel-live'],
     perpetual: ['panel-funding', 'panel-basis', 'panel-oi', 'panel-lsratio'],
-    options: ['panel-vrp', 'panel-smile', 'panel-term', 'panel-rrbf'],
+    options: ['panel-vrp', 'panel-smile', 'panel-term', 'panel-rrbf', 'panel-maxpain', 'panel-greeks', 'panel-gammaconc'],
     onchain: ['panel-onchain'],
   };
   const REGION_ORDER = ['backtest', 'live', 'perpetual', 'options', 'onchain'];
@@ -2075,7 +2155,7 @@
     });
     // Option-chain smile controls: re-render only the smile (no re-fetch — the
     // chain is one snapshot, fetched once in init()).
-    const esel = $('smile-expiry'); if (esel) esel.addEventListener('change', () => renderSmile());
+    const esel = $('smile-expiry'); if (esel) esel.addEventListener('change', () => { renderSmile(); renderMaxPain(); renderGreeks(); renderGammaConc(); });
     const xsel = $('smile-x'); if (xsel) xsel.addEventListener('change', () => renderSmile());
 
     const reload = $('reload-btn');

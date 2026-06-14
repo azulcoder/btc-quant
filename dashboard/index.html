@@ -442,6 +442,42 @@
       <p class="hint">Pinned sign convention (brief §1.4d-e): <strong>RR25 = IV(25Δ call) − IV(25Δ put)</strong> (call-minus-put). <strong>RR25 &lt; 0 ⇒ the 25Δ put is richer ⇒ downside protection bid up</strong> (the typical BTC "put skew" / fear read); RR25 &gt; 0 ⇒ call skew (euphoria). BF25 = ½(IV<sub>25c</sub>+IV<sub>25p</sub>) − IV<sub>ATM</sub> is smile convexity. The ±25Δ strikes are solved on a <strong>plain Black-Scholes spot delta</strong> on the observed IV (F as forward, r=0) — a <strong>Deribit-style 25Δ, NOT the FX premium-adjusted 25Δ</strong> (brief §1.4d caveat). The lower chart is RR25(T), the term-of-skew (front-end noisier/steeper). <strong>Sentiment gauge, not a return-timing signal</strong> (brief §2.3).</p>
     </section>
 
+    <!-- Open interest by strike + max-pain (structural positioning) -->
+    <section class="panel wide" id="panel-maxpain" data-panel-title="Open interest by strike &amp; max-pain">
+      <h2>Open interest by strike &amp; max-pain — selected expiry
+        <span class="signal-tag descriptive" title="Max-pain is where OI clusters, NOT a forecast. Equity expiry 'pinning' has weak, mechanism-driven support (Ni-Pearson-Poteshman 2005); there is no credible evidence BTC price gravitates to max-pain. Positioning descriptor only.">DESCRIPTIVE · positioning</span>
+        <span class="updated-at" id="maxpain-updated"></span>
+        <span class="stale-chip">stale</span>
+      </h2>
+      <div class="chart" id="chart-maxpain"></div>
+      <p class="chart-summary" id="maxpain-summary">—</p>
+      <p class="hint">Call vs put <strong>open interest</strong> at each strike for the expiry selected in the IV-smile panel above, with the forward <strong>F</strong> and the <strong>max-pain</strong> strike marked. Max-pain = the candidate settlement that minimizes total intrinsic paid to option holders, <code>argmin<sub>S</sub> [ Σ<sub>calls</sub> OI·max(S−K,0) + Σ<sub>puts</sub> OI·max(K−S,0) ]</code>. <strong>This is where OI clusters, NOT a price magnet or forecast</strong> — equity "pinning" near expiry is weak and mechanism-driven (Ni, Pearson &amp; Poteshman 2005) and there is no credible evidence BTC settles toward it. One keyless Deribit call; descriptive positioning context only.</p>
+    </section>
+
+    <!-- Black-76 greeks surface (descriptive; validated vs Deribit ticker) -->
+    <section class="panel wide" id="panel-greeks" data-panel-title="MARK greeks surface (Black-76)">
+      <h2>MARK greeks surface (Black-76) — delta / gamma / vega by strike
+        <span class="signal-tag descriptive" title="MARK greeks computed client-side from mark_iv (Deribit's public chain has no greeks), validated against Deribit's own ticker greeks. Descriptive surface structure, not a hedge recommendation.">DESCRIPTIVE · surface</span>
+        <span class="updated-at" id="greeks-updated"></span>
+        <span class="stale-chip">stale</span>
+      </h2>
+      <div class="chart" id="chart-greeks"></div>
+      <p class="chart-summary" id="greeks-summary">—</p>
+      <p class="hint"><strong>Black-76</strong> greeks (forward F = <code>underlying_price</code>, r = 0, σ = <code>mark_iv</code>/100) computed client-side — Deribit's one public <code>get_book_summary</code> call returns <strong>no greeks</strong>. These are <strong>MARK greeks</strong> (mark_iv only; no bid/ask IV). Call delta is shown in real units (0–1); gamma and vega are <strong>scaled to their own peak</strong> (different magnitudes). Gamma/theta <strong>blow up as T→0</strong> and deep-OTM greeks are IV-noise, so the surface is gated to <strong>T ≥ ~1 day</strong> and <strong>|delta| ∈ [0.05, 0.95]</strong> (the never-render-the-singularity rule). <strong>Validated against Deribit's own ticker greeks</strong> — delta exact, vega ~0.2%, gamma within Deribit's rounding (RESEARCH-options-runlog.md). Descriptive structure, <strong>not a hedge recommendation</strong>.</p>
+    </section>
+
+    <!-- Unsigned gamma concentration (the honest GEX substitute) -->
+    <section class="panel wide" id="panel-gammaconc" data-panel-title="Gamma concentration by strike (unsigned)">
+      <h2>Gamma concentration by strike — unsigned (Σ|gamma|·OI)
+        <span class="signal-tag descriptive" title="Gamma density from open interest. NOT dealer positioning — the dealer sign is unknowable from keyless data, so there is no signed GEX and no flip/pin level. Structural context only.">DESCRIPTIVE · structure</span>
+        <span class="updated-at" id="gammaconc-updated"></span>
+        <span class="stale-chip">stale</span>
+      </h2>
+      <div class="chart" id="chart-gammaconc"></div>
+      <p class="chart-summary" id="gammaconc-summary">—</p>
+      <p class="hint"><code>GC(K) = Σ<sub>contracts at K</sub> |gamma| · open_interest</code> — <strong>gamma density from open interest</strong>, i.e. where option gamma clusters across strikes. <strong>This is NOT dealer positioning.</strong> Who is long vs short gamma is unknowable from any keyless public feed, so there is deliberately <strong>no signed GEX and no "gamma flip" / pin level here</strong> — a signed flip level would assume dealers are short gamma (unverifiable) and read as support/resistance the data cannot support. We reject that construct and log it (RESEARCH-options-runlog.md); this panel shows only the honest, unsigned density. <strong>Do not read it as support, resistance, or a price magnet.</strong></p>
+    </section>
+
     <!-- On-chain context (descriptive only) -->
     <section class="panel wide" id="panel-onchain" data-panel-title="On-chain context (descriptive)">
       <h2>On-chain context — <span id="onchain-metric-name">network activity</span> (descriptive, NOT a signal)

@@ -49,6 +49,9 @@ __all__ = [
     "iv_term_structure",
     "iv_skew_25d",
     "smile",
+    "black76_greeks",
+    "max_pain",
+    "gamma_concentration",
 ]
 
 
@@ -709,6 +712,54 @@ def _strike_for_call_delta(
     return float(grid[int(np.argmin(np.abs(diff)))])
 
 
+def black76_greeks(
+    forward: float,
+    strike: float,
+    iv: float,
+    t: float,
+    opt_type: str = "C",
+    r: float = 0.0,
+) -> dict:
+    """Black-76 option greeks (delta / gamma / vega) for one contract. **DESCRIPTIVE.**
+
+    Computed client-side because Deribit's public ``get_book_summary_by_currency``
+    returns **no greeks**. Black (1976) on the forward ``F`` (with ``r = 0`` the spot
+    and forward deltas coincide; an optional ``r`` applies the ``e^{-rT}`` discount):
+
+        d1 = [ln(F/K) + ½σ²T] / (σ√T),   d2 = d1 − σ√T
+        delta_call = e^{-rT}·Φ(d1),      delta_put = e^{-rT}·(Φ(d1) − 1)
+        gamma      = e^{-rT}·φ(d1) / (F·σ·√T)                 (per $1 of F)
+        vega       = F·e^{-rT}·φ(d1)·√T · 0.01                (per 1 vol-point)
+
+    σ is a **decimal** annualized vol (the chain's ``iv`` column, i.e. ``mark_iv/100``),
+    so these are **MARK greeks** (no bid/ask IV exists in the public feed). gamma and
+    vega are identical for calls and puts. Returns ``nan`` greeks for non-finite or
+    degenerate inputs (``iv ≤ 0``, ``T ≤ 0``) — callers must filter the ``T → 0``
+    singularity (gamma blows up) and deep-OTM wings (IV noise) before display.
+
+    Validated against Deribit's own per-contract ``get_ticker`` greeks
+    (RESEARCH-options-runlog.md) — desks do not trust self-computed greeks unchecked.
+
+    Reference: Black, F. (1976), "The pricing of commodity contracts", *J. Financial
+    Economics* 3.
+    """
+    nan = float("nan")
+    if not (np.isfinite(forward) and np.isfinite(strike) and np.isfinite(iv) and np.isfinite(t)):
+        return {"delta": nan, "gamma": nan, "vega": nan}
+    if iv <= 0.0 or t <= 0.0 or strike <= 0.0 or forward <= 0.0:
+        return {"delta": nan, "gamma": nan, "vega": nan}
+    sqrt_t = math.sqrt(t)
+    d1 = (math.log(forward / strike) + 0.5 * iv * iv * t) / (iv * sqrt_t)
+    disc = math.exp(-r * t)
+    cdf_d1 = float(_norm_cdf(np.array([d1]))[0])
+    pdf_d1 = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+    is_put = str(opt_type).upper().startswith("P")
+    delta = disc * (cdf_d1 - 1.0) if is_put else disc * cdf_d1
+    gamma = disc * pdf_d1 / (forward * iv * sqrt_t)
+    vega = forward * disc * pdf_d1 * sqrt_t * 0.01
+    return {"delta": float(delta), "gamma": float(gamma), "vega": float(vega)}
+
+
 def iv_skew_25d(chain: pd.DataFrame, expiry, now: pd.Timestamp | None = None) -> float:
     """25-delta risk reversal ``RR25 = IV(25d call) − IV(25d put)``. **DESCRIPTIVE.**
 
@@ -859,3 +910,86 @@ def smile(
     else:  # log_moneyness (default)
         df["x"] = np.log(df["strike"].to_numpy(dtype="float64") / fwd)
     return df[cols]
+
+
+def max_pain(chain: pd.DataFrame, expiry) -> dict:
+    """Max-pain strike + open-interest by strike for one expiry. **DESCRIPTIVE · positioning.**
+
+    Max-pain is the candidate settlement price (taken over the listed strikes) that
+    minimizes the total intrinsic value paid to option *holders* at expiry:
+
+        pain(S) = Σ_calls OI · max(S − K, 0)  +  Σ_puts OI · max(K − S, 0)
+        max_pain = argmin_S pain(S)
+
+    using ``open_interest`` per contract. It is **where OI clusters, NOT a forecast**:
+    equity expiry "pinning" has some (weak, mechanism-driven) support (Ni, Pearson &
+    Poteshman 2005), but there is no credible evidence BTC price gravitates to max-pain.
+    Reported as positioning context only — never a price magnet or target.
+
+    Returns ``{max_pain, strikes, call_oi, put_oi, pc_oi_ratio, forward}`` (strikes/
+    call_oi/put_oi are ascending-strike-aligned lists). Empty-safe.
+    """
+    out = {"max_pain": float("nan"), "strikes": [], "call_oi": [], "put_oi": [],
+           "pc_oi_ratio": float("nan"), "forward": float("nan")}
+    sl = _expiry_slice(chain, expiry)
+    if sl.empty:
+        return out
+    df = sl.copy()
+    df["strike"] = pd.to_numeric(df["strike"], errors="coerce")
+    df["open_interest"] = pd.to_numeric(df.get("open_interest"), errors="coerce").fillna(0.0)
+    df = df.dropna(subset=["strike"])
+    if df.empty:
+        return out
+    strikes = np.sort(df["strike"].unique())
+    call_oi = df[df["opt_type"] == "C"].groupby("strike")["open_interest"].sum().reindex(strikes).fillna(0.0).to_numpy()
+    put_oi = df[df["opt_type"] == "P"].groupby("strike")["open_interest"].sum().reindex(strikes).fillna(0.0).to_numpy()
+    pain = np.array([
+        (call_oi * np.maximum(s - strikes, 0.0)).sum() + (put_oi * np.maximum(strikes - s, 0.0)).sum()
+        for s in strikes
+    ])
+    tot_call, tot_put = float(call_oi.sum()), float(put_oi.sum())
+    out.update(
+        max_pain=float(strikes[int(np.argmin(pain))]),
+        strikes=strikes.tolist(), call_oi=call_oi.tolist(), put_oi=put_oi.tolist(),
+        forward=_forward(df),
+        pc_oi_ratio=(tot_put / tot_call) if tot_call > 0 else float("nan"),
+    )
+    return out
+
+
+def gamma_concentration(chain: pd.DataFrame, expiry, now: pd.Timestamp | None = None) -> dict:
+    """Unsigned gamma concentration by strike for one expiry. **DESCRIPTIVE · structure.**
+
+    ``GC(K) = Σ_{contracts at K} |gamma| · open_interest`` — **gamma density from open
+    interest** (Black-76 gamma on ``mark_iv``). This is **NOT dealer positioning**: who
+    is long vs short gamma is unknowable from any keyless public feed, so there is **no
+    signed GEX and no flip / pin level** here. Read it as "where option gamma is
+    densest"; never as support/resistance, a price magnet, or a gamma-flip level. See
+    RESEARCH-options-runlog.md for why the signed version is rejected.
+
+    Returns ``{strikes, gamma_oi, forward, T}`` (ascending strike). Empty-safe; needs T > 0.
+    """
+    out = {"strikes": [], "gamma_oi": [], "forward": float("nan"), "T": float("nan")}
+    sl = _expiry_slice(chain, expiry)
+    if sl.empty:
+        return out
+    df = sl.copy()
+    for c in ("strike", "iv", "open_interest"):
+        df[c] = pd.to_numeric(df.get(c), errors="coerce")
+    df = df.dropna(subset=["strike", "iv"])
+    df = df[df["iv"] > 0.0]
+    fwd = _forward(df)
+    t = year_fraction_to_expiry(expiry, now=now)
+    out["forward"], out["T"] = fwd, t
+    if df.empty or not np.isfinite(fwd) or t <= 0.0:
+        return out
+    df["open_interest"] = df["open_interest"].fillna(0.0)
+    gc: dict[float, float] = {}
+    for _, r in df.iterrows():
+        g = black76_greeks(fwd, float(r["strike"]), float(r["iv"]), t, str(r["opt_type"]))["gamma"]
+        if np.isfinite(g):
+            k = float(r["strike"])
+            gc[k] = gc.get(k, 0.0) + abs(g) * float(r["open_interest"])
+    ks = sorted(gc)
+    out["strikes"], out["gamma_oi"] = ks, [gc[k] for k in ks]
+    return out

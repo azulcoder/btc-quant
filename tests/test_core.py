@@ -659,3 +659,66 @@ def test_cpcv_multipath_dispersion():
     assert cp["n_paths"] == math.comb(6, 2)                  # 15 paths
     assert math.isfinite(cp["median_sharpe"]) and cp["iqr"] >= 0.0
     assert cp["min"] <= cp["median_sharpe"] <= cp["max"]
+
+
+# --------------------------------------------------------------------------- #
+# Options structural analytics (black76_greeks / max_pain / gamma_concentration)
+# --------------------------------------------------------------------------- #
+def _make_option_chain(strikes, fwd=65000.0, iv=0.6, oi=100.0, days=30):
+    """Minimal synthetic Deribit-style chain (one expiry, calls+puts at each strike)."""
+    exp = pd.Timestamp.now(tz="UTC").normalize() + pd.Timedelta(days=days)
+    rows = []
+    for k in strikes:
+        for cp in ("C", "P"):
+            rows.append({"instrument_name": f"BTC-X-{int(k)}-{cp}", "expiry": exp,
+                         "strike": float(k), "opt_type": cp, "iv": iv, "mark_iv": iv * 100,
+                         "open_interest": oi, "volume": 0.0, "underlying_price": fwd})
+    return pd.DataFrame(rows), exp
+
+
+def test_black76_greeks_identities():
+    """Black-76 greeks obey the textbook identities (the math the validation gate checks
+    against Deribit): put-call delta parity, gamma = ∂delta/∂F, vega ≥ 0, ATM delta."""
+    F, K, iv, t = 65000.0, 65000.0, 0.6, 0.25
+    c = features.black76_greeks(F, K, iv, t, "C")
+    p = features.black76_greeks(F, K, iv, t, "P")
+    # put-call delta parity (r=0): delta_call - delta_put == 1
+    assert abs((c["delta"] - p["delta"]) - 1.0) < 1e-12
+    # gamma identical for call/put; vega ≥ 0; gamma ≥ 0
+    assert abs(c["gamma"] - p["gamma"]) < 1e-15
+    assert c["vega"] >= 0.0 and c["gamma"] >= 0.0
+    # ATM (K=F): d1 = 0.5σ√t, so call delta = Φ(0.5σ√t)
+    expect = float(features._norm_cdf(np.array([0.5 * iv * math.sqrt(t)]))[0])
+    assert abs(c["delta"] - expect) < 1e-9
+    # gamma == numerical ∂delta/∂F (central difference)
+    h = 1.0
+    dd = (features.black76_greeks(F + h, K, iv, t, "C")["delta"]
+          - features.black76_greeks(F - h, K, iv, t, "C")["delta"]) / (2 * h)
+    assert abs(c["gamma"] - dd) < 1e-7
+    # degenerate inputs → nan, never a spurious number
+    assert math.isnan(features.black76_greeks(F, K, iv, 0.0, "C")["gamma"])
+
+
+def test_max_pain_minimizes_holder_payout():
+    """max_pain is the settlement strike minimizing total intrinsic to holders; with all
+    OI piled on one strike it IS that strike (pain there = 0). P/C ratio is reported."""
+    chain, exp = _make_option_chain([50000, 60000, 65000, 70000, 80000], oi=0.0)
+    # pile all OI at 60000 (both legs) → pain(60000) = 0 → max_pain == 60000
+    chain.loc[chain["strike"] == 60000, "open_interest"] = 500.0
+    mp = features.max_pain(chain, exp)
+    assert mp["max_pain"] == 60000.0
+    assert len(mp["strikes"]) == 5 and len(mp["call_oi"]) == 5
+    # equal call/put OI everywhere → P/C ratio == 1
+    chain2, exp2 = _make_option_chain([60000, 65000, 70000], oi=100.0)
+    assert abs(features.max_pain(chain2, exp2)["pc_oi_ratio"] - 1.0) < 1e-12
+
+
+def test_gamma_concentration_peaks_near_atm_and_is_unsigned():
+    """Σ|gamma|·OI by strike is non-negative and peaks at the near-ATM strike (gamma is
+    largest ATM) when OI is uniform — a density, never a signed/dealer quantity."""
+    strikes = [40000, 55000, 65000, 75000, 90000]
+    chain, exp = _make_option_chain(strikes, fwd=65000.0, oi=100.0)
+    gc = features.gamma_concentration(chain, exp)
+    assert gc["strikes"] and all(v >= 0.0 for v in gc["gamma_oi"])      # unsigned
+    peak_strike = gc["strikes"][int(np.argmax(gc["gamma_oi"]))]
+    assert peak_strike == 65000.0                                       # ATM has the most gamma
