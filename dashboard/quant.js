@@ -570,6 +570,138 @@
 
   // ─── Public API ────────────────────────────────────────────────────────
 
+  // ─── OOS validation harness (mirrors btcquant/{backtest,risk}.py) ──────────
+
+  /**
+   * Anchored walk-forward. Split the series into `folds`+1 contiguous blocks; for
+   * each fold trade the *next* out-of-sample block with positions decided as data
+   * arrived (the strategies are causal). Returns the concatenated OOS returns +
+   * stats; the OOS Deflated Sharpe is deflated for `nTrials` with the skill-less
+   * Sharpe variance 1/n — matching the Python engine (backtest.walk_forward).
+   * @param {number[]} positions full-history target weights
+   * @param {number[]} prices    aligned close series
+   * @param {object} opts { folds, periodsPerYear, costBps, slippageBps, nTrials }
+   */
+  function walkForward(positions, prices, opts = {}) {
+    const folds = opts.folds || 5;
+    const ppy = opts.periodsPerYear || 365;
+    const n = Math.min(positions.length, prices.length);
+    const out = { oosReturns: [], oosStats: null };
+    if (n < (folds + 1) * 2) return out;
+    const edge = (i) => Math.floor((i * n) / (folds + 1));
+    const oos = [];
+    for (let k = 1; k <= folds; k++) {
+      const a = edge(k), b = edge(k + 1);
+      if (b <= a) continue;
+      const bt = backtest(positions.slice(a, b), prices.slice(a, b),
+        { costBps: opts.costBps, slippageBps: opts.slippageBps, periodsPerYear: ppy });
+      for (let i = 0; i < bt.returns.length; i++) oos.push(bt.returns[i]);
+    }
+    if (!oos.length) return out;
+    const nOos = oos.filter(Number.isFinite).length;
+    out.oosReturns = oos;
+    out.oosStats = computeStats(oos, compound(oos), {
+      periodsPerYear: ppy,
+      nTrials: opts.nTrials || 1,
+      varTrialsSr: nOos > 0 ? 1 / nOos : 1,   // Python-parity (skill-less Sharpe variance ≈ 1/n)
+    });
+    return out;
+  }
+
+  /**
+   * Probability of Backtest Overfitting (PBO) via CSCV — Bailey-Borwein-LdP-Zhu (2017).
+   * `matrix` = array of per-strategy return arrays (columns), positionally aligned.
+   * Over every C(S, S/2) in-sample/out-of-sample block split, pick the IS-best column
+   * and check whether it lands below the OOS median; PBO = fraction where it does.
+   */
+  function pbo(matrix, opts = {}) {
+    const N = matrix.length;
+    const out = { pbo: NaN, nCombos: 0, nStrategies: N };
+    if (N < 2) return out;
+    const T = Math.min.apply(null, matrix.map((c) => c.length));
+    if (!(T >= 8)) return out;
+    let S = opts.nBlocks || 8; if (S % 2) S -= 1; S = Math.max(2, Math.min(S, T));
+    const edges = []; for (let i = 0; i <= S; i++) edges.push(Math.floor((i * T) / S));
+    const blocks = [];
+    for (let i = 0; i < S; i++) { const a = []; for (let j = edges[i]; j < edges[i + 1]; j++) a.push(j); if (a.length) blocks.push(a); }
+    S = blocks.length; if (S < 2) return out;
+    const half = Math.floor(S / 2);
+    const blkSharpe = (idx, col) => {
+      const r = []; for (let k = 0; k < idx.length; k++) { const v = matrix[col][idx[k]]; if (Number.isFinite(v)) r.push(v); }
+      if (r.length < 2) return 0;
+      const sd = std(r, 1); return sd > 0 ? mean(r) / sd : 0;
+    };
+    const combos = [];
+    (function choose(start, picked) {
+      if (picked.length === half) { combos.push(picked.slice()); return; }
+      for (let i = start; i < S; i++) { picked.push(i); choose(i + 1, picked); picked.pop(); }
+    })(0, []);
+    let below = 0;
+    for (let ci = 0; ci < combos.length; ci++) {
+      const isSet = new Set(combos[ci]);
+      const isIdx = [], oosIdx = [];
+      for (let i = 0; i < S; i++) { const tgt = isSet.has(i) ? isIdx : oosIdx; for (let j = 0; j < blocks[i].length; j++) tgt.push(blocks[i][j]); }
+      let best = 0, bestSr = -Infinity;
+      for (let c = 0; c < N; c++) { const s = blkSharpe(isIdx, c); if (s > bestSr) { bestSr = s; best = c; } }
+      const oosBest = blkSharpe(oosIdx, best);
+      let beats = 0; for (let c = 0; c < N; c++) if (oosBest > blkSharpe(oosIdx, c)) beats++;
+      if (beats / N < 0.5) below++;
+    }
+    out.nCombos = combos.length;
+    out.pbo = combos.length ? below / combos.length : NaN;
+    return out;
+  }
+
+  /** Minimum Backtest Length (years) — Bailey et al. 2014; brief §3 form 2·ln(N)/E[max_N]. */
+  function minBacktestLength(nTrials) {
+    if (!(nTrials >= 2)) return NaN;
+    const gamma = 0.5772156649015329;
+    const z1 = normPpf(1 - 1 / nTrials), z2 = normPpf(1 - 1 / (nTrials * Math.E));
+    const emax = (1 - gamma) * z1 + gamma * z2;
+    return emax > 0 ? (2 * Math.log(nTrials)) / emax : NaN;
+  }
+
+  /**
+   * Combinatorial Purged CV — the distribution of OOS Sharpe across time-block
+   * subsets (mirrors backtest.cpcv). Returns { paths, nPaths, median, p25, p75, iqr }.
+   */
+  function cpcv(positions, prices, opts = {}) {
+    const nBlocks = opts.nBlocks || 6, kTest = opts.kTest || 2;
+    const ppy = opts.periodsPerYear || 365, embargo = opts.embargo != null ? opts.embargo : 0.01;
+    const n = Math.min(positions.length, prices.length);
+    const out = { paths: [], nPaths: 0, median: NaN, p25: NaN, p75: NaN, iqr: NaN, min: NaN, max: NaN };
+    if (nBlocks < 2 || kTest < 1 || kTest >= nBlocks || n < (nBlocks + 1) * 2) return out;
+    const bt = backtest(positions, prices, { costBps: opts.costBps, slippageBps: opts.slippageBps, periodsPerYear: ppy });
+    const rets = bt.returns;
+    const edges = []; for (let i = 0; i <= nBlocks; i++) edges.push(Math.floor((i * n) / nBlocks));
+    const blocks = [];
+    for (let i = 0; i < nBlocks; i++) { const a = []; for (let j = edges[i]; j < edges[i + 1]; j++) a.push(j); if (a.length) blocks.push(a); }
+    const B = blocks.length; if (B < 2) return out;
+    const combos = [];
+    (function choose(start, picked) {
+      if (picked.length === kTest) { combos.push(picked.slice()); return; }
+      for (let i = start; i < B; i++) { picked.push(i); choose(i + 1, picked); picked.pop(); }
+    })(0, []);
+    const paths = [];
+    for (let ci = 0; ci < combos.length; ci++) {
+      const idx = [];
+      for (const bi of combos[ci]) {
+        const blk = blocks[bi];
+        const drop = blk.length > 1 ? Math.min(blk.length - 1, Math.max(1, Math.round(embargo * blk.length))) : 0;
+        for (let j = drop; j < blk.length; j++) idx.push(blk[j]);
+      }
+      if (idx.length < 2) continue;
+      paths.push(sharpe(idx.map((j) => rets[j]), ppy));
+    }
+    const fin = paths.filter(Number.isFinite).slice().sort((a, b) => a - b);
+    if (!fin.length) return out;
+    const q = (pp) => { const i = (fin.length - 1) * pp, lo = Math.floor(i), hi = Math.ceil(i); return lo === hi ? fin[lo] : fin[lo] + (fin[hi] - fin[lo]) * (i - lo); };
+    out.paths = paths; out.nPaths = fin.length;
+    out.median = q(0.5); out.p25 = q(0.25); out.p75 = q(0.75); out.iqr = out.p75 - out.p25;
+    out.min = fin[0]; out.max = fin[fin.length - 1];
+    return out;
+  }
+
   const Quant = {
     // numeric
     mean, std, skewness, kurtosis, normCdf, normPpf,
@@ -580,6 +712,8 @@
     probabilisticSharpe, deflatedSharpe,
     // backtest
     backtest, compound, computeStats,
+    // OOS validation harness
+    walkForward, pbo, minBacktestLength, cpcv,
     // strategy signals
     sigBuyAndHold, sigMaTrend, sigMaCross, sigTsmom, applyVolTarget, sigPairs,
     carryBacktest,

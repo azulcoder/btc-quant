@@ -577,9 +577,10 @@
     const costBps = +($('cost-bps') ? $('cost-bps').value : 10);
     const slipBps = +($('slip-bps') ? $('slip-bps').value : 2);
     const keys = Object.keys(STRATEGIES);
-    const nTrials = keys.length + 4; // honest deflation for the multi-strategy search
+    const nTrials = keys.length;   // selection-count deflation (best of this many)
     const rows = [];
-    let bhSharpe = NaN;
+    const oosCols = [];            // {key, ret, positions} for the PBO/CPCV matrix
+    let bhOosSharpe = NaN;
     for (const key of keys) {
       try {
         let positions;
@@ -591,24 +592,56 @@
         } else {
           positions = STRATEGIES[key].build(o, p);
         }
-        const bt = Q.backtest(positions, o.close, { costBps, slippageBps: slipBps, periodsPerYear: p, nTrials, varTrialsSr: 0.5, oosFrac: 0.3 });
-        const s = bt.stats;
-        if (key === 'buy_and_hold') bhSharpe = s.sharpe;
-        rows.push({ key, label: STRATEGIES[key].label, cagr: s.cagr, sharpe: s.sharpe, dsr: s.deflatedSharpe, mdd: s.maxDrawdown, trades: bt.trades });
+        // In-sample full-history (for the IS Sharpe contrast) + walk-forward OOS (the rank basis).
+        const is = Q.backtest(positions, o.close, { costBps, slippageBps: slipBps, periodsPerYear: p });
+        const wf = Q.walkForward(positions, o.close, { folds: 5, costBps, slippageBps: slipBps, periodsPerYear: p, nTrials });
+        if (!wf.oosStats) continue;
+        const s = wf.oosStats;
+        oosCols.push({ key, ret: wf.oosReturns, positions });
+        if (key === 'buy_and_hold') bhOosSharpe = s.sharpe;
+        rows.push({ key, label: STRATEGIES[key].label, cagr: s.cagr, isSharpe: is.stats.sharpe,
+          oosSharpe: s.sharpe, dsr: s.deflatedSharpe, mdd: s.maxDrawdown });
       } catch (_) { /* skip a strategy that can't run on this data */ }
     }
     const dval = (r) => (Number.isFinite(r.dsr) ? r.dsr : -9);
     rows.sort((a, b) => dval(b) - dval(a));
     body.innerHTML = rows.map((r) => {
-      const beats = r.key === 'buy_and_hold' ? '—' : (r.sharpe > bhSharpe ? 'yes' : 'no');
+      const beats = r.key === 'buy_and_hold' ? '—' : (r.oosSharpe > bhOosSharpe ? 'yes' : 'no');
       const good = Number.isFinite(r.dsr) && r.dsr > 0.95;
       const cls = r.key === 'buy_and_hold' ? ' class="baseline-row"' : '';
       return `<tr${cls}><td>${r.label}</td><td class="num">${pct(r.cagr)}</td>`
-        + `<td class="num">${num(r.sharpe)}</td>`
+        + `<td class="num" style="color:var(--muted)">${num(r.isSharpe)}</td>`
+        + `<td class="num">${num(r.oosSharpe)}</td>`
         + `<td class="num" style="color:${good ? 'var(--up)' : 'var(--muted)'}">${pct(r.dsr, 0)}</td>`
-        + `<td class="num">${pct(r.mdd)}</td><td class="num">${r.trades}</td>`
+        + `<td class="num">${pct(r.mdd)}</td>`
         + `<td class="num">${beats}</td></tr>`;
     }).join('');
+
+    // Selection-overfit guards: PBO across the OOS matrix + MinBTL + CPCV(top strategy).
+    const guards = $('leaderboard-guards');
+    if (guards) {
+      let html = '';
+      if (oosCols.length >= 2) {
+        const minLen = Math.min.apply(null, oosCols.map((c) => c.ret.length));
+        const pb = Q.pbo(oosCols.map((c) => c.ret.slice(0, minLen)), { nBlocks: 8 });
+        const years = (o.time && o.time.length > 1) ? (o.time[o.time.length - 1] - o.time[0]) / (365.25 * 86400000) : NaN;
+        const minbtl = Q.minBacktestLength(nTrials);
+        const short = Number.isFinite(minbtl) && Number.isFinite(years) && years < minbtl;
+        const top = rows.find((r) => r.key !== 'buy_and_hold');
+        let cpStr = '';
+        if (top) {
+          const col = oosCols.find((c) => c.key === top.key);
+          if (col) {
+            const cp = Q.cpcv(col.positions, o.close, { periodsPerYear: p, costBps, slippageBps: slipBps });
+            if (cp.nPaths) cpStr = ` &nbsp;·&nbsp; CPCV OOS Sharpe (${top.label}, top): median <b>${num(cp.median)}</b> [${num(cp.p25)}, ${num(cp.p75)}] over ${cp.nPaths} paths`;
+          }
+        }
+        html = `PBO (selection overfit, CSCV ${pb.nCombos} splits): <b>${Number.isFinite(pb.pbo) ? (pb.pbo * 100).toFixed(0) + '%' : '—'}</b> <span class="hint">[&gt;50% = ranking is noise]</span>`
+          + ` &nbsp;·&nbsp; MinBTL for N=${nTrials}: <b>${Number.isFinite(minbtl) ? minbtl.toFixed(1) : '—'}y</b> vs ${Number.isFinite(years) ? years.toFixed(1) : '—'}y data ${short ? '<b style="color:var(--down)">⚠ under-powered</b>' : '<span class="hint">(ok)</span>'}`
+          + cpStr;
+      }
+      guards.innerHTML = html;
+    }
   }
 
   // ─── Variance risk premium: Deribit DVOL (implied) vs realized vol ──────

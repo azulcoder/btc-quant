@@ -173,24 +173,25 @@
 
     <!-- Strategy leaderboard — the honest centerpiece -->
     <section class="panel wide" id="panel-leaderboard" data-panel-title="Strategy leaderboard">
-      <h2>Strategy leaderboard — every strategy on the loaded data, sorted by deflated Sharpe</h2>
+      <h2>Strategy leaderboard — every strategy walk-forward-validated, ranked by OUT-OF-SAMPLE deflated Sharpe</h2>
       <div class="table-wrap">
         <table class="leaderboard" id="leaderboard">
           <thead>
             <tr>
               <th data-sort="label">Strategy</th>
-              <th data-sort="cagr" class="num">CAGR (net)</th>
-              <th data-sort="sharpe" class="num">Sharpe (net)</th>
-              <th data-sort="dsr" class="num">Deflated Sharpe</th>
-              <th data-sort="mdd" class="num">Max DD</th>
-              <th data-sort="trades" class="num">Trades</th>
+              <th data-sort="cagr" class="num">CAGR (OOS)</th>
+              <th data-sort="isSharpe" class="num">Sharpe (IS)</th>
+              <th data-sort="oosSharpe" class="num">Sharpe (OOS)</th>
+              <th data-sort="dsr" class="num">OOS Defl. Sharpe</th>
+              <th data-sort="mdd" class="num">Max DD (OOS)</th>
               <th data-sort="beats" class="num">Beats B&amp;H?</th>
             </tr>
           </thead>
           <tbody id="leaderboard-body"></tbody>
         </table>
       </div>
-      <p class="hint" id="leaderboard-note">Most strategies do NOT beat buy-and-hold after costs + deflation — <strong>that is the point</strong>. Deflated Sharpe is green only when &gt; 0.95 (distinguishable from luck after the multiple-testing penalty); the buy-and-hold row is the BASELINE. Click a header to re-sort. Same costs/timeframe as the selector above.</p>
+      <div id="leaderboard-guards" class="hint" style="margin-top:var(--sp-2)"></div>
+      <p class="hint" id="leaderboard-note">Ranked by the <strong>walk-forward out-of-sample</strong> deflated Sharpe, not the in-sample fit — the <strong>Sharpe (IS) → Sharpe (OOS)</strong> drop is the overfitting tell. OOS Deflated Sharpe is green only when &gt; 0.95 (distinguishable from luck after deflating for the multiple-testing penalty). <strong>PBO</strong> (selection overfit) and <strong>MinBTL</strong> (is the history even long enough?) guard the ranking itself; <strong>CPCV</strong> shows the OOS-Sharpe dispersion across regimes. Most strategies clear none of these and many do not beat buy-and-hold net of cost out-of-sample — <strong>that is the point</strong>. Same costs/timeframe as the selector above; full CPCV in the Python engine.</p>
     </section>
 
     <!-- Headline honesty stats -->
