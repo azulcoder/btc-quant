@@ -323,19 +323,22 @@
 
     const costBps = +($('cost-bps') ? $('cost-bps').value : 10);
     const slipBps = +($('slip-bps') ? $('slip-bps').value : 2);
-    // nTrials approximates the number of configs explored across the selector +
-    // its parameter knobs — it inflates the DSR benchmark (honest deflation).
-    const nTrials = Object.keys(STRATEGIES).length + 4;
+    // Full-history backtest = the DESCRIPTIVE curve/CAGR/Sharpe/maxDD context only. Its own
+    // deflated Sharpe is no longer surfaced — the headline DSR comes from the walk-forward OOS
+    // leaderboard row (single source of truth), so no DSR-tuning params are needed here.
     const bt = Q.backtest(positions, o.close, {
       costBps, slippageBps: slipBps, periodsPerYear: p,
-      nTrials, varTrialsSr: 0.5, oosFrac: 0.3,
     });
     state.last = { o, bt, zSeries, p, key };   // cached so a tab switch can re-render without recomputing
 
-    renderStats(bt, key, p);
-    renderKpiStrip(bt, key, p);
+    // Leaderboard FIRST: it owns the walk-forward OOS stats. The Performance panel + KPI hero
+    // read the selected strategy's row straight from this map, so the hero Deflated Sharpe is
+    // LITERALLY the leaderboard row — not a parallel recompute that could drift back apart.
+    const lbMap = renderLeaderboard(o);
+    const oos = lbMap[key] || null;
+    renderStats(bt, key, p, oos);
+    renderKpiStrip(bt, key, p, oos);
     renderCharts(o, bt, zSeries, p);
-    renderLeaderboard(o);
     // Live candle panel reflects the CURRENT backtest's markers + stop/target,
     // on cached OHLC + the live WS tail (§3.2). Context only — never the backtest series.
     renderLiveCandle(o, bt);
@@ -343,7 +346,7 @@
       `Cached ${o.source} ${state.gran} bars (last ${Math.min(o.close.length, 240)} shown) + live Coinbase tick on the current bar · markers/lines from "${(STRATEGIES[key] || {}).label || key}". Illustrative ±2-bar-ATR stop/target — a visual risk frame, NOT a live order.`);
   }
 
-  function renderStats(bt, key, p) {
+  function renderStats(bt, key, p, oos) {
     const s = bt.stats;
     setText('stat-net-cagr', pct(s.cagr));
     setText('stat-bh-cagr', pct(s.bhCagr));
@@ -358,19 +361,28 @@
     setText('stat-trades', String(bt.trades));
     setText('stat-skew', num(s.skew));
     setText('stat-kurt', num(s.kurtosis));
-    setText('stat-sr-is', num(s.sharpeIS));
-    setText('stat-sr-oos', num(s.sharpeOOS));
-    setText('stat-psr', pct(s.probabilisticSharpe, 1));
-    setText('stat-dsr', pct(s.deflatedSharpe, 1));
-    setText('stat-ntrials', String(s.nTrials));
 
-    // Verdict line — the honest read.
-    const dsr = s.deflatedSharpe;
+    // ── The honest headline: walk-forward OUT-OF-SAMPLE deflated Sharpe, read straight from
+    // the leaderboard's per-strategy map (single source of truth). The IS→OOS Sharpe pair
+    // mirrors the leaderboard's two Sharpe columns; the old anchored 70/30 split is gone.
+    // If the strategy/timeframe is too short to walk forward, we degrade HONESTLY — we never
+    // fall back to the in-sample number (that would resurrect the very inconsistency we killed).
+    const oosStats = oos && oos.oosStats ? oos.oosStats : null;
+    setText('stat-sr-is', num(s.sharpe));                                  // full-history (in-sample) net Sharpe
+    setText('stat-sr-oos', oosStats ? num(oosStats.sharpe) : '—');
+    setText('stat-psr', oosStats ? pct(oosStats.probabilisticSharpe, 1) : '—');
+    setText('stat-dsr', oosStats ? pct(oosStats.deflatedSharpe, 1) : '— · insufficient history for OOS');
+    setText('stat-ntrials', oosStats ? String(oosStats.nTrials) : '—');
+
+    // Verdict line — the honest read, now OUT-OF-SAMPLE.
+    const dsr = oosStats ? oosStats.deflatedSharpe : NaN;
+    const nT = oosStats ? oosStats.nTrials : NaN;
     const beatsBH = s.sharpe > s.bhSharpe;
     let verdict, vclass;
-    if (key === 'buy_and_hold') { verdict = 'This IS the baseline. Every other strategy must beat it net of cost.'; vclass = 'neutral'; }
-    else if (Number.isFinite(dsr) && dsr > 0.95) { verdict = 'Deflated Sharpe > 0.95: survives the multiple-testing deflation in-sample. Still verify OOS + live.'; vclass = 'good'; }
-    else { verdict = `Deflated Sharpe ${pct(dsr, 0)} ≤ 95%: NOT distinguishable from luck after deflating for ${s.nTrials} trials. ${beatsBH ? 'Beats B&H Sharpe but' : 'Does not beat B&H and'} treat as noise.`; vclass = 'warn'; }
+    if (key === 'buy_and_hold') { verdict = 'This IS the baseline. Every other strategy must beat it net of cost, out-of-sample.'; vclass = 'neutral'; }
+    else if (!oosStats) { verdict = 'Insufficient history to walk this strategy forward on the current timeframe — no out-of-sample deflated Sharpe to report (try the daily timeframe or a longer window). The in-sample number is deliberately NOT shown as a substitute.'; vclass = 'warn'; }
+    else if (Number.isFinite(dsr) && dsr > 0.95) { verdict = 'Deflated Sharpe > 0.95, walk-forward out-of-sample: survives the multiple-testing deflation OUT-OF-SAMPLE. Still verify live.'; vclass = 'good'; }
+    else { verdict = `Deflated Sharpe ${pct(dsr, 0)} ≤ 95%, walk-forward out-of-sample: NOT distinguishable from luck after deflating for ${nT} trials. ${beatsBH ? 'Beats B&H Sharpe in-sample but' : 'Does not beat B&H and'} treat as noise.`; vclass = 'warn'; }
     setText('verdict', verdict);
     const v = $('verdict'); if (v) v.className = 'verdict ' + vclass;
 
@@ -381,7 +393,7 @@
 
   // Headline KPI strip: the deflated Sharpe is the hero; secondaries carry the
   // B&H delta + a sparkline. The Performance panel below holds the full detail.
-  function renderKpiStrip(bt, key, p) {
+  function renderKpiStrip(bt, key, p, oos) {
     const s = bt.stats;
     const isBH = key === 'buy_and_hold';
     const ds = (a, n = 72) => {                       // downsample for a tiny sparkline
@@ -390,16 +402,21 @@
       const k = Math.ceil(f.length / n);
       return f.filter((_, i) => i % k === 0);
     };
-    // Hero — deflated Sharpe (amber by default = "treat as noise"; green if it
-    // actually clears 0.95). Honest framing: the curve is NOT the headline.
-    setText('kpi-dsr', pct(s.deflatedSharpe, 1));
-    setText('kpi-ntrials', String(s.nTrials));
-    const sig = Number.isFinite(s.deflatedSharpe) && s.deflatedSharpe > 0.95;
+    // Hero — walk-forward OUT-OF-SAMPLE deflated Sharpe, read straight from the leaderboard's
+    // selected-strategy row (same float, never a recompute). Amber by default = "treat as noise";
+    // green only if it actually clears 0.95 OOS. Honest framing: the curve is NOT the headline.
+    const oosStats = oos && oos.oosStats ? oos.oosStats : null;
+    const dsr = oosStats ? oosStats.deflatedSharpe : NaN;
+    const nT = oosStats ? oosStats.nTrials : NaN;
+    setText('kpi-dsr', oosStats ? pct(dsr, 1) : '—');
+    setText('kpi-ntrials', oosStats ? String(nT) : '—');
+    const sig = Number.isFinite(dsr) && dsr > 0.95;
     const hero = $('kpi-hero'); if (hero) hero.classList.toggle('is-sig', sig);
     setText('kpi-dsr-verdict', isBH
-      ? 'The baseline. Every strategy is measured against this, net of cost.'
-      : sig ? 'Above 0.95 — survives the multiple-testing deflation in-sample. Verify out-of-sample + live before believing it.'
-            : `At/below 0.95 — not distinguishable from luck after deflating for ${s.nTrials} trials. Treat as noise, not alpha.`);
+      ? 'The baseline. Every strategy is measured against this, net of cost, out-of-sample.'
+      : !oosStats ? 'Insufficient history for a walk-forward out-of-sample test on this timeframe — no deflated Sharpe to report. The in-sample number is deliberately not shown.'
+      : sig ? 'Above 0.95 — survives the multiple-testing deflation OUT-OF-SAMPLE (walk-forward). Verify live before believing it.'
+            : `At/below 0.95 — not distinguishable from luck after deflating for ${nT} trials, walk-forward out-of-sample. Treat as noise, not alpha.`);
     // Secondary KPIs — value sign-coloured, with the B&H delta arrow.
     const setV = (id, txt, cls) => { const e = $(id); if (e) { e.textContent = txt; e.classList.remove('pos', 'neg'); if (cls) e.classList.add(cls); } };
     const setD = (id, txt, dir) => { const e = $(id); if (e) { e.textContent = txt; e.classList.remove('up', 'down'); if (dir) e.classList.add(dir); } };
@@ -409,7 +426,7 @@
     setD('kpi-cagr-d', 'B&H ' + pct(s.bhCagr), isBH ? '' : (s.cagr > s.bhCagr ? 'up' : 'down'));
     setV('kpi-mdd', pct(s.maxDrawdown), 'neg');
     setD('kpi-mdd-d', 'B&H ' + pct(s.bhMaxDrawdown), isBH ? '' : (s.maxDrawdown > s.bhMaxDrawdown ? 'up' : 'down')); // less-negative = better
-    setText('kpi-psr', pct(s.probabilisticSharpe, 1));
+    setText('kpi-psr', oosStats ? pct(oosStats.probabilisticSharpe, 1) : '—');   // OOS, to match the hero DSR + panel
     // Sparklines (static downsampled history — never a live tick, §3.5).
     if (C.sparkline) {
       C.sparkline($('kpi-hero-spark'), ds(bt.equity), { color: sig ? 'var(--up)' : 'var(--accent)' });
@@ -580,6 +597,7 @@
     const nTrials = keys.length;   // selection-count deflation (best of this many)
     const rows = [];
     const oosCols = [];            // {key, ret, positions} for the PBO/CPCV matrix
+    const lbMap = {};              // key → { oosStats, isSharpe } — single source for the Performance panel
     let bhOosSharpe = NaN;
     for (const key of keys) {
       try {
@@ -595,6 +613,9 @@
         // In-sample full-history (for the IS Sharpe contrast) + walk-forward OOS (the rank basis).
         const is = Q.backtest(positions, o.close, { costBps, slippageBps: slipBps, periodsPerYear: p });
         const wf = Q.walkForward(positions, o.close, { folds: 5, costBps, slippageBps: slipBps, periodsPerYear: p, nTrials });
+        // Record into the map BEFORE any skip, so the Performance panel reads the exact same
+        // OOS stats this leaderboard row uses (or null → the panel degrades, never falls back to IS).
+        lbMap[key] = { oosStats: wf.oosStats || null, isSharpe: is.stats.sharpe };
         if (!wf.oosStats) continue;
         const s = wf.oosStats;
         oosCols.push({ key, ret: wf.oosReturns, positions });
@@ -642,6 +663,7 @@
       }
       guards.innerHTML = html;
     }
+    return lbMap;
   }
 
   // ─── Variance risk premium: Deribit DVOL (implied) vs realized vol ──────

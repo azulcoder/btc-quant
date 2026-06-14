@@ -114,16 +114,16 @@
          The full metric breakdown lives in the Performance panel below. -->
     <section class="kpi-strip wide" id="panel-kpi" data-panel-title="Headline KPIs">
       <div class="kpi-hero" id="kpi-hero">
-        <div class="kpi-hero-label">Deflated Sharpe <span class="kpi-hero-n">N=<span id="kpi-ntrials">—</span></span></div>
+        <div class="kpi-hero-label">Deflated Sharpe <span class="kpi-hero-n">walk-forward OOS · N=<span id="kpi-ntrials">—</span></span></div>
         <div class="kpi-hero-value" id="kpi-dsr">—</div>
-        <div class="kpi-hero-sub" id="kpi-dsr-verdict">The headline metric — significant only above 0.95 (deflated for the multiple-testing penalty). A pretty equity curve is not the headline.</div>
+        <div class="kpi-hero-sub" id="kpi-dsr-verdict">The headline metric — walk-forward out-of-sample, significant only above 0.95 (deflated for the multiple-testing penalty). A pretty in-sample equity curve is not the headline.</div>
         <div class="kpi-hero-spark" id="kpi-hero-spark" aria-hidden="true"></div>
       </div>
       <div class="kpi-cards">
         <div class="kpi"><span class="kpi-k">Sharpe (net)</span><span class="kpi-v num" id="kpi-sharpe">—</span><span class="kpi-d" id="kpi-sharpe-d">—</span><div class="kpi-spark" id="kpi-sharpe-spark" aria-hidden="true"></div></div>
         <div class="kpi"><span class="kpi-k">CAGR (net)</span><span class="kpi-v num" id="kpi-cagr">—</span><span class="kpi-d" id="kpi-cagr-d">—</span><div class="kpi-spark" id="kpi-cagr-spark" aria-hidden="true"></div></div>
         <div class="kpi"><span class="kpi-k">Max drawdown</span><span class="kpi-v num" id="kpi-mdd">—</span><span class="kpi-d" id="kpi-mdd-d">—</span><div class="kpi-spark" id="kpi-mdd-spark" aria-hidden="true"></div></div>
-        <div class="kpi"><span class="kpi-k">Prob. Sharpe</span><span class="kpi-v num" id="kpi-psr">—</span><span class="kpi-d" id="kpi-psr-d">P(SR&gt;0)</span><div class="kpi-spark" id="kpi-psr-spark" aria-hidden="true"></div></div>
+        <div class="kpi"><span class="kpi-k">Prob. Sharpe (OOS)</span><span class="kpi-v num" id="kpi-psr">—</span><span class="kpi-d" id="kpi-psr-d">P(SR&gt;0)</span><div class="kpi-spark" id="kpi-psr-spark" aria-hidden="true"></div></div>
       </div>
     </section>
 
@@ -196,7 +196,7 @@
 
     <!-- Headline honesty stats -->
     <section class="panel wide" id="panel-performance" data-panel-title="Performance — net of cost vs buy-and-hold">
-      <h2>Performance — net of cost, vs buy-and-hold (the headline is the deflated Sharpe, not the curve)</h2>
+      <h2>Performance — net of cost, vs buy-and-hold (the headline is the walk-forward out-of-sample deflated Sharpe, not the curve)</h2>
       <div class="stats-grid">
         <div class="stat"><span class="k">CAGR (net)</span><span class="v" id="stat-net-cagr">—</span><span class="vs">B&amp;H <span id="stat-bh-cagr">—</span></span></div>
         <div class="stat"><span class="k">Sharpe (net)</span><span class="v" id="stat-sharpe">—</span><span class="vs">B&amp;H <span id="stat-bh-sharpe">—</span> · gross <span id="stat-gross-sharpe">—</span></span></div>
@@ -208,10 +208,10 @@
         <div class="stat"><span class="k">Trades</span><span class="v" id="stat-trades">—</span></div>
         <div class="stat"><span class="k">Skew</span><span class="v" id="stat-skew">—</span></div>
         <div class="stat"><span class="k">Kurtosis</span><span class="v" id="stat-kurt">—</span></div>
-        <div class="stat"><span class="k">Sharpe (in-sample)</span><span class="v" id="stat-sr-is">—</span></div>
-        <div class="stat"><span class="k">Sharpe (OOS 30%)</span><span class="v" id="stat-sr-oos">—</span></div>
-        <div class="stat headline"><span class="k">Probabilistic Sharpe</span><span class="v" id="stat-psr">—</span></div>
-        <div class="stat headline"><span class="k">Deflated Sharpe (N=<span id="stat-ntrials">—</span>)</span><span class="v" id="stat-dsr">—</span></div>
+        <div class="stat"><span class="k">Sharpe (IS)</span><span class="v" id="stat-sr-is">—</span></div>
+        <div class="stat"><span class="k">Sharpe (OOS)</span><span class="v" id="stat-sr-oos">—</span></div>
+        <div class="stat headline"><span class="k">Probabilistic Sharpe (OOS)</span><span class="v" id="stat-psr">—</span></div>
+        <div class="stat headline"><span class="k">Deflated Sharpe (walk-forward OOS, N=<span id="stat-ntrials">—</span>)</span><span class="v" id="stat-dsr">—</span></div>
       </div>
       <div class="verdict neutral" id="verdict">—</div>
     </section>

@@ -310,10 +310,11 @@
    *        return — there is no look-ahead.
    * @param {number[]} prices close prices aligned to `positions`.
    * @param {object} opts { costBps, slippageBps, periodsPerYear, nTrials,
-   *        varTrialsSr, oosFrac }.
+   *        varTrialsSr }.
    * @returns {object} { equity, returns, grossReturns, position, turnover,
    *        trades, bhEquity, bhReturns, stats } where stats includes the
-   *        deflated Sharpe and an in/out-of-sample split.
+   *        full-history deflated Sharpe (the walk-forward OOS headline lives in
+   *        walkForward()).
    */
   function backtest(positions, prices, opts = {}) {
     const costBps = opts.costBps != null ? opts.costBps : 10;
@@ -321,7 +322,6 @@
     const ppy = opts.periodsPerYear || 365;
     const nTrials = opts.nTrials || 1;
     const varTrialsSr = opts.varTrialsSr != null ? opts.varTrialsSr : 1;
-    const oosFrac = opts.oosFrac != null ? opts.oosFrac : 0.3;
     const costRate = (costBps + slipBps) / 1e4; // charged per unit turnover
 
     const n = Math.min(positions.length, prices.length);
@@ -355,7 +355,7 @@
     const bhEquity = compound(bhReturns);
 
     const stats = computeStats(returns, equity, {
-      periodsPerYear: ppy, nTrials, varTrialsSr, oosFrac,
+      periodsPerYear: ppy, nTrials, varTrialsSr,
       bhReturns, turnover,
     });
 
@@ -386,12 +386,6 @@
     const ku = kurtosis(fin, false); // non-excess for the PSR/DSR formula
     const grossEq = equity;
 
-    // In-sample vs out-of-sample split — the cheap overfitting tell.
-    const oosFrac = opts.oosFrac != null ? opts.oosFrac : 0.3;
-    const cut = Math.max(1, Math.floor(returns.length * (1 - oosFrac)));
-    const isRet = returns.slice(0, cut);
-    const oosRet = returns.slice(cut);
-
     return {
       n,
       cagr: cagr(grossEq, ppy),
@@ -408,8 +402,6 @@
       skew: sk,
       kurtosis: ku,
       turnover: opts.turnover ? opts.turnover.reduce((a, b) => a + b, 0) : NaN,
-      sharpeIS: sharpe(isRet, ppy),
-      sharpeOOS: sharpe(oosRet, ppy),
       bhSharpe: opts.bhReturns ? sharpe(opts.bhReturns, ppy) : NaN,
       bhCagr: opts.bhReturns ? cagr(compound(opts.bhReturns), ppy) : NaN,
       bhMaxDrawdown: opts.bhReturns ? maxDrawdown(compound(opts.bhReturns)) : NaN,
