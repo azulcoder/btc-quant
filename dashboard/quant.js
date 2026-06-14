@@ -488,45 +488,93 @@
   }
 
   /**
-   * BTC–ETH cointegration / z-score spread reversion. [Mixed].
-   * spread = log(btc) - beta*log(eth) with a rolling OLS beta; enter when
-   * |z| > entry (fade), exit near 0, hard stop at |z| > stop (the
-   * de-cointegration guard). Returns BTC-leg positions in [-1,1].
+   * Ornstein-Uhlenbeck mean-reversion half-life from an AR(1) fit — mirror of
+   * btcquant.features.ou_half_life. Fits ΔX_t = a + b·X_{t-1} by OLS; the OU
+   * discretization gives b = -kappa, so half_life = ln(2)/kappa = -ln(2)/b (bars).
+   * Returns Infinity when not mean-reverting (b ≥ 0) and NaN with < 3 points.
+   */
+  function ouHalfLife(spread) {
+    const x = spread.filter(Number.isFinite);
+    const m = x.length;
+    if (m < 3) return NaN;
+    // ΔX_k = x[k+1]-x[k] regressed on x_lag_k = x[k]; OLS slope (with intercept) = cov/var.
+    const n = m - 1;
+    let sxl = 0, sdx = 0;
+    for (let k = 0; k < n; k++) { sxl += x[k]; sdx += x[k + 1] - x[k]; }
+    const mxl = sxl / n, mdx = sdx / n;
+    let cov = 0, vx = 0;
+    for (let k = 0; k < n; k++) { const dxl = x[k] - mxl; cov += dxl * ((x[k + 1] - x[k]) - mdx); vx += dxl * dxl; }
+    if (!(vx > 0)) return NaN;
+    const b = cov / vx;
+    if (b >= 0) return Infinity;                 // not mean-reverting
+    return Math.log(2) / -b;
+  }
+
+  /**
+   * BTC–ETH cointegration / z-score spread reversion. [Mixed]. Faithful mirror of
+   * btcquant.strategies.pairs_coint: a per-bar rolling-OLS hedge ratio beta_t,
+   * spread_t = log(btc) - beta_t·log(eth), z = trailing z-score of that spread;
+   * enter when |z| > entry (fade), exit near the mean, hard stop at |z| > stop, AND
+   * a per-bar OU half-life guard that forces flat when the trailing spread is not
+   * reliably mean-reverting (half-life non-finite or > maxHalfLife) — the
+   * de-cointegration guard. Returns BTC-leg positions in {-1,0,+1} (NaN in warm-up).
    * Tadi & Witzany (2024); Krauss (2017) documents OOS decay.
    */
   function sigPairs(btc, eth, opts = {}) {
     const window = opts.window || 60;
     const entry = opts.entry != null ? opts.entry : 2.0;
     const exit = opts.exit != null ? opts.exit : 0.5;
-    const stop = opts.stop != null ? opts.stop : 3.5;
+    const stop = opts.stop != null ? opts.stop : 4.0;
+    const maxHalfLife = opts.maxHalfLife != null ? opts.maxHalfLife : 60.0;
     const n = Math.min(btc.length, eth.length);
     const lb = btc.slice(0, n).map(Math.log);
     const le = eth.slice(0, n).map(Math.log);
-    const z = new Array(n).fill(NaN);
+
+    // Per-bar rolling-OLS hedge ratio beta_t (cov/var over the trailing window) and
+    // spread_t = log(btc)_t - beta_t·log(eth)_t — a single series (NaN in warm-up).
+    const spread = new Array(n).fill(NaN);
     for (let i = 0; i < n; i++) {
       if (i + 1 < window) continue;
-      // Rolling OLS beta of log(btc) on log(eth) over the trailing window.
-      const xs = le.slice(i - window + 1, i + 1);
-      const ys = lb.slice(i - window + 1, i + 1);
-      const mx = mean(xs), my = mean(ys);
+      const a = i - window + 1;
+      let sx = 0, sy = 0;
+      for (let k = a; k <= i; k++) { sx += le[k]; sy += lb[k]; }
+      const mx = sx / window, my = sy / window;
       let cov = 0, vx = 0;
-      for (let k = 0; k < xs.length; k++) { cov += (xs[k] - mx) * (ys[k] - my); vx += (xs[k] - mx) ** 2; }
+      for (let k = a; k <= i; k++) { const dx = le[k] - mx; cov += dx * (lb[k] - my); vx += dx * dx; }
       const beta = vx > 0 ? cov / vx : 0;
-      const spread = xs.map((x, k) => ys[k] - beta * x);
-      const ms = mean(spread), ss = std(spread, 1);
-      z[i] = ss > 0 ? (spread[spread.length - 1] - ms) / ss : NaN;
+      spread[i] = lb[i] - beta * le[i];
     }
-    // Stateful trade logic: fade extremes, exit near mean, stop on breakdown.
-    const pos = new Array(n).fill(0);
-    let cur = 0;
+
+    // Trailing z-score of the spread series + per-bar OU half-life guard (both need a
+    // full, valid trailing window — matching pandas rolling with min_periods=window).
+    const z = new Array(n).fill(NaN);
+    const hlOk = new Array(n).fill(false);
+    for (let i = 0; i < n; i++) {
+      if (i + 1 < window) continue;
+      const win = spread.slice(i - window + 1, i + 1);
+      if (win.some((v) => !Number.isFinite(v))) continue;
+      const ms = mean(win), ss = std(win, 1);
+      z[i] = ss > 0 ? (spread[i] - ms) / ss : NaN;
+      const hl = ouHalfLife(win);
+      hlOk[i] = Number.isFinite(hl) && hl <= maxHalfLife;
+    }
+
+    // Stateful logic mirroring pairs_coint: half-life guard first (stand aside when
+    // not mean-reverting), else fade extremes / exit near the mean / hard stop.
+    const pos = new Array(n).fill(NaN);
+    let state = 0;
     for (let i = 0; i < n; i++) {
       const zi = z[i];
-      if (!Number.isFinite(zi)) { pos[i] = cur; continue; }
-      if (cur !== 0 && Math.abs(zi) > stop) cur = 0;            // de-cointegration guard
-      else if (cur === 0 && zi > entry) cur = -1;                // spread rich → short BTC leg
-      else if (cur === 0 && zi < -entry) cur = 1;                // spread cheap → long BTC leg
-      else if (cur !== 0 && Math.abs(zi) < exit) cur = 0;        // reverted → flat
-      pos[i] = cur;
+      if (!Number.isFinite(zi)) { pos[i] = NaN; continue; }
+      if (!hlOk[i]) {
+        state = 0;                               // de-cointegration / non-stationary guard
+      } else if (state === 0) {
+        if (zi > entry) state = -1;              // spread rich → short BTC leg
+        else if (zi < -entry) state = 1;         // spread cheap → long BTC leg
+      } else if (Math.abs(zi) < exit || Math.abs(zi) > stop) {
+        state = 0;                               // reverted to mean, or hard-stopped
+      }
+      pos[i] = state;
     }
     return { positions: pos, z };
   }
@@ -708,7 +756,7 @@
     walkForward, pbo, minBacktestLength, cpcv,
     // strategy signals
     sigBuyAndHold, sigMaTrend, sigMaCross, sigTsmom, applyVolTarget, sigPairs,
-    carryBacktest,
+    ouHalfLife, carryBacktest,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = Quant;

@@ -313,7 +313,7 @@
       } else {
         // align ETH to BTC length (trailing overlap)
         const m = Math.min(o.close.length, state.eth.close.length);
-        const r = Q.sigPairs(o.close.slice(-m), state.eth.close.slice(-m), { window: 60, entry: 2, exit: 0.5, stop: 3.5 });
+        const r = Q.sigPairs(o.close.slice(-m), state.eth.close.slice(-m), { window: 60, entry: 2, exit: 0.5, stop: 4.0, maxHalfLife: 60 });
         positions = new Array(o.close.length - m).fill(0).concat(r.positions);
         zSeries = new Array(o.close.length - m).fill(NaN).concat(r.z);
       }
@@ -615,7 +615,7 @@
         if (key === 'pairs') {
           if (!state.eth || state.eth.close.length < 60) continue;
           const m = Math.min(o.close.length, state.eth.close.length);
-          const r = Q.sigPairs(o.close.slice(-m), state.eth.close.slice(-m), { window: 60, entry: 2, exit: 0.5, stop: 3.5 });
+          const r = Q.sigPairs(o.close.slice(-m), state.eth.close.slice(-m), { window: 60, entry: 2, exit: 0.5, stop: 4.0, maxHalfLife: 60 });
           positions = new Array(o.close.length - m).fill(0).concat(r.positions);
         } else {
           positions = STRATEGIES[key].build(o, p);
