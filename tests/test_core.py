@@ -782,3 +782,21 @@ def test_random_entry_deterministic_and_in_unit_band():
     _assert_in_unit_band(a, "random_entry")
     assert set(np.unique(a.dropna().to_numpy())).issubset({-1.0, 0.0, 1.0})
     assert not a.equals(strategies.random_entry(df, seed=8))  # different seed → different path
+
+
+def test_tier_b_candidates_unit_band_and_causal():
+    """Donchian / VWAP-reversion / fixed-R exit-overlay stay valid weights in {-1,0,+1};
+    the stateful Donchian is causal (prefix matches the full run on the settled region)."""
+    df = _make_ohlcv(n=400, seed=21)
+    don = strategies.donchian_breakout(df, n=55, exit_n=20)
+    vw = strategies.vwap_reversion(df, window=48)
+    fx = strategies.fixed_r_exit(strategies.buy_and_hold(df), df)
+    for name, s in (("donchian", don), ("vwap_reversion", vw), ("fixed_r_exit", fx)):
+        _assert_in_unit_band(s, name)
+        assert set(np.unique(s.dropna().to_numpy())).issubset({-1.0, 0.0, 1.0})
+    k = 300
+    full = strategies.donchian_breakout(df, 55, 20)
+    pref = strategies.donchian_breakout(df.iloc[:k], 55, 20)
+    a = np.nan_to_num(full.iloc[60:k - 1].to_numpy(), nan=-9.0)
+    b = np.nan_to_num(pref.iloc[60:k - 1].to_numpy(), nan=-9.0)
+    assert np.allclose(a, b)

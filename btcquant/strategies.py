@@ -39,6 +39,9 @@ __all__ = [
     "vol_target",
     "percent_risk_size",
     "random_entry",
+    "donchian_breakout",
+    "vwap_reversion",
+    "fixed_r_exit",
     "tsmom",
     "carry",
     "pairs_coint",
@@ -760,3 +763,92 @@ def short_vol(*args, **kwargs) -> pd.Series:  # noqa: D401, ANN002, ANN003
         "delta-hedged short ATM straddle, and MANDATE left-tail stress tests with "
         "small sizing (RESEARCH.md §2.8, §5.6)."
     )
+
+
+def donchian_breakout(df: pd.DataFrame, n: int = 55, exit_n: int = 20) -> pd.Series:
+    """Donchian / Turtle channel breakout (RESEARCH-tharp-runlog.md candidate). Enter long on
+    a new ``n``-bar high, short on a new ``n``-bar low; exit on the opposite ``exit_n``-bar
+    channel. Channels use the PRIOR bar's rolling extreme (``shift(1)``) so the level is known
+    at the bar's close → causal (the backtester's shift-by-one then trades it next bar). Tharp
+    notes long breakouts decayed (40–100+ bar still works); expected to be cost-fragile and
+    likely deflate OOS. Returns ``{-1,0,+1}``. Reference: Tharp Ch.8 (Donchian / Dennis-Eckhardt)."""
+    high, low, close = df["high"].astype("float64"), df["low"].astype("float64"), _close(df)
+    hn = high.rolling(n).max().shift(1).to_numpy()
+    ln = low.rolling(n).min().shift(1).to_numpy()
+    hx = high.rolling(exit_n).max().shift(1).to_numpy()
+    lx = low.rolling(exit_n).min().shift(1).to_numpy()
+    c = close.to_numpy(); m = len(c); pos = np.zeros(m); cur = 0
+    for i in range(m):
+        if not (np.isfinite(hn[i]) and np.isfinite(ln[i])):
+            pos[i] = cur; continue
+        if cur == 0:
+            if c[i] > hn[i]: cur = 1
+            elif c[i] < ln[i]: cur = -1
+        elif cur > 0:
+            if np.isfinite(lx[i]) and c[i] < lx[i]: cur = 0
+        elif cur < 0:
+            if np.isfinite(hx[i]) and c[i] > hx[i]: cur = 0
+        pos[i] = cur
+    return pd.Series(pos, index=close.index, name="donchian")
+
+
+def vwap_reversion(df: pd.DataFrame, window: int = 48, k: float = 2.0, exit_k: float = 0.5) -> pd.Series:
+    """Rolling-VWAP ± k·σ band mean-reversion (RESEARCH-tharp-runlog.md candidate). VWAP over a
+    trailing ``window`` of typical price ``(H+L+C)/3`` weighted by volume; fade when the close is
+    ``> k`` band-σ above VWAP (short) or below (long); exit near VWAP (``|z| < exit_k``). All
+    rolling/trailing → causal. The book pairs band touches with order-flow confirmation we cannot
+    reconstruct historically, so this is a weaker price-only proxy — expected to be marginal/deflate.
+    Returns ``{-1,0,+1}``. Reference: the NQ/ES plan's VWAP-band rule."""
+    close = _close(df)
+    vol = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
+    tp = (df["high"].astype("float64") + df["low"].astype("float64") + close) / 3.0
+    pv = (tp * vol).rolling(window).sum()
+    vv = vol.rolling(window).sum().replace(0.0, np.nan)
+    vwap = pv / vv
+    dev = close - vwap
+    sd = dev.rolling(window).std(ddof=1).replace(0.0, np.nan)
+    z = (dev / sd).to_numpy()
+    m = len(close); pos = np.zeros(m); cur = 0
+    for i in range(m):
+        zi = z[i]
+        if not np.isfinite(zi):
+            pos[i] = cur; continue
+        if cur == 0:
+            if zi > k: cur = -1          # rich vs VWAP → fade down
+            elif zi < -k: cur = 1        # cheap → fade up
+        elif abs(zi) < exit_k:
+            cur = 0                      # reverted to fair value
+        pos[i] = cur
+    return pd.Series(pos, index=close.index, name="vwap_reversion")
+
+
+def fixed_r_exit(positions: pd.Series, df: pd.DataFrame, k_stop: float = 2.0, rr: float = 3.0,
+                 atr_window: int = 20) -> pd.Series:
+    """Tharp/Douglas **exit overlay**: a fixed ``k_stop·ATR`` initial stop + ``rr:1`` target on any
+    existing entry signal (RESEARCH-tharp-runlog.md candidate). Tests the 'cut losses, asymmetric
+    R:R, win-rate can be < 50%' claim — it supplies NO entry edge. Intrabar stop-vs-target ambiguity
+    is resolved **stop-first** (conservative, no look-ahead): if a bar's low/high pierces both, the
+    stop is assumed hit. The position is decided from the fully-observed bar and the backtester then
+    shifts it by one → causal. Returns ``{-1,0,+1}``."""
+    pin = pd.Series(positions, dtype="float64")
+    close = _close(df)
+    pin = pin.reindex(close.index).fillna(0.0)
+    atr = features.atr(df, window=atr_window)
+    p, c = pin.to_numpy(), close.to_numpy()
+    hi, lo, a = df["high"].astype("float64").to_numpy(), df["low"].astype("float64").to_numpy(), atr.to_numpy()
+    m = len(c); out = np.zeros(m); cur = 0; stop = tgt = float("nan")
+    for i in range(m):
+        sig = p[i]
+        if cur == 0:
+            if sig != 0 and np.isfinite(a[i]):
+                cur = 1 if sig > 0 else -1
+                stop = c[i] - cur * k_stop * a[i]
+                tgt = c[i] + cur * rr * k_stop * a[i]
+        else:
+            stopped = (cur > 0 and lo[i] <= stop) or (cur < 0 and hi[i] >= stop)
+            hit_tgt = (cur > 0 and hi[i] >= tgt) or (cur < 0 and lo[i] <= tgt)
+            if stopped: cur = 0                       # stop checked FIRST (conservative)
+            elif hit_tgt: cur = 0
+            elif sig == 0 or (sig > 0) != (cur > 0): cur = 0   # underlying flattened/flipped
+        out[i] = cur
+    return pd.Series(out, index=close.index, name="fixed_r_exit")

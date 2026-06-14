@@ -309,6 +309,50 @@ def main() -> int:
               "reshapes max-DD dramatically, not the per-bet OOS Sharpe — the honest Tharp result.")
         print("─" * 78)
 
+        # ---- Tier-B candidate sweep (research-only; NOT added to the board) -------------
+        print("\nTIER-B CANDIDATE SWEEP — pre-registered, kill = OOS DSR ≤ 0.95 "
+              "(see RESEARCH-tharp-runlog.md). Expected: deflate.")
+        cands = {
+            "donchian 55/20": strategies.donchian_breakout(df, 55, 20),
+            "vwap_reversion 48": strategies.vwap_reversion(df, window=48),
+            "ma_trend + fixedR 2:3": strategies.fixed_r_exit(
+                strategies.ma_trend_filter(df, n=args.ma_n), df),
+            "random_entry (control)": strategies.random_entry(df, seed=7),
+        }
+        hdr = (f"  {'candidate':<24}{'OOS DSR':>9}{'OOS SR':>9}{'OOS MaxDD':>11}"
+               f"{'ExpR':>8}{'SQN':>7}{'#T':>5}  verdict")
+        print(hdr)
+        print("  " + "-" * (len(hdr) - 2))
+        for label, pos in cands.items():
+            try:
+                w = backtest.walk_forward(lambda px, p=pos: p.reindex(px.index), close,
+                                          n_splits=args.folds, cost_bps=args.cost_bps,
+                                          slippage_bps=args.slippage_bps, periods_per_year=ppy)
+                o = w["oos"]; op = w["oos_positions"]
+                er = risk.expectancy_report(op, close.reindex(op.index),
+                                            oos_vol.reindex(op.index), periods_per_year=ppy, k=2.0)
+                dsr = o.get("deflated_sharpe")
+                survives = isinstance(dsr, (int, float)) and dsr == dsr and dsr > 0.95
+                verdict = "SURVIVES — re-verify before promoting" if survives else "KILL (≤0.95)"
+                nt = er.get("n_trades", 0)
+                exp_s = _fmt(er.get("expectancy_r")) if nt >= 5 else "  n/a"
+                sqn_s = _fmt(er.get("sqn")) if nt >= 5 else " n/a"
+                print(f"  {label:<24}{_fmt(dsr):>9}{_fmt(o.get('sharpe')):>9}"
+                      f"{_fmt(o.get('max_drawdown'), True):>11}{exp_s:>8}{sqn_s:>7}{nt:>5}  {verdict}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"  {label:<24}  (skipped: {str(exc)[:40]})")
+        print("  Gamma-regime proxy: REJECTED — no historical option-chain/greek store ⇒ cannot enter "
+              "the OOS harness (a data limit, not an opinion).")
+        # Day-of-week seasonality — DESCRIPTIVE regime check, not a backtested edge.
+        try:
+            dow = close.pct_change().groupby(close.index.dayofweek).mean() * 100.0
+            names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            cells = " · ".join(f"{names[d]} {dow.get(d, float('nan')):+.2f}%" for d in range(7))
+            print(f"  Day-of-week mean daily return (DESCRIPTIVE, ~noise at this N): {cells}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  Day-of-week readout skipped: {str(exc)[:40]}")
+        print("─" * 78)
+
     # Carry: perp-funding, OOS-insufficient — descriptive only.
     try:
         funding = data.get_funding(symbol=args.funding_symbol, source="bybit",

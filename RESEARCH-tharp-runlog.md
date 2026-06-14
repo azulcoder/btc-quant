@@ -77,6 +77,44 @@ Not in this run-log's harness scope — it is a **live descriptive** panel (cumu
 imbalance + large-print), never backtested, never a signal (no historical tick store). Documented in
 DEVELOPMENT.md; honesty caveat shown on the panel.
 
+## P4 — Eval extensions (SQN / profit factor / MAE)
+
+`expectancy_report` (+ `quant.js expectancyReport`) extended with **SQN** = mean(R)/std(R)·√n,
+**profit factor** = Σ win-R / |Σ loss-R|, and **avg MAE** (per-trade max adverse excursion in R,
+from the per-bar cumulative path already inside `trade_ledger`). Pure honesty additions — no edge
+claim, no behavior change to ranking. Surfaced on the compare.py `#T`/`SQN` columns and the dashboard
+"Trade quality (OOS)" line. Re-verified JS↔Python parity (below). No `Date.now`/RNG → deterministic.
+
+## P5 — Tier-B strategy candidates (research-only sweep)
+
+**Pre-registered before the run** — these are price-pattern hypotheses on one asset (BTC daily); the
+prior (Part B) was that single-asset chart patterns deflate through walk-forward + cost. They are run
+in `compare.py --research` ONLY and do **not** join `SPOT_STRATS`/the dashboard board.
+
+*Kill rule (pre-registered):* a candidate is KILLed unless its **net-of-cost OOS Deflated Sharpe > 0.95**
+(the same bar the public board clears). No N-inflation of the strategy count (protects MinBTL).
+
+| candidate | hypothesis | OOS DSR | OOS SR | OOS MaxDD | verdict |
+|---|---|---|---|---|---|
+| `donchian_breakout` 55/20 | Turtle channel breakout still trends in BTC | 0.50 | 0.45 | −60.2% | **KILL** |
+| `vwap_reversion` 48, k=2 | price-only VWAP-band fade (no order-flow confirm) | 0.00 | −0.69 | −95.4% | **KILL** (worst) |
+| `ma_trend` + `fixed_r_exit` 2:3 | a fixed-R stop + 3:1 target rescues a trend entry | 0.69 | 0.64 | −65.8% | **KILL** |
+| `random_entry` (control) | coin-flip entry + trailing stop ≈ managed-risk floor | 0.36 | 0.31 | −88.7% | **KILL** (control) |
+
+**Result = as pre-registered: all four deflate.** Readings: (a) the fixed-R exit overlay (0.69) does
+lift the per-bet quality of the trend entry above the random control (0.36) but **not past the 0.95
+bar** — asymmetric R:R is real risk management, not a standalone edge, exactly the book's own claim;
+(b) the price-only VWAP fade is actively harmful without the order-flow confirmation the book pairs it
+with (which needs a tick store we don't have) — a clean, honest kill, not a tuning failure. The value
+here is the **documented rejection**.
+
+*Rejected without a run (data limits, not opinions):*
+- **Gamma-regime proxy** — no historical option-chain/greek timeseries ⇒ cannot enter the OOS harness.
+- **ORB / Monday–Wednesday & other intraday-seasonality edges** — need intraday bars we don't store.
+
+*Descriptive (not a backtested edge):* day-of-week mean daily return is printed in the sweep as a regime
+check; spread is ~noise at this N (Mon/Wed mildly +, Thu −) — surfaced, not traded.
+
 ## JS↔Python parity
 
 `tradeLedger`/`expectancyReport` mirrored in `quant.js`; parity probe on a fixed fixture (260 bars,
