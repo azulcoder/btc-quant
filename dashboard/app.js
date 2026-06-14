@@ -1505,8 +1505,11 @@
       else if (kind === 'reconnecting') { cs.classList.add('stale'); setText('conn-text', 'reconnecting…'); }
       else if (kind === 'error') { cs.classList.add('error'); setText('conn-text', 'live feed offline'); }
     }
-    // The CVD panel is fed by the same WS tape → degrade it honestly when the feed drops.
-    if (kind !== 'open') setPanelState('panel-cvd', kind === 'error' ? 'error' : 'stale', 'cvd-updated');
+    // The CVD + profile panels are fed by the same WS tape → degrade them honestly when the feed drops.
+    if (kind !== 'open') {
+      setPanelState('panel-cvd', kind === 'error' ? 'error' : 'stale', 'cvd-updated');
+      setPanelState('panel-profile', kind === 'error' ? 'error' : 'stale', 'profile-updated');
+    }
   }
 
   function onLiveTick(tick) {
@@ -1555,6 +1558,7 @@
       live.lastTradeId = norm[0].id;
       live.tradesSeeded = true;
       accumCvd(norm);                              // seed the session cumulative delta
+      accumProfile(norm);                          // seed the developing volume profile
     } else {
       if (!live.tradesSeeded) return;              // wait for the seed snapshot first
       const fresh = norm.filter((t) => t.id > live.lastTradeId);
@@ -1563,9 +1567,11 @@
       live.tape = fresh.concat(live.tape);         // newest on top
       if (live.tape.length > TAPE_MAX) live.tape.length = TAPE_MAX;
       accumCvd(fresh);
+      accumProfile(fresh);
     }
     renderTape();
     renderCvd();
+    renderProfile();
   }
 
   // ─── Live CVD / order-flow (descriptive only) — Tharp synthesis #3 ─────────
@@ -1599,6 +1605,71 @@
     setText('cvd-summary',
       `Session cumulative delta ${live.cvdCum.toFixed(2)} BTC · last-${win.length} aggressor flow ${Number.isFinite(buyPct) ? (buyPct * 100).toFixed(0) + '% buy' : '—'} · 95th-pct print ${Number.isFinite(p95) ? p95.toFixed(3) + ' BTC' : '—'}. DESCRIPTIVE order-flow — session-cumulative from connect, Coinbase spot only, NOT a signal and NOT backtestable (no historical tick store).`);
     setPanelState('panel-cvd', 'ready', 'cvd-updated'); markFeed('cvd');
+  }
+
+  // ─── Developing volume profile — POC / value area (descriptive only) ───────
+  // The live, honest form of Market Profile: bin the session's traded SIZE by price,
+  // re-binned every render across the observed range. POC = most-traded price; value
+  // area = the 70% of volume around it (the standard expand-to-the-larger-neighbour
+  // walk). NOT a signal and NOT backtestable — there is no historical volume-profile
+  // store, so it can never enter the OOS harness; one-venue spot only.
+  const PROFILE_MAX = 5000;   // cap retained session prints (re-binned each render)
+  function accumProfile(newestFirst) {
+    if (!live.profPx) { live.profPx = []; live.profSz = []; }
+    for (let i = newestFirst.length - 1; i >= 0; i--) {   // oldest → newest
+      const t = newestFirst[i];
+      if (!Number.isFinite(t.price) || !Number.isFinite(t.size) || t.size <= 0) continue;
+      live.profPx.push(t.price); live.profSz.push(t.size);
+    }
+    const over = live.profPx.length - PROFILE_MAX;
+    if (over > 0) { live.profPx.splice(0, over); live.profSz.splice(0, over); }
+  }
+  function renderProfile() {
+    const root = $('chart-profile');
+    if (!root || !live.profPx || live.profPx.length < 30) return;
+    const px = live.profPx, sz = live.profSz;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < px.length; i++) { if (px[i] < lo) lo = px[i]; if (px[i] > hi) hi = px[i]; }
+    if (!(hi > lo)) return;
+    const nb = 48, binW = (hi - lo) / nb;
+    const vol = new Array(nb).fill(0), ctr = new Array(nb);
+    for (let k = 0; k < nb; k++) ctr[k] = lo + (k + 0.5) * binW;
+    let total = 0;
+    for (let i = 0; i < px.length; i++) {
+      let k = Math.floor((px[i] - lo) / binW); if (k < 0) k = 0; else if (k >= nb) k = nb - 1;
+      vol[k] += sz[i]; total += sz[i];
+    }
+    if (!(total > 0)) return;
+    let poc = 0; for (let k = 1; k < nb; k++) if (vol[k] > vol[poc]) poc = k;
+    // Value area: expand from the POC to the larger adjacent bucket until ≥70% of volume.
+    const target = 0.70 * total;
+    let vaLo = poc, vaHi = poc, acc = vol[poc];
+    while (acc < target && (vaLo > 0 || vaHi < nb - 1)) {
+      const up = vaHi < nb - 1 ? vol[vaHi + 1] : -1;
+      const dn = vaLo > 0 ? vol[vaLo - 1] : -1;
+      if (up >= dn && up >= 0) { vaHi += 1; acc += vol[vaHi]; }
+      else if (dn >= 0) { vaLo -= 1; acc += vol[vaLo]; }
+      else break;
+    }
+    const pocP = ctr[poc], vah = ctr[vaHi], val = ctr[vaLo];
+    C.xyChart(root, [{ x: ctr, y: vol, color: 'var(--accent-2)', label: 'Volume at price (BTC)', markers: 'lineOnly' }], {
+      height: 190,
+      xFmt: (v) => fmtUsd(v),
+      yFmt: (v) => v.toFixed(1),
+      xLabel: 'price',
+      vlines: [
+        { x: pocP, color: 'var(--accent)', label: 'POC' },
+        { x: vah, color: 'var(--muted)', label: 'VAH' },
+        { x: val, color: 'var(--muted)', label: 'VAL' },
+      ],
+    });
+    const last = live.lastPrice;
+    const where = Number.isFinite(last)
+      ? (last > vah ? 'above value (acceptance higher)' : last < val ? 'below value (acceptance lower)' : 'inside value')
+      : '—';
+    setText('profile-summary',
+      `POC ${fmtUsd(pocP)} · value area ${fmtUsd(val)}–${fmtUsd(vah)} (70% of ${total.toFixed(1)} BTC) · price ${where} · ${px.length} prints. DESCRIPTIVE auction read — developing from connect, Coinbase spot only, NOT a signal and NOT backtestable (no historical volume-profile store).`);
+    setPanelState('panel-profile', 'ready', 'profile-updated'); markFeed('profile');
   }
 
   // Color by AGGRESSOR side. Coinbase market_trades `side` is the MAKER's side
@@ -1837,7 +1908,7 @@
   // charts are RE-RENDERED when its tab is shown (a hidden panel reports width 0).
   const REGIONS = {
     backtest: ['panel-leaderboard', 'panel-performance', 'panel-candles', 'panel-equity', 'panel-drawdown', 'panel-hist', 'panel-rolling'],
-    live: ['panel-live', 'panel-cvd'],
+    live: ['panel-live', 'panel-cvd', 'panel-profile'],
     perpetual: ['panel-funding', 'panel-basis', 'panel-oi', 'panel-lsratio'],
     options: ['panel-vrp', 'panel-smile', 'panel-term', 'panel-rrbf', 'panel-maxpain', 'panel-greeks', 'panel-gammaconc'],
     onchain: ['panel-onchain'],

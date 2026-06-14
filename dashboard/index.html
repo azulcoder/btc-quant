@@ -321,6 +321,18 @@
       <p class="hint">Cumulative <strong>delta</strong> = running sum of <strong>aggressor</strong> signed size from the live Coinbase <code>market_trades</code> tape (aggressor buy lifts the ask → +size; aggressor sell hits the bid → −size — the same maker-vs-aggressor convention the tape coloring uses). Synthesized from four order-flow books (Valtos, Harris, Bower, the NQ/ES plan), all of which describe this same construct. <strong>This is a LIVE descriptive read, NOT a signal and NOT backtestable</strong> — the terminal keeps no historical tick store, so it can never enter the OOS harness, and it omits the larger perp flow (Coinbase spot only). Session-cumulative from connect; resets on reload.</p>
     </section>
 
+    <!-- Developing volume profile — POC / value area (§ Market Profile, DESCRIPTIVE) -->
+    <section class="panel wide" id="panel-profile" data-panel-title="Developing volume profile — POC &amp; value area">
+      <h2>Developing volume profile — POC &amp; value area
+        <span class="signal-tag descriptive" title="Session-developing volume-at-price from the live Coinbase trade tape: POC = most-traded price, value area = the 70% of volume around it. The live, honest form of Market Profile — NOT a signal, NOT backtestable (no historical TPO/volume-profile store). One-venue spot.">DESCRIPTIVE · auction</span>
+        <span class="updated-at" id="profile-updated"></span>
+        <span class="stale-chip">stale</span>
+      </h2>
+      <div class="chart" id="chart-profile"><div class="chart-na">Waiting for live trades…</div></div>
+      <p class="chart-summary" id="profile-summary">—</p>
+      <p class="hint">Volume-at-price binned across the session range; the <strong>POC</strong> (point of control) is the most-traded price and the <strong>value area</strong> (VAH–VAL) is the 70% of session volume around it — the classic Market-Profile/auction read, built here from <strong>volume</strong> (not TPO time) on the live Coinbase <code>market_trades</code> tape. <strong>LIVE descriptive only — NOT a signal and NOT backtestable</strong>: the terminal keeps no historical volume-profile/TPO store, so it can never enter the OOS harness, and it sees one-venue spot only. Develops from connect; resets on reload.</p>
+    </section>
+
     <!-- Equity curve -->
     <section class="panel" id="panel-equity" data-panel-title="Equity curve — net vs gross vs buy-and-hold">
       <h2>Equity curve — net vs gross vs buy-and-hold</h2>
