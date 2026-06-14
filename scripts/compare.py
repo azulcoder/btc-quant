@@ -158,7 +158,7 @@ def main() -> int:
             rows.append({"name": name, "oos_cagr": oos.get("cagr"), "oos_sharpe": oos.get("sharpe"),
                          "is_sharpe": is_.get("sharpe", float("nan")), "oos_dsr": oos_dsr,
                          "oos_mdd": oos.get("max_drawdown"),
-                         "exp_r": er["expectancy_r"], "win": er["win_rate"], "ntr": er["n_trades"]})
+                         "exp_r": er["expectancy_r"], "sqn": er["sqn"], "win": er["win_rate"], "ntr": er["n_trades"]})
             if name == "buy_and_hold":
                 bh_oos_sharpe = float(oos.get("sharpe", float("nan")))
         except Exception as exc:  # noqa: BLE001
@@ -184,7 +184,7 @@ def main() -> int:
           f"{args.folds} walk-forward folds | cost {args.cost_bps}+{args.slippage_bps} bps/side | "
           f"N={n_trials} trials\n")
     hdr = (f"{'strategy':<18}{'OOS CAGR':>10}{'OOS SR':>9}{'IS SR':>9}{'OOS DSR':>10}"
-           f"{'OOS MaxDD':>11}  {'beats B&H':>9}{'OOS ExpR':>9}{'Win%':>7}{'#T':>5}")
+           f"{'OOS MaxDD':>11}  {'beats B&H':>9}{'OOS ExpR':>9}{'SQN':>7}{'Win%':>7}{'#T':>5}")
     print("=" * len(hdr)); print(hdr); print("-" * len(hdr))
     for r in ok:
         beats = ""
@@ -196,10 +196,11 @@ def main() -> int:
         # always-in buy & hold = 1 degenerate trade) so the readout never misleads.
         lowN = r.get("ntr", 0) < 5
         expr = "—" if lowN else _fmt(r.get("exp_r"))
+        sqn = "—" if lowN else _fmt(r.get("sqn"))
         win = "—" if lowN else (f"{r['win']*100:.0f}%" if isinstance(r.get("win"), (int, float)) and r["win"] == r["win"] else "—")
         print(f"{r['name']:<18}{_fmt(r['oos_cagr'], True):>10}{_fmt(r['oos_sharpe']):>9}"
               f"{_fmt(r['is_sharpe']):>9}{_fmt(r['oos_dsr']):>9}{sig}{_fmt(r['oos_mdd'], True):>11}"
-              f"  {beats:>9}{expr:>9}{win:>7}{r.get('ntr',0):>5}")
+              f"  {beats:>9}{expr:>9}{sqn:>7}{win:>7}{r.get('ntr',0):>5}")
     print("=" * len(hdr))
     for r in bad:
         print(f"  (skipped {r['name']}: {r['err']})")

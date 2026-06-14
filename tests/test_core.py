@@ -744,6 +744,9 @@ def test_expectancy_report_segments_trades_and_R_math():
     assert abs(rep["win_rate"] - 0.5) < 1e-12
     assert abs(rep["expectancy_r"]) < 1e-9               # symmetric +R / -R → ~0
     assert rep["max_loss_streak"] == 1
+    assert abs(rep["sqn"]) < 1e-9                         # symmetric R → SQN ≈ 0
+    assert abs(rep["profit_factor"] - 1.0) < 1e-9        # equal gross win/loss R
+    assert "avg_mae_r" in rep and rep["avg_mae_r"] == rep["avg_mae_r"]  # finite
 
 
 def test_expectancy_buy_and_hold_is_one_degenerate_trade():
@@ -767,3 +770,15 @@ def test_percent_risk_size_bounded_and_inverse_to_atr():
     rel_atr = (features.atr(df, 20) / df["close"])
     common = sized.dropna().index.intersection(rel_atr.dropna().index)
     assert sized.reindex(common).corr(rel_atr.reindex(common)) < 0.0   # size ↓ as vol ↑
+
+
+def test_random_entry_deterministic_and_in_unit_band():
+    """Tharp random-entry control: seeded → reproducible; positions in {-1,0,+1}; a
+    different seed gives a different path (it is a genuine coin-flip baseline)."""
+    df = _make_ohlcv(n=300, seed=12)
+    a = strategies.random_entry(df, seed=7)
+    b = strategies.random_entry(df, seed=7)
+    pd.testing.assert_series_equal(a, b)                   # deterministic by seed
+    _assert_in_unit_band(a, "random_entry")
+    assert set(np.unique(a.dropna().to_numpy())).issubset({-1.0, 0.0, 1.0})
+    assert not a.equals(strategies.random_entry(df, seed=8))  # different seed → different path

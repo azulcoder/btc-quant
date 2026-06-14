@@ -764,11 +764,13 @@
     if (cur !== 0 && start !== null) runs.push([start, m - 1]);
     const out = [];
     for (const [a, b] of runs) {
-      let p = 1; for (let i = a; i <= b; i++) p *= 1 + ret[i];
+      let p = 1, mae = Infinity;                       // mae = min cumulative return (= Python cum.min())
+      for (let i = a; i <= b; i++) { p *= 1 + ret[i]; const c = p - 1; if (c < mae) mae = c; }
       const tr = p - 1, ew = Math.abs(traded[a]);
       const R = Number.isFinite(riskFrac[a]) ? ew * riskFrac[a] : NaN;
-      const rm = (Number.isFinite(R) && R > 0) ? tr / R : NaN;
-      out.push({ entry: a, exit: b, nBars: b - a + 1, tradeReturn: tr, R, rMultiple: rm });
+      const ok = Number.isFinite(R) && R > 0;
+      const rm = ok ? tr / R : NaN, maeR = ok ? mae / R : NaN;
+      out.push({ entry: a, exit: b, nBars: b - a + 1, tradeReturn: tr, R, rMultiple: rm, maeR });
     }
     return out;
   }
@@ -779,7 +781,7 @@
     const led = tradeLedger(positions, prices, vol, periodsPerYear, k);
     const rms = led.map((t) => t.rMultiple).filter(Number.isFinite);
     const n = rms.length;
-    const out = { nTrades: n, expectancyR: NaN, winRate: NaN, avgWinR: NaN, avgLossR: NaN, payoffRatio: NaN, maxLossStreak: 0 };
+    const out = { nTrades: n, expectancyR: NaN, winRate: NaN, avgWinR: NaN, avgLossR: NaN, payoffRatio: NaN, maxLossStreak: 0, sqn: NaN, profitFactor: NaN, avgMaeR: NaN };
     if (!n) return out;
     const wins = rms.filter((r) => r > 0), losses = rms.filter((r) => r < 0);
     out.expectancyR = mean(rms);
@@ -790,6 +792,12 @@
     let streak = 0, mx = 0;
     for (const r of rms) { streak = r < 0 ? streak + 1 : 0; mx = Math.max(mx, streak); }
     out.maxLossStreak = mx;
+    const sd = n > 1 ? std(rms, 1) : NaN;
+    out.sqn = (Number.isFinite(sd) && sd > 0) ? mean(rms) / sd * Math.sqrt(n) : NaN;
+    const grossLoss = -losses.reduce((a, b) => a + b, 0);
+    out.profitFactor = grossLoss > 0 ? wins.reduce((a, b) => a + b, 0) / grossLoss : NaN;
+    const maes = led.map((t) => t.maeR).filter(Number.isFinite);
+    out.avgMaeR = maes.length ? mean(maes) : NaN;
     return out;
   }
 

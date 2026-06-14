@@ -392,7 +392,7 @@
     const ex = oos && oos.expectancy ? oos.expectancy : null;
     if (ex && ex.nTrades >= 5) {
       setText('stat-tradequality',
-        `Expectancy ${num(ex.expectancyR)}R · win ${pct(ex.winRate, 0)} · payoff ${num(ex.payoffRatio)} · ${ex.nTrades} trades · max losing streak ${ex.maxLossStreak}. Tharp expectancy on the OOS ledger (R = notional 2σ risk, no hard stop) — evaluation, not a signal.`);
+        `Expectancy ${num(ex.expectancyR)}R · SQN ${num(ex.sqn)} · win ${pct(ex.winRate, 0)} · payoff ${num(ex.payoffRatio)} · avg MAE ${num(ex.avgMaeR)}R · ${ex.nTrades} trades · max losing streak ${ex.maxLossStreak}. Tharp expectancy/SQN on the OOS ledger (R = notional 2σ risk, no hard stop) — evaluation, not a signal; SQN is sample quality, not significance (PBO/MinBTL remain the gate).`);
     } else {
       setText('stat-tradequality',
         ex ? `Only ${ex.nTrades} OOS trade(s) — too few for a reliable expectancy (always-in / sparse). #trades shown; not scored.`

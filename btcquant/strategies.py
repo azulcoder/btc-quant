@@ -38,6 +38,7 @@ __all__ = [
     "ma_trend_filter",
     "vol_target",
     "percent_risk_size",
+    "random_entry",
     "tsmom",
     "carry",
     "pairs_coint",
@@ -253,6 +254,38 @@ def percent_risk_size(
     scale = (float(risk_pct) / stop_frac).clip(upper=max_leverage)
     scaled = (positions.reindex(scale.index) * scale).clip(-1.0, 1.0)
     return scaled.rename("percent_risk")
+
+
+def random_entry(df: pd.DataFrame, seed: int = 0, k_stop: float = 3.0, atr_window: int = 10) -> pd.Series:
+    """Tharp's **random-entry control** (RESEARCH-tharp-runlog.md): coin-flip the direction,
+    hold with a ``k_stop·ATR`` trailing stop, re-flip on a stop (always in the market). Tharp's
+    famous result is that entry is barely better than random once risk-management (trailing
+    stop + position sizing) is in place — so this is a **baseline/teaching control**, NOT a
+    strategy to believe; it should NOT clear the OOS deflated-Sharpe / PBO gate.
+
+    Seeded RNG → deterministic and reproducible. Causal: the position at bar ``t`` uses only
+    bar ``t``'s close + ATR (the backtester's shift-by-one then trades it at ``t+1``). Returns
+    ``±1`` (NaN/0 during the ATR warm-up). Reference: Tharp, Ch. 8 (the Basso/Tharp experiment).
+    """
+    close = _close(df)
+    atr = features.atr(df, window=atr_window)
+    c, a = close.to_numpy(dtype="float64"), atr.to_numpy(dtype="float64")
+    rng = np.random.default_rng(seed)
+    n = len(c)
+    pos = np.zeros(n, dtype="float64")
+    cur, stop = 0, float("nan")
+    for i in range(n):
+        if not np.isfinite(a[i]) or not np.isfinite(c[i]):
+            cur, stop = 0, float("nan")
+            continue
+        if cur == 0 or (cur > 0 and c[i] <= stop) or (cur < 0 and c[i] >= stop):
+            cur = 1 if rng.random() < 0.5 else -1          # (re-)enter on a coin flip
+            stop = c[i] - cur * k_stop * a[i]
+        else:                                              # trail the stop in the trade's favour
+            ns = c[i] - cur * k_stop * a[i]
+            stop = max(stop, ns) if cur > 0 else min(stop, ns)
+        pos[i] = cur
+    return pd.Series(pos, index=close.index, name="random_entry")
 
 
 # --------------------------------------------------------------------------- #

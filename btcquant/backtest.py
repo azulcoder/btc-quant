@@ -101,6 +101,13 @@ def run(
     ``= |position_t - position_{t-1}|`` at ``(cost_bps + slippage_bps) / 10_000``
     per unit of turnover, deducted from that bar's gross return.
 
+    Cost-model grounding (Harris, *Trading and Exchanges*): a **conservative constant
+    bps on turnover** is the honest choice for a daily/hourly OHLCV backtest. Estimating
+    the realized spread from the data and feeding it back as cost would be **look-ahead**
+    (you do not know the fill spread until you trade), and btc-quant stores no historical
+    quote/tick series to bound it. So we charge a fixed, deliberately-pessimistic bps and
+    flag the net-vs-gross gap rather than model a spread we cannot observe out-of-sample.
+
     Parameters
     ----------
     positions : pd.Series

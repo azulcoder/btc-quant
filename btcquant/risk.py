@@ -600,12 +600,16 @@ def trade_ledger(
 
     out = []
     for a, b in runs:
-        tr = float(np.prod(1.0 + ret[a : b + 1]) - 1.0)
+        cum = np.cumprod(1.0 + ret[a : b + 1]) - 1.0     # running trade return path
+        tr = float(cum[-1])
+        mae = float(cum.min())                            # max adverse excursion (≤ 0)
         ew = abs(float(traded[a]))
         R = ew * float(risk_frac[a]) if np.isfinite(risk_frac[a]) else float("nan")
-        rm = tr / R if (np.isfinite(R) and R > 0) else float("nan")
+        ok = np.isfinite(R) and R > 0
+        rm = tr / R if ok else float("nan")
+        mae_r = mae / R if ok else float("nan")           # MAE in R units (Sweeney/Tharp)
         out.append({"entry": a, "exit": b, "n_bars": b - a + 1,
-                    "trade_return": tr, "R": R, "r_multiple": rm})
+                    "trade_return": tr, "R": R, "r_multiple": rm, "mae_r": mae_r})
     return out
 
 
@@ -622,14 +626,18 @@ def expectancy_report(
     expectancy is curve-fit) and treat low ``n_trades`` as unreliable.
 
     Returns ``{n_trades, expectancy_r, win_rate, avg_win_r, avg_loss_r, payoff_ratio,
-    max_loss_streak}``.
+    max_loss_streak, sqn, profit_factor, avg_mae_r}`` where **SQN** = System Quality Number
+    ``mean(R)/std(R)·√n`` (Tharp; a sample-quality score, NOT significance — PBO/MinBTL remain
+    the gate), **profit_factor** = Σ winning-R / |Σ losing-R|, and **avg_mae_r** = mean max-adverse
+    excursion in R (how far trades typically went against entry).
     """
     led = trade_ledger(positions, prices, vol, periods_per_year, k)
     rms = [t["r_multiple"] for t in led if t["r_multiple"] == t["r_multiple"]]  # drop nan
     n = len(rms)
     out = {"n_trades": n, "expectancy_r": float("nan"), "win_rate": float("nan"),
            "avg_win_r": float("nan"), "avg_loss_r": float("nan"),
-           "payoff_ratio": float("nan"), "max_loss_streak": 0}
+           "payoff_ratio": float("nan"), "max_loss_streak": 0,
+           "sqn": float("nan"), "profit_factor": float("nan"), "avg_mae_r": float("nan")}
     if n == 0:
         return out
     arr = np.array(rms, dtype="float64")
@@ -644,4 +652,10 @@ def expectancy_report(
         streak = streak + 1 if r < 0 else 0
         mx = max(mx, streak)
     out["max_loss_streak"] = int(mx)
+    sd = float(arr.std(ddof=1)) if n > 1 else float("nan")
+    out["sqn"] = float(arr.mean() / sd * math.sqrt(n)) if (sd == sd and sd > 0) else float("nan")
+    gross_loss = float(-losses.sum())
+    out["profit_factor"] = float(wins.sum() / gross_loss) if gross_loss > 0 else float("nan")
+    maes = [t["mae_r"] for t in led if t["mae_r"] == t["mae_r"]]
+    out["avg_mae_r"] = float(np.mean(maes)) if maes else float("nan")
     return out
