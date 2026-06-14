@@ -30,7 +30,7 @@ import pandas as pd
 
 from . import features, risk
 
-__all__ = ["run", "walk_forward"]
+__all__ = ["run", "walk_forward", "cpcv"]
 
 
 # --------------------------------------------------------------------------- #
@@ -364,4 +364,87 @@ def walk_forward(
         "folds": folds,
         "oos_equity": oos_equity,
         "oos_returns": oos_returns,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Combinatorial Purged CV (multi-path OOS dispersion)                          #
+# --------------------------------------------------------------------------- #
+def cpcv(
+    make_positions: Callable[[pd.Series], pd.Series],
+    prices: pd.Series,
+    n_blocks: int = 6,
+    k_test: int = 2,
+    embargo: float = 0.01,
+    cost_bps: float = 10.0,
+    slippage_bps: float = 2.0,
+    periods_per_year: int = 365,
+) -> dict:
+    """Combinatorial Purged CV — the *distribution* of OOS Sharpe across time-block
+    subsets (López de Prado 2018; RESEARCH.md §3/§5: "report multi-path dispersion as
+    the headline, not the single best equity curve").
+
+    Split the bars into ``n_blocks`` contiguous groups; for each of the
+    ``C(n_blocks, k_test)`` ways to pick ``k_test`` groups as the test set, evaluate
+    the strategy on **only those** bars (with a leading ``embargo`` trimmed from each
+    test group to purge signal leakage from the preceding bar), giving one OOS path
+    Sharpe. The spread of those paths is the honest headline: a strategy whose edge
+    lives in one regime shows a wide, often sign-flipping dispersion.
+
+    These strategies are causal and parameter-free, so there is no per-fold *refit*;
+    CPCV here measures **regime sensitivity** of the same position rule across
+    different held-out time subsets. Returns annualized Sharpe statistics over the
+    paths::
+
+        {paths, n_paths, median_sharpe, mean_sharpe, p25, p75, iqr, min, max}
+
+    Reference: López de Prado (2018), *Advances in Financial Machine Learning*, ch. 7
+    (purged CV / embargo) & ch. 12 (CPCV).
+    """
+    import itertools
+
+    nan_out = {"paths": [], "n_paths": 0, "median_sharpe": float("nan"),
+               "mean_sharpe": float("nan"), "p25": float("nan"), "p75": float("nan"),
+               "iqr": float("nan"), "min": float("nan"), "max": float("nan")}
+    px = pd.Series(prices, dtype="float64")
+    px = px[~px.index.duplicated(keep="first")].sort_index().dropna()
+    n = len(px)
+    if n_blocks < 2 or k_test < 1 or k_test >= n_blocks or n < (n_blocks + 1) * 2:
+        return nan_out
+
+    full_pos = pd.Series(make_positions(px), dtype="float64").reindex(px.index)
+    res = run(full_pos, px, cost_bps=cost_bps, slippage_bps=slippage_bps,
+              periods_per_year=periods_per_year)
+    rets = res["returns"]
+
+    edges = np.linspace(0, n, n_blocks + 1, dtype=int)
+    blocks = [np.arange(edges[i], edges[i + 1]) for i in range(n_blocks)]
+    blocks = [b for b in blocks if b.size > 0]
+    if len(blocks) < 2:
+        return nan_out
+
+    paths: list[float] = []
+    for combo in itertools.combinations(range(len(blocks)), k_test):
+        parts = []
+        for bi in combo:
+            blk = blocks[bi]
+            drop = min(blk.size - 1, max(1, int(round(embargo * blk.size)))) if blk.size > 1 else 0
+            parts.append(blk[drop:])
+        idx = np.concatenate(parts) if parts else np.array([], dtype=int)
+        if idx.size < 2:
+            continue
+        path_ret = rets.iloc[idx]
+        paths.append(risk.sharpe(path_ret, periods_per_year=periods_per_year))
+
+    arr = np.array([p for p in paths if np.isfinite(p)], dtype=float)
+    if arr.size == 0:
+        return nan_out
+    p25, p75 = (float(np.percentile(arr, 25)), float(np.percentile(arr, 75)))
+    return {
+        "paths": [float(p) for p in paths],
+        "n_paths": int(arr.size),
+        "median_sharpe": float(np.median(arr)),
+        "mean_sharpe": float(np.mean(arr)),
+        "p25": p25, "p75": p75, "iqr": float(p75 - p25),
+        "min": float(np.min(arr)), "max": float(np.max(arr)),
     }

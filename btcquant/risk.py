@@ -362,6 +362,113 @@ def deflated_sharpe_ratio(
     return probabilistic_sharpe_ratio(sr, n, skew, kurt, sr_benchmark=sr0)
 
 
+def min_backtest_length(n_trials: int) -> float:
+    """Minimum Backtest Length (years) — Bailey, Borwein, López de Prado & Zhu (2014).
+
+    Below this many years of data, selecting the best of ``N`` skill-less trials
+    yields an in-sample Sharpe whose *out-of-sample* expectation is ~0 — i.e. the
+    backtest is too short for the number of configurations tried::
+
+        MinBTL (yrs) ≈ 2 · ln(N) / E[max_N]
+
+    where ``E[max_N]`` is the expected maximum Sharpe of ``N`` standard-normal
+    (zero-skill) trials, using the same Bailey-LdP closed form as the Deflated
+    Sharpe. This is the brief's stated form (RESEARCH.md §3) — an order-of-magnitude
+    guide, not a hard threshold. Correlated parameter sweeps inflate the *effective*
+    ``N``, so treat the strategy count as a lower bound on trials.
+
+    Returns the minimum length in **years** (annualized-Sharpe convention); ``nan``
+    for ``N < 2``.
+
+    Reference: Bailey et al. (2014), "Pseudo-Mathematics and Financial Charlatanism",
+    *Notices of the AMS* 61(5):458-471; SSRN 2308659.
+    """
+    if n_trials is None or n_trials < 2:
+        return float("nan")
+    gamma = 0.5772156649015329
+    z1 = stats.norm.ppf(1.0 - 1.0 / n_trials)
+    z2 = stats.norm.ppf(1.0 - 1.0 / (n_trials * math.e))
+    expected_max = (1.0 - gamma) * z1 + gamma * z2
+    if expected_max <= 0 or np.isnan(expected_max):
+        return float("nan")
+    return float(2.0 * math.log(n_trials) / expected_max)
+
+
+def probability_of_backtest_overfitting(returns_matrix, n_blocks: int = 8) -> dict:
+    """Probability of Backtest Overfitting (PBO) via CSCV — Bailey-Borwein-LdP-Zhu (2017).
+
+    Given a ``T × N`` matrix of per-bar returns (rows = aligned time, columns =
+    the ``N`` strategies/trials the leaderboard chose among), split the rows into
+    ``S`` contiguous blocks and, over **every** way to use half the blocks as
+    in-sample (``C(S, S/2)`` combinations), pick the IS-best strategy and check
+    where it ranks out-of-sample. ``PBO`` is the fraction of splits where the
+    IS-best strategy lands **below the OOS median** — i.e. how often "keep the
+    backtest winner" would have picked an OOS underperformer.
+
+    ``PBO`` near 0 ⇒ the leaderboard's selection is robust; ``PBO > ~0.5`` ⇒ the
+    ranking is essentially noise (you are overfitting by picking the best of N).
+
+    Parameters
+    ----------
+    returns_matrix : array-like, shape (T, N)
+        Per-bar returns, columns = strategies. Use the OOS (walk-forward) returns
+        so PBO measures cross-strategy *selection* overfit on held-out data.
+    n_blocks : int, default 8
+        Number ``S`` of contiguous CSCV blocks (forced even). ``C(S, S/2)`` splits.
+
+    Returns
+    -------
+    dict
+        ``{pbo, n_combos, n_strategies, n_blocks}``; ``pbo`` is ``nan`` if there
+        are fewer than 2 strategies or too few rows to block.
+
+    Reference: Bailey, Borwein, López de Prado & Zhu (2017), "The Probability of
+    Backtest Overfitting", *J. Computational Finance* 20(4); SSRN 2326253.
+    """
+    import itertools
+
+    nan_out = {"pbo": float("nan"), "n_combos": 0, "n_strategies": 0, "n_blocks": 0}
+    M = np.asarray(returns_matrix, dtype=float)
+    if M.ndim != 2 or M.shape[1] < 2:
+        return nan_out
+    T, N = M.shape
+    S = n_blocks if n_blocks % 2 == 0 else n_blocks - 1
+    S = max(2, min(S, T))
+    edges = np.linspace(0, T, S + 1, dtype=int)
+    blocks = [np.arange(edges[i], edges[i + 1]) for i in range(S)]
+    blocks = [b for b in blocks if b.size > 0]
+    S = len(blocks)
+    if S < 2:
+        return nan_out
+    half = S // 2
+
+    def _block_sharpe(idx: np.ndarray, col: int) -> float:
+        r = M[idx, col]
+        r = r[np.isfinite(r)]
+        if r.size < 2:
+            return 0.0
+        sd = r.std(ddof=1)
+        return float(r.mean() / sd) if sd > 0 else 0.0
+
+    below = 0
+    total = 0
+    for is_combo in itertools.combinations(range(S), half):
+        is_set = set(is_combo)
+        is_idx = np.concatenate([blocks[i] for i in is_combo])
+        oos_idx = np.concatenate([blocks[i] for i in range(S) if i not in is_set])
+        is_sr = [_block_sharpe(is_idx, c) for c in range(N)]
+        oos_sr = [_block_sharpe(oos_idx, c) for c in range(N)]
+        best = int(np.argmax(is_sr))
+        oos_best = oos_sr[best]
+        # Relative OOS rank of the IS-best (fraction of strategies it beats OOS).
+        rank = float(np.mean([1.0 if oos_best > v else 0.0 for v in oos_sr]))
+        if rank < 0.5:                       # below the OOS median ⇒ an overfit pick
+            below += 1
+        total += 1
+    return {"pbo": below / total if total else float("nan"),
+            "n_combos": total, "n_strategies": N, "n_blocks": S}
+
+
 # --------------------------------------------------------------------------- #
 # Bundle                                                                       #
 # --------------------------------------------------------------------------- #

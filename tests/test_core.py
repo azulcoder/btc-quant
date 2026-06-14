@@ -534,3 +534,62 @@ def test_option_chain_degrades_on_network_failure(monkeypatch, tmp_path):
     # Stale cache reload reproduces the parsed snapshot (same contract count).
     assert len(stale) == len(fresh)
     assert (stale["expiry"].dt.hour == 8).all()
+
+
+# --------------------------------------------------------------------------- #
+# OOS validation harness — walk-forward, PBO (CSCV), MinBTL, CPCV               #
+# (RESEARCH.md §3: the selection-bias / overfitting machinery)                 #
+# --------------------------------------------------------------------------- #
+def test_min_backtest_length_monotone_and_guards():
+    """MinBTL is NaN for N<2, finite for N>=2, and strictly increases with N
+    (more trials searched -> longer history needed to trust the winner)."""
+    assert math.isnan(risk.min_backtest_length(1))
+    vals = [risk.min_backtest_length(n) for n in (2, 5, 20, 100, 500)]
+    assert all(math.isfinite(v) and v > 0 for v in vals)
+    assert vals == sorted(vals) and len(set(vals)) == len(vals)  # strictly increasing
+
+
+def test_pbo_noise_is_near_half_and_real_edge_is_low():
+    """CSCV PBO ~ 0.5 when columns are pure noise (selection is a coin flip),
+    and low when one column carries a persistent edge present in every split."""
+    rng = np.random.default_rng(7)
+    noise = rng.normal(0.0, 0.01, size=(800, 6))
+    pbo_noise = risk.probability_of_backtest_overfitting(noise, n_blocks=8)
+    assert pbo_noise["n_combos"] == math.comb(8, 4)          # C(S, S/2)
+    assert 0.0 <= pbo_noise["pbo"] <= 1.0
+    assert abs(pbo_noise["pbo"] - 0.5) < 0.2                 # no real winner -> ~half
+
+    edged = noise.copy()
+    edged[:, 0] += 0.003                                     # a persistent winner
+    pbo_edge = risk.probability_of_backtest_overfitting(edged, n_blocks=8)
+    assert pbo_edge["pbo"] < pbo_noise["pbo"]                # robust selection
+    assert pbo_edge["pbo"] < 0.2
+
+    # Degenerate input (single strategy) -> NaN, never a crash.
+    assert math.isnan(risk.probability_of_backtest_overfitting(noise[:, :1])["pbo"])
+
+
+def test_walk_forward_is_out_of_sample_and_folds_are_trials():
+    """walk_forward returns IS/OOS bundles, treats each fold as a trial for the OOS
+    Deflated Sharpe, and routes OOS through backtest.run (so no-look-ahead holds)."""
+    px = _make_prices(n=900, seed=11)
+    make_pos = lambda p: (p > p.rolling(50).mean()).astype(float)
+    wf = backtest.walk_forward(make_pos, px, n_splits=5)
+    assert set(("oos", "is_", "folds", "oos_equity", "oos_returns")) <= set(wf)
+    assert len(wf["folds"]) == 5
+    assert len(wf["oos_returns"]) > 0
+    assert wf["oos"]["n_trials"] == 5                        # folds-as-trials
+    assert 0.0 <= wf["oos"]["deflated_sharpe"] <= 1.0
+    # OOS window is strictly later than the first in-sample bar (held out, not refit).
+    assert wf["oos_returns"].index[0] > px.index[0]
+
+
+def test_cpcv_multipath_dispersion():
+    """CPCV yields C(n_blocks, k_test) OOS paths with a finite dispersion and a
+    non-negative IQR — the multi-path headline, not a single curve."""
+    px = _make_prices(n=900, seed=3)
+    make_pos = lambda p: (p > p.rolling(30).mean()).astype(float)
+    cp = backtest.cpcv(make_pos, px, n_blocks=6, k_test=2)
+    assert cp["n_paths"] == math.comb(6, 2)                  # 15 paths
+    assert math.isfinite(cp["median_sharpe"]) and cp["iqr"] >= 0.0
+    assert cp["min"] <= cp["median_sharpe"] <= cp["max"]

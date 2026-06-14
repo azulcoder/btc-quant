@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
-"""Strategy leaderboard — run every strategy on the same BTC data and rank them
-by Deflated Sharpe, net of cost, against the buy-and-hold baseline.
+"""Strategy leaderboard — every strategy on the same BTC data, ranked by the
+**out-of-sample** Deflated Sharpe (walk-forward), net of cost, vs buy-and-hold.
 
-This is the honest centrepiece: the Deflated Sharpe is benchmarked against the
-expected max Sharpe of N skill-less trials (Bailey & Lopez de Prado 2014), where
-N is the number of strategies compared here — so trying many strategies and
-keeping the best is penalised exactly as it should be. Most strategies do NOT
-beat buy-and-hold after costs + deflation; that is the point.
+This is the honest centrepiece. The ranking is NOT the in-sample fit: each strategy
+is evaluated walk-forward (fit on each in-sample block, traded on the *next*
+out-of-sample block), and the headline Deflated Sharpe is computed on the
+concatenated OOS returns, deflated for the number of strategies searched (Bailey &
+López de Prado 2014). Two selection-overfit guards are reported alongside:
+
+  * PBO (Probability of Backtest Overfitting, CSCV) — how often "keep the backtest
+    winner" would have picked an OOS underperformer. >~0.5 ⇒ the ranking is noise.
+  * MinBTL (Minimum Backtest Length) — flags when the history is too short for the
+    number of configurations tried.
+
+Most strategies do NOT clear OOS DSR 0.95 and many do not beat buy-and-hold net of
+cost out-of-sample; that is the point.
 
 Research / backtest only. Not financial advice. No keys, no orders.
 
 Usage:
     python3 scripts/compare.py --start 2018-01-01
-    python3 scripts/compare.py --granularity 1h --start 2025-01-01 --cost-bps 5
+    python3 scripts/compare.py --granularity 1h --start 2025-01-01 --folds 6
 """
 from __future__ import annotations
 
@@ -24,7 +32,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from btcquant import backtest, data, strategies  # noqa: E402
+from btcquant import backtest, data, risk, strategies  # noqa: E402
 
 
 def _ppy(granularity: str) -> int:
@@ -41,42 +49,38 @@ def _fmt(v: object, pct: bool = False, dp: int = 2) -> str:
     return f"{f * 100:.{dp}f}%" if pct else f"{f:.{dp}f}"
 
 
-def _build(name: str, df: pd.DataFrame, args: argparse.Namespace, ppy: int):
-    """Return (positions, prices) for a strategy, fetching extra data as needed."""
-    close = df["close"]
+# Spot, walk-forward-able directional strategies (the OOS leaderboard). `carry` is
+# perp-funding-indexed (8h), not daily spot, and our keyless funding history is far
+# too short for an honest OOS — it is reported descriptively below, not ranked.
+SPOT_STRATS = ["buy_and_hold", "ma_trend_filter", "tsmom", "tsmom_ls", "pairs_coint"]
+
+
+def _make_positions_fn(name: str, args: argparse.Namespace, ppy: int, eth_close):
+    """Return a ``prices -> positions`` builder for walk_forward/cpcv."""
     if name == "buy_and_hold":
-        return strategies.buy_and_hold(df), close
+        return lambda px: strategies.buy_and_hold(pd.DataFrame({"close": px}))
     if name == "ma_trend_filter":
-        return strategies.ma_trend_filter(df, n=args.ma_n, fast=args.ma_fast), close
+        return lambda px: strategies.ma_trend_filter(pd.DataFrame({"close": px}),
+                                                     n=args.ma_n, fast=args.ma_fast)
     if name == "tsmom":
-        return strategies.tsmom(df, lookback=args.lookback, vol_scaled=True,
-                                long_short=False, target_vol=args.target_vol,
-                                periods_per_year=ppy), close
+        return lambda px: strategies.tsmom(pd.DataFrame({"close": px}), lookback=args.lookback,
+                                           vol_scaled=True, long_short=False,
+                                           target_vol=args.target_vol, periods_per_year=ppy)
     if name == "tsmom_ls":
-        return strategies.tsmom(df, lookback=args.lookback, vol_scaled=True,
-                                long_short=True, target_vol=args.target_vol,
-                                periods_per_year=ppy), close
+        return lambda px: strategies.tsmom(pd.DataFrame({"close": px}), lookback=args.lookback,
+                                           vol_scaled=True, long_short=True,
+                                           target_vol=args.target_vol, periods_per_year=ppy)
     if name == "pairs_coint":
-        eth = data.get_ohlcv(symbol=args.eth_symbol, source=args.source,
-                             granularity=args.granularity, start=args.start,
-                             end=args.end, cache=not args.no_cache)
-        return strategies.pairs_coint(df["close"], eth["close"]), close
-    if name == "carry":
-        funding = data.get_funding(symbol=args.funding_symbol, source="bybit",
-                                   cache=not args.no_cache)
-        pos = strategies.carry(funding)
-        px = close.reindex(funding.index).ffill().bfill().dropna()
-        return pos.reindex(px.index), px
+        if eth_close is None:
+            raise ValueError("no ETH data for pairs")
+        return lambda px: strategies.pairs_coint(px, eth_close.reindex(px.index).ffill().bfill())
     raise ValueError(name)
-
-
-STRATS = ["buy_and_hold", "ma_trend_filter", "tsmom", "tsmom_ls", "pairs_coint", "carry"]
 
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Leaderboard: every strategy on the same data, ranked by Deflated Sharpe "
-                    "vs buy-and-hold. Research only — no keys, no orders.",
+        description="OOS leaderboard: every strategy walk-forward-validated on the same data, "
+                    "ranked by out-of-sample Deflated Sharpe vs buy-and-hold. Research only.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--symbol", default="BTC-USD")
@@ -89,6 +93,7 @@ def main() -> int:
     p.add_argument("--no-cache", action="store_true")
     p.add_argument("--cost-bps", type=float, default=10.0)
     p.add_argument("--slippage-bps", type=float, default=2.0)
+    p.add_argument("--folds", type=int, default=5, help="walk-forward OOS folds")
     p.add_argument("--ma-n", type=int, default=200)
     p.add_argument("--ma-fast", type=int, default=50)
     p.add_argument("--lookback", type=int, default=20)
@@ -96,55 +101,103 @@ def main() -> int:
     args = p.parse_args()
 
     ppy = _ppy(args.granularity)
-    df = data.get_ohlcv(symbol=args.symbol, source=args.source,
-                        granularity=args.granularity, start=args.start,
-                        end=args.end, cache=not args.no_cache)
-    n_trials = len(STRATS)  # honest deflation: we are comparing this many strategies
+    df = data.get_ohlcv(symbol=args.symbol, source=args.source, granularity=args.granularity,
+                        start=args.start, end=args.end, cache=not args.no_cache)
+    close = df["close"]
+    try:
+        eth_close = data.get_ohlcv(symbol=args.eth_symbol, source=args.source,
+                                   granularity=args.granularity, start=args.start,
+                                   end=args.end, cache=not args.no_cache)["close"]
+    except Exception:  # noqa: BLE001
+        eth_close = None
 
-    rows, bh_sharpe = [], float("nan")
-    for name in STRATS:
+    n_trials = len(SPOT_STRATS)   # selection-count deflation (best of this many)
+    rows, oos_by_name, bh_oos_sharpe = [], {}, float("nan")
+    for name in SPOT_STRATS:
         try:
-            pos, px = _build(name, df, args, ppy)
-            res = backtest.run(pos, px, cost_bps=args.cost_bps,
-                               slippage_bps=args.slippage_bps,
-                               periods_per_year=ppy, n_trials=n_trials)
-            s = res["stats"]
-            rows.append({
-                "name": name, "cagr": s.get("cagr"), "sharpe": s.get("sharpe"),
-                "dsr": s.get("deflated_sharpe"), "mdd": s.get("max_drawdown"),
-                "trades": s.get("trades"),
-            })
+            wf = backtest.walk_forward(_make_positions_fn(name, args, ppy, eth_close), close,
+                                       n_splits=args.folds, cost_bps=args.cost_bps,
+                                       slippage_bps=args.slippage_bps, periods_per_year=ppy)
+            oos, is_ = wf["oos"], wf["is_"]
+            oos_by_name[name] = wf["oos_returns"]
+            # OOS DSR deflated for N strategies (mirrors the selection-count deflation),
+            # computed on the held-out OOS returns rather than the in-sample fit.
+            np_ = int(oos.get("n_periods", 0))
+            oos_dsr = risk.deflated_sharpe_ratio(
+                oos.get("sharpe_per_period", float("nan")), np_,
+                oos.get("skew", float("nan")), oos.get("kurtosis", float("nan")),
+                n_trials, 1.0 / np_ if np_ > 0 else float("nan"))
+            rows.append({"name": name, "oos_cagr": oos.get("cagr"), "oos_sharpe": oos.get("sharpe"),
+                         "is_sharpe": is_.get("sharpe", float("nan")), "oos_dsr": oos_dsr,
+                         "oos_mdd": oos.get("max_drawdown")})
             if name == "buy_and_hold":
-                bh_sharpe = float(s.get("sharpe", float("nan")))
-        except Exception as exc:  # noqa: BLE001  — skip a strategy whose data is unavailable
+                bh_oos_sharpe = float(oos.get("sharpe", float("nan")))
+        except Exception as exc:  # noqa: BLE001
             rows.append({"name": name, "err": str(exc)[:60]})
 
     ok = [r for r in rows if "err" not in r]
-    ok.sort(key=lambda r: (r["dsr"] if isinstance(r["dsr"], (int, float))
-                           and not math.isnan(float(r["dsr"])) else -9e9), reverse=True)
+    ok.sort(key=lambda r: (r["oos_dsr"] if isinstance(r["oos_dsr"], (int, float))
+                           and not math.isnan(float(r["oos_dsr"])) else -9e9), reverse=True)
     bad = [r for r in rows if "err" in r]
 
-    bars = len(df)
-    span = f"{df.index[0].date()} -> {df.index[-1].date()}"
-    print(f"\nbtc-quant leaderboard | {args.symbol} {args.granularity} | {span} | {bars} bars | "
-          f"cost {args.cost_bps}+{args.slippage_bps} bps/side | N={n_trials} trials\n")
-    hdr = f"{'strategy':<18}{'CAGR':>9}{'Sharpe':>9}{'DeflSR':>9}{'MaxDD':>9}{'Trades':>8}  {'beatsB&H':>8}"
+    # PBO across the OOS-returns matrix (cross-strategy selection overfit).
+    pbo = {"pbo": float("nan"), "n_combos": 0}
+    if len(oos_by_name) >= 2:
+        mat = pd.concat(oos_by_name, axis=1).dropna()
+        if mat.shape[0] > 8 and mat.shape[1] >= 2:
+            pbo = risk.probability_of_backtest_overfitting(mat.to_numpy(), n_blocks=8)
+
+    years = (close.index[-1] - close.index[0]).days / 365.25
+    minbtl = risk.min_backtest_length(n_trials)
+
+    bars, span = len(df), f"{df.index[0].date()} -> {df.index[-1].date()}"
+    print(f"\nbtc-quant OOS leaderboard | {args.symbol} {args.granularity} | {span} | {bars} bars | "
+          f"{args.folds} walk-forward folds | cost {args.cost_bps}+{args.slippage_bps} bps/side | "
+          f"N={n_trials} trials\n")
+    hdr = (f"{'strategy':<18}{'OOS CAGR':>10}{'OOS SR':>9}{'IS SR':>9}{'OOS DSR':>10}"
+           f"{'OOS MaxDD':>11}  {'beats B&H':>9}")
     print("=" * len(hdr)); print(hdr); print("-" * len(hdr))
     for r in ok:
         beats = ""
-        if r["name"] != "buy_and_hold" and isinstance(r["sharpe"], (int, float)):
-            beats = "yes" if float(r["sharpe"]) > bh_sharpe else "no"
+        if r["name"] != "buy_and_hold" and isinstance(r["oos_sharpe"], (int, float)):
+            beats = "yes" if float(r["oos_sharpe"]) > bh_oos_sharpe else "no"
         tag = "  (baseline)" if r["name"] == "buy_and_hold" else ""
-        sig = "*" if isinstance(r["dsr"], (int, float)) and float(r["dsr"]) > 0.95 else " "
-        print(f"{r['name']:<18}{_fmt(r['cagr'], True):>9}{_fmt(r['sharpe']):>9}"
-              f"{_fmt(r['dsr']):>8}{sig}{_fmt(r['mdd'], True):>9}{str(r['trades']):>8}  {beats:>8}{tag}")
+        sig = "*" if isinstance(r["oos_dsr"], (int, float)) and float(r["oos_dsr"]) > 0.95 else " "
+        print(f"{r['name']:<18}{_fmt(r['oos_cagr'], True):>10}{_fmt(r['oos_sharpe']):>9}"
+              f"{_fmt(r['is_sharpe']):>9}{_fmt(r['oos_dsr']):>9}{sig}{_fmt(r['oos_mdd'], True):>11}"
+              f"  {beats:>9}{tag}")
     print("=" * len(hdr))
     for r in bad:
         print(f"  (skipped {r['name']}: {r['err']})")
-    print("\n* Deflated Sharpe > 0.95 = distinguishable from luck after deflating for N trials")
-    print("  (Bailey & Lopez de Prado 2014). Most strategies do NOT clear it, and many do not")
-    print("  beat buy-and-hold net of cost — that is the honest result, not a bug.")
-    print("  NOT FINANCIAL ADVICE - backtest != forecast. Edges decay.\n")
+
+    # Selection-overfit guards.
+    print(f"\nPBO (selection overfit, CSCV {pbo.get('n_combos', 0)} splits): "
+          f"{_fmt(pbo.get('pbo'))}   "
+          f"[>0.50 ⇒ the ranking is essentially noise]")
+    short = isinstance(minbtl, float) and not math.isnan(minbtl) and years < minbtl
+    print(f"MinBTL for N={n_trials}: {_fmt(minbtl)} yrs vs {years:.1f} yrs of data"
+          + ("   ⚠ UNDER-POWERED: history shorter than MinBTL" if short else "   (ok)"))
+
+    # Carry: perp-funding, OOS-insufficient — descriptive only.
+    try:
+        funding = data.get_funding(symbol=args.funding_symbol, source="bybit",
+                                   cache=not args.no_cache)
+        cpx = close.reindex(funding.index).ffill().bfill().dropna()
+        cpos = strategies.carry(funding).reindex(cpx.index)
+        cres = backtest.run(cpos, cpx, cost_bps=args.cost_bps, slippage_bps=args.slippage_bps,
+                            periods_per_year=ppy, n_trials=n_trials)
+        cs = cres["stats"]
+        print(f"\ncarry (perp, descriptive — OOS n/a): in-sample Sharpe {_fmt(cs.get('sharpe'))}, "
+              f"CAGR {_fmt(cs.get('cagr'), True)} over {len(funding)} funding intervals "
+              f"(< MinBTL — not OOS-rankable on keyless history).")
+    except Exception as exc:  # noqa: BLE001
+        print(f"\ncarry: descriptive feed unavailable ({str(exc)[:50]}).")
+
+    print("\n* OOS Deflated Sharpe > 0.95 = distinguishable from luck after deflating for N trials,")
+    print("  measured on WALK-FORWARD out-of-sample returns (Bailey & López de Prado 2014). The")
+    print("  IS→OOS Sharpe drop is the overfitting tell; PBO and MinBTL guard the *selection*.")
+    print("  Most strategies clear neither, and many do not beat buy-and-hold net of cost OOS —")
+    print("  that is the honest result, not a bug. NOT FINANCIAL ADVICE - backtest != forecast.\n")
     return 0
 
 

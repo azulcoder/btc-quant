@@ -96,6 +96,9 @@ def _build_parser() -> argparse.ArgumentParser:
     # Cost model (ON by default — the honesty rail).
     parser.add_argument("--cost-bps", type=float, default=10.0, help="One-way fee (bps).")
     parser.add_argument("--slippage-bps", type=float, default=2.0, help="One-way slippage (bps).")
+    parser.add_argument("--walk", action="store_true",
+                        help="Also run anchored walk-forward and report OOS vs in-sample.")
+    parser.add_argument("--folds", type=int, default=5, help="Walk-forward OOS folds (with --walk).")
 
     # Deflated-Sharpe selection bias.
     parser.add_argument(
@@ -326,6 +329,28 @@ def main(argv: list[str] | None = None) -> int:
         f"| {start.date()} -> {end.date()} | {len(prices)} bars\n"
     )
     _print_stats_table(args.strategy, result["stats"], bh_result["stats"])
+
+    # --- Walk-forward OOS (the honest out-of-sample view) --------------------- #
+    if args.walk:
+        try:
+            make_pos = lambda px: _build_positions(args, pd.DataFrame({"close": px}), ppy)[0]
+            wf = backtest.walk_forward(make_pos, prices, n_splits=args.folds,
+                                       cost_bps=args.cost_bps, slippage_bps=args.slippage_bps,
+                                       periods_per_year=ppy)
+            oos, is_ = wf["oos"], wf["is_"]
+            print(f"\nwalk-forward ({args.folds} folds) — the IS→OOS drop is the overfitting tell:")
+            print(f"  in-sample  Sharpe {is_.get('sharpe', float('nan')):.2f}")
+            print(f"  OUT-OF-SAMPLE Sharpe {oos.get('sharpe', float('nan')):.2f} | "
+                  f"OOS Deflated Sharpe {oos.get('deflated_sharpe', float('nan')):.2f} "
+                  f"(folds as trials){' *' if oos.get('deflated_sharpe', 0) > 0.95 else ''}")
+            cp = backtest.cpcv(make_pos, prices, periods_per_year=ppy)
+            if cp["n_paths"]:
+                print(f"  CPCV multi-path OOS Sharpe: median {cp['median_sharpe']:.2f} "
+                      f"[p25 {cp['p25']:.2f}, p75 {cp['p75']:.2f}] over {cp['n_paths']} paths "
+                      f"— wide/sign-flipping dispersion ⇒ regime-dependent, not a stable edge.")
+        except Exception as exc:  # noqa: BLE001
+            print(f"\nwalk-forward unavailable for {args.strategy!r} "
+                  f"(use scripts/compare.py for the OOS leaderboard): {str(exc)[:70]}")
 
     # --- Outputs: tearsheet PNG + dashboard JSON ------------------------------ #
     outdir = Path(args.outdir)
