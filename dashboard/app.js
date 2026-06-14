@@ -463,16 +463,16 @@
       { values: bt.equity, color: 'var(--c1)', label: 'Strategy (net)' },
     ], { height: 240, baseline: 1, fmt: (v) => v.toFixed(2) + 'x' });
 
-    C.drawdownArea($('chart-drawdown'), Q.drawdownSeries(bt.equity), { height: 150, dates: o.time });
+    C.drawdownArea($('chart-drawdown'), Q.drawdownSeries(bt.equity), { height: 240, dates: o.time });
 
-    C.histogram($('chart-hist'), bt.returns.filter((r) => r !== 0), { height: 170, bins: 35 });
+    C.histogram($('chart-hist'), bt.returns.filter((r) => r !== 0), { height: 190, bins: 35 });
 
     const rollVol = Q.realizedVol(bt.returns, 30, p);
     const rollSharpe = Q.rollingSharpe(bt.returns, 90, p);
     C.rollingChart($('chart-rolling'), [
       { values: rollVol, color: 'var(--down)', label: `Rolling vol (30 ${bars}, ann.)` },
       { values: rollSharpe, color: 'var(--c1)', label: `Rolling Sharpe (90 ${bars})` },
-    ], { height: 180 });
+    ], { height: 190 });
   }
 
   function renderFunding() {

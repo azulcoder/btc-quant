@@ -197,7 +197,8 @@
     <!-- Headline honesty stats -->
     <section class="panel wide" id="panel-performance" data-panel-title="Performance — net of cost vs buy-and-hold">
       <h2>Performance — net of cost, vs buy-and-hold (the headline is the walk-forward out-of-sample deflated Sharpe, not the curve)</h2>
-      <div class="stats-grid">
+      <!-- Descriptive full-history stats (5×2, even rows). -->
+      <div class="stats-grid stats-perf">
         <div class="stat"><span class="k">CAGR (net)</span><span class="v" id="stat-net-cagr">—</span><span class="vs">B&amp;H <span id="stat-bh-cagr">—</span></span></div>
         <div class="stat"><span class="k">Sharpe (net)</span><span class="v" id="stat-sharpe">—</span><span class="vs">B&amp;H <span id="stat-bh-sharpe">—</span> · gross <span id="stat-gross-sharpe">—</span></span></div>
         <div class="stat"><span class="k">Sortino</span><span class="v" id="stat-sortino">—</span></div>
@@ -208,6 +209,9 @@
         <div class="stat"><span class="k">Trades</span><span class="v" id="stat-trades">—</span></div>
         <div class="stat"><span class="k">Skew</span><span class="v" id="stat-skew">—</span></div>
         <div class="stat"><span class="k">Kurtosis</span><span class="v" id="stat-kurt">—</span></div>
+      </div>
+      <!-- Out-of-sample significance row (the headline metrics, elevated). -->
+      <div class="stats-grid stats-oos">
         <div class="stat"><span class="k">Sharpe (IS)</span><span class="v" id="stat-sr-is">—</span></div>
         <div class="stat"><span class="k">Sharpe (OOS)</span><span class="v" id="stat-sr-oos">—</span></div>
         <div class="stat headline"><span class="k">Probabilistic Sharpe (OOS)</span><span class="v" id="stat-psr">—</span></div>
