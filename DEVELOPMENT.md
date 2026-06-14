@@ -15,9 +15,11 @@ btcquant/           Python engine — the SOURCE OF TRUTH (pure, typed, pytest-c
   features.py       indicators + option-surface + greeks (pure functions)
   backtest.py       run (shift-by-1, cost-on-turnover) · walk_forward (+ oos_positions) · cpcv
   risk.py           sharpe…calmar, VaR/CVaR, kelly, probabilistic/deflated Sharpe, min_backtest_length, PBO,
-                    trade_ledger + expectancy_report (Tharp R-multiples; vol-notional R, no hard stop)
+                    trade_ledger + expectancy_report (Tharp R-multiples + SQN/profit-factor/MAE; vol-notional R, no hard stop)
   strategies.py     position builders (df -> Series in [-1,1]); each cites edge + caveat;
-                    sizing wrappers vol_target + percent_risk_size (ATR; Python-harness-only)
+                    sizing wrappers vol_target + percent_risk_size (ATR; Python-harness-only);
+                    research-only candidates donchian_breakout / vwap_reversion / fixed_r_exit / random_entry
+                    (NOT on the board — all deflated, logged in RESEARCH-tharp-runlog.md)
   report.py         matplotlib tearsheet + dashboard JSON
 scripts/            CLIs: compare.py (OOS leaderboard, --research) · run_backtest.py (--walk) · scan.py · fetch_data.py
 tests/              pytest — no-lookahead, vectorized==reference, the honesty-rail teeth
@@ -78,6 +80,14 @@ panels; its only "math" is reading values out of `Q.*` and `bt.stats`.
    matching the existing options/perp panels. `styles.css` — reuse the tokens; give any stats grid an
    **explicit column count that divides its cell count** (no ragged auto-fit half-rows).
 
+**Live-descriptive exception (no Python mirror).** A few panels read the live WS trade tape and have
+**no backtest** because there is no historical tick/TPO store — so they have no Python source-of-truth
+and no parity obligation: the **CVD / aggressor-flow** panel (`accumCvd`/`renderCvd`, `panel-cvd`) and
+the **developing volume profile — POC / value area** panel (`accumProfile`/`renderProfile`,
+`panel-profile`, the live form of Market Profile). Both live in the **Live** tab, carry a
+`DESCRIPTIVE` tag with a *NOT a signal · NOT backtestable* caveat, and degrade with the WS feed via the
+shared `onStatus` handler. Keep new live-only reads to this same pattern; never let one imply an edge.
+
 ### Add / change a shared formula
 Change it in **Python (+test)** and **quant.js**, then prove parity (§4). Cite the math + conventions
 in the docstring so a quant can audit.
@@ -85,7 +95,7 @@ in the docstring so a quant can audit.
 ## 4. Verification suite (run before every commit)
 
 ```bash
-python3 -m pytest -q                      # 32 tests — the honesty-rail teeth
+python3 -m pytest -q                      # 37 tests — the honesty-rail teeth
 node --check dashboard/app.js             # JS syntax (also quant.js, charts.js)
 node dashboard/app.js --check             # ppy guard: ppy()=365 (1d)/8760 (1h); no literal-365 at an annualization site
 # CSS brace balance:
@@ -158,6 +168,6 @@ tolerances are in §5.
 | [RESEARCH.md](RESEARCH.md) | The cited strategy-library design brief (per-strategy edge/caveat) |
 | [RESEARCH-partB-runlog.md](RESEARCH-partB-runlog.md) | Worked strategy-rejection log (B1/B2/B3) |
 | [RESEARCH-options-runlog.md](RESEARCH-options-runlog.md) | Options panels: pre-registration + Deribit greeks validation + signed-GEX rejection |
-| [RESEARCH-tharp-runlog.md](RESEARCH-tharp-runlog.md) | Tharp eval/risk layer: expectancy/R-multiple (vol-notional R), percent-risk sizing sweep, live-CVD note |
+| [RESEARCH-tharp-runlog.md](RESEARCH-tharp-runlog.md) | Trading-books eval/risk layer: expectancy/R-multiple (vol-notional R) + SQN/PF/MAE, percent-risk sizing sweep, Tier-B candidate sweep (donchian/vwap-reversion/fixed-R — all KILL), live CVD + volume-profile notes |
 | **DEVELOPMENT.md** (this) | Contributors — architecture, the parity rule, extend-recipes, verification, gotchas, roadmap |
 | [DISCLAIMER.md](DISCLAIMER.md) | Research-only / not financial advice |
