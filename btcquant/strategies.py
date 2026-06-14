@@ -37,6 +37,7 @@ __all__ = [
     "buy_and_hold",
     "ma_trend_filter",
     "vol_target",
+    "percent_risk_size",
     "tsmom",
     "carry",
     "pairs_coint",
@@ -218,6 +219,40 @@ def vol_target(
 
     scaled = (positions.reindex(scale.index) * scale).clip(-1.0, 1.0)
     return scaled.rename("vol_target")
+
+
+def percent_risk_size(
+    positions: pd.Series,
+    df: pd.DataFrame,
+    risk_pct: float = 0.02,
+    atr_window: int = 20,
+    k_stop: float = 2.0,
+    max_leverage: float = 3.0,
+) -> pd.Series:
+    """Van Tharp **Percent-Risk position sizing** as a sizing wrapper (RESEARCH-tharp-runlog.md).
+
+    Sizes any signal so that a ``k_stop * ATR`` adverse move ≈ ``risk_pct`` of equity::
+
+        stop_frac = k_stop * ATR(atr_window) / close      # fractional notional stop distance
+        scale     = clip(risk_pct / stop_frac, max=max_leverage)
+        weight    = clip(positions * scale, -1, 1)
+
+    This is the **ATR / range** counterpart of :func:`vol_target` (which scales by the
+    close-to-close return σ). **Percent-Volatility sizing is `vol_target`** — not
+    re-implemented here. Because ``ATR/close`` and return-σ are both volatility proxies,
+    this is **likely a near-duplicate of `vol_target`** (cf. the Part-B B1 finding); its
+    honest value is reshaping the **equity path / max-drawdown**, not the per-bet edge —
+    let the OOS harness decide, and report max-DD prominently. Single-asset, so the
+    cross-market 1R-equalization rationale does not apply.
+
+    Reference: Tharp, *Trade Your Way to Financial Freedom*, Ch. 12 (Models 3 & 4).
+    """
+    positions = pd.Series(positions, dtype="float64")
+    close = _close(df)
+    stop_frac = (float(k_stop) * features.atr(df, window=atr_window) / close).replace(0.0, np.nan)
+    scale = (float(risk_pct) / stop_frac).clip(upper=max_leverage)
+    scaled = (positions.reindex(scale.index) * scale).clip(-1.0, 1.0)
+    return scaled.rename("percent_risk")
 
 
 # --------------------------------------------------------------------------- #

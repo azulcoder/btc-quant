@@ -32,7 +32,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from btcquant import backtest, data, risk, strategies  # noqa: E402
+from btcquant import backtest, data, features, risk, strategies  # noqa: E402
 
 
 def _ppy(granularity: str) -> int:
@@ -134,6 +134,7 @@ def main() -> int:
 
     strat_list = RESEARCH_STRATS if args.research else SPOT_STRATS
     n_trials = len(strat_list)   # selection-count deflation (best of this many)
+    oos_vol = features.realized_vol(features.simple_returns(close), 30, ppy)  # for Tharp R-multiples
     rows, oos_by_name, bh_oos_sharpe = [], {}, float("nan")
     for name in strat_list:
         try:
@@ -149,9 +150,15 @@ def main() -> int:
                 oos.get("sharpe_per_period", float("nan")), np_,
                 oos.get("skew", float("nan")), oos.get("kurtosis", float("nan")),
                 n_trials, 1.0 / np_ if np_ > 0 else float("nan"))
+            # Tharp OOS expectancy / R-multiple on the held-out positions (vol-notional R,
+            # k=2σ — see RESEARCH-tharp-runlog.md). Evaluation layer, NOT a signal.
+            op = wf["oos_positions"]
+            er = risk.expectancy_report(op, close.reindex(op.index),
+                                        oos_vol.reindex(op.index), periods_per_year=ppy, k=2.0)
             rows.append({"name": name, "oos_cagr": oos.get("cagr"), "oos_sharpe": oos.get("sharpe"),
                          "is_sharpe": is_.get("sharpe", float("nan")), "oos_dsr": oos_dsr,
-                         "oos_mdd": oos.get("max_drawdown")})
+                         "oos_mdd": oos.get("max_drawdown"),
+                         "exp_r": er["expectancy_r"], "win": er["win_rate"], "ntr": er["n_trades"]})
             if name == "buy_and_hold":
                 bh_oos_sharpe = float(oos.get("sharpe", float("nan")))
         except Exception as exc:  # noqa: BLE001
@@ -177,7 +184,7 @@ def main() -> int:
           f"{args.folds} walk-forward folds | cost {args.cost_bps}+{args.slippage_bps} bps/side | "
           f"N={n_trials} trials\n")
     hdr = (f"{'strategy':<18}{'OOS CAGR':>10}{'OOS SR':>9}{'IS SR':>9}{'OOS DSR':>10}"
-           f"{'OOS MaxDD':>11}  {'beats B&H':>9}")
+           f"{'OOS MaxDD':>11}  {'beats B&H':>9}{'OOS ExpR':>9}{'Win%':>7}{'#T':>5}")
     print("=" * len(hdr)); print(hdr); print("-" * len(hdr))
     for r in ok:
         beats = ""
@@ -185,9 +192,14 @@ def main() -> int:
             beats = "yes" if float(r["oos_sharpe"]) > bh_oos_sharpe else "no"
         tag = "  (baseline)" if r["name"] == "buy_and_hold" else ""
         sig = "*" if isinstance(r["oos_dsr"], (int, float)) and float(r["oos_dsr"]) > 0.95 else " "
+        # Expectancy/Win% need adequate N to mean anything — suppress < 5 trades (e.g.
+        # always-in buy & hold = 1 degenerate trade) so the readout never misleads.
+        lowN = r.get("ntr", 0) < 5
+        expr = "—" if lowN else _fmt(r.get("exp_r"))
+        win = "—" if lowN else (f"{r['win']*100:.0f}%" if isinstance(r.get("win"), (int, float)) and r["win"] == r["win"] else "—")
         print(f"{r['name']:<18}{_fmt(r['oos_cagr'], True):>10}{_fmt(r['oos_sharpe']):>9}"
               f"{_fmt(r['is_sharpe']):>9}{_fmt(r['oos_dsr']):>9}{sig}{_fmt(r['oos_mdd'], True):>11}"
-              f"  {beats:>9}{tag}")
+              f"  {beats:>9}{expr:>9}{win:>7}{r.get('ntr',0):>5}")
     print("=" * len(hdr))
     for r in bad:
         print(f"  (skipped {r['name']}: {r['err']})")
@@ -262,6 +274,38 @@ def main() -> int:
         print(f"\nMinBTL headroom: public N={len(SPOT_STRATS)} needs {_fmt(mb_pub)} yrs; "
               f"research N={len(RESEARCH_STRATS)} needs {_fmt(mb_res)} yrs; data = {years:.1f} yrs. "
               f"Every added strategy lowers all DSRs and burns headroom — why losers stay off the board.")
+        print("─" * 78)
+
+        # ── Tharp position-sizing sweep (P2, RESEARCH-tharp-runlog.md) ───────────
+        # Percent-Volatility sizing IS vol_target (not re-run); percent-risk uses an
+        # ATR (range) vol budget. Hypothesis: sizing reshapes max-DD, not the per-bet
+        # OOS deflated Sharpe; percent-risk ≈ vol_target (different vol estimator).
+        base = strategies.ma_trend_filter(df, n=args.ma_n)
+        sized = {
+            "ma_trend (raw)":          base,
+            "+ vol_target 15%":        strategies.vol_target(base, df, target_vol=args.target_vol, periods_per_year=ppy),
+            "+ pct_risk 0.5% ATR20":   strategies.percent_risk_size(base, df, risk_pct=0.005, atr_window=20),
+            "+ pct_risk 2.5% ATR20":   strategies.percent_risk_size(base, df, risk_pct=0.025, atr_window=20),
+        }
+        print("\nTHARP SIZING SWEEP on ma_trend (walk-forward OOS; max-DD is the point, not terminal wealth):")
+        sh = f"  {'sizing':<24}{'OOS DSR':>9}{'OOS SR':>9}{'OOS MaxDD':>11}{'corr vs voltgt':>15}"
+        print(sh); print("  " + "-" * (len(sh) - 2))
+        vt = sized["+ vol_target 15%"]
+        for label, pos in sized.items():
+            try:
+                w = backtest.walk_forward(lambda px, p=pos: p.reindex(px.index), close,
+                                          n_splits=args.folds, cost_bps=args.cost_bps,
+                                          slippage_bps=args.slippage_bps, periods_per_year=ppy)
+                o = w["oos"]
+                dfc = pd.concat({"a": pos, "b": vt}, axis=1).dropna()
+                corr = float(dfc["a"].corr(dfc["b"])) if len(dfc) > 2 else float("nan")
+                print(f"  {label:<24}{_fmt(o.get('deflated_sharpe')):>9}{_fmt(o.get('sharpe')):>9}"
+                      f"{_fmt(o.get('max_drawdown'), True):>11}{_fmt(corr):>15}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"  {label:<24}  (skipped: {str(exc)[:40]})")
+        print("  → percent-risk corr ≈0.95 with vol_target ⇒ essentially a duplicate vol estimator "
+              "(ATR vs return-σ); keep as a selectable sizing option, NOT a new board entry. Sizing "
+              "reshapes max-DD dramatically, not the per-bet OOS Sharpe — the honest Tharp result.")
         print("─" * 78)
 
     # Carry: perp-funding, OOS-insufficient — descriptive only.

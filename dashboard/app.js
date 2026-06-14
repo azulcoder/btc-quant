@@ -386,6 +386,19 @@
     setText('verdict', verdict);
     const v = $('verdict'); if (v) v.className = 'verdict ' + vclass;
 
+    // Trade quality (OOS) — Van Tharp expectancy / R-multiples on the held-out trades.
+    // Evaluation layer, NOT a signal; suppressed below 5 trades (e.g. always-in B&H = 1
+    // degenerate trade) so it never misleads. R is a vol-notional 2σ risk (no hard stop).
+    const ex = oos && oos.expectancy ? oos.expectancy : null;
+    if (ex && ex.nTrades >= 5) {
+      setText('stat-tradequality',
+        `Expectancy ${num(ex.expectancyR)}R · win ${pct(ex.winRate, 0)} · payoff ${num(ex.payoffRatio)} · ${ex.nTrades} trades · max losing streak ${ex.maxLossStreak}. Tharp expectancy on the OOS ledger (R = notional 2σ risk, no hard stop) — evaluation, not a signal.`);
+    } else {
+      setText('stat-tradequality',
+        ex ? `Only ${ex.nTrades} OOS trade(s) — too few for a reliable expectancy (always-in / sparse). #trades shown; not scored.`
+           : 'Trade quality (OOS): n/a (no walk-forward ledger).');
+    }
+
     // Highlight the net-vs-gross gap (the cost-fragility tell).
     const grossSharpe = Q.sharpe(bt.grossReturns, p);
     setText('stat-gross-sharpe', num(grossSharpe));
@@ -623,9 +636,17 @@
         // In-sample full-history (for the IS Sharpe contrast) + walk-forward OOS (the rank basis).
         const is = Q.backtest(positions, o.close, { costBps, slippageBps: slipBps, periodsPerYear: p });
         const wf = Q.walkForward(positions, o.close, { folds: 5, costBps, slippageBps: slipBps, periodsPerYear: p, nTrials });
+        // Tharp OOS expectancy / R-multiples on the held-out positions (vol-notional R, k=2σ;
+        // RESEARCH-tharp-runlog.md). The OOS span is the trailing bars, so vol aligns by tail-slice.
+        let expectancy = null;
+        if (wf.oosPositions && wf.oosPositions.length) {
+          const fullVol = Q.realizedVol(Q.simpleReturns(o.close), 30, p);
+          const volSlice = fullVol.slice(fullVol.length - wf.oosPositions.length);
+          expectancy = Q.expectancyReport(wf.oosPositions, wf.oosPrices, volSlice, p, 2.0);
+        }
         // Record into the map BEFORE any skip, so the Performance panel reads the exact same
         // OOS stats this leaderboard row uses (or null → the panel degrades, never falls back to IS).
-        lbMap[key] = { oosStats: wf.oosStats || null, isSharpe: is.stats.sharpe };
+        lbMap[key] = { oosStats: wf.oosStats || null, isSharpe: is.stats.sharpe, expectancy };
         if (!wf.oosStats) continue;
         const s = wf.oosStats;
         oosCols.push({ key, ret: wf.oosReturns, positions });
@@ -1484,6 +1505,8 @@
       else if (kind === 'reconnecting') { cs.classList.add('stale'); setText('conn-text', 'reconnecting…'); }
       else if (kind === 'error') { cs.classList.add('error'); setText('conn-text', 'live feed offline'); }
     }
+    // The CVD panel is fed by the same WS tape → degrade it honestly when the feed drops.
+    if (kind !== 'open') setPanelState('panel-cvd', kind === 'error' ? 'error' : 'stale', 'cvd-updated');
   }
 
   function onLiveTick(tick) {
@@ -1531,6 +1554,7 @@
       live.tape = norm.slice(0, TAPE_MAX);
       live.lastTradeId = norm[0].id;
       live.tradesSeeded = true;
+      accumCvd(norm);                              // seed the session cumulative delta
     } else {
       if (!live.tradesSeeded) return;              // wait for the seed snapshot first
       const fresh = norm.filter((t) => t.id > live.lastTradeId);
@@ -1538,8 +1562,43 @@
       live.lastTradeId = fresh[0].id;              // fresh is desc → [0] is the max id
       live.tape = fresh.concat(live.tape);         // newest on top
       if (live.tape.length > TAPE_MAX) live.tape.length = TAPE_MAX;
+      accumCvd(fresh);
     }
     renderTape();
+    renderCvd();
+  }
+
+  // ─── Live CVD / order-flow (descriptive only) — Tharp synthesis #3 ─────────
+  // Aggregate the existing market_trades tape into a session-cumulative delta:
+  // aggressor BUY (maker side SELL) = +size, aggressor SELL (maker side BUY) = -size
+  // (same maker-vs-aggressor convention the tape coloring uses). NOT a signal and NOT
+  // backtestable — there is no historical tick store; this is a live read only.
+  function accumCvd(newestFirst) {
+    if (!live.cvd) { live.cvd = []; live.cvdCum = 0; live.cvdWin = []; live.sizes = []; }
+    for (let i = newestFirst.length - 1; i >= 0; i--) {   // oldest → newest
+      const t = newestFirst[i];
+      if (!Number.isFinite(t.size)) continue;
+      const signed = t.side === 'SELL' ? t.size : t.side === 'BUY' ? -t.size : 0;
+      live.cvdCum += signed;
+      live.cvd.push(live.cvdCum); if (live.cvd.length > 240) live.cvd.shift();
+      live.cvdWin.push(signed); if (live.cvdWin.length > 120) live.cvdWin.shift();
+      live.sizes.push(t.size); if (live.sizes.length > 300) live.sizes.shift();
+    }
+  }
+  function renderCvd() {
+    const root = $('chart-cvd');
+    if (!root || !live.cvd || live.cvd.length < 2) return;
+    C.lineChart(root, [{ values: live.cvd, color: 'var(--c4)', label: 'Cumulative delta (BTC)' }],
+      { height: 170, baseline: 0, fmt: (v) => v.toFixed(2) });
+    const win = live.cvdWin;
+    const buy = win.filter((s) => s > 0).reduce((a, b) => a + b, 0);
+    const sell = -win.filter((s) => s < 0).reduce((a, b) => a + b, 0);
+    const tot = buy + sell, buyPct = tot > 0 ? buy / tot : NaN;
+    const sorted = live.sizes.slice().sort((a, b) => a - b);
+    const p95 = sorted.length ? sorted[Math.floor(0.95 * (sorted.length - 1))] : NaN;
+    setText('cvd-summary',
+      `Session cumulative delta ${live.cvdCum.toFixed(2)} BTC · last-${win.length} aggressor flow ${Number.isFinite(buyPct) ? (buyPct * 100).toFixed(0) + '% buy' : '—'} · 95th-pct print ${Number.isFinite(p95) ? p95.toFixed(3) + ' BTC' : '—'}. DESCRIPTIVE order-flow — session-cumulative from connect, Coinbase spot only, NOT a signal and NOT backtestable (no historical tick store).`);
+    setPanelState('panel-cvd', 'ready', 'cvd-updated'); markFeed('cvd');
   }
 
   // Color by AGGRESSOR side. Coinbase market_trades `side` is the MAKER's side
@@ -1778,7 +1837,7 @@
   // charts are RE-RENDERED when its tab is shown (a hidden panel reports width 0).
   const REGIONS = {
     backtest: ['panel-leaderboard', 'panel-performance', 'panel-candles', 'panel-equity', 'panel-drawdown', 'panel-hist', 'panel-rolling'],
-    live: ['panel-live'],
+    live: ['panel-live', 'panel-cvd'],
     perpetual: ['panel-funding', 'panel-basis', 'panel-oi', 'panel-lsratio'],
     options: ['panel-vrp', 'panel-smile', 'panel-term', 'panel-rrbf', 'panel-maxpain', 'panel-greeks', 'panel-gammaconc'],
     onchain: ['panel-onchain'],

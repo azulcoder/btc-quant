@@ -13,9 +13,11 @@ pre-registration / rejection discipline.
 btcquant/           Python engine — the SOURCE OF TRUTH (pure, typed, pytest-covered)
   data.py           fetch + cache: get_ohlcv / get_funding / get_option_chain / get_dvol / get_onchain (public, no keys)
   features.py       indicators + option-surface + greeks (pure functions)
-  backtest.py       run (shift-by-1, cost-on-turnover) · walk_forward · cpcv
-  risk.py           sharpe…calmar, VaR/CVaR, kelly, probabilistic/deflated Sharpe, min_backtest_length, PBO
-  strategies.py     position builders (df -> Series in [-1,1]); each cites edge + caveat
+  backtest.py       run (shift-by-1, cost-on-turnover) · walk_forward (+ oos_positions) · cpcv
+  risk.py           sharpe…calmar, VaR/CVaR, kelly, probabilistic/deflated Sharpe, min_backtest_length, PBO,
+                    trade_ledger + expectancy_report (Tharp R-multiples; vol-notional R, no hard stop)
+  strategies.py     position builders (df -> Series in [-1,1]); each cites edge + caveat;
+                    sizing wrappers vol_target + percent_risk_size (ATR; Python-harness-only)
   report.py         matplotlib tearsheet + dashboard JSON
 scripts/            CLIs: compare.py (OOS leaderboard, --research) · run_backtest.py (--walk) · scan.py · fetch_data.py
 tests/              pytest — no-lookahead, vectorized==reference, the honesty-rail teeth
@@ -156,5 +158,6 @@ tolerances are in §5.
 | [RESEARCH.md](RESEARCH.md) | The cited strategy-library design brief (per-strategy edge/caveat) |
 | [RESEARCH-partB-runlog.md](RESEARCH-partB-runlog.md) | Worked strategy-rejection log (B1/B2/B3) |
 | [RESEARCH-options-runlog.md](RESEARCH-options-runlog.md) | Options panels: pre-registration + Deribit greeks validation + signed-GEX rejection |
+| [RESEARCH-tharp-runlog.md](RESEARCH-tharp-runlog.md) | Tharp eval/risk layer: expectancy/R-multiple (vol-notional R), percent-risk sizing sweep, live-CVD note |
 | **DEVELOPMENT.md** (this) | Contributors — architecture, the parity rule, extend-recipes, verification, gotchas, roadmap |
 | [DISCLAIMER.md](DISCLAIMER.md) | Research-only / not financial advice |

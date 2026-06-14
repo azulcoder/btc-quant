@@ -276,6 +276,7 @@ def walk_forward(
         min_train = int(edges[1])
 
     oos_returns_parts: list[pd.Series] = []
+    oos_pos_parts: list[pd.Series] = []
     is_returns_parts: list[pd.Series] = []
     folds: list[dict] = []
 
@@ -316,6 +317,7 @@ def walk_forward(
             periods_per_year=periods_per_year,
         )
         oos_returns_parts.append(oos_res["returns"])
+        oos_pos_parts.append(oos_pos)
 
         folds.append(
             {
@@ -334,6 +336,11 @@ def walk_forward(
     oos_returns = pd.concat(oos_returns_parts).sort_index()
     oos_returns = oos_returns[~oos_returns.index.duplicated(keep="first")]
     oos_equity = (1.0 + oos_returns.fillna(0.0)).cumprod().rename("equity")
+
+    # Concatenated OOS target positions (contiguous, anchored) — for the Tharp
+    # expectancy / R-multiple OOS ledger (risk.expectancy_report).
+    oos_positions = pd.concat(oos_pos_parts).sort_index()
+    oos_positions = oos_positions[~oos_positions.index.duplicated(keep="first")].rename("oos_positions")
 
     is_returns = (
         pd.concat(is_returns_parts).sort_index() if is_returns_parts else pd.Series(dtype="float64")
@@ -364,6 +371,7 @@ def walk_forward(
         "folds": folds,
         "oos_equity": oos_equity,
         "oos_returns": oos_returns,
+        "oos_positions": oos_positions,
     }
 
 

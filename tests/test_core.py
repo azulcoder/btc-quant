@@ -722,3 +722,48 @@ def test_gamma_concentration_peaks_near_atm_and_is_unsigned():
     assert gc["strikes"] and all(v >= 0.0 for v in gc["gamma_oi"])      # unsigned
     peak_strike = gc["strikes"][int(np.argmax(gc["gamma_oi"]))]
     assert peak_strike == 65000.0                                       # ATM has the most gamma
+
+
+# --------------------------------------------------------------------------- #
+# Tharp eval/risk layer (expectancy / R-multiples; percent-risk sizing)        #
+# --------------------------------------------------------------------------- #
+def test_expectancy_report_segments_trades_and_R_math():
+    """trade_ledger segments a long/flat signal into discrete trades; expectancy_report
+    computes R-multiples off the vol-notional R (R = entry_w * k * sigma_bar)."""
+    idx = pd.date_range("2021-01-01", periods=12, freq="D", tz="UTC")
+    px = pd.Series([100,100,100,110,110,110,100,100,100,90,90,90], index=idx, dtype="float64")
+    pos = pd.Series([0,0,1,1,0,0,0,1,1,0,0,0], index=idx, dtype="float64")  # pre-shift
+    vol = pd.Series(0.10, index=idx)  # constant 10% annualized
+    led = risk.trade_ledger(pos, px, vol, periods_per_year=365, k=2.0)
+    assert len(led) == 2                                  # two discrete trades
+    assert led[0]["trade_return"] > 0 and led[1]["trade_return"] < 0  # winner then loser
+    sb = 0.10 / math.sqrt(365); R = 1.0 * 2.0 * sb        # entry_w=1
+    assert abs(led[0]["r_multiple"] - led[0]["trade_return"] / R) < 1e-9
+    rep = risk.expectancy_report(pos, px, vol, periods_per_year=365, k=2.0)
+    assert rep["n_trades"] == 2
+    assert abs(rep["win_rate"] - 0.5) < 1e-12
+    assert abs(rep["expectancy_r"]) < 1e-9               # symmetric +R / -R → ~0
+    assert rep["max_loss_streak"] == 1
+
+
+def test_expectancy_buy_and_hold_is_one_degenerate_trade():
+    """Always-in (buy & hold) collapses to a single ledger trade — the low-N case to flag.
+    Its entry sits in the vol warm-up so it is not R-scorable → expectancy_report honestly
+    reports n_trades=0 (no R-scorable trades), correct for the baseline."""
+    df = _make_ohlcv(n=200, seed=4)
+    vol = features.realized_vol(features.simple_returns(df["close"]), 20, 365)
+    led = risk.trade_ledger(strategies.buy_and_hold(df), df["close"], vol)
+    assert len(led) == 1                                   # always-in → one (degenerate) trade
+    assert risk.expectancy_report(strategies.buy_and_hold(df), df["close"], vol)["n_trades"] == 0
+
+
+def test_percent_risk_size_bounded_and_inverse_to_atr():
+    """percent_risk_size is a valid [-1,1] weight and shrinks as relative ATR rises
+    (inverse-volatility sizing) — the Tharp Percent-Risk model."""
+    df = _make_ohlcv(n=300, seed=9)
+    sized = strategies.percent_risk_size(strategies.buy_and_hold(df), df,
+                                         risk_pct=0.02, atr_window=20, k_stop=2.0)
+    _assert_in_unit_band(sized, "percent_risk")
+    rel_atr = (features.atr(df, 20) / df["close"])
+    common = sized.dropna().index.intersection(rel_atr.dropna().index)
+    assert sized.reindex(common).corr(rel_atr.reindex(common)) < 0.0   # size ↓ as vol ↑

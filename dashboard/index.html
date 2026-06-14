@@ -218,6 +218,7 @@
         <div class="stat headline"><span class="k">Deflated Sharpe (walk-forward OOS, N=<span id="stat-ntrials">—</span>)</span><span class="v" id="stat-dsr">—</span></div>
       </div>
       <div class="verdict neutral" id="verdict">—</div>
+      <p class="hint" id="stat-tradequality">—</p>
     </section>
 
     <!-- Price + MA -->
@@ -306,6 +307,18 @@
         DERIBIT). The widget is a sealed cross-origin iframe (we cannot draw our backtest overlays into it — that is what the native panel above is
         for, §3.4). The <strong>"Track all markets on TradingView" attribution is contractually mandatory and must stay</strong> (brief §3.1/§3.6).
       </p>
+    </section>
+
+    <!-- Live CVD / order-flow (descriptive only) — Tharp synthesis #3 -->
+    <section class="panel wide" id="panel-cvd" data-panel-title="Live cumulative delta (order flow)">
+      <h2>Live cumulative delta &amp; aggressor flow
+        <span class="signal-tag descriptive" title="Session-cumulative signed volume (aggressor buy − aggressor sell) from the live Coinbase trade tape. NOT a signal, NOT backtestable — there is no historical tick store. One-venue spot.">DESCRIPTIVE · order-flow</span>
+        <span class="updated-at" id="cvd-updated"></span>
+        <span class="stale-chip">stale</span>
+      </h2>
+      <div class="chart" id="chart-cvd"><div class="chart-na">Waiting for live trades…</div></div>
+      <p class="chart-summary" id="cvd-summary">—</p>
+      <p class="hint">Cumulative <strong>delta</strong> = running sum of <strong>aggressor</strong> signed size from the live Coinbase <code>market_trades</code> tape (aggressor buy lifts the ask → +size; aggressor sell hits the bid → −size — the same maker-vs-aggressor convention the tape coloring uses). Synthesized from four order-flow books (Valtos, Harris, Bower, the NQ/ES plan), all of which describe this same construct. <strong>This is a LIVE descriptive read, NOT a signal and NOT backtestable</strong> — the terminal keeps no historical tick store, so it can never enter the OOS harness, and it omits the larger perp flow (Coinbase spot only). Session-cumulative from connect; resets on reload.</p>
     </section>
 
     <!-- Equity curve -->

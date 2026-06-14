@@ -38,6 +38,10 @@ __all__ = [
     "kelly",
     "probabilistic_sharpe_ratio",
     "deflated_sharpe_ratio",
+    "min_backtest_length",
+    "probability_of_backtest_overfitting",
+    "trade_ledger",
+    "expectancy_report",
     "summary",
 ]
 
@@ -545,3 +549,99 @@ def summary(
         "psr": psr,
         "terminal_equity": float(equity.iloc[-1]) if len(equity) else float("nan"),
     }
+
+
+def trade_ledger(
+    positions: pd.Series,
+    prices: pd.Series,
+    vol: pd.Series,
+    periods_per_year: int = 365,
+    k: float = 2.0,
+) -> list:
+    """Segment a continuous target-weight series into discrete trades + R-multiples.
+
+    Van Tharp's R-multiple = trade P&L / initial risk R. These strategies carry **no
+    hard stop**, so R is a **vol-notional** initial risk: ``R = |entry_weight| * k *
+    sigma_bar`` at the entry bar, where ``sigma_bar = vol / sqrt(periods_per_year)``
+    (per-bar close-to-close vol from ``features.realized_vol``) and ``k`` is the notional
+    stop in sigmas (default 2). This is faithful to Tharp's intent (reward measured in
+    units of volatility-scaled initial risk) but is **not a stop-based R** — disclose it.
+
+    A trade is a maximal run of bars with constant non-zero **sign** of the *traded*
+    (shifted-by-one, no-look-ahead) position; flat bars separate trades and a sign flip
+    ends one trade and opens the next. Trade return is the compounded per-bar return over
+    the held bars. For continuous (varying-weight) strategies R uses the *entry* weight,
+    so the R-multiple is approximate; for long/flat strategies it is exact. Always-in
+    strategies (buy & hold) yield a single degenerate trade — flag low N.
+
+    Returns a list of ``{entry, exit, n_bars, trade_return, R, r_multiple}`` (R/r_multiple
+    are ``nan`` when the entry-bar risk is unavailable).
+    """
+    pos, px = positions.align(prices, join="inner")
+    vol = vol.reindex(px.index)
+    traded = pos.shift(1).fillna(0.0).to_numpy(dtype="float64")
+    aret = px.pct_change().fillna(0.0).to_numpy(dtype="float64")
+    ret = traded * aret
+    sigma_bar = vol.to_numpy(dtype="float64") / np.sqrt(periods_per_year)
+    risk_frac = k * sigma_bar
+
+    def sgn(x: float) -> int:
+        return int(x > 0) - int(x < 0)
+
+    runs, cur, start = [], 0, None
+    for i, w in enumerate(traded):
+        s = sgn(w)
+        if s != cur:
+            if cur != 0 and start is not None:
+                runs.append((start, i - 1))
+            cur, start = s, (i if s != 0 else None)
+    if cur != 0 and start is not None:
+        runs.append((start, len(traded) - 1))
+
+    out = []
+    for a, b in runs:
+        tr = float(np.prod(1.0 + ret[a : b + 1]) - 1.0)
+        ew = abs(float(traded[a]))
+        R = ew * float(risk_frac[a]) if np.isfinite(risk_frac[a]) else float("nan")
+        rm = tr / R if (np.isfinite(R) and R > 0) else float("nan")
+        out.append({"entry": a, "exit": b, "n_bars": b - a + 1,
+                    "trade_return": tr, "R": R, "r_multiple": rm})
+    return out
+
+
+def expectancy_report(
+    positions: pd.Series,
+    prices: pd.Series,
+    vol: pd.Series,
+    periods_per_year: int = 365,
+    k: float = 2.0,
+) -> dict:
+    """Tharp expectancy / R-multiple summary over the trade ledger. **Evaluation layer,
+    NOT a signal.** Expectancy = mean R-multiple per trade; a system can win often yet have
+    negative expectancy if losers are large. Use **out-of-sample only** (in-sample
+    expectancy is curve-fit) and treat low ``n_trades`` as unreliable.
+
+    Returns ``{n_trades, expectancy_r, win_rate, avg_win_r, avg_loss_r, payoff_ratio,
+    max_loss_streak}``.
+    """
+    led = trade_ledger(positions, prices, vol, periods_per_year, k)
+    rms = [t["r_multiple"] for t in led if t["r_multiple"] == t["r_multiple"]]  # drop nan
+    n = len(rms)
+    out = {"n_trades": n, "expectancy_r": float("nan"), "win_rate": float("nan"),
+           "avg_win_r": float("nan"), "avg_loss_r": float("nan"),
+           "payoff_ratio": float("nan"), "max_loss_streak": 0}
+    if n == 0:
+        return out
+    arr = np.array(rms, dtype="float64")
+    wins, losses = arr[arr > 0], arr[arr < 0]
+    out["expectancy_r"] = float(arr.mean())
+    out["win_rate"] = float(len(wins) / n)
+    out["avg_win_r"] = float(wins.mean()) if len(wins) else 0.0
+    out["avg_loss_r"] = float(losses.mean()) if len(losses) else 0.0
+    out["payoff_ratio"] = float(out["avg_win_r"] / abs(out["avg_loss_r"])) if out["avg_loss_r"] < 0 else float("nan")
+    streak = mx = 0
+    for r in arr:
+        streak = streak + 1 if r < 0 else 0
+        mx = max(mx, streak)
+    out["max_loss_streak"] = int(mx)
+    return out

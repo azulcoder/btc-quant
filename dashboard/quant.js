@@ -710,7 +710,7 @@
     const folds = opts.folds || 5;
     const ppy = opts.periodsPerYear || 365;
     const n = Math.min(positions.length, prices.length);
-    const out = { oosReturns: [], oosStats: null };
+    const out = { oosReturns: [], oosStats: null, oosPositions: [], oosPrices: [] };
     if (n < (folds + 1) * 2) return out;
     const edge = (i) => Math.floor((i * n) / (folds + 1));
     const oos = [];
@@ -724,11 +724,72 @@
     if (!oos.length) return out;
     const nOos = oos.filter(Number.isFinite).length;
     out.oosReturns = oos;
+    // Contiguous OOS positions/prices (the anchored OOS span) — for the Tharp expectancy ledger.
+    out.oosPositions = positions.slice(edge(1), edge(folds + 1));
+    out.oosPrices = prices.slice(edge(1), edge(folds + 1));
     out.oosStats = computeStats(oos, compound(oos), {
       periodsPerYear: ppy,
       nTrials: opts.nTrials || 1,
       varTrialsSr: nOos > 0 ? 1 / nOos : 1,   // Python-parity (skill-less Sharpe variance ≈ 1/n)
     });
+    return out;
+  }
+
+  /**
+   * Van Tharp trade ledger + R-multiples — mirror of risk.trade_ledger. Segments a
+   * continuous target-weight series into discrete trades (runs of constant non-zero
+   * sign of the shifted/traded position) and scores each by a VOL-NOTIONAL R
+   * (R = |entry_weight| · k · sigma_bar, sigma_bar = vol/√ppy) — these strategies have
+   * no hard stop, so R is a notional kσ risk, NOT stop-based. positions/prices/vol are
+   * aligned same-length arrays (vol = annualized realizedVol).
+   */
+  function tradeLedger(positions, prices, vol, periodsPerYear, k) {
+    const ppy = periodsPerYear || 365, kk = k || 2;
+    const m = Math.min(positions.length, prices.length, vol.length);
+    const traded = new Array(m).fill(0);
+    for (let i = 1; i < m; i++) traded[i] = Number.isFinite(positions[i - 1]) ? positions[i - 1] : 0;
+    const ret = new Array(m).fill(0);
+    for (let i = 1; i < m; i++) {
+      const ar = (Number.isFinite(prices[i]) && Number.isFinite(prices[i - 1]) && prices[i - 1] !== 0) ? prices[i] / prices[i - 1] - 1 : 0;
+      ret[i] = traded[i] * ar;
+    }
+    const sq = Math.sqrt(ppy);
+    const riskFrac = vol.map((v) => kk * (Number.isFinite(v) ? v : NaN) / sq);
+    const sgn = (x) => (x > 0 ? 1 : x < 0 ? -1 : 0);
+    const runs = []; let cur = 0, start = null;
+    for (let i = 0; i < m; i++) {
+      const s = sgn(traded[i]);
+      if (s !== cur) { if (cur !== 0 && start !== null) runs.push([start, i - 1]); cur = s; start = (s !== 0) ? i : null; }
+    }
+    if (cur !== 0 && start !== null) runs.push([start, m - 1]);
+    const out = [];
+    for (const [a, b] of runs) {
+      let p = 1; for (let i = a; i <= b; i++) p *= 1 + ret[i];
+      const tr = p - 1, ew = Math.abs(traded[a]);
+      const R = Number.isFinite(riskFrac[a]) ? ew * riskFrac[a] : NaN;
+      const rm = (Number.isFinite(R) && R > 0) ? tr / R : NaN;
+      out.push({ entry: a, exit: b, nBars: b - a + 1, tradeReturn: tr, R, rMultiple: rm });
+    }
+    return out;
+  }
+
+  /** Tharp expectancy summary over the trade ledger — mirror of risk.expectancy_report.
+   * Evaluation layer, NOT a signal; use OUT-OF-SAMPLE only; low nTrades = unreliable. */
+  function expectancyReport(positions, prices, vol, periodsPerYear, k) {
+    const led = tradeLedger(positions, prices, vol, periodsPerYear, k);
+    const rms = led.map((t) => t.rMultiple).filter(Number.isFinite);
+    const n = rms.length;
+    const out = { nTrades: n, expectancyR: NaN, winRate: NaN, avgWinR: NaN, avgLossR: NaN, payoffRatio: NaN, maxLossStreak: 0 };
+    if (!n) return out;
+    const wins = rms.filter((r) => r > 0), losses = rms.filter((r) => r < 0);
+    out.expectancyR = mean(rms);
+    out.winRate = wins.length / n;
+    out.avgWinR = wins.length ? mean(wins) : 0;
+    out.avgLossR = losses.length ? mean(losses) : 0;
+    out.payoffRatio = out.avgLossR < 0 ? out.avgWinR / Math.abs(out.avgLossR) : NaN;
+    let streak = 0, mx = 0;
+    for (const r of rms) { streak = r < 0 ? streak + 1 : 0; mx = Math.max(mx, streak); }
+    out.maxLossStreak = mx;
     return out;
   }
 
@@ -838,6 +899,8 @@
     backtest, compound, computeStats,
     // OOS validation harness
     walkForward, pbo, minBacktestLength, cpcv,
+    // Tharp eval layer
+    tradeLedger, expectancyReport,
     // strategy signals
     sigBuyAndHold, sigMaTrend, sigMaCross, sigTsmom, applyVolTarget, sigPairs,
     ouHalfLife, carryBacktest,
