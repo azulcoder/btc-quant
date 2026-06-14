@@ -40,6 +40,7 @@ __all__ = [
     "tsmom",
     "carry",
     "pairs_coint",
+    "pairs_ou",
     "short_vol",
 ]
 
@@ -547,6 +548,90 @@ def pairs_coint(
         pos[i] = state
 
     return pd.Series(pos, index=z.index, name="pairs_coint")
+
+
+def pairs_ou(
+    btc: pd.Series,
+    eth: pd.Series,
+    window: int = 60,
+    entry: float = 2.0,
+    exit: float = 0.5,
+    stop: float = 4.0,
+    max_half_life: float = 60.0,
+) -> pd.Series:
+    """RESEARCH variant of :func:`pairs_coint` — OU-model thresholds instead of z.
+
+    Identical to ``pairs_coint`` in **every** respect (hedge ratio ``beta``, the
+    half-life stationarity gate, the ``entry``/``exit``/``stop`` multiples, the
+    stateful hysteresis) except for **one isolated variable**: the spread
+    deviation is normalized by the **OU-fit stationary standard deviation**
+    (``features.ou_sigma_eq``, from the same trailing AR(1) fit as the half-life)
+    rather than the empirical rolling standard deviation (the z-score). So the
+    decision variable is ``u_t = (spread_t - rolling_mean) / sigma_eq_t`` — the
+    OU-model counterpart of ``z_t``.
+
+    Pre-registered as a teaching case (RESEARCH-partB-runlog.md, B2): the
+    hypothesis is that this parametric normalizer does **not** beat the simple
+    empirical z-score out-of-sample, because the fitted OU parameters are
+    non-stationary in crypto. Isolating the normalizer (everything else held
+    fixed against ``pairs_coint``) makes the comparison clean — if OU loses, the
+    model added nothing; it is not an implementation artifact.
+
+    Returns BTC-leg target positions in ``{-1, 0, +1}`` (NaN during warm-up).
+    Reference: Leung & Li (2015), *Optimal Mean Reversion Trading*; Krauss (2017).
+    """
+    btc = pd.Series(btc, dtype="float64")
+    eth = pd.Series(eth, dtype="float64")
+    common = btc.index.intersection(eth.index)
+    log_btc = np.log(btc.reindex(common))
+    log_eth = np.log(eth.reindex(common))
+
+    var_eth = log_eth.rolling(window).var(ddof=1)
+    cov = log_btc.rolling(window).cov(log_eth)
+    beta = cov / var_eth
+
+    spread = log_btc - beta * log_eth
+    roll_mean = spread.rolling(window).mean()
+    spread_arr = spread.to_numpy()
+    mean_arr = roll_mean.to_numpy()
+
+    # Per-bar OU fit on the trailing spread window → (half-life gate, sigma_eq
+    # normalizer). Both come from the same AR(1) fit convention as ou_half_life;
+    # trailing-only → no look-ahead. u = (spread - mean) / sigma_eq (model std).
+    n = len(spread)
+    u = np.full(n, np.nan, dtype="float64")
+    hl_ok = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if i + 1 < window:
+            continue
+        win = spread_arr[i - window + 1 : i + 1]
+        if np.isnan(win).any():
+            continue
+        hl = features.ou_half_life(pd.Series(win))
+        sig_eq = features.ou_sigma_eq(pd.Series(win))
+        hl_ok[i] = np.isfinite(hl) and (hl <= max_half_life) and np.isfinite(sig_eq) and sig_eq > 0
+        if hl_ok[i]:
+            u[i] = (spread_arr[i] - mean_arr[i]) / sig_eq
+
+    pos = np.full(n, np.nan, dtype="float64")
+    state = 0.0
+    for i in range(n):
+        ui = u[i]
+        if i + 1 < window or np.isnan(spread_arr[i]):
+            pos[i] = np.nan
+            continue
+        if not hl_ok[i] or np.isnan(ui):
+            state = 0.0  # de-cointegration / non-stationary guard: stand aside
+        elif state == 0.0:
+            if ui > entry:
+                state = -1.0
+            elif ui < -entry:
+                state = +1.0
+        elif abs(ui) < exit or abs(ui) > stop:
+            state = 0.0
+        pos[i] = state
+
+    return pd.Series(pos, index=spread.index, name="pairs_ou")
 
 
 # --------------------------------------------------------------------------- #

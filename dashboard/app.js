@@ -504,6 +504,16 @@
     const carryAnn = Q.mean(carry.net) * 3 * 365;
     setText('carry-summary',
       `Carry sleeve (short perp when funding > 0, ${'≈'}delta-neutral, 4bps/rebalance): net ${(carryAnn * 100).toFixed(1)}% APR over the window. Inverts when funding < 0 — the FTX-2022 / 2025 risk.`);
+
+    // OOS-insufficient (B3, RESEARCH-partB-runlog.md): carry is a funding-stream sleeve, not a
+    // price-position strategy, and our keyless history is far below MinBTL → descriptive only,
+    // never an OOS Deflated Sharpe or a leaderboard slot. (Honest by construction.)
+    const fN = f.rate.length;
+    const fYears = fN / (3 * 365);                  // 8h funding intervals → 3/day
+    const mbN = Object.keys(STRATEGIES).length;     // same trial count the leaderboard deflates for
+    const mb = Q.minBacktestLength(mbN);
+    setText('carry-oos',
+      `OOS-insufficient: ${fN} funding intervals ≈ ${fYears.toFixed(2)} yr of keyless history ≪ MinBTL ~${Number.isFinite(mb) ? mb.toFixed(1) : '—'} yr (N=${mbN}). A funding-stream sleeve, not a price strategy — shown DESCRIPTIVELY, never given an out-of-sample Deflated Sharpe or a leaderboard slot.`);
   }
 
   // ─── Strategy leaderboard: run EVERY strategy, rank by deflated Sharpe ──

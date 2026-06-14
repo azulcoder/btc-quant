@@ -38,6 +38,7 @@ __all__ = [
     "momentum",
     "zscore",
     "ou_half_life",
+    "ou_sigma_eq",
     "rsi",
     "rolling_sharpe",
     "drawdown",
@@ -318,6 +319,57 @@ def ou_half_life(spread: pd.Series) -> float:
     if b >= 0:  # not mean-reverting
         return float("inf")
     return float(np.log(2.0) / -b)
+
+
+def ou_sigma_eq(spread: pd.Series) -> float:
+    """Stationary (equilibrium) standard deviation of an OU/AR(1) spread.
+
+    Fits the same discrete AR(1) ``ΔX_t = a + b·X_{t-1} + e_t`` as
+    :func:`ou_half_life` (so the two share one fit convention), then returns the
+    standard deviation of the AR(1) **stationary distribution**::
+
+        phi      = 1 + b                         # AR(1) coefficient
+        sigma_eq = sqrt( var(e) / (1 - phi^2) )  # valid only when |phi| < 1
+
+    where ``var(e)`` is the OLS residual variance (RSS / (n - 2)). This is the
+    *model-implied* dispersion of the spread — the OU counterpart to the
+    empirical rolling standard deviation used by the z-score. Used by the
+    ``pairs_ou`` research variant to normalize deviations by the OU model rather
+    than the sample std, isolating "model vs empirical" (RESEARCH.md §2.10).
+
+    Returns ``inf`` when the series is not mean-reverting (``b >= 0`` ⇒ |phi| ≥ 1,
+    no finite stationary variance) and ``nan`` when there are too few observations
+    or the residual variance is degenerate. Callers should treat a non-finite
+    result the same way they treat a non-finite half-life: stand aside.
+
+    Reference: Leung & Li (2015), *Optimal Mean Reversion Trading*.
+    """
+    x = pd.Series(spread, dtype="float64").dropna()
+    if len(x) < 3:
+        return float("nan")
+
+    x_lag = x.shift(1)
+    delta = x - x_lag
+    df = pd.concat([delta, x_lag], axis=1).dropna()
+    delta = df.iloc[:, 0].to_numpy()
+    x_lag = df.iloc[:, 1].to_numpy()
+
+    design = np.column_stack([np.ones_like(x_lag), x_lag])
+    with np.errstate(all="ignore"):  # extreme/explosive inputs must not warn
+        coef, *_ = np.linalg.lstsq(design, delta, rcond=None)
+        b = coef[1]
+        phi = 1.0 + b
+        if not np.isfinite(b) or b >= 0 or abs(phi) >= 1.0:
+            return float("inf")  # not mean-reverting → no finite stationary variance
+        n = len(delta)
+        if n <= 2:
+            return float("nan")
+        resid = delta - design @ coef
+        var_e = float(resid @ resid) / (n - 2)
+        var_eq = var_e / (1.0 - phi * phi)
+    if not np.isfinite(var_eq) or var_eq <= 0:
+        return float("nan")
+    return float(np.sqrt(var_eq))
 
 
 # --------------------------------------------------------------------------- #

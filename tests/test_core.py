@@ -324,6 +324,72 @@ def test_pairs_coint_strategy_within_unit_band():
     assert set(np.unique(pos.dropna().to_numpy())).issubset({-1.0, 0.0, 1.0})
 
 
+# --------------------------------------------------------------------------- #
+# Part B research candidates (pre-registered; RESEARCH-partB-runlog.md)        #
+# --------------------------------------------------------------------------- #
+def test_ou_sigma_eq_finite_for_mean_reverting_inf_for_trending():
+    """ou_sigma_eq (B2 normalizer): finite, positive equilibrium std for a
+    mean-reverting AR(1); inf for a trending/explosive series (b >= 0, no finite
+    stationary variance). NB: a pure random walk's finite-sample AR(1) fit is
+    Dickey-Fuller biased toward *spurious* mean-reversion (finite half-life) — that
+    non-stationarity trap is exactly what B2 is designed to expose, so it is not
+    asserted as inf here; the run-log documents it as a finding."""
+    rng = np.random.default_rng(11)
+    n = 600
+    x = np.zeros(n)
+    for i in range(1, n):  # AR(1) phi=0.8 -> stationary, sigma_e=1
+        x[i] = 0.8 * x[i - 1] + rng.normal(0.0, 1.0)
+    s_mr = pd.Series(x)
+    sig = features.ou_sigma_eq(s_mr)
+    assert np.isfinite(sig) and sig > 0
+    # Theoretical sigma_eq = sigma_e / sqrt(1 - phi^2) = 1 / sqrt(1 - 0.64) ~ 1.667.
+    assert abs(sig - 1.0 / math.sqrt(1.0 - 0.64)) < 0.6
+    assert np.isfinite(features.ou_half_life(s_mr))
+    # Deterministic non-mean-reverting case: a bounded exponential trend (b > 0).
+    trend = pd.Series(np.exp(np.linspace(0.0, 8.0, n)))
+    assert math.isinf(features.ou_half_life(trend))
+    assert math.isinf(features.ou_sigma_eq(trend))
+
+
+def test_pairs_ou_within_unit_band_and_distinct_from_fixed_z():
+    """pairs_ou stays in {-1,0,+1} and is a genuine variant of pairs_coint — the OU
+    normalizer changes the thresholds, so the position series is not identical."""
+    btc = _make_prices(n=400, seed=41)
+    rng = np.random.default_rng(43)
+    eth = pd.Series(btc.to_numpy() * 0.07 * np.exp(rng.normal(0, 0.01, len(btc))), index=btc.index)
+    pos_ou = strategies.pairs_ou(btc, eth, window=60)
+    pos_fz = strategies.pairs_coint(btc, eth, window=60)
+    _assert_in_unit_band(pos_ou, "pairs_ou")
+    assert set(np.unique(pos_ou.dropna().to_numpy())).issubset({-1.0, 0.0, 1.0})
+    a = pos_ou.fillna(-9).to_numpy()
+    b = pos_fz.reindex(pos_ou.index).fillna(-9).to_numpy()
+    assert (a != b).any(), "pairs_ou must differ from fixed-z pairs (it is a distinct variant)"
+
+
+def test_pairs_ou_is_causal_prefix_stable():
+    """No look-ahead: positions computed on a prefix match the full-series positions
+    over that prefix's settled region (rolling/OU stats use only trailing data)."""
+    btc = _make_prices(n=300, seed=41)
+    rng = np.random.default_rng(43)
+    eth = pd.Series(btc.to_numpy() * 0.07 * np.exp(rng.normal(0, 0.01, len(btc))), index=btc.index)
+    full = strategies.pairs_ou(btc, eth, window=60)
+    k = 220
+    pref = strategies.pairs_ou(btc.iloc[:k], eth.iloc[:k], window=60)
+    lo, hi = 60, k - 1  # after warm-up, before the prefix end
+    a = np.nan_to_num(full.iloc[lo:hi].to_numpy(), nan=-9.0)
+    b = np.nan_to_num(pref.iloc[lo:hi].to_numpy(), nan=-9.0)
+    assert np.allclose(a, b)
+
+
+def test_tsmom_voltarget_is_bounded():
+    """B1 sanity: the vol-target overlay on directional tsmom is a valid target
+    weight in [-1, 1] (it composes already-tested pieces)."""
+    df = _make_ohlcv(n=400, seed=8)
+    raw = strategies.tsmom(df, lookback=20, vol_scaled=False, long_short=False)
+    sized = strategies.vol_target(raw, df, target_vol=0.15, max_leverage=2.0)
+    _assert_in_unit_band(sized, "tsmom_voltarget")
+
+
 def test_short_vol_is_documented_stub():
     """short_vol must refuse to fabricate option data (honesty rail)."""
     with pytest.warns(UserWarning):

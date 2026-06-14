@@ -54,6 +54,10 @@ def _fmt(v: object, pct: bool = False, dp: int = 2) -> str:
 # too short for an honest OOS — it is reported descriptively below, not ranked.
 SPOT_STRATS = ["buy_and_hold", "ma_trend_filter", "tsmom", "tsmom_ls", "pairs_coint"]
 
+# Pre-registered Part B candidates, evaluated only under --research (kept OFF the
+# public board until one clears its kill criterion — see RESEARCH-partB-runlog.md).
+RESEARCH_STRATS = SPOT_STRATS + ["tsmom_dir", "tsmom_voltarget", "pairs_ou"]
+
 
 def _make_positions_fn(name: str, args: argparse.Namespace, ppy: int, eth_close):
     """Return a ``prices -> positions`` builder for walk_forward/cpcv."""
@@ -74,6 +78,20 @@ def _make_positions_fn(name: str, args: argparse.Namespace, ppy: int, eth_close)
         if eth_close is None:
             raise ValueError("no ETH data for pairs")
         return lambda px: strategies.pairs_coint(px, eth_close.reindex(px.index).ffill().bfill())
+    # ── Part B research candidates (pre-registered; not on the public board) ──
+    if name == "tsmom_dir":   # B1 baseline: raw directional momentum, NO sizing
+        return lambda px: strategies.tsmom(pd.DataFrame({"close": px}), lookback=args.lookback,
+                                           vol_scaled=False, long_short=False)
+    if name == "tsmom_voltarget":   # B1 candidate: vol-target overlay on directional tsmom
+        return lambda px: strategies.vol_target(
+            strategies.tsmom(pd.DataFrame({"close": px}), lookback=args.lookback,
+                             vol_scaled=False, long_short=False),
+            pd.DataFrame({"close": px}), target_vol=args.target_vol,
+            periods_per_year=ppy, max_leverage=2.0)
+    if name == "pairs_ou":   # B2 candidate: OU-σ_eq normalizer instead of empirical z
+        if eth_close is None:
+            raise ValueError("no ETH data for pairs_ou")
+        return lambda px: strategies.pairs_ou(px, eth_close.reindex(px.index).ffill().bfill())
     raise ValueError(name)
 
 
@@ -98,6 +116,9 @@ def main() -> int:
     p.add_argument("--ma-fast", type=int, default=50)
     p.add_argument("--lookback", type=int, default=20)
     p.add_argument("--target-vol", type=float, default=0.15)
+    p.add_argument("--research", action="store_true",
+                   help="also evaluate the pre-registered Part B candidates (B1/B2) and print "
+                        "their verdict vs baseline; does NOT change the public board.")
     args = p.parse_args()
 
     ppy = _ppy(args.granularity)
@@ -111,9 +132,10 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         eth_close = None
 
-    n_trials = len(SPOT_STRATS)   # selection-count deflation (best of this many)
+    strat_list = RESEARCH_STRATS if args.research else SPOT_STRATS
+    n_trials = len(strat_list)   # selection-count deflation (best of this many)
     rows, oos_by_name, bh_oos_sharpe = [], {}, float("nan")
-    for name in SPOT_STRATS:
+    for name in strat_list:
         try:
             wf = backtest.walk_forward(_make_positions_fn(name, args, ppy, eth_close), close,
                                        n_splits=args.folds, cost_bps=args.cost_bps,
@@ -177,6 +199,70 @@ def main() -> int:
     short = isinstance(minbtl, float) and not math.isnan(minbtl) and years < minbtl
     print(f"MinBTL for N={n_trials}: {_fmt(minbtl)} yrs vs {years:.1f} yrs of data"
           + ("   ⚠ UNDER-POWERED: history shorter than MinBTL" if short else "   (ok)"))
+
+    # ── Part B verdicts (pre-registered kill criteria; --research only) ──────────
+    if args.research:
+        dsr_by = {r["name"]: r.get("oos_dsr") for r in rows if "err" not in r}
+
+        def _num(v):
+            try:
+                f = float(v)
+                return f if not (math.isnan(f) or math.isinf(f)) else None
+            except (TypeError, ValueError):
+                return None
+
+        def _pbo_over(names):
+            cols = {k: oos_by_name[k] for k in names if k in oos_by_name}
+            if len(cols) < 2:
+                return None
+            m = pd.concat(cols, axis=1).dropna()
+            if m.shape[0] > 8 and m.shape[1] >= 2:
+                return _num(risk.probability_of_backtest_overfitting(m.to_numpy(), n_blocks=8).get("pbo"))
+            return None
+
+        print("\n" + "─" * 78)
+        print("PART B — pre-registered candidate verdicts (judged on OOS DSR / PBO):")
+        print("─" * 78)
+
+        # B1: vol-target overlay vs raw directional tsmom (+ near-duplicate check vs board tsmom).
+        d_vt, d_dir = _num(dsr_by.get("tsmom_voltarget")), _num(dsr_by.get("tsmom_dir"))
+        corr = None
+        try:
+            pos_vt = _make_positions_fn("tsmom_voltarget", args, ppy, eth_close)(close)
+            pos_ts = _make_positions_fn("tsmom", args, ppy, eth_close)(close)
+            dfc = pd.DataFrame({"vt": pos_vt, "ts": pos_ts}).dropna()
+            corr = float(dfc["vt"].corr(dfc["ts"])) if len(dfc) > 2 else None
+        except Exception:  # noqa: BLE001
+            corr = None
+        delta1 = (d_vt - d_dir) if (d_vt is not None and d_dir is not None) else None
+        dup = corr is not None and abs(corr) > 0.95
+        kill1 = (delta1 is None) or (delta1 < 0.05) or dup
+        print(f"\nB1 tsmom_voltarget: OOS DSR {_fmt(d_vt)} vs raw directional {_fmt(d_dir)} "
+              f"(Δ {_fmt(delta1)})  ·  corr vs board tsmom {_fmt(corr)}")
+        print(f"   KILL CRITERION: Δ<+0.05 OR |corr|>0.95  →  "
+              + ("KILL — " + ("near-duplicate of the board's vol-scaled tsmom; " if dup else "")
+                 + "tail-control-only, NOT promoted." if kill1
+                 else "SURVIVES — candidate for promotion (re-check parity before adding)."))
+
+        # B2: OU-σ_eq normalizer vs fixed-z pairs (+ does it make selection more overfit?).
+        d_ou, d_fz = _num(dsr_by.get("pairs_ou")), _num(dsr_by.get("pairs_coint"))
+        delta2 = (d_ou - d_fz) if (d_ou is not None and d_fz is not None) else None
+        pbo_board, pbo_with = _pbo_over(SPOT_STRATS), _pbo_over(SPOT_STRATS + ["pairs_ou"])
+        worse = (pbo_board is not None and pbo_with is not None and pbo_with > pbo_board)
+        kill2 = (delta2 is None) or (delta2 < 0.05) or worse
+        print(f"\nB2 pairs_ou: OOS DSR {_fmt(d_ou)} vs fixed-z pairs {_fmt(d_fz)} (Δ {_fmt(delta2)})  ·  "
+              f"PBO board {_fmt(pbo_board)} → +pairs_ou {_fmt(pbo_with)}")
+        print(f"   KILL CRITERION: Δ<+0.05 OR PBO worsens  →  "
+              + ("KILL — model, not edge; OU params non-stationary, NOT promoted." if kill2
+                 else "SURVIVES — candidate for promotion (re-check parity before adding)."))
+
+        # MinBTL headroom cost: public board N vs research N.
+        mb_pub = risk.min_backtest_length(len(SPOT_STRATS))
+        mb_res = risk.min_backtest_length(len(RESEARCH_STRATS))
+        print(f"\nMinBTL headroom: public N={len(SPOT_STRATS)} needs {_fmt(mb_pub)} yrs; "
+              f"research N={len(RESEARCH_STRATS)} needs {_fmt(mb_res)} yrs; data = {years:.1f} yrs. "
+              f"Every added strategy lowers all DSRs and burns headroom — why losers stay off the board.")
+        print("─" * 78)
 
     # Carry: perp-funding, OOS-insufficient — descriptive only.
     try:
