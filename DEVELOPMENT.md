@@ -95,9 +95,10 @@ in the docstring so a quant can audit.
 ## 4. Verification suite (run before every commit)
 
 ```bash
-python3 -m pytest -q                      # 37 tests — the honesty-rail teeth
+python3 -m pytest -q                      # 38 tests — the honesty-rail teeth (incl. JS↔Python parity)
 node --check dashboard/app.js             # JS syntax (also quant.js, charts.js)
 node dashboard/app.js --check             # ppy guard: ppy()=365 (1d)/8760 (1h); no literal-365 at an annualization site
+python3 scripts/check_parity.py           # JS↔Python mirror parity (35 shared formulas; the one rule)
 # CSS brace balance:
 awk '{o+=gsub(/{/,"{");c+=gsub(/}/,"}")}END{print (o==c)?"balanced":"UNBALANCED"}' dashboard/styles.css
 python3 scripts/compare.py                # public OOS leaderboard (defaults to --start 2018-01-01)
@@ -105,17 +106,22 @@ python3 scripts/compare.py --research     # + pre-registered candidate verdicts
 make test        # convenience targets: also  make compare / backtest / scan / fetch / dash / install
 ```
 
+**CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the first three on every push/PR:
+`pytest`, `node --check` ×3, and `python scripts/check_parity.py`. A diverging mirror fails the build.
+
 **Headless self-validation** (Playwright, `python3 -m playwright install chromium`): serve
 `dashboard/` and drive it — assert panels render or honestly degrade across all tabs, screenshot for
 review. This caught real bugs (inverted tape coloring, the clipped TradingView embed, the null-OOS
 fallback). Pattern: serve on a port → `page.goto` → wait for `#leaderboard-body tr` / `#smile-expiry
 option` → click each `button[data-tab="…"]` → assert + screenshot.
 
-**JS↔Python parity probe** (the discipline behind "the mirror agrees"): build a fixed deterministic
-fixture, compute the value in Python (`btcquant.*`) and in Node (`require('dashboard/quant.js')`),
-diff them. These were run as **local one-off scripts** (not committed) — *a worthwhile future
-improvement is to commit them under `scripts/` or `tests/` so parity is CI-enforced.* Expected
-tolerances are in §5.
+**JS↔Python parity check** (the discipline behind "the mirror agrees"): [scripts/check_parity.py](scripts/check_parity.py)
+builds a fixed deterministic fixture, computes 35 shared formulas in Python (`btcquant.*`) and in Node
+(`scripts/_parity_eval.cjs` → `require('dashboard/quant.js')`), and diffs them within the §5 tolerances.
+It is committed, wrapped by `tests/test_parity_mirror.py` (so `pytest` enforces it; skipped when Node is
+absent), and run as its own CI step. To extend the mirror, add the formula to both sides **and** a row to
+the harness. (This check earned its keep immediately: it caught a real Sortino divergence — the JS mirror
+was dividing the downside variance by the downside count instead of the full sample.)
 
 ## 5. Gotchas & numerical tolerances (hard-won — do not relitigate)
 
@@ -155,7 +161,8 @@ tolerances are in §5.
   of every DSR call to one convention is a tidy follow-up.
 - **True bit-for-bit parity** — swap JS `normPpf` (Acklam) / `erf` for higher-order approximations to
   close the ~1e-8 / ~7e-8 gaps, if ever wanted.
-- **Commit the parity probes** under `scripts/`/`tests/` for CI (see §4).
+- ~~Commit the parity probes under `scripts/`/`tests/` for CI~~ — **done**: `scripts/check_parity.py` +
+  `tests/test_parity_mirror.py` + `.github/workflows/ci.yml` (see §4).
 - **Visual pass** — the institutional redesign is a first pass; type-scale/color/per-panel refinements
   may iterate.
 

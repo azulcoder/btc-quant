@@ -1,0 +1,44 @@
+name: ci
+
+# The project's honesty rails, enforced on every push/PR: the Python engine's tests
+# (no-look-ahead, vectorized==reference), the dashboard JS parses, and — the one rule —
+# the JS mirror agrees with the Python source of truth on every shared formula.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: pytest (engine + honesty-rail teeth)
+        run: python -m pytest -q
+
+      - name: node --check (dashboard mirror + app + charts)
+        run: |
+          node --check dashboard/quant.js
+          node --check dashboard/app.js
+          node --check dashboard/charts.js
+
+      - name: JS<->Python parity (the one rule)
+        run: python scripts/check_parity.py

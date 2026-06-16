@@ -240,9 +240,13 @@
   function sortino(returns, periodsPerYear = 365) {
     const fin = returns.filter(Number.isFinite);
     const m = mean(fin);
-    let s = 0, n = 0;
-    for (const x of fin) { if (x < 0) { s += x * x; n++; } }
-    const dd = n ? Math.sqrt(s / n) : 0;
+    // Target downside deviation (Sortino & Price 1994): RMS of below-target returns
+    // over ALL observations, not just the downside ones — mirrors risk.sortino, which
+    // divides by the full sample length. (Dividing by the downside count overstates dd
+    // and understates |Sortino|.)
+    let s = 0;
+    for (const x of fin) { if (x < 0) s += x * x; }
+    const dd = fin.length ? Math.sqrt(s / fin.length) : 0;
     if (!(dd > 0)) return 0;
     return (m / dd) * Math.sqrt(periodsPerYear);
   }
