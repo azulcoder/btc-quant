@@ -29,14 +29,27 @@ deflates; the open question is whether *gating* rescues it.
 intervals) cannot be OOS-validated over multi-year history; they remain descriptive-only,
 like `carry`. Building them as board signals would be N-inflation on unvalidatable data.
 
-**Result.** *(filled by the Commit-4 sweep — `compare.py --reversion` / run-log update.)*
+**Result** (`scripts/reversion_sweep.py`, 2026-06-17 · BTC-USD · 5 folds · net 10+2 bps):
 
-| timeframe | variant | OOS DSR | OOS Sharpe | OOS MaxDD | IC k=1 | verdict |
-|---|---|---|---|---|---|---|
-| 1d | mean_reversion ungated | _tbd_ | | | | |
-| 1d | mean_reversion gated | _tbd_ | | | | |
-| 1h | mean_reversion ungated | _tbd_ | | | | |
-| 1h | mean_reversion gated | _tbd_ | | | | |
+| timeframe | variant | OOS DSR | OOS Sharpe | OOS MaxDD | IC k=1 | % in-trade | verdict |
+|---|---|---|---|---|---|---|---|
+| 1d (3089 bars, 2018→) | ungated | 0.019 | −0.336 | −89.0% | +0.002 | 45% | **KILL** |
+| 1d | gated | 0.000 | −0.643 | **−23.0%** | −0.016 | 2% | **KILL** |
+| 1h (26 677 bars, 2023-06→) | ungated | 0.000 | −2.644 | −92.7% | +0.021* | 43% | **KILL** |
+| 1h | gated | 0.000 | −3.232 | **−54.5%** | −0.001 | 4% | **KILL** |
 
-**Verdict.** *(tbd)* — expected: ungated deflates; gated is the genuine test of whether the
-regime gate adds OOS value. Keep only if it clears the pre-registered kill criterion.
+**Verdict: HYPOTHESIS FALSIFIED — `mean_reversion` is NOT promoted (board unchanged).** The
+gate does exactly what it should as *risk management* — it slashes drawdown (−89%→−23% on 1d,
+−93%→−54% on 1h) and time-in-trade (45%→2%, 43%→4%) by refusing to fade trends — but it does
+**not** create alpha: every variant deflates (OOS DSR ≪ 0.95), the gated Sharpe is in fact
+*more* negative (it just risks far less), and forward IC is ~0 (the lone 1h ungated +0.021*
+does not survive cost/structure into a positive Sharpe). Gated does not beat ungated on OOS DSR
+on either timeframe, so the pre-registered kill criterion is not met.
+
+This is consistent and triangulated: `vwap_reversion` was already KILLed ungated; the IC pass
+found no board strategy with significant forward IC; and the blueprint's own caveat holds — a
+single gated oscillator, *without* the multi-family confluence (OI / CVD / funding / VRP
+positioning signals that need data btc-quant does not ingest), is "pennies in front of a
+steamroller." The gate is retained as a **reusable risk filter / research primitive**
+(`features.hurst`/`variance_ratio`/`adx`, `strategies.regime_gate`), not as a standalone edge.
+The documented rejection IS the deliverable.

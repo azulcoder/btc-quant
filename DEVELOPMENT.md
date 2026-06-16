@@ -198,5 +198,7 @@ was dividing the downside variance by the downside count instead of the full sam
 | [RESEARCH-options-runlog.md](RESEARCH-options-runlog.md) | Options panels: pre-registration + Deribit greeks validation + signed-GEX rejection |
 | [RESEARCH-tharp-runlog.md](RESEARCH-tharp-runlog.md) | Trading-books eval/risk layer: expectancy/R-multiple (vol-notional R) + SQN/PF/MAE, percent-risk sizing sweep, Tier-B candidate sweep (donchian/vwap-reversion/fixed-R — all KILL), live CVD + volume-profile notes |
 | [RESEARCH-ic-runlog.md](RESEARCH-ic-runlog.md) | Lead-time Information Coefficient: forward IC of OOS signals (rank, overlap-corrected) — board strategies show NO significant forward IC; their edge is trend/vol-capture, not bar-to-bar lead |
+| [RESEARCH-reversion-runlog.md](RESEARCH-reversion-runlog.md) | Regime-gated mean reversion (Hurst/VR/ADX gate + `mean_reversion`): pre-registered gated-vs-ungated A/B on 1d+1h — gate cuts drawdown but adds no OOS alpha; hypothesis FALSIFIED, board unchanged |
+| [AUDIT.md](AUDIT.md) / [AUDIT_LOG.md](AUDIT_LOG.md) | Repeatable code/stat audit spec + the change-log of verified fixes (H1 funding P&L fixed; remaining findings tracked) |
 | **DEVELOPMENT.md** (this) | Contributors — architecture, the parity rule, extend-recipes, verification, gotchas, roadmap |
 | [DISCLAIMER.md](DISCLAIMER.md) | Research-only / not financial advice |
