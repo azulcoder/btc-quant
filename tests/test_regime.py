@@ -2,7 +2,7 @@
 import numpy as np
 import pandas as pd
 
-from btcquant import features
+from btcquant import features, strategies
 
 
 def _ohlc_from_close(close, seed=0):
@@ -86,3 +86,32 @@ def test_yang_zhang_vol_positive_and_scales_with_volatility():
     flat = pd.DataFrame({"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
                         index=range(n))
     assert features.yang_zhang_vol(flat, window=20).dropna().iloc[-1] < 1e-9
+
+
+def test_mean_reversion_unit_band_and_gate_suppresses_trend():
+    """Gated mean_reversion stays in {-1,0,+1} and the regime gate suppresses far more
+    fades in a strong trend than the ungated version would take."""
+    n = 800
+    rng = np.random.default_rng(11)
+    trend = _ohlc_from_close(100 + np.arange(n) * 0.3 + rng.standard_normal(n), seed=11)
+    pos_ung = strategies.mean_reversion(trend, gated=False)
+    pos_g = strategies.mean_reversion(trend, gated=True, hurst_window=150)
+    for p in (pos_ung, pos_g):
+        assert set(np.unique(p.dropna().to_numpy())).issubset({-1.0, 0.0, 1.0})
+    assert int((pos_g != 0).sum()) < int((pos_ung != 0).sum())   # gate kills trend-fades
+
+
+def test_regime_gate_opens_more_in_range_than_trend():
+    n = 800
+    rng = np.random.default_rng(12)
+    trend = _ohlc_from_close(100 + np.arange(n) * 0.4 + rng.standard_normal(n), seed=12)
+    # anti-persistent (ranging) level: an OU path mean-reverting to 100 — choppy, H<0.45
+    mr = np.zeros(n); mr[0] = 100.0
+    e = rng.standard_normal(n)
+    for t in range(1, n):
+        mr[t] = mr[t - 1] + 0.4 * (100.0 - mr[t - 1]) + e[t]
+    rangey = _ohlc_from_close(mr, seed=13)
+    gt = strategies.regime_gate(trend, hurst_window=150)
+    gr = strategies.regime_gate(rangey, hurst_window=150)
+    assert gt.dtype == bool and gr.dtype == bool
+    assert gr.iloc[200:].mean() > gt.iloc[200:].mean()           # ranging opens the gate more

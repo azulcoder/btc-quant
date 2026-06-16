@@ -41,6 +41,8 @@ __all__ = [
     "random_entry",
     "donchian_breakout",
     "vwap_reversion",
+    "regime_gate",
+    "mean_reversion",
     "fixed_r_exit",
     "tsmom",
     "carry",
@@ -852,3 +854,54 @@ def fixed_r_exit(positions: pd.Series, df: pd.DataFrame, k_stop: float = 2.0, rr
             elif sig == 0 or (sig > 0) != (cur > 0): cur = 0   # underlying flattened/flipped
         out[i] = cur
     return pd.Series(out, index=close.index, name="fixed_r_exit")
+
+
+# --------------------------------------------------------------------------- #
+# Regime-gated mean reversion (RESEARCH-reversion-runlog.md candidate)         #
+# --------------------------------------------------------------------------- #
+def regime_gate(df: pd.DataFrame, hurst_window: int = 200, hurst_max: float = 0.45,
+                adx_window: int = 14, adx_max: float = 22.0) -> pd.Series:
+    """Boolean ranging-regime gate for mean reversion: True where the market is
+    anti-persistent/ranging — **Hurst < hurst_max AND ADX < adx_max** — i.e. where
+    fading an extreme is plausibly positive-expectancy rather than knife-catching a
+    trend. Both inputs are trailing/causal (``features.hurst`` rolling, Wilder ``adx``).
+    The whole thesis of the reversion research pass is that this gate is the difference
+    between negative- and positive-expectancy (RESEARCH-reversion-runlog.md)."""
+    close = _close(df)
+    h = features.hurst(close, window=hurst_window)
+    a = features.adx(df, window=adx_window)
+    gate = (h < hurst_max) & (a < adx_max)
+    return gate.fillna(False).rename("regime_gate")
+
+
+def mean_reversion(df: pd.DataFrame, lookback: int = 20, entry_z: float = 2.0,
+                   exit_z: float = 0.5, gated: bool = True, hurst_window: int = 200,
+                   hurst_max: float = 0.45, adx_window: int = 14, adx_max: float = 22.0) -> pd.Series:
+    """Bounded z-score mean-reversion fade (RESEARCH-reversion-runlog.md candidate).
+
+    ``z = (close − SMA(lookback)) / rolling_std``; enter the FADE (``−sign(z)``) when
+    ``|z| > entry_z``, exit when ``|z| < exit_z`` (stateful hysteresis). When ``gated``
+    (default) the position is forced flat outside the ranging regime (:func:`regime_gate`)
+    — the pre-registered hypothesis is that the gate turns an otherwise negative-EV fade
+    positive (cf. ``vwap_reversion``, already KILLed ungated). Causal; returns ``{−1,0,+1}``.
+    Research-only — NOT on the public board unless it clears its kill criterion."""
+    close = _close(df)
+    mean = close.rolling(lookback).mean()
+    sd = close.rolling(lookback).std(ddof=1)
+    z = ((close - mean) / sd.replace(0.0, np.nan)).to_numpy()
+    gate = (regime_gate(df, hurst_window, hurst_max, adx_window, adx_max).to_numpy()
+            if gated else np.ones(len(close), dtype=bool))
+    n = len(close); pos = np.zeros(n); cur = 0
+    for i in range(n):
+        zi = z[i]
+        if not np.isfinite(zi):
+            pos[i] = cur; continue
+        if gated and not gate[i]:
+            cur = 0                       # regime closed ⇒ no fade
+        elif cur == 0:
+            if zi > entry_z: cur = -1     # rich ⇒ fade down
+            elif zi < -entry_z: cur = 1   # cheap ⇒ fade up
+        elif abs(zi) < exit_z:
+            cur = 0                       # reverted to fair value
+        pos[i] = cur
+    return pd.Series(pos, index=close.index, name="mean_reversion")
