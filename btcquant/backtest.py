@@ -210,6 +210,86 @@ def run(
     }
 
 
+def run_funding(
+    positions: pd.Series,
+    funding_rate: pd.Series,
+    cost_bps: float = 10.0,
+    slippage_bps: float = 2.0,
+    periods_per_year: int = 1095,
+    n_trials: int = 1,
+    var_trials_sr: Optional[float] = None,
+) -> dict:
+    """Backtest a **delta-neutral funding-carry** position whose P&L is the funding
+    *accrued*, NOT spot price moves.
+
+    A carry trade is long spot + short perp (or the inverse), so its directional
+    price exposure is ~zero by construction — booking it against the spot price path
+    (as a generic price backtest would) measures the wrong quantity entirely
+    (RESEARCH.md §"Funding": "Backtesting perps without applying realized historical
+    funding on the actual position … is one of the largest error sources"). Here the
+    per-interval return is the funding leg::
+
+        funding_pnl_t = - traded_pos_t · funding_rate_t          # receive when short & funding>0
+
+    where ``traded_pos = positions.shift(1)`` (the same no-look-ahead 1-bar shift as
+    :func:`run`; ``positions`` is the **perp-leg** weight, ``-1`` = standard carry).
+    For ``positions = -1`` and ``funding_rate > 0`` this is ``+funding_rate`` (the
+    short perp *receives* funding); the inverted leg (``+1`` while funding < 0) also
+    earns. Turnover cost ``(cost_bps+slippage_bps)/1e4`` is charged on
+    ``|Δ traded_pos|`` (a rebalance trades both delta-neutral legs; costs are rare
+    because the state only flips at the hysteresis bounds). ``periods_per_year``
+    must be the **funding cadence** (≈1095 for 8h), not the spot bar count, or the
+    annualized Sharpe/CAGR are mis-scaled. Mirrors ``quant.js carryBacktest``.
+
+    Returns the same dict shape as :func:`run` (``equity``/``returns``/
+    ``gross_returns``/``turnover``/``trades``/``stats``).
+    """
+    pos, fr = _align(positions, funding_rate)
+    if len(fr) < 2:
+        raise ValueError("run_funding() needs at least 2 aligned funding/position rows.")
+
+    traded_pos = pos.shift(1)
+    _assert_no_lookahead(pos, traded_pos)
+
+    # Funding accrual: a SHORT perp (pos<0) receives funding when funding>0.
+    gross_returns = (-traded_pos * fr).rename("gross_returns")
+
+    turnover = traded_pos.fillna(0.0).diff().abs()
+    turnover.iloc[0] = abs(float(traded_pos.fillna(0.0).iloc[0]))
+    turnover = turnover.rename("turnover")
+
+    cost_rate = (float(cost_bps) + float(slippage_bps)) / 10_000.0
+    costs = turnover * cost_rate
+
+    net_returns = (gross_returns.fillna(0.0) - costs).rename("returns")
+    net_returns.iloc[0] = -float(costs.iloc[0])
+
+    equity = (1.0 + net_returns.fillna(0.0)).cumprod().rename("equity")
+    trades = int((turnover > 0).sum())
+
+    stats = risk.summary(net_returns, equity=equity, periods_per_year=periods_per_year)
+    n_periods = int(stats.get("n_periods", 0))
+    var_sr = (1.0 / n_periods if n_periods > 0 else float("nan")) if var_trials_sr is None else float(var_trials_sr)
+    stats["deflated_sharpe"] = risk.deflated_sharpe_ratio(
+        stats.get("sharpe_per_period", float("nan")), n_periods,
+        stats.get("skew", float("nan")), stats.get("kurtosis", float("nan")),
+        int(n_trials), var_sr)
+    stats["n_trials"] = int(n_trials)
+    stats["trades"] = trades
+    stats["total_turnover"] = float(turnover.sum())
+    stats["cost_bps"] = float(cost_bps)
+    stats["slippage_bps"] = float(slippage_bps)
+
+    return {
+        "equity": equity,
+        "returns": net_returns,
+        "gross_returns": gross_returns,
+        "turnover": turnover,
+        "trades": trades,
+        "stats": stats,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Walk-forward (out-of-sample) evaluation                                      #
 # --------------------------------------------------------------------------- #

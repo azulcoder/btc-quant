@@ -49,6 +49,16 @@ def _fmt(v: object, pct: bool = False, dp: int = 2) -> str:
     return f"{f * 100:.{dp}f}%" if pct else f"{f:.{dp}f}"
 
 
+def _funding_periods_per_year(index) -> int:
+    """Funding intervals per year from the median stamp spacing (≈1095 for an 8h cadence).
+    Carry stats must annualize on the funding clock, not the spot bar count (audit M3)."""
+    try:
+        sec = pd.Series(index).diff().dropna().median().total_seconds()
+        return int(round(365.25 * 24 * 3600 / sec)) if sec and sec > 0 else 1095
+    except Exception:  # noqa: BLE001
+        return 1095
+
+
 # Spot, walk-forward-able directional strategies (the OOS leaderboard). `carry` is
 # perp-funding-indexed (8h), not daily spot, and our keyless funding history is far
 # too short for an honest OOS — it is reported descriptively below, not ranked.
@@ -383,17 +393,22 @@ def main() -> int:
             print(f"  Day-of-week readout skipped: {str(exc)[:40]}")
         print("─" * 78)
 
-    # Carry: perp-funding, OOS-insufficient — descriptive only.
+    # Carry: perp-FUNDING accrual (delta-neutral), descriptive only. P&L is the funding
+    # RECEIVED on the short-perp leg, NOT spot price moves (audit H1 fix), annualized on
+    # the funding cadence inferred from the stamp spacing (audit M3), no bfill (audit M1).
     try:
         funding = data.get_funding(symbol=args.funding_symbol, source="bybit",
                                    cache=not args.no_cache)
-        cpx = close.reindex(funding.index).ffill().bfill().dropna()
-        cpos = strategies.carry(funding).reindex(cpx.index)
-        cres = backtest.run(cpos, cpx, cost_bps=args.cost_bps, slippage_bps=args.slippage_bps,
-                            periods_per_year=ppy, n_trials=n_trials)
+        cpos = strategies.carry(funding)
+        fpy = _funding_periods_per_year(funding.index)
+        cres = backtest.run_funding(cpos, funding["funding_rate"],
+                                    cost_bps=args.cost_bps, slippage_bps=args.slippage_bps,
+                                    periods_per_year=fpy, n_trials=n_trials)
         cs = cres["stats"]
-        print(f"\ncarry (perp, descriptive — OOS n/a): in-sample Sharpe {_fmt(cs.get('sharpe'))}, "
-              f"CAGR {_fmt(cs.get('cagr'), True)} over {len(funding)} funding intervals "
+        in_trade = float((cpos.fillna(0.0) != 0.0).mean()) * 100.0
+        print(f"\ncarry (perp FUNDING accrual, delta-neutral; descriptive — OOS n/a): "
+              f"funding Sharpe {_fmt(cs.get('sharpe'))}, funding CAGR {_fmt(cs.get('cagr'), True)}, "
+              f"{in_trade:.0f}% time in-trade, over {len(funding)} funding intervals @ {fpy}/yr "
               f"(< MinBTL — not OOS-rankable on keyless history).")
     except Exception as exc:  # noqa: BLE001
         print(f"\ncarry: descriptive feed unavailable ({str(exc)[:50]}).")

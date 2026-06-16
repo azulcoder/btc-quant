@@ -800,3 +800,21 @@ def test_tier_b_candidates_unit_band_and_causal():
     a = np.nan_to_num(full.iloc[60:k - 1].to_numpy(), nan=-9.0)
     b = np.nan_to_num(pref.iloc[60:k - 1].to_numpy(), nan=-9.0)
     assert np.allclose(a, b)
+
+
+def test_run_funding_books_funding_accrual_not_spot_price():
+    """run_funding pays the funding leg, not spot returns: a SHORT perp (-1) earns
+    positive funding, a LONG (+1) pays it, flat earns ~0 — independent of any price."""
+    idx = pd.date_range("2023-01-01", periods=200, freq="8h")
+    funding = pd.Series(0.0005, index=idx)            # +0.05%/8h, constant
+    short = backtest.run_funding(pd.Series(-1.0, index=idx), funding,
+                                 cost_bps=0.0, slippage_bps=0.0, periods_per_year=1095)
+    longp = backtest.run_funding(pd.Series(1.0, index=idx), funding,
+                                 cost_bps=0.0, slippage_bps=0.0, periods_per_year=1095)
+    flat = backtest.run_funding(pd.Series(0.0, index=idx), funding,
+                                cost_bps=0.0, slippage_bps=0.0, periods_per_year=1095)
+    assert short["equity"].iloc[-1] > 1.05          # short receives funding
+    assert longp["equity"].iloc[-1] < 1.0           # long pays funding
+    assert abs(flat["equity"].iloc[-1] - 1.0) < 1e-12
+    # net per held interval equals +funding for the short leg (no-look-ahead shift)
+    assert abs(short["returns"].iloc[5] - 0.0005) < 1e-12

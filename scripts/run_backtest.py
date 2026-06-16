@@ -169,6 +169,37 @@ def _periods_per_year(granularity: str) -> int:
     return 24 * 365 if granularity == "1h" else 365
 
 
+def _funding_ppy(index) -> int:
+    """Funding intervals per year from the median stamp spacing (≈1095 for 8h)."""
+    try:
+        sec = pd.Series(index).diff().dropna().median().total_seconds()
+        return int(round(365.25 * 24 * 3600 / sec)) if sec and sec > 0 else 1095
+    except Exception:  # noqa: BLE001
+        return 1095
+
+
+def _run_carry(args, positions, funding_rate) -> int:
+    """Carry is a delta-neutral FUNDING trade: P&L is the funding accrued on the
+    short-perp leg, NOT spot price moves (audit H1). Routed through run_funding — no
+    spot buy-and-hold baseline, no walk-forward, no price tearsheet (none apply)."""
+    fpy = _funding_ppy(funding_rate.index)
+    res = backtest.run_funding(positions, funding_rate, cost_bps=args.cost_bps,
+                               slippage_bps=args.slippage_bps, periods_per_year=fpy,
+                               n_trials=args.n_trials)
+    st = res["stats"]
+    in_trade = float((pd.Series(positions).fillna(0.0) != 0.0).mean()) * 100.0
+    print(f"\nbtc-quant carry (perp FUNDING accrual, delta-neutral) | {len(funding_rate)} "
+          f"funding intervals @ {fpy}/yr | {in_trade:.0f}% time in-trade\n")
+    print(f"  funding Sharpe (ann.)   {_fmt(st.get('sharpe'))}")
+    print(f"  funding CAGR            {_fmt(st.get('cagr'), pct=True)}")
+    print(f"  Deflated Sharpe         {_fmt(st.get('deflated_sharpe'))}")
+    print(f"  max drawdown            {_fmt(st.get('max_drawdown'), pct=True)}")
+    print(f"  rebalances              {res['trades']}")
+    print("  P&L = funding received on the short-perp leg (delta-neutral); NOT spot price returns.")
+    print("  NOT FINANCIAL ADVICE - backtest != forecast.")
+    return 0
+
+
 def _build_positions(
     args: argparse.Namespace,
     df: pd.DataFrame,
@@ -212,13 +243,10 @@ def _build_positions(
             cache=not args.no_cache,
         )
         pos = strategies.carry(funding)
-        # The carry P&L is driven by the funding cadence, not spot price moves;
-        # we proxy the perp-leg price path with the spot close reindexed to the
-        # funding clock so the harness can mark turnover/exposure consistently.
-        px = close.reindex(funding.index).ffill().bfill()
-        px = px.dropna()
-        pos = pos.reindex(px.index)
-        return pos, px
+        # Carry P&L is the FUNDING accrued on the delta-neutral position, NOT spot price
+        # moves (audit H1). Return the funding-rate series as the second element; main()
+        # routes carry through backtest.run_funding instead of the price engine.
+        return pos, funding["funding_rate"]
 
     raise ValueError(f"unknown strategy {name!r}")
 
@@ -307,6 +335,11 @@ def main(argv: list[str] | None = None) -> int:
     except (data.DataError, NotImplementedError, ValueError, KeyError) as exc:
         print(f"ERROR building positions for {args.strategy!r}: {exc}", file=sys.stderr)
         return 1
+
+    # Carry is a funding trade, not a price trade — route it through the funding engine
+    # (prices here is actually the funding-rate series; audit H1).
+    if args.strategy == "carry":
+        return _run_carry(args, positions, prices)
 
     result = backtest.run(
         positions,
