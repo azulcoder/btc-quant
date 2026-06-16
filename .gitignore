@@ -8,3 +8,9 @@ data/*.json
 .venv/
 venv/
 *.png
+
+# Optional research/reproducibility tooling (requirements-dev.txt) — local-only stores.
+# DVC pipeline outputs under reports/ are ignored by DVC's own reports/.gitignore.
+mlflow.db
+mlartifacts/
+mlruns/

@@ -1,0 +1,22 @@
+# DVC pipeline — reproducible research runs.
+#
+# `dvc repro` re-runs a stage only when its declared deps (the engine code + this
+# strategy's script) change, and records exact output hashes in dvc.lock, so any
+# reported figure is reproducible from a pinned pipeline definition. `dvc dag` shows
+# the graph. Stages also `--track` to MLflow, so the run lands in both the pipeline
+# lock AND the experiment store.
+#
+# HONEST LIMITATION: the backtest fetches LIVE OHLCV (cached under data/), which is not
+# in `deps` — so a re-run can change when the upstream data updates. Pinning the input
+# data (`dvc add` a point-in-time OHLCV snapshot) is the next reproducibility step; this
+# stage pins the *pipeline + code*, not yet the market data.
+stages:
+  backtest:
+    cmd: >-
+      python3 scripts/run_backtest.py --strategy ma_trend_filter --start 2020-01-01
+      --n-trials 15 --walk --no-plot --track --outdir reports
+    deps:
+      - btcquant
+      - scripts/run_backtest.py
+    outs:
+      - reports/ma_trend_filter_BTC-USD_1d.json

@@ -21,8 +21,10 @@ btcquant/           Python engine — the SOURCE OF TRUTH (pure, typed, pytest-c
                     research-only candidates donchian_breakout / vwap_reversion / fixed_r_exit / random_entry
                     (NOT on the board — all deflated, logged in RESEARCH-tharp-runlog.md)
   report.py         matplotlib tearsheet + dashboard JSON
-scripts/            CLIs: compare.py (OOS leaderboard, --research) · run_backtest.py (--walk) · scan.py · fetch_data.py
-tests/              pytest — no-lookahead, vectorized==reference, the honesty-rail teeth
+  tracking.py       OPTIONAL MLflow run-logging (guarded import; no-ops without requirements-dev.txt)
+scripts/            CLIs: compare.py (OOS leaderboard, --research) · run_backtest.py (--walk, --track) · scan.py · fetch_data.py
+  check_parity.py   JS↔Python mirror parity harness (+ _parity_eval.cjs); CI-enforced
+tests/              pytest — no-lookahead, vectorized==reference, parity, the honesty-rail teeth
 dashboard/          static terminal, no build step:
   quant.js          REQUIREABLE JS MIRROR of the engine's math (Q.*) — parity-checked vs Python
   app.js            data fetch (client-side, public feeds) + DOM render; calls Q.* for all math
@@ -108,6 +110,23 @@ make test        # convenience targets: also  make compare / backtest / scan / f
 
 **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the first three on every push/PR:
 `pytest`, `node --check` ×3, and `python scripts/check_parity.py`. A diverging mirror fails the build.
+
+### Reproducibility tooling (OPTIONAL — `requirements-dev.txt`, not the core)
+
+Off by default; the engine never hard-depends on it. `pip install -r requirements-dev.txt` to enable.
+
+- **MLflow run-tracking.** `run_backtest.py --track` logs the run's params (strategy, costs, folds, and
+  **`n_trials`** — the figure that deflates the Sharpe) + (OOS) metrics + the JSON/PNG artifacts via
+  [btcquant/tracking.py](btcquant/tracking.py). Store defaults to local `sqlite:///mlflow.db` (MLflow 3.x
+  retired the `file:./mlruns` backend; SQLite works on 2.x too); override with `MLFLOW_TRACKING_URI`.
+  Browse with `mlflow ui --backend-store-uri sqlite:///mlflow.db`. Without MLflow installed, `--track`
+  prints a hint and no-ops — it never fabricates or fails the run. Only finite scalars are logged.
+- **DVC pipeline.** [dvc.yaml](dvc.yaml) defines a `backtest` stage (deps = `btcquant/` + the script,
+  out = the dashboard JSON); `dvc repro` re-runs only on change and records output hashes in `dvc.lock`;
+  `dvc dag` shows the graph. **Honest limit:** the stage fetches live OHLCV (not in `deps`), so it pins the
+  *pipeline + code*, not yet the market data — `dvc add` a point-in-time OHLCV snapshot is the next step.
+- Local stores (`mlflow.db`, `mlartifacts/`, `reports/*.json`) are git-ignored. **Prefect orchestration is
+  deferred** — on-demand `dvc repro` + `make` suffice for a solo researcher until a schedule is actually needed.
 
 **Headless self-validation** (Playwright, `python3 -m playwright install chromium`): serve
 `dashboard/` and drive it — assert panels render or honestly degrade across all tabs, screenshot for

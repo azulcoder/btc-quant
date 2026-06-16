@@ -1,0 +1,7 @@
+# Optional research/reproducibility tooling — NOT required to run the core engine,
+# the backtests, or the dashboard. Install with:  pip install -r requirements-dev.txt
+#
+# The engine imports these lazily and degrades cleanly when they are absent
+# (btcquant/tracking.py no-ops with a hint; the DVC pipeline is opt-in).
+mlflow>=2.12          # experiment tracking + UI (`mlflow ui`). `mlflow-skinny` suffices for logging-only.
+dvc>=3.50             # data + pipeline versioning (`dvc repro`, `dvc dag`).

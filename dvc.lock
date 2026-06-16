@@ -1,0 +1,20 @@
+schema: '2.0'
+stages:
+  backtest:
+    cmd: python3 scripts/run_backtest.py --strategy ma_trend_filter --start 
+      2020-01-01 --n-trials 15 --walk --no-plot --track --outdir reports
+    deps:
+    - path: btcquant
+      hash: md5
+      md5: 8ec99a2789800972009fd34f88c63d40.dir
+      size: 405548
+      nfiles: 16
+    - path: scripts/run_backtest.py
+      hash: md5
+      md5: 2c6568813ed6a80a2e45eab733580c9f
+      size: 16713
+    outs:
+    - path: reports/ma_trend_filter_BTC-USD_1d.json
+      hash: md5
+      md5: c3d939b32808ccc778997db96e442169
+      size: 998182

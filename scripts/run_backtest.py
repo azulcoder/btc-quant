@@ -40,7 +40,7 @@ if str(_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
-from btcquant import backtest, data, report, strategies  # noqa: E402
+from btcquant import backtest, data, report, strategies, tracking  # noqa: E402
 
 # Strategies this CLI can build (short_vol is a documented data-less stub and is
 # intentionally excluded — it raises NotImplementedError by design).
@@ -137,6 +137,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--outdir",
         default=str(_ROOT / "data"),
         help="Directory for the tearsheet PNG + dashboard JSON.",
+    )
+    parser.add_argument(
+        "--track",
+        action="store_true",
+        help="Log this run's params + (OOS) metrics + artifacts to MLflow "
+             "(optional; needs requirements-dev.txt — no-ops with a hint otherwise).",
     )
     parser.add_argument(
         "--no-plot",
@@ -331,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     _print_stats_table(args.strategy, result["stats"], bh_result["stats"])
 
     # --- Walk-forward OOS (the honest out-of-sample view) --------------------- #
+    wf_oos = None  # captured for optional MLflow logging below
     if args.walk:
         try:
             make_pos = lambda px: _build_positions(args, pd.DataFrame({"close": px}), ppy)[0]
@@ -338,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
                                        cost_bps=args.cost_bps, slippage_bps=args.slippage_bps,
                                        periods_per_year=ppy)
             oos, is_ = wf["oos"], wf["is_"]
+            wf_oos = oos
             print(f"\nwalk-forward ({args.folds} folds) — the IS→OOS drop is the overfitting tell:")
             print(f"  in-sample  Sharpe {is_.get('sharpe', float('nan')):.2f}")
             print(f"  OUT-OF-SAMPLE Sharpe {oos.get('sharpe', float('nan')):.2f} | "
@@ -377,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"\nsaved dashboard JSON -> {json_path}")
 
+    png_path = None
     if not args.no_plot:
         png_path = outdir / f"{stem}.png"
         fig = report.tearsheet(
@@ -387,6 +396,30 @@ def main(argv: list[str] | None = None) -> int:
         )
         fig.savefig(str(png_path), dpi=110)
         print(f"saved tearsheet PNG  -> {png_path}")
+
+    # --- Optional MLflow run-tracking (reproducibility spine) ------------------ #
+    if args.track:
+        st = result["stats"]
+        params = {
+            "strategy": args.strategy, "symbol": args.symbol, "granularity": args.granularity,
+            "source": args.source, "start": str(start.date()), "end": str(end.date()),
+            "bars": len(prices), "cost_bps": args.cost_bps, "slippage_bps": args.slippage_bps,
+            "n_trials": args.n_trials, "walk": bool(args.walk), "folds": args.folds,
+        }
+        metrics = {
+            "sharpe": st.get("sharpe"), "deflated_sharpe": st.get("deflated_sharpe"),
+            "psr": st.get("psr"), "sortino": st.get("sortino"), "cagr": st.get("cagr"),
+            "max_drawdown": st.get("max_drawdown"), "calmar": st.get("calmar"),
+            "trades": st.get("trades"), "terminal_equity": st.get("terminal_equity"),
+        }
+        if wf_oos is not None:  # the honest out-of-sample numbers are what matter
+            metrics["oos_sharpe"] = wf_oos.get("sharpe")
+            metrics["oos_deflated_sharpe"] = wf_oos.get("deflated_sharpe")
+        artifacts = [str(json_path)] + ([str(png_path)] if png_path else [])
+        run_id = tracking.log_run(stem, params, metrics, artifacts=artifacts)
+        if run_id:
+            print(f"logged MLflow run {run_id[:8]} -> experiment 'btc-quant' "
+                  f"(view: mlflow ui --backend-store-uri sqlite:///mlflow.db)")
 
     return 0
 
