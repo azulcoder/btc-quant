@@ -16,6 +16,8 @@ btcquant/           Python engine — the SOURCE OF TRUTH (pure, typed, pytest-c
   backtest.py       run (shift-by-1, cost-on-turnover) · walk_forward (+ oos_positions) · cpcv
   risk.py           sharpe…calmar, VaR/CVaR, kelly, probabilistic/deflated Sharpe, min_backtest_length, PBO,
                     trade_ledger + expectancy_report (Tharp R-multiples + SQN/profit-factor/MAE; vol-notional R, no hard stop)
+  ic.py             forward Information Coefficient (lead-time validation): does signal_t lead return_{t+k}?
+                    rank IC + overlap-corrected significance + IC-IR + regime-conditional IC (eval layer, OOS)
   strategies.py     position builders (df -> Series in [-1,1]); each cites edge + caveat;
                     sizing wrappers vol_target + percent_risk_size (ATR; Python-harness-only);
                     research-only candidates donchian_breakout / vwap_reversion / fixed_r_exit / random_entry
@@ -195,5 +197,6 @@ was dividing the downside variance by the downside count instead of the full sam
 | [RESEARCH-partB-runlog.md](RESEARCH-partB-runlog.md) | Worked strategy-rejection log (B1/B2/B3) |
 | [RESEARCH-options-runlog.md](RESEARCH-options-runlog.md) | Options panels: pre-registration + Deribit greeks validation + signed-GEX rejection |
 | [RESEARCH-tharp-runlog.md](RESEARCH-tharp-runlog.md) | Trading-books eval/risk layer: expectancy/R-multiple (vol-notional R) + SQN/PF/MAE, percent-risk sizing sweep, Tier-B candidate sweep (donchian/vwap-reversion/fixed-R — all KILL), live CVD + volume-profile notes |
+| [RESEARCH-ic-runlog.md](RESEARCH-ic-runlog.md) | Lead-time Information Coefficient: forward IC of OOS signals (rank, overlap-corrected) — board strategies show NO significant forward IC; their edge is trend/vol-capture, not bar-to-bar lead |
 | **DEVELOPMENT.md** (this) | Contributors — architecture, the parity rule, extend-recipes, verification, gotchas, roadmap |
 | [DISCLAIMER.md](DISCLAIMER.md) | Research-only / not financial advice |

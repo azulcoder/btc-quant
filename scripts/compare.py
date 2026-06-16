@@ -32,7 +32,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from btcquant import backtest, data, features, risk, strategies  # noqa: E402
+from btcquant import backtest, data, features, ic, risk, strategies  # noqa: E402
 
 
 def _ppy(granularity: str) -> int:
@@ -155,10 +155,16 @@ def main() -> int:
             op = wf["oos_positions"]
             er = risk.expectancy_report(op, close.reindex(op.index),
                                         oos_vol.reindex(op.index), periods_per_year=ppy, k=2.0)
+            # Forward IC: does the OOS signal actually LEAD returns? (Spearman rank IC of
+            # position_t vs forward return t→t+k; evaluation only, no look-ahead.)
+            op_px = close.reindex(op.index)
+            ic_prof = ic.ic_profile(op, op_px, horizons=(1, 3, 5, 10), method="spearman")
+            icir = ic.ic_ir(op, op_px, k=3, block=21, method="spearman")
             rows.append({"name": name, "oos_cagr": oos.get("cagr"), "oos_sharpe": oos.get("sharpe"),
                          "is_sharpe": is_.get("sharpe", float("nan")), "oos_dsr": oos_dsr,
                          "oos_mdd": oos.get("max_drawdown"),
-                         "exp_r": er["expectancy_r"], "sqn": er["sqn"], "win": er["win_rate"], "ntr": er["n_trades"]})
+                         "exp_r": er["expectancy_r"], "sqn": er["sqn"], "win": er["win_rate"], "ntr": er["n_trades"],
+                         "ic": ic_prof, "icir_t": icir["t_stat"]})
             if name == "buy_and_hold":
                 bh_oos_sharpe = float(oos.get("sharpe", float("nan")))
         except Exception as exc:  # noqa: BLE001
@@ -212,6 +218,30 @@ def main() -> int:
     short = isinstance(minbtl, float) and not math.isnan(minbtl) and years < minbtl
     print(f"MinBTL for N={n_trials}: {_fmt(minbtl)} yrs vs {years:.1f} yrs of data"
           + ("   ⚠ UNDER-POWERED: history shorter than MinBTL" if short else "   (ok)"))
+
+    # ── Lead-time IC: does the OOS signal actually LEAD returns? ──────────────────
+    print("\nLEAD-TIME IC (OOS, Spearman rank corr of signalₜ vs forward return t→t+k; "
+          "* = significant at 95%, |IC| > 1.96·√(k/N) overlap-corrected):")
+    ich = (f"{'strategy':<18}{'IC k=1':>10}{'IC k=3':>10}{'IC k=5':>10}{'IC k=10':>10}"
+           f"{'IC-IR t(k=3)':>14}")
+    print(ich); print("-" * len(ich))
+
+    def _icCell(prof, k):
+        d = (prof or {}).get(k, {})
+        v = d.get("ic")
+        if not isinstance(v, (int, float)) or v != v:
+            return "n/a"
+        return f"{v:+.3f}{'*' if d.get('significant') else ''}"
+
+    for r in ok:
+        prof = r.get("ic")
+        if not prof:
+            continue
+        print(f"{r['name']:<18}{_icCell(prof, 1):>10}{_icCell(prof, 3):>10}"
+              f"{_icCell(prof, 5):>10}{_icCell(prof, 10):>10}{_fmt(r.get('icir_t')):>14}")
+    print("  IC = the per-bet LEADING skill (Grinold-Kahn: IR ≈ IC·√breadth). Near-zero / "
+          "insignificant ⇒ the signal does NOT lead returns OOS — whatever the equity curve shows.")
+    print("  (buy_and_hold has a constant signal ⇒ IC undefined; that is correct, not a bug.)")
 
     # ── Part B verdicts (pre-registered kill criteria; --research only) ──────────
     if args.research:
