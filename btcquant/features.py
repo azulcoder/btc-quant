@@ -43,6 +43,11 @@ __all__ = [
     "rolling_sharpe",
     "drawdown",
     "max_drawdown",
+    # Regime / mean-reversion diagnostics (trend-vs-revert gate + OHLC vol).
+    "yang_zhang_vol",
+    "hurst",
+    "variance_ratio",
+    "adx",
     # Option-surface helpers (consume data.get_option_chain frames).
     "year_fraction_to_expiry",
     "atm_iv",
@@ -453,6 +458,116 @@ def max_drawdown(equity: pd.Series) -> float:
     if dd.empty or dd.isna().all():
         return float("nan")
     return float(dd.min())
+
+
+# --------------------------------------------------------------------------- #
+# Regime / mean-reversion diagnostics (trend-vs-revert classifiers + OHLC vol)  #
+# --------------------------------------------------------------------------- #
+# These gate mean-reversion: a fade is only positive-expectancy in a ranging /
+# anti-persistent regime. All trailing-window → causal (no look-ahead). Python-only
+# research layer (no dashboard consumer yet → not mirrored in quant.js).
+def yang_zhang_vol(df: pd.DataFrame, window: int = 20, periods_per_year: int = 365) -> pd.Series:
+    """Yang-Zhang (2000) drift-independent OHLC realized volatility, annualized.
+
+    ``σ²_YZ = σ²_O + k·σ²_C + (1−k)·σ²_RS`` with ``k = 0.34/(1.34 + (n+1)/(n−1))``,
+    combining the overnight-gap variance (``ln(O_t/C_{t−1})``), the open-to-close
+    variance (``ln(C_t/O_t)``), and the Rogers-Satchell term. It is the most efficient
+    and least biased RV estimator for gapping/24-7 data; close-to-close (``realized_vol``)
+    is the noisy fallback. Trailing ``window`` → causal."""
+    o = pd.Series(df["open"], dtype="float64")
+    h = pd.Series(df["high"], dtype="float64")
+    lo = pd.Series(df["low"], dtype="float64")
+    c = pd.Series(df["close"], dtype="float64")
+    log_o = np.log(o / c.shift(1))                                   # overnight gap
+    log_c = np.log(c / o)                                            # open-to-close
+    rs = np.log(h / c) * np.log(h / o) + np.log(lo / c) * np.log(lo / o)  # Rogers-Satchell
+    n = int(window)
+    k = 0.34 / (1.34 + (n + 1.0) / (n - 1.0)) if n > 1 else 0.34
+    var_o = log_o.rolling(n).var(ddof=1)
+    var_c = log_c.rolling(n).var(ddof=1)
+    var_rs = rs.rolling(n).mean()
+    yz = np.sqrt((var_o + k * var_c + (1.0 - k) * var_rs).clip(lower=0.0)) * math.sqrt(periods_per_year)
+    return yz.rename("yang_zhang_vol")
+
+
+def _hurst_estimate(arr: np.ndarray, max_lag: int = 20) -> float:
+    """Hurst via the slope of log(RMS of lag-τ differences) vs log(τ)."""
+    a = np.asarray(arr, dtype="float64")
+    a = a[np.isfinite(a)]
+    n = len(a)
+    if n < 20:
+        return float("nan")
+    tau, lg = [], []
+    for lag in range(2, min(int(max_lag), n // 2)):
+        diff = a[lag:] - a[:-lag]
+        s = math.sqrt(float(np.mean(diff * diff)))
+        if s > 0.0:
+            tau.append(math.log(s)); lg.append(math.log(lag))
+    if len(tau) < 3:
+        return float("nan")
+    return float(np.polyfit(lg, tau, 1)[0])
+
+
+def hurst(series: pd.Series, window: int | None = None, max_lag: int = 20):
+    """Hurst exponent: ``H<0.5`` anti-persistent (mean-reverting), ``≈0.5`` random walk,
+    ``>0.5`` trending. With ``window`` set, returns a TRAILING rolling ``H`` (the causal
+    regime gate); else a single whole-sample float. Coarse on short windows — a regime
+    flag, not a precise measurement (the audit's R/S-bias caveat applies)."""
+    s = pd.Series(series, dtype="float64")
+    if window is None:
+        return _hurst_estimate(s.to_numpy(), max_lag)
+    return s.rolling(int(window)).apply(lambda a: _hurst_estimate(a, max_lag), raw=True).rename("hurst")
+
+
+def variance_ratio(returns: pd.Series, q: int = 2) -> dict:
+    """Lo-MacKinlay (1988) variance ratio ``VR(q) = Var(q-period)/(q·Var(1-period))`` with
+    the **heteroskedasticity-robust** ``z*`` (valid under conditional heteroskedasticity —
+    the crypto case, and per Lo-MacKinlay more reliable than ADF/Box-Pierce here).
+    ``VR<1`` mean-reverting, ``>1`` trending, ``≈1`` random walk. Returns
+    ``{vr, z_star, p_value, n}`` (two-sided p via ``erfc``)."""
+    r = pd.Series(returns, dtype="float64").dropna().to_numpy()
+    nq = len(r)
+    if nq < q + 2 or q < 2:
+        return {"vr": float("nan"), "z_star": float("nan"), "p_value": float("nan"), "n": nq}
+    mu = r.mean()
+    dev = r - mu
+    sse = float(np.sum(dev * dev))
+    var1 = sse / (nq - 1)
+    if var1 <= 0:
+        return {"vr": float("nan"), "z_star": float("nan"), "p_value": float("nan"), "n": nq}
+    qsum = np.convolve(r, np.ones(q), mode="valid")          # overlapping q-period sums
+    m = q * (nq - q + 1) * (1.0 - q / nq)                    # m already divides out the q
+    varq = float(np.sum((qsum - q * mu) ** 2)) / m           # ⇒ σ²_b is PER-PERIOD
+    vr = varq / var1
+    theta = 0.0                                              # robust asymptotic variance
+    for j in range(1, q):
+        dj = float(np.sum((dev[j:] ** 2) * (dev[:-j] ** 2))) / (sse * sse)
+        w = 2.0 * (q - j) / q
+        theta += (w * w) * dj
+    # z* = (VR−1)/√θ* is asymptotically N(0,1); the 1/T scaling is already inside θ*.
+    z = (vr - 1.0) / math.sqrt(theta) if theta > 0 else float("nan")
+    p = math.erfc(abs(z) / math.sqrt(2.0)) if z == z else float("nan")
+    return {"vr": float(vr), "z_star": float(z), "p_value": float(p), "n": nq}
+
+
+def adx(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    """Wilder's Average Directional Index (trend strength, 0-100). ``ADX>~25`` ⇒ trending,
+    ``<~20`` ⇒ ranging — the trend gate for mean reversion. Wilder-smoothed (RMA,
+    ``α=1/window``) → causal."""
+    h = pd.Series(df["high"], dtype="float64")
+    lo = pd.Series(df["low"], dtype="float64")
+    c = pd.Series(df["close"], dtype="float64")
+    up, dn = h.diff(), -lo.diff()
+    plus_dm = pd.Series(np.where((up > dn) & (up > 0.0), up, 0.0), index=h.index)
+    minus_dm = pd.Series(np.where((dn > up) & (dn > 0.0), dn, 0.0), index=h.index)
+    tr = pd.concat([h - lo, (h - c.shift(1)).abs(), (lo - c.shift(1)).abs()], axis=1).max(axis=1)
+    n = int(window)
+    rma = lambda x: x.ewm(alpha=1.0 / n, adjust=False, min_periods=n).mean()
+    atr_ = rma(tr).replace(0.0, np.nan)
+    plus_di = 100.0 * rma(plus_dm) / atr_
+    minus_di = 100.0 * rma(minus_dm) / atr_
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, np.nan)
+    return rma(dx).rename("adx")
 
 
 # --------------------------------------------------------------------------- #

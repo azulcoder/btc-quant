@@ -12,7 +12,7 @@ pre-registration / rejection discipline.
 ```
 btcquant/           Python engine — the SOURCE OF TRUTH (pure, typed, pytest-covered)
   data.py           fetch + cache: get_ohlcv / get_funding / get_option_chain / get_dvol / get_onchain (public, no keys)
-  features.py       indicators + option-surface + greeks (pure functions)
+  features.py       indicators + option-surface + greeks + regime gate (hurst/variance_ratio/adx) + yang_zhang_vol (pure)
   backtest.py       run (shift-by-1, cost-on-turnover) · walk_forward (+ oos_positions) · cpcv
   risk.py           sharpe…calmar, VaR/CVaR, kelly, probabilistic/deflated Sharpe, min_backtest_length, PBO,
                     trade_ledger + expectancy_report (Tharp R-multiples + SQN/profit-factor/MAE; vol-notional R, no hard stop)
