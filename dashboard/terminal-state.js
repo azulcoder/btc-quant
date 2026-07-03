@@ -1,4 +1,4 @@
-// terminal-state.js — orderflow terminal: pure in-memory stores (DESIGN-orderflow-terminal.md §4).
+// terminal-state.js — orderflow terminal: pure in-memory stores (DESIGN-orderflow-terminal.md §4 + §4b).
 //
 // RESEARCH / DESCRIPTIVE ONLY. Everything held here is LIVE-DESCRIPTIVE session
 // state (§0.1): it is never merged into a backtested series or the OOS harness,
@@ -112,8 +112,11 @@
   //
   // Bids/asks are Maps price→qty. Two wire realities drive applyDepth (§2,
   // verified in scripts/fixtures_ws.json):
-  //   - Bybit orderbook.50 sends a `snapshot` then `delta` frames where
-  //     qty "0" DELETES a level (fixture bybit_orderbook_delta);
+  //   - Bybit orderbook.200 (§4b — upgraded from .50 in O-2; identical
+  //     snapshot/delta semantics at any depth) sends a `snapshot` then `delta`
+  //     frames where qty "0" DELETES a level (fixtures bybit_orderbook_delta +
+  //     bybit_orderbook200_delta); OKX `books` updates use the same tombstone
+  //     convention (fixture okx_books_update);
   //   - Binance depth20@100ms frames are each a FULL 20-level snapshot
   //     (adapter marks every frame isSnapshot:true).
   // So: isSnapshot → replace the side maps wholesale; delta → set/delete.
@@ -562,10 +565,399 @@
     return { push, sumWindow, recent, get length() { return ring.length; }, get lastTs() { return lastTs; } };
   }
 
+  // ─── DepthHistoryStore({tickSize, maxSamples, nLevels}) — book history ring (§4b) ─
+  //
+  // Session-local history of the RESTING book: one grouped-ladder snapshot per
+  // sample() call, held in a fixed ring so the orderbook heatmap (X = session
+  // time, Y = price, alpha ∝ resting qty) can render without unbounded growth.
+  // Memory is bounded BY CONSTRUCTION (§4b): maxSamples × 2 sides × nLevels
+  // (defaults 3600 × 2×40 ≈ one hour of book at the 1/s cadence).
+  //
+  // CADENCE IS THE CALLER'S JOB (§4b): terminal.js samples on rAF only when the
+  // book's newest EVENT ts advanced ≥ 1 s — so `ts` here is wire time and this
+  // store stays Date.now()-free (replay rail: same tape in → same ring out).
+  // Sampling faster only shortens the visible window; nothing here breaks.
+  //
+  // §0.7 rail: the ring holds only ladders that actually stood this session —
+  // no interpolation across gaps, no backfill. A reconnect gap is a gap.
+  function DepthHistoryStore(opts) {
+    const o = opts || {};
+    const tickSize = finiteOr(o.tickSize, 1);
+    const maxSamples = finiteOr(o.maxSamples, 3600);
+    const nLevels = finiteOr(o.nLevels, 40);
+    const ring = makeRing(maxSamples);
+
+    /** Snapshot one exchange's BookStore into the ring: {ts, bids:Map bucket→qty,
+     *  asks:Map bucket→qty}, top-nLevels per side via the book's own grouped()
+     *  (same snap conventions as the DOM ladder — buckets line up across views).
+     *
+     *  GUARD (§4b): no-op while the book has no levels yet (pre-snapshot /
+     *  mid-reconnect). Recording an all-zero column would render as a false
+     *  "all liquidity vanished" band in the heatmap — absence of data is not
+     *  data (§0.7), so we record nothing instead of recording zeros. */
+    function sample(ts, bookStore) {
+      if (!Number.isFinite(ts) || !bookStore) return;
+      const g = bookStore.grouped(tickSize, nLevels);
+      if (!g.bids.length && !g.asks.length) return; // empty book — see guard note
+      const toMap = (rows) => {
+        const m = new Map();
+        for (const r of rows) m.set(r.price, r.qty);
+        return m;
+      };
+      ring.push({ ts, bids: toMap(g.bids), asks: toMap(g.asks) });
+    }
+
+    /** Oldest→newest LIVE references — treat as read-only. Copying ~3600×80
+     *  map entries per heatmap redraw would be pure waste (CvdStore precedent). */
+    function samples() { return ring.toArray(); }
+
+    /** {min, max} price bucket across every held sample, both sides — the
+     *  heatmap's Y extent. NaN/NaN when empty (ProfileStore's NaN convention:
+     *  "no data" must never look like price 0). Full scan on demand — callers
+     *  redraw behind a dirty flag, not per frame, so O(samples×levels) is fine. */
+    function priceRange() {
+      let min = Infinity, max = -Infinity;
+      for (const s of ring.toArray()) {
+        for (const m of [s.bids, s.asks]) {
+          for (const p of m.keys()) {
+            if (p < min) min = p;
+            if (p > max) max = p;
+          }
+        }
+      }
+      return min <= max ? { min, max } : { min: NaN, max: NaN };
+    }
+
+    /** Resting-qty velocity at one price bucket: Δqty/Δseconds between the
+     *  oldest and newest samples inside the window ENDING AT THE NEWEST
+     *  SAMPLE'S ts (event-time anchor — no wall clock, replay rail). Positive
+     *  = liquidity building, negative = draining. Returns 0 when fewer than 2
+     *  samples fall in the window (§4b) or Δt ≤ 0 — "unknown" renders as flat,
+     *  never as NaN poisoning a canvas gradient. A bucket absent from a sample
+     *  counts as qty 0: a deleted level is genuinely gone, that IS the signal.
+     *  Bucket is roundPx-canonicalized so caller float math still hits the key. */
+    function velocity(bucket, windowMs) {
+      if (!Number.isFinite(bucket) || !Number.isFinite(windowMs)) return 0;
+      const all = ring.toArray();
+      if (all.length < 2) return 0;
+      const b = roundPx(bucket);
+      const last = all[all.length - 1];
+      const cutoff = last.ts - windowMs;
+      let first = null;
+      for (const s of all) {
+        if (s.ts >= cutoff) { first = s; break; }
+      }
+      if (!first || first === last) return 0; // <2 samples in window
+      const dt = (last.ts - first.ts) / 1000;
+      if (!(dt > 0)) return 0;
+      const qtyAt = (s) => (s.bids.get(b) || 0) + (s.asks.get(b) || 0);
+      return (qtyAt(last) - qtyAt(first)) / dt;
+    }
+
+    return { sample, samples, priceRange, velocity, tickSize };
+  }
+
+  // ─── SpoofIcebergDetector({wallK, wallWindowMs, …}) — HEURISTIC flags (§4b) ─
+  //
+  // ⚠ HEURISTIC, NOT PROOF (§4b rail, stated on every event AND on the panel):
+  // these rules flag order-book patterns *consistent with* spoofing (a large
+  // resting order pulled before it trades) and icebergs (hidden size refilling
+  // behind a small display). INTENT IS UNOBSERVABLE from public L2 data — a
+  // "spoof-pull" can be an honest market maker re-quoting on new information,
+  // an "iceberg-refill" can be coincidental independent flow at a busy level.
+  // Every emitted event therefore carries label:'heuristic' and the views keep
+  // that badge visible. Nothing here ever feeds a signal (§0.1).
+  //
+  // Inputs (both event-time, no Date.now() — replay rail):
+  //   onDepthSample(ts, grouped) — a BookStore.grouped(tick, n) result, same
+  //     ≤1/s cadence as DepthHistoryStore (terminal.js feeds both together).
+  //   onTrade(t)                 — normalized §4 trade events from the SAME venue.
+  // Per-bucket state (§4b): displayed-size history + traded volume, both
+  // bounded windows, evicted by EVENT ts as events arrive.
+  //
+  // `tickSize` (extra opt, default 1) MUST match the tick the caller used for
+  // grouped(): trades are snapped onto the same grid so "traded volume at that
+  // bucket" compares like-for-like with displayed size at that bucket.
+  function SpoofIcebergDetector(opts) {
+    const o = opts || {};
+    const wallK = finiteOr(o.wallK, 8);                    // wall = ≥ k × median level size
+    const wallWindowMs = finiteOr(o.wallWindowMs, 15000);  // pull must happen this fast
+    const tradeCoverPct = finiteOr(o.tradeCoverPct, 0.2);  // traded < pct×wall ⇒ not "eaten"
+    const icebergM = finiteOr(o.icebergM, 3);              // traded ≥ m × max displayed
+    const icebergWindowMs = finiteOr(o.icebergWindowMs, 60000);
+    const minQty = finiteOr(o.minQty, 0);                  // dust floor (base units) for both rules
+    const tickSize = finiteOr(o.tickSize, 1);              // see header — must match grouped()
+
+    // One retention horizon serves both rules (spoof cover lookups never reach
+    // farther back than wallWindowMs ≤ retainMs; iceberg uses icebergWindowMs).
+    const retainMs = Math.max(wallWindowMs, icebergWindowMs);
+    const ring = makeRing(100); // §4b: events() ring(100)
+    // bucket → {disp:[{ts,qty}], traded:[{ts,qty}], lastIcebergTs}. Bounded:
+    // entries evicted past retainMs on every touch + a full sweep per depth
+    // sample drops buckets whose histories emptied (price drifts, memory doesn't).
+    const stats = new Map();
+    // bucket → {side:'bid'|'ask', firstTs, maxQty} — walls currently on display.
+    const walls = new Map();
+
+    function bucketStats(b) {
+      let s = stats.get(b);
+      if (!s) { s = { disp: [], traded: [], lastIcebergTs: -Infinity }; stats.set(b, s); }
+      return s;
+    }
+
+    /** Drop leading entries older than cutoff (arrays are ts-ascending because
+     *  events arrive in tape order; a stray out-of-order ts just evicts late). */
+    function evictOld(arr, cutoff) {
+      let i = 0;
+      while (i < arr.length && arr[i].ts < cutoff) i++;
+      if (i) arr.splice(0, i);
+    }
+
+    /** Ingest one ≤1/s grouped ladder. Detects wall births and wall pulls. */
+    function onDepthSample(ts, grouped) {
+      if (!Number.isFinite(ts) || !grouped) return;
+      const bids = Array.isArray(grouped.bids) ? grouped.bids : [];
+      const asks = Array.isArray(grouped.asks) ? grouped.asks : [];
+      const cutoff = ts - retainMs;
+
+      // 1. Record displayed sizes + collect this sample's ladder stats.
+      const present = new Map(); // bucket → displayed qty this sample
+      const sideBy = new Map();  // bucket → 'bid' | 'ask'
+      const qtys = [];
+      const ingest = (rows, side) => {
+        for (const r of rows) {
+          if (!r || !Number.isFinite(r.price) || !Number.isFinite(r.qty) || r.qty <= 0) continue;
+          present.set(r.price, (present.get(r.price) || 0) + r.qty);
+          if (!sideBy.has(r.price)) sideBy.set(r.price, side);
+          qtys.push(r.qty);
+          const s = bucketStats(r.price);
+          s.disp.push({ ts, qty: r.qty });
+        }
+      };
+      ingest(bids, 'bid');
+      ingest(asks, 'ask');
+      // An EMPTY ladder is a reconnect gap, not a 40-level mass pull — firing
+      // on it would fabricate events out of missing data (§0.7). Skip.
+      if (!qtys.length) return;
+
+      // 2. Wall registration. "Wall" = a level ≥ wallK × the MEDIAN level size
+      //    on this ladder (§4b) — median, not mean, so the wall itself (or one
+      //    whale neighbor) cannot drag the baseline up and hide itself. A wall
+      //    keeps its ORIGINAL firstTs while it stays displayed: re-stamping on
+      //    every sample would let a wall that stood for minutes fire as a
+      //    "fast pull" when it finally leaves — lifetime must be honest.
+      qtys.sort((a, b) => a - b);
+      const n = qtys.length;
+      const med = n % 2 ? qtys[(n - 1) / 2] : 0.5 * (qtys[n / 2 - 1] + qtys[n / 2]);
+      const wallThresh = Math.max(wallK * med, minQty);
+      for (const [bucket, qty] of present) {
+        const w = walls.get(bucket);
+        if (w) { if (qty > w.maxQty) w.maxQty = qty; } // wall size = max ever displayed
+        else if (qty >= wallThresh) {
+          walls.set(bucket, { side: sideBy.get(bucket), firstTs: ts, maxQty: qty });
+        }
+      }
+
+      // 3. Pull detection on tracked walls that VANISHED this sample.
+      //    "Vanished" at grouped-bucket resolution means the displayed size
+      //    collapsed back to ORDINARY (≤ this ladder's median), not that the
+      //    bucket printed exactly zero: after a real pull, OTHER participants'
+      //    residual orders keep the bucket alive with normal-looking size —
+      //    requiring literal emptiness would blind the detector to nearly
+      //    every actual pull. The wall (the anomalous size) is what left.
+      //    Partial shrinks that stay above median keep tracking silently.
+      //
+      //    Visibility guard: grouped() is a top-N window — a wall bucket can
+      //    leave the ladder entirely because price drifted and N better levels
+      //    now sit in front of it. That is NOT a pull, and from top-N data the
+      //    two are indistinguishable, so a wall whose bucket is ABSENT and
+      //    outside the still-visible price range of its side is dropped
+      //    SILENTLY (say nothing rather than fabricate). A bucket still
+      //    displayed, or absent while inside the visible range, is a real read.
+      const rangeOf = (rows) => {
+        let min = Infinity, max = -Infinity;
+        for (const r of rows) {
+          if (!r || !Number.isFinite(r.price)) continue;
+          if (r.price < min) min = r.price;
+          if (r.price > max) max = r.price;
+        }
+        return min <= max ? { min, max } : null;
+      };
+      const vis = { bid: rangeOf(bids), ask: rangeOf(asks) };
+      for (const [bucket, w] of [...walls]) {
+        const dispQty = present.get(bucket) || 0;
+        if (dispQty > med) continue; // still wall-ish — see "vanished" note above
+        // Collapse guard: "≤ median" alone could also mean the MEDIAN rose
+        // (whole ladder thickened around an unchanged order) — nothing was
+        // pulled. Require the size itself to have fallen below 1/wallK of the
+        // wall's max — un-walled by the same multiplier that made it a wall.
+        if (dispQty > w.maxQty / wallK) continue; // not collapsed — keep tracking
+        walls.delete(bucket); // resolved below, one way or the other
+        if (!present.has(bucket)) {
+          const vr = vis[w.side];
+          if (!vr || bucket < vr.min || bucket > vr.max) continue; // scrolled out — unknowable
+        }
+        const lifetimeMs = ts - w.firstTs;
+        // Spoof-pull rule (§4b, verbatim): vanished within wallWindowMs AND
+        // traded volume at that bucket over the wall's lifetime < tradeCoverPct
+        // × wall size (a wall that got EATEN was real liquidity, not a spoof).
+        if (!(lifetimeMs >= 0 && lifetimeMs <= wallWindowMs)) continue; // stood too long (or ts skew) — a real wall that left
+        const st = stats.get(bucket);
+        let covered = 0;
+        if (st) for (const tr of st.traded) if (tr.ts >= w.firstTs && tr.ts <= ts) covered += tr.qty;
+        if (covered < tradeCoverPct * w.maxQty) {
+          ring.push({ kind: 'spoof-pull', ts, price: bucket, size: w.maxQty, lifetimeMs, label: 'heuristic' });
+        }
+      }
+
+      // 4. Bounded-memory sweep (§4b: evict beyond windows by event ts). Buckets
+      //    whose histories emptied AND that hold no live wall are forgotten —
+      //    a session that drifts $2k does not accumulate dead per-price state.
+      for (const [bucket, s] of stats) {
+        evictOld(s.disp, cutoff);
+        evictOld(s.traded, cutoff);
+        if (!s.disp.length && !s.traded.length && !walls.has(bucket)) stats.delete(bucket);
+      }
+    }
+
+    /** Ingest one normalized trade from the same venue as the depth samples. */
+    function onTrade(t) {
+      if (!validTrade(t)) return;
+      const cutoff = t.ts - retainMs;
+      // Grid attribution: depth buckets snap DOWN on bids and UP on asks
+      // (snapTick), so an off-grid print is attributable to either side's
+      // bucket. We credit BOTH (they coincide for on-grid prints). Effect,
+      // stated not hidden: spoof-pull gets MORE cover volume → harder to fire
+      // (conservative — good for a heuristic); iceberg counts a ±1-tick band
+      // around the bucket — acceptable at heatmap resolution and labeled.
+      const down = snapTick(t.price, tickSize, false);
+      const up = snapTick(t.price, tickSize, true);
+      const buckets = up === down ? [down] : [down, up];
+      for (const b of buckets) {
+        const s = bucketStats(b);
+        s.traded.push({ ts: t.ts, qty: t.qty });
+        evictOld(s.traded, cutoff);
+        evictOld(s.disp, cutoff);
+        // Iceberg-refill rule (§4b, verbatim): traded volume at the bucket
+        // within icebergWindowMs ≥ icebergM × the max DISPLAYED size there.
+        // maxDisp must be > 0: a bucket that never displayed anything has no
+        // refill to observe — trading through empty space is not an iceberg.
+        // Checked on trades only: samples can't newly satisfy it (they only
+        // raise maxDisp), and the eviction that lowers maxDisp is re-run here.
+        const icut = t.ts - icebergWindowMs;
+        let traded = 0;
+        for (const tr of s.traded) if (tr.ts >= icut) traded += tr.qty;
+        let maxDisp = 0;
+        for (const d of s.disp) if (d.ts >= icut && d.qty > maxDisp) maxDisp = d.qty;
+        if (maxDisp > 0 && traded >= icebergM * maxDisp && traded >= minQty
+            && t.ts - s.lastIcebergTs >= icebergWindowMs) {
+          // Re-arm only after a full window — without this, every subsequent
+          // print at the level would re-emit the same finding 100× (ring spam).
+          s.lastIcebergTs = t.ts;
+          ring.push({
+            kind: 'iceberg-refill', ts: t.ts, price: b,
+            tradedQty: traded, maxDisplayed: maxDisp, label: 'heuristic',
+          });
+        }
+      }
+    }
+
+    /** Last ≤100 events, oldest→newest, EVERY one labeled 'heuristic' (§4b —
+     *  the label rides the event so no view can drop it by accident). Feed
+     *  views reverse for newest-first display, as with LiqStore.recent(). */
+    function events() { return ring.toArray(); }
+
+    return { onDepthSample, onTrade, events };
+  }
+
+  // ─── LiqHeatmapModel({tiers, mmr, tickSize}) — ESTIMATED liq bands (§4b) ─
+  //
+  // ⚠ MODEL ESTIMATE, NOT OBSERVED DATA (§0.4 rail — same class as max_pain/
+  // unsigned gamma): true liquidation prices require knowing every position's
+  // entry, leverage and margin mode, none of which is knowable keyless. This
+  // model PROXIES them, and every output carries label:'estimated':
+  //   - entry prices  ∝ session volume-at-price (ProfileStore levels): where
+  //     volume printed is where positions were opened — a proxy, not a ledger;
+  //   - leverage mix  = the given tiers weighted EQUALLY (§4b: stated model
+  //     assumption — the real tier mix is unknowable keyless, so we refuse to
+  //     invent a distribution and say so instead);
+  //   - isolated-margin, linear-contract formula with a flat maintenance
+  //     margin rate (real venues tier mmr by position size — ignored, stated):
+  //       long-liq  ≈ entry · (1 − 1/L + mmr)   — BELOW entry
+  //       short-liq ≈ entry · (1 + 1/L − mmr)   — ABOVE entry
+  // Observed liquidation prints pass through UNTOUCHED in `observed` — they
+  // are rendered distinctly and NEVER blended into the estimated bands (§4b).
+  function LiqHeatmapModel(opts) {
+    const o = opts || {};
+    const srcTiers = Array.isArray(o.tiers) && o.tiers.length ? o.tiers : [5, 10, 25, 50, 100];
+    // L must be > 1: at L ≤ 1 the formula puts "liquidation" at ≈ entry·mmr
+    // (no leverage → no forced liquidation level worth drawing). Filtered, not
+    // clamped — a nonsense tier is a caller bug we surface by ignoring it.
+    const tiers = srcTiers.filter((L) => Number.isFinite(L) && L > 1);
+    const mmr = finiteOr(o.mmr, 0.005);
+    const tickSize = finiteOr(o.tickSize, 1);
+
+    /** estimate(profileLevels, mark, observedLiqs) → {bands, observed, label}.
+     *  - profileLevels: ProfileStore.profile().levels ([{price, vol}]) — the
+     *    volume-weighted entry proxy. weight ∝ level volume (§4b).
+     *  - mark: current mark price — the liveness filter (below).
+     *  - observedLiqs: LiqStore prints, passed through (lightly validated).
+     *
+     *  Band prices snap onto the tickSize grid AWAY from mark (long bands
+     *  floor DOWN, short bands ceil UP) — the same conservative direction as
+     *  the book's snapTick: an estimate is never displayed CLOSER to mark
+     *  than the math puts it. Same-bucket weights merge by summation (§4b).
+     *
+     *  LIVENESS FILTER (§4b): only bands on the correct side of mark survive —
+     *  long bands strictly BELOW mark, short bands strictly ABOVE. A long
+     *  whose liq price sits at/above the current mark has ALREADY been
+     *  liquidated (or never existed) — its position is gone, so drawing its
+     *  band would show liquidity that cannot fire. Filtered on the BUCKETED
+     *  price (what the view actually draws — deterministic for the fixture).
+     *
+     *  Weights are normalized post-merge/post-filter so max = 1 (proportions
+     *  preserved — "∝ volume" holds; views map weight straight to alpha).
+     *  No mark / no tiers / no levels → empty bands, never NaN bands. */
+    function estimate(profileLevels, mark, observedLiqs) {
+      const observed = Array.isArray(observedLiqs)
+        ? observedLiqs.filter((l) => l && Number.isFinite(l.ts) && Number.isFinite(l.price))
+        : [];
+      if (!Number.isFinite(mark) || !tiers.length || !Array.isArray(profileLevels)) {
+        return { bands: [], observed, label: 'estimated' };
+      }
+      const perTier = 1 / tiers.length; // equal tier weights — §4b model assumption
+      const longAcc = new Map();  // bucket → weight (merged)
+      const shortAcc = new Map();
+      for (const lv of profileLevels) {
+        if (!lv || !Number.isFinite(lv.price) || !Number.isFinite(lv.vol)) continue;
+        if (lv.price <= 0 || lv.vol <= 0) continue; // hygiene: no phantom entries
+        const w = lv.vol * perTier;
+        for (const L of tiers) {
+          const longB = snapTick(lv.price * (1 - 1 / L + mmr), tickSize, false);
+          const shortB = snapTick(lv.price * (1 + 1 / L - mmr), tickSize, true);
+          if (longB < mark) longAcc.set(longB, (longAcc.get(longB) || 0) + w);
+          if (shortB > mark) shortAcc.set(shortB, (shortAcc.get(shortB) || 0) + w);
+        }
+      }
+      const bands = [];
+      for (const [price, weight] of longAcc) bands.push({ price, weight, side: 'long' });
+      for (const [price, weight] of shortAcc) bands.push({ price, weight, side: 'short' });
+      let wmax = 0;
+      for (const b of bands) if (b.weight > wmax) wmax = b.weight;
+      if (wmax > 0) for (const b of bands) b.weight /= wmax;
+      bands.sort((a, b) => a.price - b.price); // ascending — heatmap renders low→high
+      return { bands, observed, label: 'estimated' };
+    }
+
+    return { estimate, tiers: tiers.slice(), mmr, tickSize };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalState = {
     TapeStore, BookStore, AggBookStore, FootprintStore, CvdStore, ProfileStore, LiqStore,
+    // O-2 (§4b): heatmap history + labeled heuristic/model layers.
+    DepthHistoryStore, SpoofIcebergDetector, LiqHeatmapModel,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalState;

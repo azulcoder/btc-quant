@@ -1,7 +1,9 @@
 # DESIGN — Orderflow Terminal (CryExc-inspired) + tick collector
 
-Status: **phase O-0 + O-1 implementation** (2026-07-03). Later phases (O-2…O-5) are specced
-here and deferred — same greenlight discipline as DEVELOPMENT.md §6.
+Status: **O-0 + O-1 shipped 2026-07-03 (`8c2781f`); O-2 shipped 2026-07-04** (orderbook
+heatmap, spoof/iceberg heuristics LABELED, liquidation heatmap LABELED model, OKX leg,
+per-exchange CVD — contracts in §4b). Later phases (O-3…O-5) are specced here and
+deferred — same greenlight discipline as DEVELOPMENT.md §6.
 
 Provenance: feature surface adapted from [Cryexc](https://cryexc.josedonato.com/) (José
 Donato's free orderflow terminal — footprint, DOM, heatmaps, TPO, whale/options flow;
@@ -198,6 +200,63 @@ Load order: `vendor/lightweight-charts.js` → `livewire.js` → `terminal-adapt
   Coinbase market_trades), asserts: aggressor normalization per §0.6 (incl. the Coinbase
   maker-inversion), book best-bid/ask after snapshot+delta, footprint bar delta = Σsigned,
   CVD bucket sums = total, VP value-area ∈ [session low, high], agg book merge math.
+
+## 4b. O-2 contracts — heatmaps + OKX leg (binding, same style as §4)
+
+Rails first: spoof/iceberg detection is a **heuristic** (labeled on every emitted event and
+on the panel); the liquidation heatmap is a **model estimate** (§0.4 — volume-weighted
+entry proxy × standard leverage tiers; the true tier mix is unknowable keyless and the
+panel says so); the footprint/session-VP stay **single-venue Bybit** (§0.7 — no mixed-venue
+bars), while CVD gains **per-exchange, per-labeled** series (bybit/okx/coinbase).
+
+- **OKX adapter** (`makeOkxAdapter(instId, sink, {ctVal})` in terminal-adapters.js):
+  `wss://ws.okx.com:8443/ws/v5/public`, subscribe `books` + `trades` for BTC-USDT-SWAP;
+  text `'ping'` keepalive (~25 s). **Sizes are in CONTRACTS: qty = sz × ctVal (0.01 BTC —
+  verified via `/api/v5/public/instruments`, pinned in fixtures `_okx_ctval_note`).**
+  trades: `side` is the taker → aggressorBuy = side==='buy'. books: `action` snapshot |
+  update; update level sz `"0"` deletes; `checksum`/`seqId` ignored (comment why — we
+  re-snapshot on reconnect rather than verify checksums). ex code `'okx'`.
+- **Bybit book upgrade:** `orderbook.50` → `orderbook.200` (same code path — snapshot/
+  delta/tombstones already store-side; real 200-level frames in fixtures). Deeper book =
+  usable heatmap range; the DOM ladder just keeps reading `grouped()`.
+- **`DepthHistoryStore({tickSize, maxSamples=3600, nLevels=40})`** (terminal-state.js,
+  pure): `sample(ts, bookStore)` — caller gates to ≤1/s per exchange; ring of
+  `{ts, bids:Map bucket→qty, asks:Map bucket→qty}` (grouped, top-N per side);
+  `samples()`, `priceRange()`, `velocity(bucket, windowMs)` = Δqty/Δs at a level.
+  Memory-bounded by construction (3600 × 2×40 levels).
+- **`SpoofIcebergDetector({wallK=8, wallWindowMs=15000, tradeCoverPct=0.2, icebergM=3,
+  icebergWindowMs=60000, minQty})`** (terminal-state.js, pure, every event
+  `label:'heuristic'`): consumes `onDepthSample(ts, grouped)` + `onTrade(t)`.
+  *Spoof-pull:* a level ≥ wallK × median level size that vanishes within wallWindowMs
+  with traded volume at that bucket < tradeCoverPct × wall size → `{kind:'spoof-pull',
+  ts, price, size, lifetimeMs, label:'heuristic'}`. *Iceberg-refill:* traded volume at a
+  bucket within icebergWindowMs ≥ icebergM × max displayed size there →
+  `{kind:'iceberg-refill', …}`. `events()` ring (100). Honest comment: these are
+  *patterns consistent with* spoofing/icebergs, not proof — intent is unobservable.
+- **`LiqHeatmapModel({tiers=[5,10,25,50,100], mmr=0.005, tickSize})`** (terminal-state.js,
+  pure, output `label:'estimated'`): inputs = ProfileStore volume-at-price (entry proxy)
+  + current mark + LiqStore prints. For each entry bucket (weight ∝ volume) × tier L:
+  long-liq ≈ entry·(1 − 1/L + mmr), short-liq ≈ entry·(1 + 1/L − mmr); tiers weighted
+  EQUALLY (stated model assumption — the real tier mix is unknowable keyless).
+  `estimate(mark)` → `{bands:[{price, weight, side}], observed:[liq prints], label}`.
+  Observed prints are rendered distinctly from estimates — never blended.
+- **Views** (terminal-views.js): `BookHeatmapView` (canvas: X=session time, Y=price,
+  alpha ∝ resting qty from DepthHistoryStore, last-price polyline overlay, optional
+  velocity tint, wall/spoof markers; DPR-aware), `LiqHeatmapView` (canvas: estimated
+  long bands below / short bands above mark + observed dots; permanent "ESTIMATED
+  (model)" badge in the panel chrome), `DetectionFeedView` (spoof/iceberg event list,
+  per-row "heuristic" badge). CVD panel: one line per exchange + overall (labeled).
+- **Bootstrap** (terminal.js): OKX adapter → AggBook + per-exchange CvdStore; OKX trades
+  do NOT feed FootprintStore/ProfileStore (§0.7). Depth sampler: on rAF, sample each
+  exchange's BookStore into its DepthHistoryStore when the latest depth event ts advanced
+  ≥1 s (event-ts gated — stores stay Date.now()-free). LiqHeatmapModel re-estimates on a
+  5 s dirty flag. New panels join the grid: heatmap (wide, under footprint), liq-heatmap +
+  detections (right column).
+- **check_terminal.cjs additions:** OKX trade ctVal math (sz 200 → 2.00 BTC), OKX books
+  snapshot+update through BookStore (incl. a delete), bybit orderbook200 snapshot sanity,
+  DepthHistoryStore ring + velocity sign, SpoofIcebergDetector fires on a constructed
+  pull + refill and stays quiet on a benign book, LiqHeatmapModel band math for a known
+  (entry, L, mmr) → exact price, and `label` fields present on every heuristic/model output.
 
 ## 5. CryExc → btc-quant feature map & phase plan
 

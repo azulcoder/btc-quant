@@ -54,8 +54,8 @@
         <div id="view-dom" class="dom-wrap"></div>
       </section>
       <section class="panel">
-        <h2>aggregated book — bybit + binancef
-          <span class="signal-tag descriptive" title="Per-exchange stacked depth at $-grouped levels + cumulative depth curve. Legs are independent; a dead leg simply drops out (nothing interpolated).">descriptive</span>
+        <h2>aggregated book — bybit + binancef + okx
+          <span class="signal-tag descriptive" title="Per-exchange stacked depth at $-grouped levels + cumulative depth curve. OKX sizes arrive in CONTRACTS and are ctVal-scaled to BTC (0.01) in the adapter. Legs are independent; a dead leg simply drops out (nothing interpolated).">descriptive</span>
         </h2>
         <div id="view-aggbook" class="agg-wrap"></div>
       </section>
@@ -75,13 +75,50 @@
         </h2>
         <div id="view-liq" class="liq-wrap"></div>
       </section>
+
+      <!-- O-2 (§4b): liquidation heatmap — a MODEL, never observed data (§0.4).
+           The 'ESTIMATED (model)' label lives in the header hint here AND is
+           drawn into the canvas itself so it can never scroll away. -->
+      <section class="panel">
+        <h2>liquidation heatmap — Bybit mark
+          <span class="signal-tag research" title="MODEL ESTIMATE (§0.4): entry prices proxied by session volume-at-price × EQUAL-weighted leverage tiers (5/10/25/50/100×, flat mmr 0.5%) — the true tier mix is unknowable keyless. Long-liq bands below mark, short-liq above. Observed liquidation prints render as separate dots in their own lane, never blended into the bands.">ESTIMATED (model)</span>
+        </h2>
+        <div id="view-liqheat" class="liqheat-wrap"></div>
+        <p class="hint">bands = <b>model-estimated</b> liquidation clusters (α ∝ weight, normalized); dots in the left lane = liquidations that actually printed (§0.7 — kept visually separate). Re-estimated every 5s of event time.</p>
+      </section>
+
+      <!-- O-2 (§4b): spoof/iceberg detections — HEURISTIC flags, labeled per row. -->
+      <section class="panel">
+        <h2>detections — Bybit book
+          <span class="signal-tag research" title="HEURISTIC (§4b): flags book patterns CONSISTENT WITH spoofing (▽ large wall pulled fast, barely traded) or icebergs (◈ traded volume ≫ max displayed). Intent is unobservable from public L2 — these are patterns, not proof, and never feed a signal.">heuristic</span>
+        </h2>
+        <div id="view-detect" class="det-wrap"></div>
+      </section>
     </div>
+
+    <!-- O-2 (§4b): book heatmap — wide, directly under the footprint row. -->
+    <section class="panel area-heat">
+      <h2>book heatmap — resting depth history
+        <span class="signal-tag descriptive" title="Session ring of real 1/s book samples (event-time gated): X = session time, Y = price, α ∝ resting qty (p95-normalized). White line = that venue's own last-price trail. ▽/◈ = heuristic detector marks (bybit only). Reconnect gaps stay blank — nothing is interpolated (§0.7).">descriptive · per-venue</span>
+        <span class="heat-controls">
+          <label for="set-heat-venue">venue</label>
+          <select id="set-heat-venue">
+            <option value="bybit" selected>bybit</option>
+            <option value="binancef">binancef</option>
+            <option value="okx">okx</option>
+          </select>
+          <label for="set-heat-vel" title="Hue = sign of resting-qty change vs the previous column (build/drain) instead of bid/ask side; α still ∝ qty">velocity tint <input type="checkbox" id="set-heat-vel" /></label>
+        </span>
+      </h2>
+      <div id="view-bookheat" class="heat-wrap"></div>
+      <p class="hint">one venue at a time, labeled — books are never merged here. bid depth in green, ask depth in red (α ∝ resting size, p95-scaled so one whale wall can't wash out the ladder); ▽ = heuristic spoof-pull, ◈ = heuristic iceberg-refill (see detections panel). binancef shows no price line — its trades are topic-filtered on this network (§0.2), so there is honestly no per-venue print series to draw.</p>
+    </section>
 
     <!-- Footer row 1: CVD subchart (full-width; logically part of the
          footprint view — FootprintView mounts lightweight-charts here). -->
     <section class="panel area-cvd">
-      <h2>CVD by trade size — Bybit perp, session-anchored
-        <span class="signal-tag descriptive" title="Cumulative signed USD notional (aggressor buy − sell) overall and per trade-size bucket. Anchored at page open — CVD has no natural zero; read slope/divergence, never level. NOT a signal, NOT backtestable from here.">descriptive · order-flow</span>
+      <h2>CVD — per exchange (bybit / okx / coinbase) + by trade size (bybit), session-anchored
+        <span class="signal-tag descriptive" title="Cumulative signed USD notional (aggressor buy − sell). One labeled line PER VENUE (§4b — never an unlabeled blend) plus an exact Σ, plus bybit-only trade-size buckets (dashed family). Anchored at page open — CVD has no natural zero; read slope/divergence, never level. NOT a signal, NOT backtestable from here.">descriptive · per-venue labels</span>
       </h2>
       <div id="view-cvd" class="term-cvd"></div>
     </section>
@@ -115,12 +152,12 @@
           <button id="set-pause" type="button" aria-pressed="false" title="Freezes rendering only — data keeps accumulating, so resume shows the true session (no gap is fabricated)">pause</button>
         </div>
       </div>
-      <p class="hint">settings persist locally. Changing tick group or bar interval <b>restarts</b> the session footprint/profile aggregation — the browser keeps no raw tick store to re-bucket from (that is the collector's job), and synthesizing old bars onto a new grid would fabricate data. Pause freezes the display, not ingestion, and never the connection chips.</p>
+      <p class="hint">settings persist locally. Changing tick group or bar interval <b>restarts</b> the session footprint/profile aggregation — and the tick group also restarts the book-heatmap history, detector and liq-model (all grid-bound) — the browser keeps no raw tick store to re-bucket from (that is the collector's job), and synthesizing old bars/ladders onto a new grid would fabricate data. Pause freezes the display, not ingestion, and never the connection chips.</p>
     </section>
   </main>
 
   <footer>
-    <p>Live-descriptive orderflow terminal (DESIGN-orderflow-terminal.md). Everything above renders only what arrived over the public wire this session — <b>never a backtest input</b>, never merged into the OOS harness. Feeds: Bybit v5 linear (primary), Binance Futures depth WS + REST mark/OI, Coinbase Advanced Trade spot tape. See <a href="../DISCLAIMER.md">DISCLAIMER.md</a>.</p>
+    <p>Live-descriptive orderflow terminal (DESIGN-orderflow-terminal.md). Everything above renders only what arrived over the public wire this session — <b>never a backtest input</b>, never merged into the OOS harness. Feeds: Bybit v5 linear (primary), Binance Futures depth WS + REST mark/OI, Coinbase Advanced Trade spot tape, OKX v5 swap book+trades (O-2). Liq heatmap = <b>model estimate</b>; spoof/iceberg flags = <b>heuristics</b> — both labeled in-panel. See <a href="../DISCLAIMER.md">DISCLAIMER.md</a>.</p>
   </footer>
 
   <!-- Script order is a CONTRACT (DESIGN §4): vendor/lightweight-charts.js →

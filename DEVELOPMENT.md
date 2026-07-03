@@ -172,6 +172,11 @@ was dividing the downside variance by the downside count instead of the full sam
   frames (sub-ack only); REST `fapi/v1/*` works fully. Hence Bybit-primary in the terminal/collector
   and Binance-for-depth+REST — do not "fix" adapters by re-adding Binance trade streams without
   re-testing the wire first (capture script pattern: DESIGN-orderflow-terminal.md §2).
+- **OKX SWAP sizes are in CONTRACTS, not coin** — BTC-USDT-SWAP `ctVal` = **0.01 BTC** (verified via
+  `/api/v5/public/instruments`, pinned in `fixtures_ws.json`). A trades `sz` of `"200"` is 2 BTC, a
+  book level of `"883.58"` is ~8.84 BTC. Forgetting the ×ctVal is a silent 100× bug — same trap
+  family as `mark_iv` percent. (Terminal book feeds: Bybit `orderbook.200`, OKX `books`; the
+  adapters scale at the wire, stores only ever see coin units.)
 - **Bybit v5 `tickers` sends a snapshot then PARTIAL deltas** — delta frames omit unchanged fields
   (a delta with no `markPrice` does not mean mark went away). Merge against the last snapshot or
   funding/OI silently vanish. Same stream carries OI — there is no separate Bybit OI poll.

@@ -118,9 +118,11 @@
   }
 
   /** Fixed exchange → categorical-token mapping, consistent across ALL panels
-   *  (tape tag, agg-book stack, legend) so one venue is always one color.
+   *  (tape tag, agg-book stack, CVD venue lines, legend) so one venue is always
+   *  one color. okx = --c3 (O-2, §4b — the CVD 'whale' bucket line moved to
+   *  --c6 so venue-pink stays venue-pink inside the same chart).
    *  Deliberately NOT --up/--down (venues aren't P&L) and NOT --accent (chrome). */
-  const EX_TOKEN = { bybit: 'c2', binancef: 'c1', coinbase: 'c4' };
+  const EX_TOKEN = { bybit: 'c2', binancef: 'c1', coinbase: 'c4', okx: 'c3' };
   function exColor(p, ex) { return p[EX_TOKEN[ex]] || p.c5; }
 
   // ─── Shared canvas helper — DPR-aware sizing (crisp on retina) ───────────
@@ -166,12 +168,13 @@
   //
   // The CVD subchart mounts into opts.cvdEl (physically the full-width footer
   // panel in terminal.html §4 layout, logically part of this view per §4):
-  // one lightweight-charts line per notional bucket + overall. If the vendored
-  // lib is missing we show an honest note instead of hand-rolling a fake — the
-  // page must never carry a silently-broken chart.
+  // per-EXCHANGE lines + an exact Σ (O-2, §4b) plus the O-1 per-notional-bucket
+  // lines, every one labeled in the legend. If the vendored lib is missing we
+  // show an honest note instead of hand-rolling a fake — the page must never
+  // carry a silently-broken chart.
   function FootprintView() {
     let root = null, canvas = null, cvdEl = null;
-    let cvdChart = null, cvdSeries = null, cvdKeys = null, cvdNote = false;
+    let cvdChart = null, cvdSeries = null, cvdExs = null, cvdBuckets = null, cvdNote = false;
     let lastSlice = null;      // cached so crosshair moves can redraw without new data
     let mouse = null;          // {x,y} in CSS px, or null
     let drawQueued = false;    // rAF coalescing for mouse-driven redraws
@@ -199,7 +202,7 @@
       canvas.addEventListener('mouseleave', () => { mouse = null; scheduleDraw(); });
 
       cvdEl = o.cvdEl || null;
-      if (cvdEl) initCvd(o.buckets || []);
+      if (cvdEl) initCvd(o.buckets || [], o.cvdExs || ['bybit']);
     }
 
     function scheduleDraw() {
@@ -209,7 +212,18 @@
     }
 
     // ── CVD subchart (lightweight-charts; vendored, no CDN — DESIGN §4) ──
-    function initCvd(buckets) {
+    //
+    // O-2 (§4b) line families, every one labeled in the legend:
+    //   1) 'Σ all venues' (--c1, 2px) — EXACT sum of the per-exchange cumsums
+    //      (see mergeStepSum: step-function arithmetic, never interpolation).
+    //   2) one line per exchange (bybit/okx/coinbase) in the fixed EX_TOKEN
+    //      hues — the same color a venue wears on the tape and agg-book stack,
+    //      so "which venue is diverging" reads across panels (§0.7 per-source
+    //      labels; §4b "per-exchange, per-labeled series").
+    //   3) bybit by trade-size buckets (O-1 feature, kept): ONE hue (--c5)
+    //      with a distinct dash pattern per bucket, whale = --c6 — dash is the
+    //      non-color cue that separates the size family from the venue lines.
+    function initCvd(buckets, exs) {
       const LC = global.LightweightCharts;
       if (!LC || !LC.createChart) {
         // Honest degrade (index.html vendoring rule): say why, fabricate nothing.
@@ -228,32 +242,73 @@
         crosshair: { mode: 0 },
         localization: { priceFormatter: fmtCompactUsd },   // CVD is USD notional — compact axis
       });
-      // Series order/colors: overall = --c1 (primary data line token), then one
-      // categorical token per bucket. 'whale' (> largest threshold) = --c3.
-      const bucketTok = ['c5', 'c2', 'c4', 'c6'];   // thresholds ascending, ≤4 supported hues
-      cvdKeys = ['overall'].concat(buckets);
+      cvdExs = exs.slice();
+      cvdBuckets = buckets.slice();
       cvdSeries = {};
       const legend = document.createElement('div');
       legend.className = 'term-cvd-legend';
-      cvdKeys.forEach((k, i) => {
-        const color = k === 'overall' ? p.c1
-          : k === 'whale' ? p.c3
-            : p[bucketTok[Math.min(i - 1, bucketTok.length - 1)]];
-        cvdSeries[k] = cvdChart.addLineSeries({
-          color, lineWidth: k === 'overall' ? 2 : 1,
+      const addLine = (key, color, width, style, label) => {
+        cvdSeries[key] = cvdChart.addLineSeries({
+          color, lineWidth: width, lineStyle: style,
           priceLineVisible: false, lastValueVisible: true,
           crosshairMarkerVisible: false,
         });
-        const label = k === 'overall' ? 'overall'
-          : k === 'whale' ? '&gt; largest bucket (whale)'
-            : '&le; ' + fmtCompactUsd(Number(k));
         legend.insertAdjacentHTML('beforeend',
           '<span><i class="sw" style="background:' + color + '"></i>' + label + '</span>');
+      };
+      // LC.LineStyle: 0 Solid, 1 Dotted, 2 Dashed, 3 LargeDashed.
+      addLine('sum', p.c1, 2, 0, '&Sigma; all venues');
+      for (const ex of cvdExs) addLine('ex:' + ex, exColor(p, ex), 1, 0, esc(ex));
+      const bucketStyle = [2, 1, 3];   // dashed / dotted / large-dashed, thresholds ascending
+      cvdBuckets.forEach((k, i) => {
+        if (k === 'whale') addLine('bucket:whale', p.c6, 1, 0, 'bybit &gt; largest bucket (whale)');
+        else addLine('bucket:' + k, p.c5, 1, bucketStyle[Math.min(i, bucketStyle.length - 1)],
+          'bybit &le; ' + fmtCompactUsd(Number(k)));
       });
       // Session-anchor honesty label (§4 CvdStore doc: CVD has no natural zero).
       legend.insertAdjacentHTML('beforeend',
         '<span class="cvd-anchor">anchored at page open — slope/divergence only, level is meaningless</span>');
       cvdEl.appendChild(legend);
+    }
+
+    /** EXACT sum of k session-anchored cumsum step series on the UNION of
+     *  their sample times. A session-anchored CVD is a right-continuous STEP
+     *  function, so at any union timestamp each venue contributes its last
+     *  cumsum (0 before its first sample — its true anchored value) and the
+     *  sum is plain arithmetic, never interpolation — no value is fabricated
+     *  (§0.7). Output is plot-decimated to ≤20k points by keeping every Nth
+     *  (resolution only; every KEPT point is still an exact sum). */
+    function mergeStepSum(list) {
+      const k = list.length;
+      const idx = new Array(k).fill(0);
+      const cur = new Array(k).fill(0);
+      let t = [], v = [];
+      for (;;) {
+        let next = Infinity;
+        for (let i = 0; i < k; i++) {
+          if (idx[i] < list[i].t.length && list[i].t[idx[i]] < next) next = list[i].t[idx[i]];
+        }
+        if (next === Infinity) break;
+        let s = 0;
+        for (let i = 0; i < k; i++) {
+          while (idx[i] < list[i].t.length && list[i].t[idx[i]] <= next) {
+            cur[i] = list[i].overall[idx[i]];
+            idx[i]++;
+          }
+          s += cur[i];
+        }
+        t.push(next); v.push(s);
+      }
+      const MAX = 20000;   // matches CvdStore's own plot cap
+      if (t.length > MAX) {
+        const stride = Math.ceil(t.length / MAX);
+        const dt = [], dv = [];
+        for (let i = 0; i < t.length; i += stride) { dt.push(t[i]); dv.push(v[i]); }
+        // Always keep the newest point — the live edge must not lag a stride.
+        if (dt[dt.length - 1] !== t[t.length - 1]) { dt.push(t[t.length - 1]); dv.push(v[v.length - 1]); }
+        t = dt; v = dv;
+      }
+      return { t, v };
     }
 
     /** cvd.series() arrays are LIVE refs (read-only, terminal-state.js §4) with
@@ -274,15 +329,31 @@
       return out;
     }
 
+    /** cvd = { exs: {ex → CvdStore.series() ({t, overall, byBucket})} } — a
+     *  map of PER-EXCHANGE stores (§4b), each independently session-anchored.
+     *  Bucket lines read the BYBIT store only (buckets stay single-venue, same
+     *  §0.7 reasoning as the footprint). */
     function renderCvd(cvd, now) {
-      if (!cvdChart || !cvd) return;
+      if (!cvdChart || !cvd || !cvd.exs) return;
       if (now - lastCvdAt < CVD_MIN_MS) return;   // setData is O(points) — throttle beyond dirty flags
       lastCvdAt = now;
-      const s = cvd;   // {t, overall, byBucket}
-      cvdSeries.overall.setData(toLcSeries(s.t, s.overall));
-      for (const k of cvdKeys) {
-        if (k === 'overall') continue;
-        if (s.byBucket[k]) cvdSeries[k].setData(toLcSeries(s.t, s.byBucket[k]));
+      const present = [];
+      for (const ex of cvdExs) {
+        const s = cvd.exs[ex];
+        if (!s) continue;
+        cvdSeries['ex:' + ex].setData(toLcSeries(s.t, s.overall));
+        present.push(s);
+      }
+      if (present.length) {
+        const m = mergeStepSum(present);
+        cvdSeries.sum.setData(toLcSeries(m.t, m.v));
+      }
+      const by = cvd.exs.bybit;
+      if (by && by.byBucket) {
+        for (const k of cvdBuckets) {
+          const key = 'bucket:' + k;
+          if (cvdSeries[key] && by.byBucket[k]) cvdSeries[key].setData(toLcSeries(by.t, by.byBucket[k]));
+        }
       }
     }
 
@@ -834,7 +905,8 @@
       // be the first thing the eye hits (watchdog rail, livewire.js).
       const chipRow = document.createElement('div');
       chipRow.className = 'term-chips';
-      for (const ex of ['bybit', 'binancef', 'coinbase']) {
+      // okx joined in O-2 (§4b): agg-book leg + its own labeled CVD line.
+      for (const ex of ['bybit', 'binancef', 'coinbase', 'okx']) {
         const chip = document.createElement('span');
         chip.className = 'statchip term-chip';
         chip.innerHTML = '<span class="dot"></span><span class="chip-text">' + ex + ': connecting…</span>';
@@ -842,7 +914,7 @@
         chips[ex] = { el: chip, text: chip.querySelector('.chip-text') };
       }
       chipRow.insertAdjacentHTML('beforeend',
-        '<span class="chips-note">bybit = primary WS (trades/book/liq/mark/OI) · binancef = depth WS + REST mark/OI · coinbase = spot tape</span>');
+        '<span class="chips-note">bybit = primary WS (trades/book/liq/mark/OI) · binancef = depth WS + REST mark/OI · coinbase = spot tape · okx = agg book + CVD leg</span>');
       root.appendChild(chipRow);
 
       const grid = document.createElement('div');
@@ -967,10 +1039,421 @@
     return { mount, render };
   }
 
+  // ═══ BookHeatmapView — historical resting-depth heatmap (O-2, §4b) ═══
+  //
+  // X = session time (DepthHistoryStore ring, EVENT timestamps — a linear time
+  // axis, so a reconnect gap renders as blank space, never as the last ladder
+  // smeared across time it did not actually stand, §0.7). Y = price bucket
+  // (the store's tick grid). Cell alpha ∝ resting qty, normalized by the
+  // ring-wide p95: normalizing by MAX would let one whale wall (say 400 BTC
+  // against a 5–15 BTC level body) compress every ordinary level into
+  // near-invisible alpha — p95 keeps the body of the distribution legible and
+  // lets true walls simply saturate at full alpha.
+  //
+  // Default hues: bids --up, asks --down (their position relative to the
+  // last-price polyline is the redundant non-color cue; hover names the side
+  // in text). Velocity tint toggle (opts.velocityInput): hue switches to the
+  // SIGN of the resting-qty change at that bucket vs the previous drawn
+  // column — building = --up, draining = --down, flat = --muted; alpha still
+  // ∝ qty. In tint mode side is no longer color-coded — the hover readout
+  // still reports it.
+  //
+  // Overlays: last-price polyline (--fg reference trace) + detector event
+  // markers — ▽ spoof-pull (--accent), ◈ iceberg-refill (--accent-2), both
+  // HEURISTIC flags (§4b; the detection feed panel carries the per-event badge).
+  function BookHeatmapView() {
+    let root = null, canvas = null, velInput = null, velOn = false;
+    let lastSlice = null, mouse = null, drawQueued = false;
+    const GUT_AXIS = 64, ROW_TIME = 16;
+
+    function mount(el, opts) {
+      root = el;
+      const o = opts || {};
+      canvas = document.createElement('canvas');
+      canvas.className = 'term-canvas';
+      root.appendChild(canvas);
+      // Crosshair/hover: cached-slice redraws only (FootprintView pattern —
+      // the mouse never fabricates a new data frame).
+      canvas.addEventListener('mousemove', (e) => {
+        const r = canvas.getBoundingClientRect();
+        mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
+        scheduleDraw();
+      });
+      canvas.addEventListener('mouseleave', () => { mouse = null; scheduleDraw(); });
+      // Velocity toggle lives in the panel chrome (terminal.html) — the view
+      // owns its behavior, same split as TapeView's min-notional input.
+      velInput = o.velocityInput || null;
+      if (velInput) {
+        velOn = !!velInput.checked;
+        velInput.addEventListener('change', () => { velOn = !!velInput.checked; scheduleDraw(); });
+      }
+    }
+
+    function scheduleDraw() {
+      if (drawQueued || !lastSlice) return;
+      drawQueued = true;
+      requestAnimationFrame(() => { drawQueued = false; if (lastSlice) draw(lastSlice); });
+    }
+
+    function draw(slice) {
+      const { ctx, w, h } = fitCanvas(canvas);
+      const p = pal();
+      ctx.clearRect(0, 0, w, h);
+      ctx.textBaseline = 'middle';
+      const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
+
+      const samples = slice.samples || [];
+      const tick = slice.tickSize || 1;
+      const range = slice.range || { min: NaN, max: NaN };
+      if (!samples.length || !Number.isFinite(range.min) || !Number.isFinite(range.max)) {
+        font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+        ctx.fillText('waiting for book history — one real ladder per second, event-time gated; nothing is backfilled (§0.7)', 10, 18);
+        return;
+      }
+
+      const plotW = w - GUT_AXIS, plotH = h - ROW_TIME;
+      const nRows = Math.round((range.max - range.min) / tick) + 1;
+      if (nRows > 2000) {
+        // Same guard as the footprint: sub-pixel mush helps nobody — say so.
+        font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+        ctx.fillText('history spans ' + nRows + ' rows at $' + tick + ' grouping — pick a coarser tick group', 10, 18);
+        return;
+      }
+      const rowH = plotH / nRows;
+      const cellH = Math.max(rowH, 1);
+      const yOf = (price) => ((range.max - price) / tick) * rowH;   // row TOP edge
+
+      const t0 = samples[0].ts, tN = samples[samples.length - 1].ts;
+      const span = Math.max(tN - t0, 1000);
+      const X = (ts) => plotW * (ts - t0) / span;
+
+      // Column decimation: keep every stride-th sample so columns stay ≥ ~1.5
+      // CSS px. Plot RESOLUTION only — every drawn column is a real ladder
+      // that stood on the wire; we drop columns, we never average two ladders
+      // into a fictitious one (§0.7).
+      const stride = Math.max(1, Math.ceil(samples.length / Math.max(1, Math.floor(plotW / 1.5))));
+      const kept = [];
+      for (let i = 0; i < samples.length; i += stride) kept.push(samples[i]);
+      if (kept[kept.length - 1] !== samples[samples.length - 1]) kept.push(samples[samples.length - 1]);
+
+      // Median inter-column dt caps column width: past ~1.5× the median the
+      // book state is UNKNOWN (reconnect gap) and stays blank — gaps are gaps.
+      const dts = [];
+      for (let i = 1; i < kept.length; i++) dts.push(kept[i].ts - kept[i - 1].ts);
+      dts.sort((a, b) => a - b);
+      const dtMed = dts.length ? Math.max(dts[Math.floor(dts.length / 2)], 1) : 1000;
+
+      // Ring-wide p95 of resting qty (see header note on why not max).
+      const qs = [];
+      for (const s of kept) {
+        for (const m of [s.bids, s.asks]) for (const q of m.values()) qs.push(q);
+      }
+      if (!qs.length) return;
+      qs.sort((a, b) => a - b);
+      const p95 = qs[Math.floor(0.95 * (qs.length - 1))];
+      if (!(p95 > 0)) return;
+      const alphaOf = (q) => 0.05 + 0.72 * Math.min(1, q / p95);
+
+      let prevComb = null;   // velocity-tint diff base (previous DRAWN column)
+      for (let i = 0; i < kept.length; i++) {
+        const s = kept[i];
+        const x0 = X(s.ts);
+        const nextTs = i + 1 < kept.length ? kept[i + 1].ts : s.ts + dtMed;
+        const wCol = Math.max(1, X(Math.min(nextTs, s.ts + 1.5 * dtMed)) - x0);
+        if (velOn) {
+          // Combined bucket qty (bids+asks — same semantics as the store's
+          // velocity()); hue = sign of the change vs the previous column.
+          const comb = new Map();
+          for (const m of [s.bids, s.asks]) for (const [b, q] of m) comb.set(b, (comb.get(b) || 0) + q);
+          for (const [b, q] of comb) {
+            const dq = prevComb ? q - (prevComb.get(b) || 0) : 0;
+            ctx.fillStyle = rgba(dq > 0 ? p.up : dq < 0 ? p.down : p.muted, alphaOf(q));
+            ctx.fillRect(x0, yOf(b), wCol, cellH);
+          }
+          prevComb = comb;
+        } else {
+          for (const [b, q] of s.bids) { ctx.fillStyle = rgba(p.up, alphaOf(q)); ctx.fillRect(x0, yOf(b), wCol, cellH); }
+          for (const [b, q] of s.asks) { ctx.fillStyle = rgba(p.down, alphaOf(q)); ctx.fillRect(x0, yOf(b), wCol, cellH); }
+        }
+      }
+
+      // Last-price polyline overlay (--fg — a reference trace, not P&L).
+      const trail = slice.trail || [];
+      if (trail.length > 1) {
+        ctx.strokeStyle = rgba(p.fg, 0.85); ctx.lineWidth = 1.25;
+        ctx.beginPath();
+        let started = false;
+        for (const pt of trail) {
+          if (!Number.isFinite(pt.ts) || !Number.isFinite(pt.price) || pt.ts < t0) continue;
+          const x = X(pt.ts);
+          const y = Math.min(plotH, Math.max(0, yOf(pt.price) + rowH / 2));
+          if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+
+      // Detector markers (§4b): drawn ONLY inside the visible window — an
+      // off-screen marker would imply knowledge the eye can't verify.
+      for (const ev of slice.events || []) {
+        if (!ev || ev.ts < t0 || ev.ts > tN) continue;
+        if (!(ev.price >= range.min && ev.price <= range.max)) continue;
+        font(11, true); ctx.textAlign = 'center';
+        ctx.fillStyle = ev.kind === 'spoof-pull' ? p.accent : p.accent2;
+        ctx.fillText(ev.kind === 'spoof-pull' ? '▽' : '◈', X(ev.ts), yOf(ev.price) + rowH / 2);
+      }
+
+      // Price axis (right), thinned to ~14px spacing.
+      const labStep = Math.max(1, Math.ceil(14 / rowH));
+      font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'right';
+      for (let r = 0; r < nRows; r += labStep) {
+        const price = range.max - r * tick;
+        ctx.fillText(fmtUsd(price), w - 2, yOf(price) + rowH / 2);
+      }
+      // Time axis (bottom): labels at fixed fractions of the linear time span.
+      font(9); ctx.textAlign = 'center';
+      for (const f of [0.02, 0.25, 0.5, 0.75, 0.98]) {
+        ctx.fillText(hms(t0 + f * span), plotW * f, plotH + ROW_TIME / 2);
+      }
+      // Corner tag: venue + scale statement (per-source label, §0.7).
+      font(9, true); ctx.textAlign = 'left'; ctx.fillStyle = p.muted;
+      ctx.fillText((slice.ex || '') + ' · α ∝ resting qty (p95-scaled)' + (velOn ? ' · velocity tint ON' : ''), 6, 8);
+
+      // Hover readout: ts · price · resting qty (+ side) at the cell.
+      if (mouse && mouse.x >= 0 && mouse.x < plotW && mouse.y >= 0 && mouse.y < plotH) {
+        const tsAt = t0 + span * (mouse.x / plotW);
+        // Last kept sample at/before the cursor time (linear scan is fine at
+        // ≤ plotW/1.5 columns, and only on mouse-move redraws).
+        let s = null;
+        for (const k of kept) { if (k.ts <= tsAt) s = k; else break; }
+        const ri = Math.min(nRows - 1, Math.floor(mouse.y / rowH));
+        const bucket = Math.round((range.max - ri * tick) * 1e8) / 1e8;   // roundPx-canonical (store grid)
+        ctx.save();
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = rgba(p.fg, 0.4); ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, mouse.y + 0.5); ctx.lineTo(plotW, mouse.y + 0.5); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(mouse.x + 0.5, 0); ctx.lineTo(mouse.x + 0.5, plotH); ctx.stroke();
+        ctx.restore();
+        let txt;
+        if (!s || tsAt - s.ts > 1.5 * dtMed) {
+          txt = hms(tsAt) + ' · ' + fmtUsd(bucket) + ' · no sample (gap — gaps stay gaps)';
+        } else {
+          const bq = s.bids.get(bucket) || 0, aq = s.asks.get(bucket) || 0;
+          const side = bq && aq ? 'bid+ask' : bq ? 'bid' : aq ? 'ask' : '—';
+          txt = hms(s.ts) + ' · ' + fmtUsd(bucket) + ' · resting ' + fmtQty(bq + aq) + ' BTC (' + side + ')';
+        }
+        font(10);
+        const tw = ctx.measureText(txt).width;
+        ctx.fillStyle = rgba(p.panel2, 0.92);
+        ctx.fillRect(6, 14, tw + 14, 18);
+        ctx.strokeStyle = p.border; ctx.strokeRect(6.5, 14.5, tw + 13, 17);
+        ctx.fillStyle = p.fg; ctx.textAlign = 'left';
+        ctx.fillText(txt, 13, 23.5);
+      }
+    }
+
+    /** slice = { samples, range, tickSize, trail, events, ex } — samples/range
+     *  straight from DepthHistoryStore (LIVE refs, read-only), trail from the
+     *  bootstrap's per-venue price ring, events from the detector. */
+    function render(slice) {
+      lastSlice = slice;
+      draw(slice);
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ LiqHeatmapView — ESTIMATED liquidation bands + observed prints (O-2, §4b) ═══
+  //
+  // ⚠ MODEL ESTIMATE (§0.4): bands come from LiqHeatmapModel — a volume-at-
+  // price entry proxy × equal-weighted leverage tiers, NOT observed positions.
+  // The 'ESTIMATED (model)' badge is drawn INTO the canvas every frame (it
+  // cannot scroll away or be covered) and the panel header hint repeats it.
+  // Observed liquidation prints render as discrete DOTS in their own left
+  // lane — visually and spatially separate from the bands, never blended
+  // (§4b: estimates and observations must not be confusable).
+  //
+  // Colors: side 'long' (est. long-liq below mark → forced SELLS) = --down;
+  // side 'short' (above mark → forced BUY-backs) = --up — the same semantic
+  // pair the liquidation feed badges use. Position (below/above the mark
+  // line) is the redundant non-color cue.
+  function LiqHeatmapView() {
+    let root = null, canvas = null;
+    const OBS_LANE = 56, GUT_AXIS = 64;
+
+    function mount(el) {
+      root = el;
+      canvas = document.createElement('canvas');
+      canvas.className = 'term-canvas';
+      root.appendChild(canvas);
+    }
+
+    /** Permanent in-canvas badge — top-right, warn palette (§0.4 label rail). */
+    function drawBadge(ctx, w, p) {
+      const txt = 'ESTIMATED (model)';
+      ctx.font = '600 9px ' + cssVar('--mono', 'monospace');
+      const tw = ctx.measureText(txt).width;
+      const x = w - tw - 14, y = 4;
+      ctx.fillStyle = cssVar('--warn-bg', '#3a2a12');
+      ctx.fillRect(x, y, tw + 10, 15);
+      ctx.strokeStyle = cssVar('--warn-fg', '#ffd591');
+      ctx.strokeRect(x + 0.5, y + 0.5, tw + 9, 14);
+      ctx.fillStyle = cssVar('--warn-fg', '#ffd591');
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(txt, x + 5, y + 8);
+    }
+
+    /** slice = { est: LiqHeatmapModel.estimate() result ({bands, observed,
+     *  label}) or null before first estimate, mark, tickSize } */
+    function render(slice) {
+      if (!canvas) return;
+      const { ctx, w, h } = fitCanvas(canvas);
+      const p = pal();
+      ctx.clearRect(0, 0, w, h);
+      ctx.textBaseline = 'middle';
+      const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
+
+      const est = slice.est;
+      const mark = slice.mark;
+      const tick = slice.tickSize || 1;
+      if (!est || !Number.isFinite(mark)) {
+        font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+        ctx.fillText('waiting for model inputs (bybit mark + session volume profile)…', 10, 30);
+        drawBadge(ctx, w, p);
+        return;
+      }
+
+      // Y extent: bands + observed prints + mark, small pad. All real inputs —
+      // the axis never extends to prices nothing references.
+      let pmin = mark, pmax = mark;
+      for (const b of est.bands) { if (b.price < pmin) pmin = b.price; if (b.price > pmax) pmax = b.price; }
+      for (const o of est.observed) { if (o.price < pmin) pmin = o.price; if (o.price > pmax) pmax = o.price; }
+      const pad = Math.max((pmax - pmin) * 0.04, tick * 2);
+      pmin -= pad; pmax += pad;
+      const plotH = h - 4;
+      const yOf = (price) => plotH * (pmax - price) / (pmax - pmin);
+      const bandX = OBS_LANE + 4, bandW = w - GUT_AXIS - bandX;
+      const bandH = Math.max(2, plotH * tick / (pmax - pmin));
+
+      // Estimated bands: alpha ∝ normalized weight (max = 1 by construction).
+      for (const b of est.bands) {
+        ctx.fillStyle = rgba(b.side === 'long' ? p.down : p.up, 0.07 + 0.6 * b.weight);
+        ctx.fillRect(bandX, yOf(b.price) - bandH / 2, bandW, bandH);
+      }
+
+      // Mark line (--accent, dashed) + label at the axis.
+      const my = yOf(mark);
+      ctx.save();
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = p.accent; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, my); ctx.lineTo(w - GUT_AXIS, my); ctx.stroke();
+      ctx.restore();
+      font(9, true); ctx.fillStyle = p.accent; ctx.textAlign = 'left';
+      ctx.fillText('mark ' + fmtUsd(mark), w - GUT_AXIS + 2, my);
+
+      // Side captions — the redundant text cue for what each half means.
+      font(9, true); ctx.textAlign = 'left';
+      ctx.fillStyle = p.up; ctx.fillText('est. SHORT-liq bands (above mark)', bandX + 2, 26);
+      ctx.fillStyle = p.down; ctx.fillText('est. LONG-liq bands (below mark)', bandX + 2, plotH - 8);
+
+      // Observed lane (left): real liquidation PRINTS as dots — separate lane,
+      // never blended into band alpha (§4b). X inside the lane = print time
+      // across the session's observed span (single print → centered).
+      ctx.strokeStyle = p.border;
+      ctx.beginPath(); ctx.moveTo(OBS_LANE + 0.5, 0); ctx.lineTo(OBS_LANE + 0.5, plotH); ctx.stroke();
+      font(8); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+      ctx.fillText('observed', 4, 8);
+      const obs = est.observed;
+      if (obs.length) {
+        let tsMin = Infinity, tsMax = -Infinity;
+        for (const o of obs) { if (o.ts < tsMin) tsMin = o.ts; if (o.ts > tsMax) tsMax = o.ts; }
+        const tspan = tsMax - tsMin;
+        for (const o of obs) {
+          const x = tspan > 0 ? 8 + (OBS_LANE - 16) * (o.ts - tsMin) / tspan : OBS_LANE / 2;
+          const y = yOf(o.price);
+          if (y < 0 || y > plotH) continue;
+          ctx.fillStyle = o.side === 'long' ? p.down : p.up;
+          ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = rgba(p.fg, 0.6); ctx.lineWidth = 0.75; ctx.stroke();
+        }
+      } else {
+        font(8); ctx.fillStyle = p.muted;
+        ctx.save();
+        ctx.translate(10, plotH / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center';
+        ctx.fillText('no prints yet', 0, 0);
+        ctx.restore();
+      }
+
+      // Price axis (right), ~40px spacing.
+      const nLab = Math.max(2, Math.floor(plotH / 40));
+      font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'right';
+      for (let i = 0; i <= nLab; i++) {
+        const price = pmax - (i / nLab) * (pmax - pmin);
+        ctx.fillText(fmtUsd(price), w - 2, yOf(price));
+      }
+
+      drawBadge(ctx, w, p);
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ DetectionFeedView — spoof/iceberg heuristic event list (O-2, §4b) ═══
+  //
+  // Newest-first list of SpoofIcebergDetector events. EVERY row carries the
+  // 'heuristic' badge (§4b label rail — the store stamps the label on the
+  // event; this view refuses to render a row without showing it). Kind glyphs
+  // match the heatmap overlay markers: ▽ spoof-pull, ◈ iceberg-refill —
+  // glyph + kind text are the non-color cues.
+  function DetectionFeedView() {
+    let root = null, list = null;
+    const MAX_ROWS = 50;
+
+    function mount(el) {
+      root = el;
+      root.insertAdjacentHTML('beforeend',
+        '<div class="det-row det-head"><span>UTC</span><span>kind</span><span>price</span><span>size</span><span>life</span><span></span></div>');
+      list = document.createElement('div');
+      list.className = 'det-list';
+      root.appendChild(list);
+    }
+
+    /** slice = { events } — detector.events(), oldest→newest (reversed here). */
+    function render(slice) {
+      if (!list) return;
+      const evs = (slice.events || []).slice().reverse().slice(0, MAX_ROWS);
+      if (!evs.length) {
+        list.innerHTML = '<div class="chart-na">no heuristic flags this session — flags mark book patterns '
+          + '<i>consistent with</i> spoofing/icebergs, never proof (intent is unobservable from public L2).</div>';
+        return;
+      }
+      let html = '';
+      for (const ev of evs) {
+        const spoof = ev.kind === 'spoof-pull';
+        const size = spoof
+          ? fmtQty(ev.size)
+          : fmtQty(ev.tradedQty) + '/' + fmtQty(ev.maxDisplayed);   // traded / max displayed
+        const life = spoof && Number.isFinite(ev.lifetimeMs) ? (ev.lifetimeMs / 1000).toFixed(1) + 's' : '—';
+        html += '<div class="det-row">'
+          + '<span class="ts">' + hms(ev.ts) + '</span>'
+          + '<span class="kind ' + (spoof ? 'spoof' : 'iceberg') + '">' + (spoof ? '▽ spoof-pull' : '◈ iceberg') + '</span>'
+          + '<span class="px">' + fmtUsd(ev.price) + '</span>'
+          + '<span class="qty" title="' + (spoof ? 'max displayed wall size (BTC)' : 'traded / max displayed (BTC)') + '">' + size + '</span>'
+          + '<span class="life">' + life + '</span>'
+          + '<span class="det-badge">' + esc(ev.label || 'heuristic') + '</span>'
+          + '</div>';
+      }
+      list.innerHTML = html;
+    }
+
+    return { mount, render };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalViews = {
     FootprintView, DomLadderView, TapeView, AggBookView, HeaderStatsView, LiqFeedView,
+    // O-2 (§4b): depth-history heatmap + labeled model/heuristic panels.
+    BookHeatmapView, LiqHeatmapView, DetectionFeedView,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalViews;

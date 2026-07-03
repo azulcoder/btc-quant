@@ -14,8 +14,9 @@
 //   1. Bybit publicTrade  → aggressorBuy === (S === 'Buy')  (taker side, as-is)
 //   2. Coinbase trades    → aggressorBuy INVERTED from `side` (maker-side rule,
 //                           DEVELOPMENT.md §5 gotcha) + reconnect snapshot NOT re-seeded
-//   3. Bybit orderbook.50 → snapshot+delta through BookStore: sane best(), and a
-//                           delta qty-"0" level actually DELETES (tombstone rail)
+//   3. Bybit orderbook (.50-captured; the adapter routes any depth) → snapshot+
+//                           delta through BookStore: sane best(), and a delta
+//                           qty-"0" level actually DELETES (tombstone rail)
 //   4. Binance depth20    → combined {stream,data} unwrap, full-snapshot semantics
 //   5. Bybit tickers      → partial-delta merge: mark/funding persist across a
 //                           delta that omits them (the fixture's deltas really do)
@@ -26,6 +27,24 @@
 //   9. ProfileStore       → POC = max-volume level; VAH ≥ POC ≥ VAL; value-area
 //                           volume ≈ 70% (±5pp)
 //  10. AggBookStore       → two-exchange merge: row.total == Σ row.byEx exactly
+//
+// O-2 additions (DESIGN §4b "check_terminal.cjs additions", binding list):
+//  11. OKX adapter        → descriptor contract (plain-text 'ping', books+trades
+//                           subscribe) + trade ctVal math: sz "200" → 2.00 BTC
+//                           EXACTLY; taker side as-is (§0.6 Bybit family);
+//                           ctVal override opt; markAlive per data frame
+//  12. OKX books          → snapshot+update through BookStore, ctVal-scaled
+//                           levels, incl. a REAL sz-"0" delete from the captured
+//                           update frames (store-side tombstone rail)
+//  13. Bybit orderbook.200 → subscribe arg upgraded (.200, §4b), snapshot sane at
+//                           200 levels/side through BookStore, delta tombstones delete
+//  14. DepthHistoryStore  → empty-book guard, ring bound by construction,
+//                           velocity sign (+ on a constructed fill, − on a pull)
+//  15. SpoofIcebergDetector → fires on a constructed wall-pull AND iceberg-refill,
+//                           stays QUIET on a benign book; every event label:'heuristic'
+//  16. LiqHeatmapModel    → exact band math (entry 100, L 10, mmr 0.005 →
+//                           long 90.5 / short 109.5), sides correct vs mark,
+//                           observed prints passed through UNblended, label:'estimated'
 //
 // Exit: 0 with one PASS line per group; non-zero with a clear FAIL message
 // (plus stack) if any group breaks. Run: node scripts/check_terminal.cjs
@@ -42,6 +61,23 @@ const FX = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures_ws.json'), 
 // markAlive/onStatus here. Frames are fed straight into adapter.onMessage —
 // exactly what livewire.js does after JSON.parse.
 const nullApi = { markAlive() {}, onStatus() {} };
+
+/** Like nullApi but counts markAlive() calls — the O-2 OKX groups pin the
+ *  "every books/trades data frame marks alive" contract (§4b), which is that
+ *  adapter's ONLY liveness source (its 'pong' is plain text and never survives
+ *  makeSocket's JSON.parse). */
+function countingApi() {
+  const api = { alive: 0, markAlive() { api.alive++; }, onStatus() {} };
+  return api;
+}
+
+/** Capture everything an adapter's subscribe()/ping() writes to the socket —
+ *  frames are JSON.parse'd when possible, kept as raw strings otherwise (the
+ *  OKX keepalive is deliberately a NON-JSON plain-text 'ping', §4b). */
+function captureWs() {
+  const sent = [];
+  return { sent, ws: { send(s) { try { sent.push(JSON.parse(s)); } catch (_) { sent.push(s); } } } };
+}
 
 /** Drive every frame of a fixture array through an adapter, exactly as
  *  livewire.js would post-JSON.parse. Events land in the collecting sink the
@@ -137,7 +173,10 @@ group('coinbase maker-side inversion + reconnect snapshot skip', () => {
   assert.ok(u700 && u700.aggressorBuy === true, 'SELL maker print must normalize to an aggressive BUY');
 });
 
-// ─── 3. Bybit orderbook.50 snapshot+delta → BookStore (qty-0 tombstone rail) ─
+// ─── 3. Bybit orderbook snapshot+delta → BookStore (qty-0 tombstone rail) ────
+// (Frames were captured from orderbook.50 in O-1; the adapter now subscribes
+// .200 with a depth-AGNOSTIC 'orderbook.' route — §4b — so these .50 frames
+// still exercise the exact same code path. Group 13 covers the .200 frames.)
 group('bybit book snapshot+delta through BookStore', () => {
   const { evts, sink } = collectSink();
   const ad = A.makeBybitAdapter('BTCUSDT', sink);
@@ -418,6 +457,365 @@ group('agg book two-exchange merge math', () => {
   const bybitOwn = agg.books.get('bybit').grouped(50, 10).bids.reduce((a, r) => a + r.qty, 0);
   const bybitMerged = g.bids.reduce((a, r) => a + (r.byEx.bybit || 0), 0);
   assert.ok(approx(bybitOwn, bybitMerged, 1e-9), 'bybit bid quantity conserved through the merge');
+});
+
+// ─── 11. OKX adapter: descriptor contract + trade ctVal math (§4b) ──────────
+group('okx descriptor + trade ctVal math (CONTRACTS → BTC)', () => {
+  const { evts, sink } = collectSink();
+  const ad = A.makeOkxAdapter('BTC-USDT-SWAP', sink);
+  const api = countingApi();
+
+  // Descriptor contract (§4b): OKX prescribes a PLAIN TEXT 'ping' ≲30s — a
+  // JSON op frame (Bybit-style) would be ignored server-side and the socket
+  // would die at the idle timeout.
+  assert.strictEqual(ad.url, 'wss://ws.okx.com:8443/ws/v5/public');
+  assert.strictEqual(ad.pingMs, 25000, 'keepalive must beat the ~30s idle drop');
+  {
+    const { sent, ws } = captureWs();
+    ad.ping(ws);
+    assert.strictEqual(sent[0], 'ping', "keepalive must be the literal text 'ping', NOT JSON");
+    ad.subscribe(ws);
+    const sub = sent[1];
+    assert.strictEqual(sub.op, 'subscribe');
+    const chans = sub.args.map((a) => a.channel).sort();
+    assert.deepStrictEqual(chans, ['books', 'trades'], 'subscribe books + trades (§4b)');
+    for (const a of sub.args) assert.strictEqual(a.instId, 'BTC-USDT-SWAP');
+  }
+
+  // Sub-ack (fixture okx_sub_ack: {event:'subscribe',…}) carries no data →
+  // swallowed, and it must NOT count as liveness (an ack is not a data frame).
+  for (const f of FX.okx_sub_ack) ad.onMessage(f, api);
+  assert.strictEqual(evts.length, 0, 'sub ack must emit nothing');
+  assert.strictEqual(api.alive, 0, 'sub ack must not markAlive');
+
+  // Fixture precondition for the §4b headline assertion: the capture really
+  // does carry a sz "200" print (re-captured fixtures must keep exercising it).
+  assert.strictEqual(FX.okx_trades[0].data[0].sz, '200', 'fixture precondition: first trade sz must be "200"');
+
+  for (const f of FX.okx_trades) ad.onMessage(f, api);
+  assert.strictEqual(evts.length, 3, 'one trade per fixture frame');
+  // §4b UNIT RAIL: sizes are CONTRACTS; qty = sz × ctVal (0.01 BTC pinned in
+  // fixtures _okx_ctval_note). sz "200" → 2 BTC EXACTLY (200 × 0.01 === 2 in
+  // doubles); skipping the multiply would overstate OKX flow 100×.
+  assert.strictEqual(evts[0].qty, 2, 'sz "200" × ctVal 0.01 must be EXACTLY 2.00 BTC, got ' + evts[0].qty);
+  FX.okx_trades.forEach((f, i) => {
+    const raw = f.data[0], ev = evts[i];
+    assert.strictEqual(ev.kind, 'trade');
+    assert.strictEqual(ev.ex, 'okx');
+    // §0.6: OKX `side` is the TAKER (aggressor) — as-is, Bybit family, NO
+    // Coinbase-style inversion.
+    assert.strictEqual(ev.aggressorBuy, raw.side === 'buy', 'aggressorBuy must equal (side===buy), no inversion');
+    assert.ok(Number.isInteger(ev.ts) && ev.ts === Number(raw.ts), 'ts must be the numeric-string wire ts as int ms');
+    assert.strictEqual(ev.price, Number(raw.px), 'price must be Number(px)');
+    assert.ok(approx(ev.qty, Number(raw.sz) * 0.01, 1e-12), 'qty must be Number(sz) × 0.01');
+    assert.strictEqual(ev.id, String(raw.tradeId), 'id must be the tradeId as a string');
+  });
+  // §4b liveness: EVERY books/trades data frame marks alive — data frames are
+  // this socket's only liveness source (the text 'pong' dies in JSON.parse).
+  assert.strictEqual(api.alive, 3, 'each trade data frame must markAlive');
+
+  // ctVal is an OPT (another instId = another multiplier): override must win.
+  const { evts: e2, sink: s2 } = collectSink();
+  const ad2 = A.makeOkxAdapter('BTC-USDT-SWAP', s2, { ctVal: 1 });
+  ad2.onMessage(FX.okx_trades[0], nullApi);
+  assert.strictEqual(e2[0].qty, 200, 'ctVal override 1 must yield raw contract count');
+});
+
+// ─── 12. OKX books snapshot+update → BookStore (ctVal levels + real delete) ──
+group('okx books snapshot+update through BookStore (ctVal + tombstone delete)', () => {
+  const { evts, sink } = collectSink();
+  const ad = A.makeOkxAdapter('BTC-USDT-SWAP', sink);
+  const api = countingApi();
+  const book = S.BookStore();
+  const CT = 0.01;   // pinned BTC-USDT-SWAP ctVal (fixtures _okx_ctval_note)
+
+  // Fixture preconditions: the snapshot carries checksum/seqId (the adapter
+  // IGNORES them by design — re-snapshot-on-reconnect instead, §4b — so the
+  // fields must exist for that to be a decision rather than a vacuous no-op),
+  // and update[1] carries a REAL sz-"0" tombstone for a level the snapshot
+  // holds (bid 62009.2) — no synthesized delete needed, the wire provided one.
+  const rawSnap = FX.okx_books_snapshot[0].data[0];
+  assert.ok('checksum' in rawSnap && 'seqId' in rawSnap, 'fixture precondition: snapshot carries checksum/seqId');
+  assert.ok(rawSnap.bids.some((l) => l[0] === '62009.2'),
+    'fixture precondition: snapshot holds bid 62009.2');
+  assert.ok(FX.okx_books_update[1].data[0].bids.some((l) => l[0] === '62009.2' && l[1] === '0'),
+    'fixture precondition: update[1] deletes bid 62009.2 with sz "0"');
+
+  // Snapshot: action:'snapshot' → isSnapshot:true; 25 levels/side, sorted
+  // best-first, EVERY level qty ctVal-scaled (books sz is CONTRACTS too, §4b).
+  for (const f of FX.okx_books_snapshot) ad.onMessage(f, api);
+  assert.strictEqual(evts.length, 1);
+  const snap = evts[0];
+  assert.strictEqual(snap.kind, 'depth');
+  assert.strictEqual(snap.ex, 'okx');
+  assert.strictEqual(snap.isSnapshot, true, "action:'snapshot' must map to isSnapshot:true");
+  assert.ok(Number.isInteger(snap.ts) && snap.ts === Number(rawSnap.ts), 'ts from the books row');
+  assert.strictEqual(snap.bids.length, 25);
+  assert.strictEqual(snap.asks.length, 25);
+  for (let i = 1; i < 25; i++) {
+    assert.ok(snap.bids[i][0] < snap.bids[i - 1][0], 'bids descending (best first)');
+    assert.ok(snap.asks[i][0] > snap.asks[i - 1][0], 'asks ascending (best first)');
+  }
+  // Cross-check EVERY emitted level against its raw 4-tuple: [px, sz, deprecated,
+  // nOrders] → [Number(px), Number(sz)×ctVal] (tuple tail ignored).
+  const rawBidBySz = new Map(rawSnap.bids.map((l) => [Number(l[0]), Number(l[1])]));
+  for (const [p, q] of snap.bids) {
+    assert.ok(rawBidBySz.has(p), 'emitted bid ' + p + ' not in the raw snapshot');
+    assert.ok(approx(q, rawBidBySz.get(p) * CT, 1e-12), 'bid @' + p + ' qty must be sz × ctVal');
+  }
+
+  book.applyDepth(snap);
+  let b = book.best();
+  assert.strictEqual(b.bid[0], 62009.9, 'fixture best bid');
+  assert.strictEqual(b.ask[0], 62010, 'fixture best ask');
+  assert.ok(approx(b.bid[1], 883.58 * CT, 1e-12), 'best-bid qty ctVal-scaled (8.8358 BTC, not 883.58)');
+  assert.ok(book.bids.has(62009.2), 'level 62009.2 present pre-update');
+
+  // Update 0: action:'update' → isSnapshot:false (no clear); upserts merge.
+  evts.length = 0;
+  ad.onMessage(FX.okx_books_update[0], api);
+  assert.strictEqual(evts[0].isSnapshot, false, "action:'update' must map to isSnapshot:false");
+  book.applyDepth(evts[0]);
+  assert.ok(approx(book.asks.get(62010), 250.44 * CT, 1e-12), 'update must upsert ask 62010 (ctVal-scaled)');
+  assert.ok(book.bids.has(62008.7), 'update 0 adds bid 62008.7');
+
+  // Update 1 carries the REAL ["62009.2","0",…] tombstone — the adapter must
+  // KEEP it (qty 0, 0×ctVal is still 0) and the store must DELETE the level.
+  evts.length = 0;
+  ad.onMessage(FX.okx_books_update[1], api);
+  assert.ok(evts[0].bids.some((l) => l[0] === 62009.2 && l[1] === 0),
+    'adapter must keep the sz-"0" tombstone (qty 0) for the store');
+  book.applyDepth(evts[0]);
+  assert.ok(!book.bids.has(62009.2), 'sz "0" must DELETE bid 62009.2 store-side');
+  assert.ok(!book.bids.has(62008.7), 'bid 62008.7 added by update 0 then deleted by update 1');
+
+  // Update 2 keeps the book sane; ask 62011 (in the snapshot) is deleted here.
+  evts.length = 0;
+  ad.onMessage(FX.okx_books_update[2], api);
+  book.applyDepth(evts[0]);
+  assert.ok(!book.asks.has(62011), 'update 2 deletes ask 62011');
+  b = book.best();
+  assert.ok(Number.isFinite(b.bid[0]) && Number.isFinite(b.ask[0]) && b.bid[0] < b.ask[0], 'best() sane after all updates');
+  assert.ok(approx(book.bids.get(62009.9), 614.58 * CT, 1e-12), 'best bid qty tracks the last update');
+
+  // §4b liveness: every books data frame (snapshot + 3 updates) marks alive.
+  assert.strictEqual(api.alive, 4, 'each books data frame must markAlive');
+});
+
+// ─── 13. Bybit orderbook.200 (§4b upgrade): subscribe arg + 200-level sanity ─
+group('bybit orderbook.200 subscribe + snapshot/delta through BookStore', () => {
+  const { evts, sink } = collectSink();
+  const ad = A.makeBybitAdapter('BTCUSDT', sink);
+
+  // The §4b upgrade is in the SUBSCRIBE (deeper heatmap range); snapshot/delta
+  // semantics are identical at any depth and share one 'orderbook.' route.
+  {
+    const { sent, ws } = captureWs();
+    ad.subscribe(ws);
+    const args = sent[0].args;
+    assert.ok(args.indexOf('orderbook.200.BTCUSDT') >= 0, 'must subscribe orderbook.200 (§4b)');
+    assert.ok(!args.some((a) => a.indexOf('orderbook.50.') === 0), 'the .50 subscription must be GONE');
+  }
+
+  // Real captured .200 frames: full 200 levels/side, then sparse deltas.
+  const book = S.BookStore();
+  replay(ad, FX.bybit_orderbook200_snapshot);
+  assert.strictEqual(evts.length, 1, 'one depth event from the snapshot');
+  const snap = evts[0];
+  assert.strictEqual(snap.isSnapshot, true);
+  assert.strictEqual(snap.bids.length, 200, '200 bid levels');
+  assert.strictEqual(snap.asks.length, 200, '200 ask levels');
+  for (let i = 1; i < 200; i++) {
+    assert.ok(snap.bids[i][0] < snap.bids[i - 1][0], 'bids descending (best first)');
+    assert.ok(snap.asks[i][0] > snap.asks[i - 1][0], 'asks ascending (best first)');
+  }
+  book.applyDepth(snap);
+  assert.strictEqual(book.bids.size, 200, 'store holds all 200 bid levels');
+  assert.strictEqual(book.asks.size, 200, 'store holds all 200 ask levels');
+  let b = book.best();
+  assert.strictEqual(b.bid[0], 62011.8, 'fixture best bid');
+  assert.strictEqual(b.ask[0], 62011.9, 'fixture best ask');
+  assert.ok(book.bids.has(62011.3) && book.asks.has(62037.5), 'delta-targeted levels present pre-delta');
+
+  // Deltas: tombstones deep in a 200-level book must still delete store-side.
+  evts.length = 0;
+  replay(ad, FX.bybit_orderbook200_delta);
+  for (const ev of evts) {
+    assert.strictEqual(ev.isSnapshot, false, 'type:delta must map to isSnapshot:false');
+    book.applyDepth(ev);
+  }
+  assert.ok(!book.bids.has(62011.3), 'delta ["62011.30","0"] must delete the bid');
+  assert.ok(!book.asks.has(62037.5), 'delta must delete ask 62037.50 (the former 200th level)');
+  b = book.best();
+  assert.ok(Number.isFinite(b.bid[0]) && Number.isFinite(b.ask[0]) && b.bid[0] < b.ask[0], 'best() sane after deltas');
+});
+
+// ─── 14. DepthHistoryStore: guard, ring bound, velocity sign (§4b) ──────────
+group('depth history ring bound + velocity sign', () => {
+  const T0 = 1783076400000;
+  const book = S.BookStore();
+  const hist = S.DepthHistoryStore({ tickSize: 1, maxSamples: 5, nLevels: 40 });
+
+  // Empty-book guard (§4b): sampling before any snapshot records NOTHING —
+  // an all-zero column would render as a fake "liquidity vanished" band.
+  hist.sample(T0, book);
+  assert.strictEqual(hist.samples().length, 0, 'empty book must not produce a sample');
+  assert.ok(Number.isNaN(hist.priceRange().min) && Number.isNaN(hist.priceRange().max), 'empty range is NaN/NaN, never 0');
+
+  // Constructed FILL at bid 100: qty ramps 1→8 over 8 one-second samples.
+  // maxSamples=5 → the ring must hold ONLY the newest 5 (bound by construction).
+  for (let i = 0; i < 8; i++) {
+    book.applyDepth({
+      kind: 'depth', ex: 'bybit', ts: T0 + i * 1000, isSnapshot: true,
+      bids: [[100, 1 + i]], asks: [[101, 2]],
+    });
+    hist.sample(T0 + i * 1000, book);
+  }
+  const smp = hist.samples();
+  assert.strictEqual(smp.length, 5, 'ring bound: 8 samples in, 5 held');
+  assert.strictEqual(smp[0].ts, T0 + 3000, 'oldest 3 evicted (oldest→newest order)');
+  assert.strictEqual(smp[4].ts, T0 + 7000, 'newest sample kept');
+  assert.strictEqual(smp[4].bids.get(100), 8, 'grouped bid qty recorded');
+  const r = hist.priceRange();
+  assert.strictEqual(r.min, 100); assert.strictEqual(r.max, 101);
+
+  // Velocity over the full held window: (8 − 4) qty / 4 s = +1/s — POSITIVE
+  // on a fill (liquidity building).
+  assert.ok(approx(hist.velocity(100, 10000), 1), 'fill must read as positive velocity, got ' + hist.velocity(100, 10000));
+  // <2 samples in a tiny window → 0 ("unknown renders flat, never NaN").
+  assert.strictEqual(hist.velocity(100, 1), 0, 'sub-sample window must return 0');
+
+  // Constructed PULL: qty collapses 8 → 0.5 → NEGATIVE velocity. Also checks
+  // the absent-bucket-is-zero rule via ask 101 disappearing entirely.
+  book.applyDepth({
+    kind: 'depth', ex: 'bybit', ts: T0 + 8000, isSnapshot: true,
+    bids: [[100, 0.5]], asks: [[102, 1]],
+  });
+  hist.sample(T0 + 8000, book);
+  assert.ok(hist.velocity(100, 4000) < 0, 'pull must read as negative velocity');
+  assert.ok(hist.velocity(101, 4000) < 0, 'a bucket that vanished counts as qty 0 (its deletion IS the signal)');
+});
+
+// ─── 15. SpoofIcebergDetector: fires on pull + refill, quiet on benign (§4b) ─
+group('spoof/iceberg detector fires on constructed pull+refill, quiet on benign', () => {
+  const T0 = 1783076400000;
+  // Grouped-ladder builders (BookStore.grouped() shape: [{price, qty}]).
+  const rows = (pairs) => pairs.map(([price, qty]) => ({ price, qty }));
+  const baseBids = () => rows([[100, 1], [99, 1.1], [98, 0.9], [97, 1], [96, 1.05],
+    [94, 1], [93, 0.95], [92, 1], [91, 1.1], [90, 1]]);
+  const baseAsks = () => rows([[101, 1], [102, 1.2], [103, 0.9], [104, 1]]);
+
+  // (a) SPOOF-PULL: a 20 BTC wall at bid 95 (≥ wallK=8 × median≈1) appears at
+  // T0, then VANISHES 5s later with ZERO traded volume there — §4b verbatim:
+  // pulled within wallWindowMs (15s) and traded < tradeCoverPct (0.2) × wall.
+  // 95 stays inside the still-visible bid range (90..100), so the top-N
+  // visibility guard cannot mistake the pull for a scroll-out.
+  const det = S.SpoofIcebergDetector({ tickSize: 1 });
+  det.onDepthSample(T0, { bids: baseBids().concat(rows([[95, 20]])), asks: baseAsks() });
+  det.onDepthSample(T0 + 5000, { bids: baseBids(), asks: baseAsks() });
+  const spoofs = det.events().filter((e) => e.kind === 'spoof-pull');
+  assert.strictEqual(spoofs.length, 1, 'exactly one spoof-pull, got ' + spoofs.length);
+  assert.strictEqual(spoofs[0].price, 95, 'pull at the wall bucket');
+  assert.strictEqual(spoofs[0].size, 20, 'size = max displayed wall size');
+  assert.strictEqual(spoofs[0].lifetimeMs, 5000, 'lifetime = event-ts span on display');
+
+  // (b) NOT a spoof when the wall was EATEN: same wall, but 5 BTC (≥ 0.2×20)
+  // trades at the bucket before it vanishes — real liquidity got filled.
+  const det2 = S.SpoofIcebergDetector({ tickSize: 1 });
+  det2.onDepthSample(T0, { bids: baseBids().concat(rows([[95, 20]])), asks: baseAsks() });
+  det2.onTrade({ kind: 'trade', ex: 'bybit', ts: T0 + 2000, price: 95, qty: 5, aggressorBuy: false, id: 'x1' });
+  det2.onDepthSample(T0 + 5000, { bids: baseBids(), asks: baseAsks() });
+  assert.strictEqual(det2.events().filter((e) => e.kind === 'spoof-pull').length, 0,
+    'a wall consumed by real trades must NOT flag as a spoof');
+
+  // (c) ICEBERG-REFILL: bucket 100 displays max 2 BTC but 7.5 BTC trades there
+  // inside icebergWindowMs — traded ≥ icebergM (3) × maxDisplayed (2). The
+  // event fires on the crossing trade and re-arms only after a full window
+  // (a 4th trade must NOT re-emit).
+  const det3 = S.SpoofIcebergDetector({ tickSize: 1 });
+  det3.onDepthSample(T0, { bids: rows([[100, 2], [99, 1], [98, 1]]), asks: rows([[101, 1], [102, 1]]) });
+  const mkT = (ts, qty) => ({ kind: 'trade', ex: 'bybit', ts, price: 100, qty, aggressorBuy: false, id: String(ts) });
+  det3.onTrade(mkT(T0 + 1000, 2.5));   // 2.5 < 6 — quiet
+  det3.onTrade(mkT(T0 + 2000, 2.5));   // 5.0 < 6 — quiet
+  assert.strictEqual(det3.events().length, 0, 'no iceberg before the 3× threshold');
+  det3.onTrade(mkT(T0 + 3000, 2.5));   // 7.5 ≥ 3×2 — fires
+  det3.onTrade(mkT(T0 + 4000, 3));     // within the window — must NOT re-fire
+  const bergs = det3.events().filter((e) => e.kind === 'iceberg-refill');
+  assert.strictEqual(bergs.length, 1, 'exactly one iceberg-refill per bucket per window, got ' + bergs.length);
+  assert.strictEqual(bergs[0].price, 100);
+  assert.ok(approx(bergs[0].tradedQty, 7.5), 'tradedQty = window sum at the crossing trade');
+  assert.strictEqual(bergs[0].maxDisplayed, 2, 'maxDisplayed = max shown size in window');
+
+  // (d) BENIGN book: ordinary jittering ladder + dust trades → ZERO events.
+  const det4 = S.SpoofIcebergDetector({ tickSize: 1 });
+  for (let i = 0; i < 10; i++) {
+    const jit = 0.05 * (i % 3);
+    det4.onDepthSample(T0 + i * 1000, {
+      bids: baseBids().map((r2) => ({ price: r2.price, qty: r2.qty + jit })),
+      asks: baseAsks(),
+    });
+    det4.onTrade({ kind: 'trade', ex: 'bybit', ts: T0 + i * 1000 + 500, price: 100, qty: 0.2, aggressorBuy: true, id: 'b' + i });
+  }
+  assert.strictEqual(det4.events().length, 0, 'benign book must stay silent, got ' + det4.events().length + ' event(s)');
+
+  // §4b label rail: EVERY emitted event carries label:'heuristic' — the label
+  // rides the event itself so no view can drop it by accident.
+  for (const d of [det, det3]) {
+    for (const e of d.events()) assert.strictEqual(e.label, 'heuristic', "every detector event must carry label:'heuristic'");
+  }
+});
+
+// ─── 16. LiqHeatmapModel: exact band math + sides + 'estimated' label (§4b) ──
+group('liq heatmap model exact band math + estimated label', () => {
+  // §4b known-value case: entry 100, L 10, mmr 0.005 →
+  //   long-liq  = 100·(1 − 1/10 + 0.005) =  90.5  (BELOW entry/mark)
+  //   short-liq = 100·(1 + 1/10 − 0.005) = 109.5  (ABOVE entry/mark)
+  // tick 0.5 keeps both on-grid so the snap must not move them.
+  const model = S.LiqHeatmapModel({ tiers: [10], mmr: 0.005, tickSize: 0.5 });
+  const obs = [{ ts: 1783076400000, price: 99, side: 'long', qty: 1, notionalUsd: 99 }];
+  const est = model.estimate([{ price: 100, vol: 5 }], 100, obs);
+
+  assert.strictEqual(est.label, 'estimated', "model output must carry label:'estimated' (§0.4)");
+  assert.strictEqual(est.bands.length, 2, 'one long + one short band');
+  const [lo, hi] = est.bands;   // ascending by price
+  assert.strictEqual(lo.price, 90.5, 'long-liq band EXACTLY at 90.5, got ' + lo.price);
+  assert.strictEqual(lo.side, 'long');
+  assert.strictEqual(hi.price, 109.5, 'short-liq band EXACTLY at 109.5, got ' + hi.price);
+  assert.strictEqual(hi.side, 'short');
+  assert.strictEqual(lo.weight, 1, 'single entry level → both bands at max weight 1');
+  assert.strictEqual(hi.weight, 1);
+
+  // Observed prints pass through BY REFERENCE — never blended into bands, and
+  // never mutated (§4b: estimates and observations must not be confusable).
+  assert.strictEqual(est.observed.length, 1);
+  assert.strictEqual(est.observed[0], obs[0], 'observed prints must be the SAME objects, unblended');
+
+  // Liveness filter across the full default tier set + several entry levels:
+  // EVERY surviving long band sits strictly BELOW mark, every short strictly
+  // ABOVE (a long whose liq price is at/above mark has already fired — §4b).
+  const model2 = S.LiqHeatmapModel({ tickSize: 1 });   // tiers [5,10,25,50,100], mmr 0.005
+  const levels = [{ price: 61000, vol: 3 }, { price: 62000, vol: 5 }, { price: 63000, vol: 2 }];
+  const mark = 62000;
+  const est2 = model2.estimate(levels, mark, []);
+  assert.ok(est2.bands.length > 0, 'real profile must produce bands');
+  let wmax = 0;
+  for (const bd of est2.bands) {
+    if (bd.side === 'long') assert.ok(bd.price < mark, 'long band ' + bd.price + ' must be strictly below mark');
+    else assert.ok(bd.price > mark, 'short band ' + bd.price + ' must be strictly above mark');
+    assert.ok(bd.weight > 0 && bd.weight <= 1, 'weights normalized to (0, 1]');
+    if (bd.weight > wmax) wmax = bd.weight;
+  }
+  assert.strictEqual(wmax, 1, 'max band weight must normalize to exactly 1');
+  for (let i = 1; i < est2.bands.length; i++) {
+    assert.ok(est2.bands[i].price > est2.bands[i - 1].price, 'bands ascending by price');
+  }
+  assert.strictEqual(est2.label, 'estimated');
+
+  // No mark → NO bands (never NaN bands), observed still passes through.
+  const estNaN = model2.estimate(levels, NaN, obs);
+  assert.strictEqual(estNaN.bands.length, 0, 'non-finite mark must yield empty bands');
+  assert.strictEqual(estNaN.observed.length, 1);
+  assert.strictEqual(estNaN.label, 'estimated');
 });
 
 // ─── Verdict ─────────────────────────────────────────────────────────────────

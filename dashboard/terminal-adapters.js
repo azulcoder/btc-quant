@@ -1,8 +1,8 @@
 // terminal-adapters.js — exchange WS/REST adapters for the orderflow terminal.
 //
-// DESIGN-orderflow-terminal.md §4 contract: each make*Adapter(symbolOrProduct, sink)
-// returns a makeSocket-compatible descriptor { url, pingMs?, subscribe(ws), ping?(ws),
-// onMessage(msg, api) } (the shared socket skeleton lives in livewire.js — extracted
+// DESIGN-orderflow-terminal.md §4 + §4b contract: each make*Adapter(symbolOrProduct,
+// sink[, opts]) returns a makeSocket-compatible descriptor { url, pingMs?, subscribe(ws),
+// ping?(ws), onMessage(msg, api) } (the shared socket skeleton lives in livewire.js — extracted
 // verbatim from app.js; adapters never manage reconnection themselves). `sink(evt)`
 // receives ONLY the normalized event shapes below — the single vocabulary the stores
 // ever see (DESIGN §4):
@@ -14,14 +14,16 @@
 //   { kind:'oi',    ex, ts, oi }
 //
 // ts is ALWAYS epoch milliseconds (int); price/qty are ALWAYS Number() — exchanges
-// send numeric strings on the wire. `ex` short codes: 'bybit' | 'binancef' | 'coinbase'
-// (same codes the collector writes to DuckDB, DESIGN §3 schema).
+// send numeric strings on the wire. `ex` short codes: 'bybit' | 'binancef' |
+// 'coinbase' | 'okx' (the first three are what the collector writes to DuckDB,
+// DESIGN §3 schema; 'okx' is a browser-terminal-only leg added in O-2, §4b).
 //
 // Honesty rails (DESIGN §0, inherited from app.js):
 //   - LIVE-DESCRIPTIVE only. Nothing normalized here ever feeds a backtest or the
 //     OOS harness (§0.1). Keyless public endpoints only — no signing, no accounts (§0.2).
 //   - Aggressor-side conventions are PER-EXCHANGE and normalized explicitly (§0.6):
-//     Bybit publicTrade `S` is already the TAKER side (use as-is); Coinbase
+//     Bybit publicTrade `S` is already the TAKER side (use as-is); OKX trades
+//     `side` is likewise the TAKER side (use as-is — Bybit family); Coinbase
 //     market_trades `side` is the MAKER side (invert it — DEVELOPMENT.md §5 gotcha).
 //     Each adapter documents its convention inline; the fixture smoke asserts it.
 //   - Liveness: adapters call api.markAlive() on heartbeat-ish frames ONLY — never on
@@ -30,9 +32,12 @@
 //   - Coded against REAL captured frames in scripts/fixtures_ws.json (DESIGN §2), not
 //     remembered API docs. Wire realities encoded below: Bybit `tickers` sends one
 //     snapshot then PARTIAL deltas (only changed fields — must merge); Bybit
-//     `orderbook.50` sends snapshot then deltas where qty "0" deletes a level;
-//     Binance `depth20@100ms` frames are each a FULL 20-level snapshot; Coinbase
-//     `market_trades` arrives as snapshot then update batches, newest-first.
+//     `orderbook.200` (§4b upgrade from .50 — deeper heatmap range) sends snapshot
+//     then deltas where qty "0" deletes a level; Binance `depth20@100ms` frames are
+//     each a FULL 20-level snapshot; Coinbase `market_trades` arrives as snapshot
+//     then update batches, newest-first; OKX `books` sends action:'snapshot' then
+//     'update' frames where sz "0" deletes — and ALL OKX sizes are in CONTRACTS,
+//     not BTC (ctVal 0.01 — fixtures `_okx_ctval_note`).
 //
 // No DOM access, no globals beyond the ONE export — unit-testable in Node via the
 // quant.js dual-export pattern (consumed by scripts/check_terminal.cjs).
@@ -42,16 +47,21 @@
   // ─── Shared normalization helpers ────────────────────────────────────────
 
   /**
-   * Normalize one raw [price, qty] string-pair array into sorted Number pairs.
+   * Normalize one raw [price, qty, …] string-tuple array into sorted Number pairs.
    * bids sort DESC (best = highest bid first), asks ASC (best = lowest ask first)
    * — "sorted best-first" per the DESIGN §4 depth contract. qty 0 entries are
-   * KEPT (Bybit delta semantics: qty "0" means DELETE this level — the STORE
+   * KEPT (Bybit/OKX delta semantics: qty "0" means DELETE this level — the STORE
    * applies deltas against its book; the adapter only normalizes + sorts).
+   * Tuple tails beyond [0]/[1] (e.g. OKX's deprecated field + nOrders) are ignored.
+   * `scale` multiplies qty: 1 (default) for venues quoting base units
+   * (Bybit/Binance BTC), ctVal for OKX where `sz` is in CONTRACTS (§4b) — note
+   * a "0" tombstone survives scaling (0 × ctVal = 0), so deletes still work.
    */
-  function normLevels(raw, desc) {
+  function normLevels(raw, desc, scale) {
+    const k = scale === undefined ? 1 : scale;
     const out = [];
     for (const lvl of raw || []) {
-      const p = Number(lvl[0]), q = Number(lvl[1]);
+      const p = Number(lvl[0]), q = Number(lvl[1]) * k;
       if (!Number.isFinite(p) || !Number.isFinite(q)) continue;   // never emit NaN levels
       out.push([p, q]);
     }
@@ -62,7 +72,10 @@
   // ─── Bybit v5 linear — PRIMARY feed (DESIGN §2: all four topics verified live) ──
   //
   // One socket carries the whole perp picture: publicTrade (tape/footprint/CVD),
-  // orderbook.50 (DOM/agg book), tickers (mark/index/funding/OI header stats),
+  // orderbook.200 (DOM/agg book + the O-2 book heatmap — §4b upgraded from .50:
+  // 200 levels/side give the heatmap a usable price range; snapshot/delta
+  // semantics are IDENTICAL, proven by fixtures bybit_orderbook200_*), tickers
+  // (mark/index/funding/OI header stats),
   // allLiquidation (liq feed). Bybit is primary because Binance Futures WS
   // topic-filters trades/mark on this network (§0.2) — we state what the wire
   // actually delivers rather than pretending the documented stream list works.
@@ -82,7 +95,7 @@
           op: 'subscribe',
           args: [
             'publicTrade.' + sym,
-            'orderbook.50.' + sym,
+            'orderbook.200.' + sym,   // §4b: deeper book for the heatmap (was .50 in O-1)
             'tickers.' + sym,
             'allLiquidation.' + sym,
           ],
@@ -115,9 +128,14 @@
               id: String(t.i),                 // Bybit trade ids are UUID strings
             });
           }
-        } else if (msg.topic.indexOf('orderbook.50.') === 0) {
+        } else if (msg.topic.indexOf('orderbook.') === 0) {
+          // Depth-AGNOSTIC prefix on purpose: we subscribe orderbook.200 (§4b) but
+          // the normalization is identical at any depth — the fixture-proven .50
+          // frames and live .200 frames (fixtures bybit_orderbook200_*: same
+          // snapshot/delta/tombstone shape, just 200 levels/side) share this path.
           // snapshot = full replace; delta = sparse changes where qty "0" DELETES a
-          // level (fixture bybit_orderbook_delta shows ["61844.80","0"]). The BookStore
+          // level (fixture bybit_orderbook_delta shows ["61844.80","0"]; the .200
+          // delta fixture shows ["62011.30","0"]). The BookStore
           // applies deltas against its last snapshot — here we only normalize + sort,
           // keeping the qty-0 tombstones intact so the store can remove those levels.
           sink({
@@ -283,6 +301,110 @@
     };
   }
 
+  // ─── OKX v5 public — deeper agg-book leg + labeled per-exchange CVD (O-2, §4b) ──
+  //
+  // Subscribes `books` (full snapshot then sparse updates) + `trades` for the
+  // instId (BTC-USDT-SWAP). Per §4b bootstrap rules, OKX feeds the AggBook and a
+  // per-exchange, per-LABELED CvdStore only — OKX trades never enter
+  // FootprintStore/ProfileStore (§0.7: no mixed-venue bars).
+  //
+  // UNIT RAIL (§4b, honesty-critical): OKX SWAP sizes — trades `sz` AND books
+  // level `sz` — are in CONTRACTS, not BTC. BTC-USDT-SWAP ctVal = 0.01 BTC
+  // (verified via /api/v5/public/instruments 2026-07-03, pinned in fixtures
+  // `_okx_ctval_note`). qty = Number(sz) × ctVal EVERYWHERE below; skipping the
+  // multiply would overstate OKX flow 100× against the BTC-denominated
+  // Bybit/Binance/Coinbase legs and poison the merged book + CVD.
+  function makeOkxAdapter(instId, sink, opts) {
+    const o = opts || {};
+    // ctVal is an OPT (a different instId means a different multiplier) but the
+    // 0.01 default is the pinned BTC-USDT-SWAP value, not a guess.
+    const ctVal = o.ctVal === undefined ? 0.01 : Number(o.ctVal);
+
+    return {
+      url: 'wss://ws.okx.com:8443/ws/v5/public',
+      // OKX drops sockets idle ~30s and prescribes a PLAIN TEXT 'ping' — NOT a
+      // JSON op frame like Bybit's. ~25s keeps us safely inside the window.
+      pingMs: 25000,
+      subscribe(ws) {
+        ws.send(JSON.stringify({
+          op: 'subscribe',
+          args: [
+            { channel: 'books', instId: instId },
+            { channel: 'trades', instId: instId },
+          ],
+        }));
+      },
+      // Keepalive quirk, documented so nobody "fixes" it: OKX answers plain-text
+      // 'pong'. makeSocket (livewire.js) JSON.parses EVERY incoming message and
+      // silently drops parse failures, so the 'pong' never reaches onMessage and
+      // needs no branch below — safely ignored BY CONSTRUCTION, not by accident.
+      // Liveness therefore comes from books/trades data frames (markAlive below);
+      // a genuinely stalled feed still trips the watchdog because nothing else
+      // marks this socket alive.
+      ping(ws) { ws.send('ping'); },
+      onMessage(msg, api) {
+        if (!msg) return;
+        // Event frames carry no data: sub acks (fixture okx_sub_ack:
+        // {event:'subscribe', arg, connId}) and {event:'error'} → swallow.
+        if (msg.event) return;
+        if (!msg.arg || !Array.isArray(msg.data)) return;
+        const ch = msg.arg.channel;
+        if (ch !== 'books' && ch !== 'trades') return;
+
+        // Liveness: EVERY books/trades data frame marks alive (§4b contract).
+        // books ticks near-continuously for BTC and is the primary signal; a
+        // trade frame is equally hard proof the SAME socket is delivering, so
+        // marking it too costs nothing. This does not soften the §0 rail (never
+        // RELY on trades alone — a quiet tape is a quiet market): if the feed
+        // stalls, books goes quiet with it and the watchdog still fires.
+        if (api.markAlive) api.markAlive();
+
+        if (ch === 'trades') {
+          for (const t of msg.data) {
+            const price = Number(t.px), qty = Number(t.sz) * ctVal;   // CONTRACTS → BTC (§4b)
+            if (!Number.isFinite(price) || !Number.isFinite(qty)) continue;
+            sink({
+              kind: 'trade', ex: 'okx',
+              ts: Number(t.ts),                // wire ts is a numeric-string ms epoch
+              price, qty,
+              // §0.6 family: OKX trades `side` ('buy'/'sell') is the TAKER
+              // (aggressor) side — use as-is, NO inversion (Bybit convention,
+              // NOT the Coinbase maker-side gotcha).
+              aggressorBuy: t.side === 'buy',
+              id: String(t.tradeId),
+            });
+          }
+        } else {
+          // books: action 'snapshot' = full replace; 'update' = sparse changes
+          // where sz "0" DELETES a level (fixture okx_books_update carries e.g.
+          // ["62009.2","0","0","0"]). The delete happens STORE-side, exactly like
+          // the Bybit delta path: we KEEP the tombstone and emit the level with
+          // qty 0 (0 × ctVal is still 0) so the BookStore can remove it.
+          //
+          // Level tuples are [px, sz, deprecated, nOrders] — only px/sz are
+          // consumed (normLevels reads [0]/[1] and ignores the tail).
+          //
+          // `checksum`/`seqId`/`prevSeqId` are deliberately IGNORED: the only
+          // remedy for a checksum miss is a resubscribe, and makeSocket already
+          // re-subscribes on every reconnect — after which OKX resends a full
+          // snapshot. So we RE-SNAPSHOT on reconnect instead of checksum-
+          // verifying every frame; the residual failure mode (a silently gapped
+          // book between reconnects) is bounded by the stale/dead watchdog.
+          const isSnap = msg.action === 'snapshot';
+          for (const row of msg.data) {
+            sink({
+              kind: 'depth', ex: 'okx',
+              ts: Number(row.ts),
+              bids: normLevels(row.bids, true, ctVal),    // best bid (highest) first; CONTRACTS→BTC
+              asks: normLevels(row.asks, false, ctVal),   // best ask (lowest) first; CONTRACTS→BTC
+              isSnapshot: isSnap,
+            });
+          }
+        }
+      },
+    };
+  }
+
   // ─── Binance Futures REST poller — mark/funding (5s) + OI (60s) ─────────────
   //
   // WS markPrice/ticker are topic-filtered on this network (§0.2), so the
@@ -359,7 +481,7 @@
   }
 
   // ─── Export (ONE global + Node dual-export, quant.js pattern) ───────────────
-  const ADAPTERS = { makeBybitAdapter, makeBinanceDepthAdapter, makeCoinbaseAdapter, makeBinanceRestPoller };
+  const ADAPTERS = { makeBybitAdapter, makeBinanceDepthAdapter, makeCoinbaseAdapter, makeOkxAdapter, makeBinanceRestPoller };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = ADAPTERS;
   if (typeof global !== 'undefined') global.BTCQ_TERMINAL_ADAPTERS = ADAPTERS;

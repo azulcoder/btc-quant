@@ -20,9 +20,11 @@
 
 header.topbar .subtitle { color: var(--muted); font-size: var(--fs-sm); font-weight: 400; }
 
-/* ─── Page grid (§4 layout: stats strip / fp | mid | right / cvd / settings) ─
-   The terminal wants width — 1840px vs the analytics page's 1440px — because
-   the footprint alone needs room for ~10 bar columns of legible cells. */
+/* ─── Page grid (§4 + §4b layout: stats strip / fp | mid | right /
+   heat | right (heatmap wide under the footprint row; the right column —
+   tape, liq feed, liq heatmap, detections — stacks down BOTH rows) /
+   cvd / settings). The terminal wants width — 1840px vs the analytics page's
+   1440px — because the footprint alone needs room for ~10 bar columns. */
 main.term-main {
   max-width: 1840px;
   margin: 0 auto;
@@ -33,6 +35,7 @@ main.term-main {
   grid-template-areas:
     "stats stats stats"
     "fp    mid   right"
+    "heat  heat  right"
     "cvd   cvd   cvd"
     "set   set   set";
   align-items: start;
@@ -41,6 +44,7 @@ main.term-main {
 .area-fp    { grid-area: fp; }
 .area-mid   { grid-area: mid; }
 .area-right { grid-area: right; }
+.area-heat  { grid-area: heat; }
 .area-cvd   { grid-area: cvd; }
 .area-set   { grid-area: set; }
 
@@ -53,10 +57,12 @@ main.term-main {
 @media (max-width: 1100px) {
   main.term-main {
     grid-template-columns: 1fr;
-    grid-template-areas: "stats" "fp" "mid" "right" "cvd" "set";
+    grid-template-areas: "stats" "fp" "mid" "right" "heat" "cvd" "set";
   }
   .fp-wrap { height: 460px; }
   .agg-wrap { height: 260px; }
+  .heat-wrap { height: 300px; }
+  .liqheat-wrap { height: 240px; }
 }
 
 /* ─── Canvas mounts — views size their backing store from these CSS boxes
@@ -65,6 +71,26 @@ main.term-main {
 .fp-wrap  { height: 620px; position: relative; background: var(--bg); border-radius: var(--radius); }
 .agg-wrap { height: 300px; position: relative; background: var(--bg); border-radius: var(--radius); padding-bottom: 18px; }
 .agg-canvas { height: calc(100% - 0px); }
+/* O-2 canvas mounts (§4b): book heatmap (wide) + liq heatmap (right column). */
+.heat-wrap    { height: 380px; position: relative; background: var(--bg); border-radius: var(--radius); }
+.liqheat-wrap { height: 300px; position: relative; background: var(--bg); border-radius: var(--radius); }
+
+/* Book-heatmap panel-header controls (venue select + velocity tint toggle) —
+   they live in the h2 chrome, mono + small like the legends. */
+.heat-controls {
+  float: right;
+  display: inline-flex;
+  gap: var(--sp-2);
+  align-items: center;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.heat-controls select { min-width: 84px; padding: 1px 4px; font-size: var(--fs-xs); }
+.heat-controls input[type="checkbox"] { vertical-align: middle; margin: 0 0 0 3px; }
 
 /* Shared canvas-panel legend (agg book; CVD has its own overlay variant). */
 .term-legend {
@@ -198,6 +224,7 @@ table.ladder tr.spread td {
 .tape-row .ex { font-size: 10px; }
 .tape-row .ex-bybit { color: var(--c2); }
 .tape-row .ex-coinbase { color: var(--c4); }
+.tape-row .ex-okx { color: var(--c3); }   /* O-2 leg — same EX_TOKEN hue as CVD/agg-book */
 /* Whale ≥ $250k: bold + ◆ marker in the notional cell (marker = non-color cue). */
 .tape-row.whale { font-weight: 700; background: rgba(224, 163, 62, 0.08); }
 .tape-row.whale .ntl { color: var(--accent); }
@@ -247,6 +274,47 @@ table.ladder tr.spread td {
 }
 .liq-badge.long  { color: var(--down); border: 1px solid var(--down); }
 .liq-badge.short { color: var(--up);   border: 1px solid var(--up); }
+
+/* ─── Detection feed (O-2, §4b) — heuristic spoof/iceberg flags ──────────── */
+.det-wrap { display: flex; flex-direction: column; }
+.det-list { height: 170px; overflow-y: auto; }
+.det-row {
+  display: grid;
+  grid-template-columns: 56px 96px 1fr 84px 42px 60px;
+  gap: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums slashed-zero;
+  padding: 1px 2px;
+  align-items: baseline;
+}
+.det-head {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 2px;
+  margin-bottom: 2px;
+}
+.det-row .ts { color: var(--muted); }
+.det-row .px, .det-row .qty, .det-row .life { text-align: right; }
+/* Kind glyphs reuse the heatmap-marker hues: ▽ spoof-pull = --accent,
+   ◈ iceberg-refill = --accent-2 (chrome/annotation tokens — a heuristic flag
+   is an ANNOTATION, never P&L green/red). Glyph + text = non-color cues. */
+.det-row .kind.spoof   { color: var(--accent); }
+.det-row .kind.iceberg { color: var(--accent-2); }
+/* Per-row 'heuristic' badge (§4b label rail) — warn palette, same visual
+   language as the .signal-tag.research header tag. */
+.det-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 0 4px;
+  border-radius: 3px;
+  text-align: center;
+  color: var(--warn-fg);
+  border: 1px solid var(--warn-fg);
+}
 
 /* ─── CVD subchart (lightweight-charts mounts inside #view-cvd) ──────────── */
 .term-cvd { height: 190px; position: relative; background: var(--bg); border-radius: var(--radius); }
