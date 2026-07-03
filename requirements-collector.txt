@@ -1,0 +1,7 @@
+# Opt-in deps for the O-0 tick collector daemon (btcquant/collector.py +
+# scripts/run_collector.py) — NOT required by the core engine, the backtests, or
+# `make test` (tests/test_collector.py skips cleanly via pytest.importorskip when
+# these are absent, same discipline as MLflow/DVC in requirements-dev.txt).
+# Install with:  pip install -r requirements-collector.txt
+duckdb>=1.0        # single-file column store for data/ticks.duckdb (gitignored)
+websockets>=12     # asyncio WS client for Bybit v5 / Binance fstream public feeds

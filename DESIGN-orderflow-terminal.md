@@ -1,0 +1,252 @@
+# DESIGN — Orderflow Terminal (CryExc-inspired) + tick collector
+
+Status: **phase O-0 + O-1 implementation** (2026-07-03). Later phases (O-2…O-5) are specced
+here and deferred — same greenlight discipline as DEVELOPMENT.md §6.
+
+Provenance: feature surface adapted from [Cryexc](https://cryexc.josedonato.com/) (José
+Donato's free orderflow terminal — footprint, DOM, heatmaps, TPO, whale/options flow;
+browser-only, keyless WS to public exchange feeds) and its self-host history store
+[cryexc-history](https://github.com/jose-donato/cryexc-history) (Go + DuckDB, trades +
+liquidations, BYOD HTTP protocol). We adapt the *capabilities* into btc-quant's stack
+(vanilla JS + canvas, no bundler; Python + DuckDB) — we do not port C++/WASM.
+
+## 0. Honesty rails (non-negotiable, inherited + extended)
+
+1. **Everything in the terminal is LIVE-DESCRIPTIVE.** No terminal series is ever merged
+   into a backtested series or the OOS harness (same rail as the existing live tape,
+   app.js §3.5). The terminal page carries a permanent "research context — descriptive
+   only, never a backtest input" banner.
+2. **Keyless only.** Public WS/REST, no signing, no accounts. Connectivity of every
+   endpoint verified from this machine 2026-07-03 (all REST reachable). **Empirical
+   constraint found during frame capture:** Binance Futures WS **topic-filters** this
+   network — `depth20@100ms` flows (112 frames/12s) while `aggTrade`/`markPrice`/`ticker`
+   on the *same socket, same subscribe* deliver zero frames (sub-ack only); REST
+   `fapi/v1/aggTrades|premiumIndex|openInterest` all work. Design therefore uses **Bybit
+   v5 as the primary WS feed** (publicTrade/orderbook.50/tickers/allLiquidation all
+   verified live), Binance for depth WS + REST polls. We state what the wire actually
+   delivers rather than pretending the documented stream list is available.
+3. **The collector changes data-family status from *un-ingested* to *time-gated*, not to
+   *validated*.** Tick CVD / liquidations / OI / funding accrual start accumulating at
+   first collector run. They may enter the OOS harness ONLY after (a) accumulated history
+   clears MinBTL for the intended trial count, and (b) a pre-registered hypothesis with a
+   kill criterion (net-of-cost OOS DSR > 0.95 AND beats baseline) — DEVELOPMENT.md §6
+   greenlight required. Until then they are terminal panels, nothing more.
+4. **Model estimates are labeled as estimates.** The liquidation heatmap (O-2) infers
+   cascade levels from leverage assumptions — it is a *model*, labeled "estimated", never
+   presented as observed data. Same class as the existing max_pain/gamma positioning reads.
+5. **Signed dealer GEX stays refused** (dealer sign unknowable keyless — options run-log).
+   The options widget extensions (O-4) keep the unsigned Σ|gamma|·OI convention.
+6. **Aggressor-side conventions are per-exchange and MUST be normalized explicitly:**
+   - Coinbase `market_trades.side` is the **MAKER** side → aggressor = the inverse
+     (DEVELOPMENT.md §5 gotcha — the tape coloring inverts if read as aggressor).
+   - Binance `aggTrade.m` (isBuyerMaker) `true` → **SELL** aggressor.
+   - Bybit v5 `publicTrade` `S` (`Buy`/`Sell`) is already the **taker** side → use as-is.
+   Every adapter documents its convention inline and the fixture test asserts it.
+7. **No fabricated history.** The terminal renders only what arrived over the wire this
+   session (plus what the local collector genuinely recorded). No backfill from mixed
+   sources into one series without an explicit per-source label.
+
+## 1. Architecture
+
+```
+                    ┌──────────────────────────────────────────────┐
+  Binance Futures ─▶│  browser terminal (dashboard/terminal.html)  │
+  Bybit v5 linear ─▶│  adapters → stores → canvas views (rAF)      │
+  Coinbase spot   ─▶│  keyless WS, session-local state             │
+                    └──────────────────────────────────────────────┘
+                    ┌──────────────────────────────────────────────┐
+  same feeds  ────▶ │  collector daemon (btcquant/collector.py)    │
+                    │  asyncio WS → batched DuckDB inserts         │
+                    │  + BYOD HTTP API (stdlib) for later replay   │
+                    └──────────────────────────────────────────────┘
+                         data/ticks.duckdb  (keep-all by default)
+```
+
+Browser terminal and collector are independent: the terminal works with zero setup
+(CryExc "demo mode" equivalent); the collector is the opt-in history store (CryExc
+"self-hosted" equivalent) whose value is *research optionality*, not the UI.
+
+## 2. Data-source matrix (all keyless, verified reachable)
+
+| Source | Transport | Streams (BTC) | Feeds | Verified |
+|---|---|---|---|---|
+| **Bybit v5 linear** (`stream.bybit.com/v5/public/linear`) — **PRIMARY** | WS | `publicTrade.BTCUSDT`, `orderbook.50.BTCUSDT`, `tickers.BTCUSDT` (mark/index/funding/**OI**), `allLiquidation.BTCUSDT` | tape, footprint, CVD, VP, DOM, book, header stats, **liquidations** | live frames captured ✓ |
+| Binance Futures (`fstream.binance.com`) | WS | `btcusdt@depth20@100ms` **only** (trades/mark topic-filtered on this network, §0.2) | second agg-book leg | live frames captured ✓ |
+| Binance Futures (`fapi.binance.com`) | REST poll | `/fapi/v1/premiumIndex` (5 s), `/fapi/v1/openInterest` (60 s) | cross-exchange funding/OI columns | responses captured ✓ |
+| Coinbase Adv. Trade (`advanced-trade-ws.coinbase.com`) | WS | `market_trades`, `ticker`, `heartbeats` | spot tape (conventions proven in app.js) | live frames captured ✓ |
+| OKX (`ws.okx.com:8443/ws/v5/public`) | WS (O-2+) | `trades`, `books` (BTC-USDT-SWAP) | deeper agg book | REST reachable ✓ |
+| Deribit / Hyperliquid / Polymarket / Tree-of-Alpha | REST/WS (O-4/O-5) | — | options ext, whale tracking, prediction, news | REST reachable ✓ |
+
+Captured real frames live in `scripts/fixtures_ws.json` (trimmed) — adapters and the
+fixture smoke are written against **actual wire shapes**, not remembered docs. Notable
+realities encoded there: Bybit `tickers` sends a full `snapshot` then **partial deltas**
+(only changed fields — the adapter must merge); Bybit `orderbook.50` sends `snapshot`
+then `delta` frames (qty `"0"` deletes a level); Binance `depth20` frames are each a
+full 20-level snapshot; Coinbase `market_trades` arrives as `snapshot` then `update`
+batches and its `side` is the **maker** side.
+
+## 3. Collector spec (O-0) — `btcquant/collector.py`
+
+- **Deps:** `duckdb>=1.0`, `websockets>=12` via `requirements-collector.txt` (opt-in, like
+  MLflow/DVC — guarded import with an actionable install hint; core `make test` never
+  needs them beyond the guarded skip).
+- **DB:** `data/ticks.duckdb` (gitignored). Single writer process. Batched inserts
+  (flush every 500 ms or 500 rows, whichever first). Graceful shutdown flush on SIGINT.
+- **Streams (empirically grounded, §2):** Bybit WS `publicTrade` → trades,
+  `allLiquidation` → liquidations, `orderbook.50` → depth (1/s downsample), `tickers` →
+  funding_mark + open_interest (merge partial deltas against the last snapshot!);
+  Binance WS `depth20@100ms` → depth (1/s downsample); Binance REST `premiumIndex` (5 s)
+  → funding_mark, `openInterest` (60 s) → open_interest; Coinbase WS `market_trades` →
+  trades (spot leg, maker-side inversion). Binance futures *trades* are NOT collected —
+  topic-filtered on this network (§0.2); documented, not proxied.
+- **Schema** (all timestamps epoch **ms**, UTC; `exchange` short code `binancef|bybit|coinbase`):
+  - `trades(exchange VARCHAR, symbol VARCHAR, trade_id VARCHAR, ts_ms BIGINT, price DOUBLE, qty DOUBLE, aggressor_buy BOOLEAN)` — trade_id VARCHAR (Bybit ids are UUIDs).
+  - `liquidations(exchange, symbol, ts_ms BIGINT, side VARCHAR, price DOUBLE, qty DOUBLE, notional_usd DOUBLE)` — side = the *liquidated* position (`long|short`), normalized per exchange (Bybit `allLiquidation` side `Buy` = a **short** was liquidated — the printed order is the forced *buy-back*).
+  - `depth_snapshots(exchange, symbol, ts_ms BIGINT, bids VARCHAR, asks VARCHAR)` — JSON `[[price,qty]…]`, top-20, downsampled to 1/s (the 100ms firehose is a UI concern, not a storage one).
+  - `funding_mark(exchange, symbol, ts_ms BIGINT, mark DOUBLE, index DOUBLE, funding_rate DOUBLE, next_funding_ts BIGINT)` — downsampled to 1/s.
+  - `open_interest(exchange, symbol, ts_ms BIGINT, oi DOUBLE)` — 60 s REST poll.
+  - Indexes on `(symbol, ts_ms)` per table.
+- **Retention: keep-all by default** — the whole point is accumulating research history
+  (unlike cryexc-history's 24 h cap). `--retention-days N` optional. Honest sizing note:
+  BTC perp trades ≈ 0.5–1.5 M rows/day → order-of ~0.5–1 GB/month in DuckDB; depth\@1s
+  adds ~0.1 GB/month. Disk is the user's budget; documented, not hidden.
+- **Resilience:** per-stream reconnect with capped exponential backoff + jitter (mirror of
+  dashboard `makeSocket` semantics); a stalled-stream watchdog (no frame > 60 s → force
+  reconnect); gaps are **left as gaps** (no interpolation — honesty rail; cryexc-history
+  has the same known limitation and says so).
+- **BYOD HTTP API** (stdlib `http.server`, thread in same process, off by default,
+  `--api-port 8788` to enable): `GET /health`, `/v1/info`, `/v1/trades`,
+  `/v1/liquidations`, `/v1/funding`, `/v1/oi`, `/v1/depth` with
+  `symbol,start_ms,end_ms,limit` params, JSON out. Read via a `threading.Lock`-serialized
+  cursor (single-process; no cross-process readers while the daemon owns the file).
+- **CLI:** `scripts/run_collector.py --symbol BTCUSDT --exchanges binancef,bybit
+  [--api-port 8788] [--db data/ticks.duckdb] [--retention-days N]`.
+  Make targets: `make collector`, `make collector-api`.
+- **Tests (no network):** pure normalization functions (`normalize_binance_aggtrade`,
+  `normalize_binance_forceorder`, `normalize_bybit_trade`, `normalize_bybit_liq`,
+  `normalize_bybit_ticker`) against recorded fixture frames; schema create + insert/query
+  roundtrip on a temp DB; API handler against a seeded temp DB. Skips cleanly (`pytest
+  importorskip`) when collector deps absent.
+
+## 4. Terminal spec (O-1) — files & module contracts
+
+No bundler; plain `<script>` IIFEs exposing ONE global each (matches app.js style).
+Load order: `vendor/lightweight-charts.js` → `livewire.js` → `terminal-adapters.js` →
+`terminal-state.js` → `terminal-views.js` → `terminal.js`.
+
+- **`dashboard/livewire.js`** — `window.BTCQ_LIVEWIRE = { makeSocket }`: the existing
+  `makeSocket(adapter, api)` (reconnect/backoff/watchdog/`markAlive`) **extracted verbatim
+  from app.js** so both pages share one implementation. app.js keeps a
+  `const makeSocket = window.BTCQ_LIVEWIRE.makeSocket;` shim; `index.html` loads
+  livewire.js before app.js. Behavior change: none (verified by `node --check` + manual
+  dashboard smoke).
+- **`dashboard/terminal-adapters.js`** — `window.BTCQ_TERMINAL_ADAPTERS`:
+  `makeBybitAdapter(sym, sink)` (primary: trade/book/tickers/liq; merges `tickers`
+  partial deltas), `makeBinanceDepthAdapter(sym, sink)` (depth20 snapshots only),
+  `makeCoinbaseAdapter(productId, sink)` (spot tape; maker-side inversion), each
+  `makeSocket`-compatible; plus `makeBinanceRestPoller(sym, sink, opts)` →
+  `{start(), stop()}` polling `premiumIndex` (5 s) / `openInterest` (60 s) via fetch.
+  `sink` receives **normalized events** (the only shapes stores ever see):
+  ```js
+  { kind:'trade', ex, ts, price, qty, aggressorBuy, id }
+  { kind:'depth', ex, ts, bids:[[p,q]…], asks:[[p,q]…], isSnapshot }   // sorted best-first
+  { kind:'liq',   ex, ts, side:'long'|'short', price, qty, notionalUsd }
+  { kind:'mark',  ex, ts, mark, index, fundingRate, nextFundingTs }
+  { kind:'oi',    ex, ts, oi }
+  ```
+  Aggressor conventions per rail §0.6, documented inline per adapter. Bybit
+  `orderbook.50` delta frames are applied against the last snapshot (qty 0 = remove);
+  Binance `depth20@100ms` frames are full snapshots (`isSnapshot:true` each frame).
+- **`dashboard/terminal-state.js`** — `window.BTCQ_TERMINAL_STATE`: pure state, zero DOM.
+  - `TapeStore(max)` — ring buffer; `push(trade)`, `filtered(minNotional)`.
+  - `BookStore()` — per-exchange L2: `applyDepth(ev)`, `best()`, `grouped(tickSize, nLevels)`.
+  - `AggBookStore(exs)` — merged price-level view across BookStores with per-exchange
+    breakdown per level; `grouped(tickSize, nLevels)` → `{price, total, byEx:{…}}[]`.
+  - `FootprintStore({barMs, tickSize})` — per-bar map priceLevel → `{buyVol, sellVol}` +
+    per-bar `{o,h,l,c, delta, totalVol}`; finished-bar ring (last 120 bars);
+    diagonal imbalance flags (`buy[i] ≥ k·sell[i+1]`, default k=3, ≥min volume);
+    `onTrade`, `bars()`, `current()`.
+  - `CvdStore({bucketsUsd:[1e4,1e5,1e6]})` — cumulative delta overall + per notional
+    bucket (CryExc's CVD-by-trade-size); session-anchored; `onTrade`, `series()`.
+  - `ProfileStore({tickSize})` — session volume-at-price → POC / VAH / VAL (70% value
+    area, standard expansion-from-POC), HVN/LVN candidates; `onTrade`, `profile()`.
+  - `LiqStore(max)` — ring of normalized liqs + rolling 1 m/5 m notional sums.
+  - All stores unit-testable in Node (no `window` reference) — consumed by the fixture
+    smoke `scripts/check_terminal.cjs`.
+- **`dashboard/terminal-views.js`** — `window.BTCQ_TERMINAL_VIEWS`: canvas/DOM renderers,
+  each `{ mount(el, opts), render(stateSlice) }`, dirty-flag friendly:
+  `FootprintView` (canvas: bid×ask cells per price per bar, delta row, volume row,
+  imbalance highlights, session-VP gutter, CVD subchart via lightweight-charts),
+  `DomLadderView` (table: grouped bid/ask qty + session sold/bought at level + delta),
+  `TapeView` (list, min-notional filter, aggressor coloring, whale row emphasis ≥ $250k),
+  `AggBookView` (horizontal depth bars w/ per-exchange stacking + cumulative depth curve),
+  `HeaderStatsView` (mark, index, basis bp, funding + countdown, OI, 24h realized range),
+  `LiqFeedView` (recent liquidation prints w/ side + notional).
+  Colors reuse styles.css tokens; CVD-safe palette respected (no new hues outside tokens).
+- **`dashboard/terminal.js`** — bootstrap: instantiate adapters (**Bybit primary**;
+  Binance depth + REST poller and Coinbase tape as secondary legs), fan events into
+  stores, one rAF loop with per-view dirty
+  flags (no per-frame full redraw), per-exchange status chips (reuse `conn-status`
+  semantics: live/stale/reconnecting), settings row (tick grouping, footprint bar interval
+  1m|5m, tape min-notional, CVD buckets), honesty banner, link back to the analytics page.
+- **`dashboard/terminal.html` + `terminal.css`** — same shell/status-bar/toolbar/font
+  conventions as index.html (links styles.css THEN terminal.css). index.html header gains
+  a small `Terminal →` nav link (mirror of the 404 page's pattern on cryexc).
+- **Fixture smoke:** `scripts/check_terminal.cjs` (node, follows `_parity_eval.cjs`
+  pattern): loads adapters+stores in a `vm` sandbox with stub `window`, replays recorded
+  fixture frames (Binance aggTrade/depth/forceOrder/markPrice, Bybit trade/book/liq/ticker,
+  Coinbase market_trades), asserts: aggressor normalization per §0.6 (incl. the Coinbase
+  maker-inversion), book best-bid/ask after snapshot+delta, footprint bar delta = Σsigned,
+  CVD bucket sums = total, VP value-area ∈ [session low, high], agg book merge math.
+
+## 5. CryExc → btc-quant feature map & phase plan
+
+| # | CryExc view | Phase | Rail notes |
+|---|---|---|---|
+| 1 | Tape feed (size filter) | **O-1** | aggressor conventions §0.6 |
+| 2 | DOM / ladder | **O-1** | |
+| 3 | Footprint (multi-ex CVD subplots, size buckets) | **O-1** (Binance leg; multi-ex O-2) | |
+| 4 | Multi-source aggregated orderbook | **O-1** (binancef+bybit+coinbase; +OKX O-2) | |
+| 5 | Session volume profile (POC/VAH/VAL) | **O-1** (gutter) → full panel O-3 | |
+| 6 | Header market stats (mark/funding/OI/basis) | **O-1** | |
+| 7 | Liquidation feed | **O-1** (feed) → heatmap O-2 | |
+| 8 | Orderbook heatmap (historical DOM) | O-2 | session ring buffer, browser-side |
+| 9 | Live heatmap w/ spoof & iceberg detection | O-2 | detection = **heuristic**, labeled |
+| 10 | Liquidation heatmap (cascade levels) | O-2 | **estimated — model, labeled** (§0.4) |
+| 11 | Market Profile / TPO | O-3 | |
+| 12 | Volume profile panel (HVN/LVN, extensions) | O-3 | |
+| 13 | Historical charts + bar replay | O-3 | Binance klines REST, per-source labeled |
+| 14 | Funding-rate arb (cross-exchange, annualized, OI) | O-3 | descriptive; carry stays off-board |
+| 15 | Market correlation (macro) | O-3 | HL HIP-3 pairs; **no CME feeds** (honest) |
+| 16 | VWAP screener (bubble) | O-4 | multi-symbol = Binance 24h REST |
+| 17 | RSI heatmap | O-4 | |
+| 18 | Mechanical analysis (9-category confluence) | O-4 | **descriptive confluence ONLY — never a board signal; every category labeled un-validated** |
+| 19 | Whale tracking (Hyperliquid) | O-4 | public info API |
+| 20 | Options widget (surface, strike/expiry heatmap, PCR) | O-4 | extends existing Deribit panels; **unsigned GEX only** (§0.5) |
+| 21 | Alerts (price/volume/delta/liq/CVD-div/exhaustion) | O-4 | browser Notification API |
+| 22 | Trade journal + playbook | O-5 | localStorage |
+| 23 | Calendar returns / performance | O-5 | journal-derived |
+| 24 | Polymarket + econ calendar + news feed | O-5 | Polymarket REST / ToA WS; econ source TBD keyless |
+
+## 6. What this unlocks for research (time-gated, NOT granted)
+
+| Family (currently refused as un-ingested) | After collector | Earliest honest OOS use |
+|---|---|---|
+| Tick CVD / aggressor imbalance | accumulating | when history ≥ MinBTL for the trial count (months, 1h bars) + pre-registered hypothesis |
+| Liquidation cascades | accumulating | same |
+| OI history (1-min) | accumulating | same |
+| Funding accrual (dense, vs ~200-interval REST cap) | accumulating | same; may eventually revisit `carry`'s descriptive-only status **through the harness** |
+| VPIN | derivable from stored trades | same + methodology pre-registration |
+
+Everything in this table still requires the DEVELOPMENT.md §6 greenlight ritual. Building
+the collector buys *optionality*, not conclusions.
+
+## 7. Verification
+
+- `python -m pytest` (incl. new collector tests; network-free).
+- `node --check` on every dashboard JS file (existing guard) + `node scripts/check_terminal.cjs`.
+- Live smoke: run collector ≥ 60 s → row counts > 0 in trades/funding_mark; open
+  terminal.html → all three exchange chips green, tape/BBO/footprint moving; kill network
+  → chips degrade to stale/reconnecting (watchdog rail).
+- Existing dashboard unaffected: `node dashboard/app.js --check` still passes; index.html
+  manual smoke (livewire extraction is behavior-neutral).

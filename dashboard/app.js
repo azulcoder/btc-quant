@@ -1347,100 +1347,12 @@
   // historical bars are never flash-animated as if real-time (brief §3.5).
   // PUBLIC channels only — no keys, no signing (brief §3.3/§3.6).
 
-  // Shared reconnect skeleton: capped exponential backoff + jitter, re-subscribe
-  // on every reopen, ping/heartbeat timer gated to the socket lifecycle (§3.3).
-  // An adapter supplies { url, subscribe(ws), onMessage(msg, api), ping }.
-  function makeSocket(adapter, api) {
-    let ws = null, attempt = 0, hbTimer = null, closedByUs = false;
-    // Module D — liveness watchdog. A socket can stay OPEN while the feed silently
-    // stalls (proxy, dozing tab, dropped subscription); onclose never fires, so the
-    // status would otherwise stay green "live" over a frozen price — an honesty-rail
-    // violation. The adapter stamps lastAliveAt via api.markAlive() on every ticker/
-    // heartbeat frame (NOT trades — a quiet market_trades window is normal). While the
-    // socket is OPEN we flip to amber "stale" after STALE_MS, and force ONE reconnect
-    // after DEAD_MS which routes through the EXISTING backoff (we never fight it).
-    let lastAliveAt = 0, stale = false, forcedDead = false, wdTimer = null;
-    const MAX_BACKOFF = 30000, STALE_MS = 12000, DEAD_MS = 40000, WATCHDOG_MS = 2000;
-
-    function clearHeartbeat() { if (hbTimer) { clearInterval(hbTimer); hbTimer = null; } }
-
-    // Adapter calls this on a healthy-feed frame (ticker tick / heartbeat). Recovery
-    // is a single clean transition back to green — no flicker.
-    const liveApi = Object.assign({}, api, {
-      markAlive() {
-        lastAliveAt = Date.now();
-        if (stale) { stale = false; forcedDead = false; api.onStatus('open', 'live feed recovered'); }
-      },
-    });
-
-    function scheduleReconnect() {
-      clearHeartbeat();
-      if (closedByUs) return;
-      // capped exponential backoff (1s,2s,4s,…,30s) + up to 1s jitter.
-      const base = Math.min(MAX_BACKOFF, 1000 * Math.pow(2, attempt));
-      const delay = base + Math.random() * 1000;
-      attempt++;
-      api.onStatus('reconnecting', `live feed dropped — retrying in ${(delay / 1000).toFixed(0)}s`);
-      setTimeout(connect, delay);
-    }
-
-    function connect() {
-      if (closedByUs) return;
-      try { ws = new WebSocket(adapter.url); }
-      catch (e) { api.onStatus('error', 'live feed unavailable (' + e.message + ')'); scheduleReconnect(); return; }
-
-      ws.onopen = () => {
-        attempt = 0;                       // reset backoff on a clean open
-        lastAliveAt = Date.now();          // fresh liveness baseline → no instant false-stale
-        stale = false; forcedDead = false;
-        api.onStatus('open', 'live feed connected');
-        try { adapter.subscribe(ws); }     // (re-)subscribe on EVERY (re)open
-        catch (_) { /* subscribe error -> socket will close, backoff handles it */ }
-        // Lifecycle-gated heartbeat: only ticks while THIS socket is open.
-        if (adapter.ping) {
-          clearHeartbeat();
-          hbTimer = setInterval(() => {
-            if (ws && ws.readyState === WebSocket.OPEN) { try { adapter.ping(ws); } catch (_) { /* ignore */ } }
-          }, adapter.pingMs || 20000);
-        }
-      };
-      ws.onmessage = (ev) => {
-        let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
-        try { adapter.onMessage(msg, liveApi); } catch (_) { /* never let a bad frame kill the socket */ }
-      };
-      ws.onerror = () => { /* onclose fires next; handled there */ };
-      ws.onclose = () => { clearHeartbeat(); scheduleReconnect(); };
-    }
-
-    // Judge ONLY an OPEN socket — a CONNECTING/closed one is the backoff's job, so the
-    // watchdog never double-drives reconnection. One interval for the socket's lifetime.
-    function startWatchdog() {
-      if (wdTimer) return;
-      wdTimer = setInterval(() => {
-        if (closedByUs || !ws || ws.readyState !== WebSocket.OPEN) return;
-        const gap = Date.now() - lastAliveAt;
-        if (gap >= DEAD_MS) {
-          if (!forcedDead) {
-            forcedDead = true;
-            api.onStatus('reconnecting', 'live feed stalled — reconnecting');
-            try { ws.close(); } catch (_) { /* onclose → scheduleReconnect (existing backoff) */ }
-          }
-          return;
-        }
-        if (gap >= STALE_MS) { stale = true; api.onStatus('stale', `stale — no data for ${Math.round(gap / 1000)}s`); }
-      }, WATCHDOG_MS);
-    }
-
-    connect();
-    startWatchdog();
-    return {
-      close() {
-        closedByUs = true; clearHeartbeat();
-        if (wdTimer) { clearInterval(wdTimer); wdTimer = null; }
-        if (ws) try { ws.close(); } catch (_) { /* ignore */ }
-      },
-    };
-  }
+  // Shared reconnect skeleton — EXTRACTED VERBATIM to livewire.js (DESIGN-orderflow-
+  // terminal.md §4) so this page and the orderflow terminal reuse ONE reconnect/
+  // backoff/watchdog implementation. index.html loads livewire.js before app.js.
+  // The typeof guard means a load-order slip degrades to a late failure inside
+  // startLive() instead of a ReferenceError killing this whole IIFE at eval time.
+  const makeSocket = (typeof BTCQ_LIVEWIRE !== 'undefined' ? BTCQ_LIVEWIRE.makeSocket : null);
 
   // Coinbase Advanced Trade adapter (§3.3) on wss://advanced-trade-ws.coinbase.com.
   // THREE public channels, no auth/signing (product id BTC-USD, dash):

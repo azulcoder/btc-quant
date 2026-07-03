@@ -69,6 +69,7 @@
         <button id="cvd-toggle" type="button" class="ux-btn" aria-pressed="false"
                 title="Strict Okabe-Ito blue/orange palette — maximally CVD-separable (§4.1)">CVD-safe</button>
         <button id="help-open" type="button" class="ux-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+        <a href="terminal.html" class="ux-btn" title="Orderflow terminal — live descriptive only">terminal →</a>
       </nav>
       <span id="source-line">connecting…</span>
     </header>
@@ -530,6 +531,9 @@
        Exposes window.LightweightCharts; app.js feature-detects it and falls back to the native SVG
        live panel if it ever fails to load, so the page never carries a broken <script>. -->
   <script src="vendor/lightweight-charts.js"></script>
+  <!-- Shared WS reconnect/backoff/watchdog (DESIGN-orderflow-terminal.md §4) — MUST load
+       before app.js, which consumes window.BTCQ_LIVEWIRE.makeSocket via a shim. -->
+  <script src="livewire.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

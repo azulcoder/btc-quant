@@ -99,15 +99,16 @@ in the docstring so a quant can audit.
 ## 4. Verification suite (run before every commit)
 
 ```bash
-python3 -m pytest -q                      # 38 tests — the honesty-rail teeth (incl. JS↔Python parity)
-node --check dashboard/app.js             # JS syntax (also quant.js, charts.js)
+python3 -m pytest -q                      # 70 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
+node --check dashboard/app.js             # JS syntax (also quant.js, charts.js, livewire.js, terminal-*.js)
 node dashboard/app.js --check             # ppy guard: ppy()=365 (1d)/8760 (1h); no literal-365 at an annualization site
 python3 scripts/check_parity.py           # JS↔Python mirror parity (35 shared formulas; the one rule)
+node scripts/check_terminal.cjs           # orderflow terminal smoke: adapters+stores replayed over REAL captured WS frames (fixtures_ws.json)
 # CSS brace balance:
 awk '{o+=gsub(/{/,"{");c+=gsub(/}/,"}")}END{print (o==c)?"balanced":"UNBALANCED"}' dashboard/styles.css
 python3 scripts/compare.py                # public OOS leaderboard (defaults to --start 2018-01-01)
 python3 scripts/compare.py --research     # + pre-registered candidate verdicts
-make test        # convenience targets: also  make compare / backtest / scan / fetch / dash / install
+make test        # convenience targets: also  make compare / backtest / scan / fetch / dash / collector / install
 ```
 
 **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the first three on every push/PR:
@@ -164,7 +165,19 @@ was dividing the downside variance by the downside count instead of the full sam
   match to 1e-8 end-to-end (this is a methodology choice, not a bug; the dashboard points to the Python
   engine for the rigorous run).
 - **Coinbase `market_trades.side` is the MAKER side, not the aggressor** — `SELL` prints on an up-tick.
-  The tape coloring inverts if you read it as the aggressor.
+  The tape coloring inverts if you read it as the aggressor. (Bybit `publicTrade.S` is the TAKER side —
+  use as-is; the two conventions are asserted against real captured frames in `scripts/check_terminal.cjs`.)
+- **Binance Futures WS is topic-filtered on this network** (verified 2026-07-03): `depth20@100ms`
+  flows while `aggTrade`/`markPrice`/`ticker` on the *same socket, same subscribe* deliver zero
+  frames (sub-ack only); REST `fapi/v1/*` works fully. Hence Bybit-primary in the terminal/collector
+  and Binance-for-depth+REST — do not "fix" adapters by re-adding Binance trade streams without
+  re-testing the wire first (capture script pattern: DESIGN-orderflow-terminal.md §2).
+- **Bybit v5 `tickers` sends a snapshot then PARTIAL deltas** — delta frames omit unchanged fields
+  (a delta with no `markPrice` does not mean mark went away). Merge against the last snapshot or
+  funding/OI silently vanish. Same stream carries OI — there is no separate Bybit OI poll.
+- **Bybit `allLiquidation` prints the forced order's side, not the position's**: printed `Buy` = a
+  SHORT was liquidated (forced buy-back), `Sell` = a LONG was. Normalizers flip it to the position
+  side; fixtures carry real frames of both directions.
 - **`max_pain`/gamma-concentration are positioning/structure, never forecasts**; **signed dealer GEX /
   flip levels are rejected** (dealer sign unknowable from keyless data — see options run-log).
 - **TradingView embed** writes inline px heights on the iframe + container → must be overridden with
@@ -186,6 +199,13 @@ was dividing the downside variance by the downside count instead of the full sam
   `tests/test_parity_mirror.py` + `.github/workflows/ci.yml` (see §4).
 - **Visual pass** — the institutional redesign is a first pass; type-scale/color/per-panel refinements
   may iterate.
+- **Orderflow terminal phases O-2…O-5** (DESIGN-orderflow-terminal.md §5) — orderbook/liquidation
+  heatmaps (estimates LABELED), TPO/market profile, bar replay, funding-arb table, screeners, whale
+  tracking, options-widget extensions (unsigned GEX only), alerts, journal. All still live-descriptive.
+- **Order-flow research families (tick CVD / liquidations / OI / funding accrual)** — the collector
+  makes these **time-gated, not granted** (DESIGN §6): OOS candidacy requires accumulated history ≥
+  MinBTL *and* a pre-registered hypothesis + kill criterion through the standard harness. No exceptions
+  because "we now have the data".
 
 ## 7. Where things are documented
 
@@ -199,6 +219,7 @@ was dividing the downside variance by the downside count instead of the full sam
 | [RESEARCH-tharp-runlog.md](RESEARCH-tharp-runlog.md) | Trading-books eval/risk layer: expectancy/R-multiple (vol-notional R) + SQN/PF/MAE, percent-risk sizing sweep, Tier-B candidate sweep (donchian/vwap-reversion/fixed-R — all KILL), live CVD + volume-profile notes |
 | [RESEARCH-ic-runlog.md](RESEARCH-ic-runlog.md) | Lead-time Information Coefficient: forward IC of OOS signals (rank, overlap-corrected) — board strategies show NO significant forward IC; their edge is trend/vol-capture, not bar-to-bar lead |
 | [RESEARCH-reversion-runlog.md](RESEARCH-reversion-runlog.md) | Regime-gated mean reversion (Hurst/VR/ADX gate + `mean_reversion`): pre-registered gated-vs-ungated A/B on 1d+1h — gate cuts drawdown but adds no OOS alpha; hypothesis FALSIFIED, board unchanged |
+| [DESIGN-orderflow-terminal.md](DESIGN-orderflow-terminal.md) | Orderflow terminal + tick collector: CryExc-inspired feature map, honesty rails (live-descriptive only, labeled estimates, unsigned GEX), empirical data-source matrix (real captured frames), module contracts, phase plan O-0…O-5, research time-gating |
 | [AUDIT.md](AUDIT.md) / [AUDIT_LOG.md](AUDIT_LOG.md) | Repeatable code/stat audit spec + the change-log of verified fixes (H1 funding P&L fixed; remaining findings tracked) |
 | **DEVELOPMENT.md** (this) | Contributors — architecture, the parity rule, extend-recipes, verification, gotchas, roadmap |
 | [DISCLAIMER.md](DISCLAIMER.md) | Research-only / not financial advice |

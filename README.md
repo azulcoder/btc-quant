@@ -25,11 +25,14 @@ should match — that is the design.
   - `risk.py` — Sharpe/Sortino/CAGR/Calmar/maxDD/VaR/CVaR, Kelly, **probabilistic & deflated Sharpe**, `min_backtest_length` (MinBTL), `probability_of_backtest_overfitting` (PBO via CSCV).
   - `strategies.py` — literature-grounded baselines (buy-and-hold, MA trend filter, golden cross, time-series momentum ± vol-targeting, BTC–ETH cointegration pairs, funding carry), each citing its edge and its honest caveat. Plus `pairs_ou`, a research variant (see Methodology).
   - `report.py` — matplotlib tearsheet + JSON export for the dashboard.
+  - `collector.py` — **optional** tick collector daemon (`requirements-collector.txt`): keyless WS/REST → local DuckDB (trades, liquidations, depth, funding/mark, OI; keep-all retention). Starts the clock on order-flow history so those families can *eventually* be OOS-tested — see `DESIGN-orderflow-terminal.md` §6.
 - **`scripts/`** — CLIs:
   - `compare.py` — **the centerpiece**: every strategy walk-forward-validated on the same data, ranked by out-of-sample deflated Sharpe, with PBO + MinBTL. `--research` also evaluates the pre-registered candidates and prints their verdicts.
   - `run_backtest.py` — single strategy; `--walk` adds the walk-forward + CPCV multi-path dispersion.
   - `fetch_data.py`, `scan.py` — data cache; current signal snapshot.
+  - `run_collector.py` — the tick-collector CLI (`make collector`), with an optional read-only BYOD HTTP API.
 - **`dashboard/`** — static web terminal (no build step): the OOS leaderboard, live candles + indicators, equity/drawdown, return distribution, rolling vol/Sharpe, perp funding/basis, option-IV surface. A faithful mirror of the Python engine. Open `dashboard/index.html` or serve the folder.
+  - **`terminal.html`** — the **orderflow terminal** (live-descriptive ONLY, never a backtest input): footprint chart + session volume profile (POC/VAH/VAL), DOM ladder, time-and-sales tape, multi-exchange aggregated orderbook, CVD by trade-size bucket, liquidation feed, mark/funding/OI header. Keyless WS (Bybit primary + Binance depth + Coinbase tape). Design + honesty rails: `DESIGN-orderflow-terminal.md`.
 - **`tests/`** — `pytest` math-sanity, no-look-ahead, and harness checks.
 - **`RESEARCH.md`** — the cited design brief. **`RESEARCH-partB-runlog.md`** — the pre-registered candidate run-log (a worked rejection example; see Methodology).
 
@@ -59,6 +62,10 @@ python3 -m pytest -q
 
 # 6) the live web dashboard
 python3 -m http.server 8787 --directory dashboard   # then open http://127.0.0.1:8787
+
+# 7) orderflow terminal (same server → /terminal.html) + optional tick collector
+python3 -m pip install -r requirements-collector.txt   # duckdb + websockets (opt-in)
+make collector                                          # records trades/liqs/depth/funding/OI → data/ticks.duckdb
 ```
 
 The numbers in the next section come from `compare.py` (which defaults to `--start 2018-01-01`) and

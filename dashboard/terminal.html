@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>btc-quant orderflow terminal — live descriptive only</title>
+  <meta name="description" content="Keyless live orderflow terminal: footprint, DOM ladder, tape, aggregated book, liquidations, CVD. Research context — descriptive only, never a backtest input. No orders, no API keys." />
+  <!-- Same shell as index.html: styles.css is the shared theme (tokens, fonts,
+       statchips, panels); terminal.css layers the terminal grid on top and
+       reuses the SAME custom properties — no new hues (DESIGN §4). -->
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="terminal.css" />
+</head>
+<body>
+  <!-- Sticky chrome: disclaimer + the PERMANENT §0.1 honesty banner + topbar. -->
+  <div class="app-header">
+    <!-- Persistent disclaimer — never removed (index.html convention). -->
+    <div class="disclaimer">NOT FINANCIAL ADVICE · a backtest is not a forecast · research only — no orders, no keys</div>
+
+    <!-- DESIGN §0.1: the terminal page carries a permanent banner. This is
+         static HTML on purpose — it exists even if every script fails. -->
+    <div class="term-banner">research context — descriptive only, never a backtest input · everything below is live session state from public keyless feeds · no fabricated history, gaps stay gaps</div>
+
+    <header class="topbar">
+      <h1>btc<span class="tick">·</span>quant <span class="subtitle">orderflow terminal</span></h1>
+      <span class="price" id="last-price">—</span>
+      <nav class="ux-toolbar" aria-label="Navigation">
+        <!-- Mirror of index.html's "terminal →" link (DESIGN §4). -->
+        <a href="index.html" class="ux-btn" title="Back to the analytics / backtest page">analytics ←</a>
+      </nav>
+    </header>
+  </div>
+
+  <main class="term-main">
+    <!-- Header stats strip (full-width): conn chips + mark/index/basis/funding/
+         OI/session range. Content is built by HeaderStatsView at mount. -->
+    <section class="panel area-stats" id="view-header" aria-label="Market stats and connection health"></section>
+
+    <!-- Main row, left: footprint (large). Canvas built by FootprintView. -->
+    <section class="panel area-fp">
+      <h2>footprint — Bybit BTCUSDT perp
+        <span class="signal-tag descriptive" title="Bid×ask aggressor volume per price per bar, session-local. LIVE-DESCRIPTIVE ONLY (DESIGN §0.1): never a backtest input. Imbalance flags are computed on finished bars only.">descriptive · live session</span>
+      </h2>
+      <div id="view-footprint" class="fp-wrap"></div>
+      <p class="hint">cells: <b>sell × buy</b> aggressor volume (BTC) per $-grouped level; outlined half = diagonal imbalance (k=3, finished bars only). Right gutter: session volume profile with POC/VAH/VAL. Dashed column = the open (unfinished) bar.</p>
+    </section>
+
+    <!-- Main row, middle column: DOM ladder + aggregated book. -->
+    <div class="term-col area-mid">
+      <section class="panel">
+        <h2>DOM ladder — Bybit
+          <span class="signal-tag descriptive" title="Grouped L2 book around the spread + per-level session sold/bought/delta from the footprint ring (last ≤120 bars, not all-of-session once the ring wraps).">descriptive</span>
+        </h2>
+        <div id="view-dom" class="dom-wrap"></div>
+      </section>
+      <section class="panel">
+        <h2>aggregated book — bybit + binancef
+          <span class="signal-tag descriptive" title="Per-exchange stacked depth at $-grouped levels + cumulative depth curve. Legs are independent; a dead leg simply drops out (nothing interpolated).">descriptive</span>
+        </h2>
+        <div id="view-aggbook" class="agg-wrap"></div>
+      </section>
+    </div>
+
+    <!-- Main row, right column: tape + liquidation feed. -->
+    <div class="term-col area-right">
+      <section class="panel">
+        <h2>tape — bybit perp + coinbase spot
+          <span class="signal-tag descriptive" title="Mixed-venue time &amp; sales — every print carries its exchange tag (§0.7 per-source labels). Aggressor side normalized per venue (§0.6). ◆ = whale ≥ $250k.">descriptive</span>
+        </h2>
+        <div id="view-tape" class="tape-wrap"></div>
+      </section>
+      <section class="panel">
+        <h2>liquidations — Bybit allLiquidation
+          <span class="signal-tag descriptive" title="side = the LIQUIDATED position: a printed forced buy closed a short, a forced sell closed a long (§3 convention). Rolling sums over wall-clock windows.">descriptive</span>
+        </h2>
+        <div id="view-liq" class="liq-wrap"></div>
+      </section>
+    </div>
+
+    <!-- Footer row 1: CVD subchart (full-width; logically part of the
+         footprint view — FootprintView mounts lightweight-charts here). -->
+    <section class="panel area-cvd">
+      <h2>CVD by trade size — Bybit perp, session-anchored
+        <span class="signal-tag descriptive" title="Cumulative signed USD notional (aggressor buy − sell) overall and per trade-size bucket. Anchored at page open — CVD has no natural zero; read slope/divergence, never level. NOT a signal, NOT backtestable from here.">descriptive · order-flow</span>
+      </h2>
+      <div id="view-cvd" class="term-cvd"></div>
+    </section>
+
+    <!-- Footer row 2: settings (persisted to localStorage 'btcq-terminal'). -->
+    <section class="panel area-set">
+      <div class="controls">
+        <div class="control">
+          <label for="set-tick">tick group ($)</label>
+          <select id="set-tick">
+            <option value="1">1</option>
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="25">25</option>
+            <option value="50">50</option>
+          </select>
+        </div>
+        <div class="control">
+          <label for="set-bar">footprint bar</label>
+          <select id="set-bar">
+            <option value="60000" selected>1m</option>
+            <option value="300000">5m</option>
+          </select>
+        </div>
+        <div class="control">
+          <label for="set-tape-min">tape min notional ($)</label>
+          <input type="number" id="set-tape-min" min="0" step="1000" value="0" />
+        </div>
+        <div class="control">
+          <label>&nbsp;</label>
+          <button id="set-pause" type="button" aria-pressed="false" title="Freezes rendering only — data keeps accumulating, so resume shows the true session (no gap is fabricated)">pause</button>
+        </div>
+      </div>
+      <p class="hint">settings persist locally. Changing tick group or bar interval <b>restarts</b> the session footprint/profile aggregation — the browser keeps no raw tick store to re-bucket from (that is the collector's job), and synthesizing old bars onto a new grid would fabricate data. Pause freezes the display, not ingestion, and never the connection chips.</p>
+    </section>
+  </main>
+
+  <footer>
+    <p>Live-descriptive orderflow terminal (DESIGN-orderflow-terminal.md). Everything above renders only what arrived over the public wire this session — <b>never a backtest input</b>, never merged into the OOS harness. Feeds: Bybit v5 linear (primary), Binance Futures depth WS + REST mark/OI, Coinbase Advanced Trade spot tape. See <a href="../DISCLAIMER.md">DISCLAIMER.md</a>.</p>
+  </footer>
+
+  <!-- Script order is a CONTRACT (DESIGN §4): vendor/lightweight-charts.js →
+       livewire.js → terminal-adapters.js → terminal-state.js →
+       terminal-views.js → terminal.js. Each file is a plain IIFE exposing ONE
+       global; terminal.js consumes all of them and must load last. -->
+  <script src="vendor/lightweight-charts.js"></script>
+  <script src="livewire.js"></script>
+  <script src="terminal-adapters.js"></script>
+  <script src="terminal-state.js"></script>
+  <script src="terminal-views.js"></script>
+  <script src="terminal.js"></script>
+</body>
+</html>

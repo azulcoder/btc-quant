@@ -4,6 +4,10 @@ __pycache__/
 .ipynb_checkpoints/
 data/*.csv
 data/*.json
+# O-0 tick collector store (DESIGN-orderflow-terminal.md §3) — local research
+# history, single-writer DuckDB file + its WAL. Never committed.
+data/ticks.duckdb
+data/*.duckdb.wal
 .DS_Store
 .venv/
 venv/

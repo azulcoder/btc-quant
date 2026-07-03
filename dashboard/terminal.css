@@ -1,0 +1,269 @@
+/* terminal.css — orderflow terminal layout + panel styles (DESIGN §4).
+   Loaded AFTER styles.css and built ENTIRELY on its custom properties: the
+   grey ladder, --up/--down (CVD-safe, survives body.cvd-strict), the
+   categorical --c1…--c6 series palette, spacing/type scales. NO new hues —
+   the only literal colors below are rgba() weightings of existing token
+   values (same practice as styles.css's own flashUp/flashDown keyframes).
+   Data/numbers are monospace tabular (ladder/tape density), prose stays Inter. */
+
+/* ─── §0.1 permanent honesty banner (static HTML, styled like warn chrome) ── */
+.term-banner {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: var(--sp-1) var(--sp-3);
+}
+
+header.topbar .subtitle { color: var(--muted); font-size: var(--fs-sm); font-weight: 400; }
+
+/* ─── Page grid (§4 layout: stats strip / fp | mid | right / cvd / settings) ─
+   The terminal wants width — 1840px vs the analytics page's 1440px — because
+   the footprint alone needs room for ~10 bar columns of legible cells. */
+main.term-main {
+  max-width: 1840px;
+  margin: 0 auto;
+  padding: var(--sp-3);
+  display: grid;
+  gap: var(--sp-2);
+  grid-template-columns: minmax(0, 2.1fr) minmax(300px, 1fr) minmax(290px, 1fr);
+  grid-template-areas:
+    "stats stats stats"
+    "fp    mid   right"
+    "cvd   cvd   cvd"
+    "set   set   set";
+  align-items: start;
+}
+.area-stats { grid-area: stats; }
+.area-fp    { grid-area: fp; }
+.area-mid   { grid-area: mid; }
+.area-right { grid-area: right; }
+.area-cvd   { grid-area: cvd; }
+.area-set   { grid-area: set; }
+
+/* Middle/right columns: stacked panels sharing the row height. */
+.term-col { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
+.term-col .panel { min-width: 0; }
+
+/* Responsive collapse (<1100px): single column, natural reading order.
+   Canvas panels shrink their fixed heights a step so phones aren't all-footprint. */
+@media (max-width: 1100px) {
+  main.term-main {
+    grid-template-columns: 1fr;
+    grid-template-areas: "stats" "fp" "mid" "right" "cvd" "set";
+  }
+  .fp-wrap { height: 460px; }
+  .agg-wrap { height: 260px; }
+}
+
+/* ─── Canvas mounts — views size their backing store from these CSS boxes
+   (DPR-aware in fitCanvas), so the height lives HERE, not in JS. ──────────── */
+.term-canvas { display: block; width: 100%; height: 100%; }
+.fp-wrap  { height: 620px; position: relative; background: var(--bg); border-radius: var(--radius); }
+.agg-wrap { height: 300px; position: relative; background: var(--bg); border-radius: var(--radius); padding-bottom: 18px; }
+.agg-canvas { height: calc(100% - 0px); }
+
+/* Shared canvas-panel legend (agg book; CVD has its own overlay variant). */
+.term-legend {
+  display: flex;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  padding: 2px var(--sp-1);
+}
+.term-legend .sw, .term-cvd-legend .sw {
+  display: inline-block;
+  width: 10px; height: 3px;
+  border-radius: 1px;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+.lg-note, .chips-note { color: var(--g-400); }
+
+/* ─── Header stats strip ─────────────────────────────────────────────────── */
+.term-chips { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; margin-bottom: var(--sp-2); }
+.chips-note { font-size: var(--fs-xs); font-family: var(--mono); }
+
+/* Per-exchange conn chips: same statchip skeleton as index.html, but the
+   live/stale/error state styling there is scoped to #conn-status ids — these
+   class-scoped twins keep the identical visual language (green pulsing dot =
+   live, amber = stale/reconnecting, red = offline; connpulse keyframes come
+   from styles.css). */
+.term-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--g-400); flex: none; }
+.term-chip.live  { color: var(--fg); }
+.term-chip.live  .dot { background: var(--up); box-shadow: 0 0 6px var(--up); animation: connpulse 2.4s ease-in-out infinite; }
+.term-chip.stale .dot { background: var(--accent); }
+.term-chip.error .dot { background: var(--down); }
+
+.term-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 1px;
+  background: var(--border);   /* hairline separators via grid gap (styles.css idiom) */
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.tstat { background: var(--bg-panel); padding: var(--sp-1) var(--sp-2); min-width: 0; }
+.tstat .k {
+  display: block;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.tstat .v { font-size: var(--fs-base); font-weight: 600; white-space: nowrap; }
+.tstat .v.pos { color: var(--up); }
+.tstat .v.neg { color: var(--down); }
+
+/* ─── DOM ladder — monospace density, fixed row pool, flash on change ────── */
+.dom-wrap { max-height: 420px; overflow-y: auto; }
+table.ladder {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums slashed-zero;
+  line-height: 1.35;
+}
+table.ladder th {
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  padding: 1px var(--sp-2);
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+}
+table.ladder td { padding: 1px var(--sp-2); text-align: right; white-space: nowrap; }
+table.ladder th:nth-child(3), table.ladder td.px { text-align: center; }
+table.ladder td.px { font-weight: 600; color: var(--fg); }
+table.ladder tr.ask td.px { color: var(--down); }
+table.ladder tr.bid td.px { color: var(--up); }
+table.ladder td.sess { color: var(--muted); }
+table.ladder td.dl.pos { color: var(--up); }
+table.ladder td.dl.neg { color: var(--down); }
+table.ladder tr.spread td {
+  text-align: center;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel-2);
+  padding: 2px var(--sp-2);
+}
+/* Qty-change flash: amber (--accent = "something changed" chrome, NOT the
+   green/red P&L pair — a size change has no direction). One-shot animation
+   restarted from JS; killed globally by the prefers-reduced-motion guard in
+   styles.css. rgba literal = the --accent token value #E0A33E with alpha. */
+.cell-flash { animation: ladderflash 0.5s ease-out; }
+@keyframes ladderflash {
+  from { background-color: rgba(224, 163, 62, 0.35); }
+  to   { background-color: transparent; }
+}
+
+/* ─── Tape — newest-first prints, aggressor-colored, whale emphasis ──────── */
+.tape-wrap { display: flex; flex-direction: column; }
+.tape-list { height: 380px; overflow-y: auto; }
+.tape-row {
+  display: grid;
+  grid-template-columns: 62px 30px 1fr 72px 76px;
+  gap: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums slashed-zero;
+  padding: 1px 2px;
+  align-items: baseline;
+}
+.tape-head {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 2px;
+  margin-bottom: 2px;
+}
+.tape-row .ts { color: var(--muted); }
+.tape-row .qty, .tape-row .ntl { text-align: right; }
+.tape-row .px { text-align: right; }
+/* Exchange tag per print (§0.7 per-source label) — venue = categorical token,
+   consistent with the agg-book stacking colors. */
+.tape-row .ex { font-size: 10px; }
+.tape-row .ex-bybit { color: var(--c2); }
+.tape-row .ex-coinbase { color: var(--c4); }
+/* Whale ≥ $250k: bold + ◆ marker in the notional cell (marker = non-color cue). */
+.tape-row.whale { font-weight: 700; background: rgba(224, 163, 62, 0.08); }
+.tape-row.whale .ntl { color: var(--accent); }
+
+/* ─── Liquidation feed ───────────────────────────────────────────────────── */
+.liq-wrap { display: flex; flex-direction: column; }
+.liq-sums {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  padding-bottom: var(--sp-1);
+}
+.liq-sums b { color: var(--fg); font-weight: 600; }
+.liq-list { height: 190px; overflow-y: auto; }
+.liq-row {
+  display: grid;
+  grid-template-columns: 62px 76px 1fr 66px 72px;
+  gap: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums slashed-zero;
+  padding: 1px 2px;
+  align-items: baseline;
+}
+.liq-head {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 2px;
+  margin-bottom: 2px;
+}
+.liq-row .ts { color: var(--muted); }
+.liq-row .px, .liq-row .qty, .liq-row .ntl { text-align: right; }
+/* side = the LIQUIDATED position (§3): long liq = forced sell → --down;
+   short liq = forced buy-back → --up. Text badge is the non-color cue. */
+.liq-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 0 4px;
+  border-radius: 3px;
+  text-align: center;
+}
+.liq-badge.long  { color: var(--down); border: 1px solid var(--down); }
+.liq-badge.short { color: var(--up);   border: 1px solid var(--up); }
+
+/* ─── CVD subchart (lightweight-charts mounts inside #view-cvd) ──────────── */
+.term-cvd { height: 190px; position: relative; background: var(--bg); border-radius: var(--radius); }
+.term-cvd-legend {
+  position: absolute;
+  top: 4px; left: 8px;
+  z-index: 5;
+  display: flex;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  pointer-events: none;   /* never block the chart's own crosshair */
+}
+.cvd-anchor { color: var(--g-400); }
+
+/* ─── Settings row ───────────────────────────────────────────────────────── */
+.area-set select { min-width: 90px; }
+.area-set input[type="number"] { width: 110px; }
