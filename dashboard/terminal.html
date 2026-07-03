@@ -82,9 +82,21 @@
       <section class="panel">
         <h2>liquidation heatmap — Bybit mark
           <span class="signal-tag research" title="MODEL ESTIMATE (§0.4): entry prices proxied by session volume-at-price × EQUAL-weighted leverage tiers (5/10/25/50/100×, flat mmr 0.5%) — the true tier mix is unknowable keyless. Long-liq bands below mark, short-liq above. Observed liquidation prints render as separate dots in their own lane, never blended into the bands.">ESTIMATED (model)</span>
+          <!-- Range toggle (visual-defect fix): default mark ± 6% window keeps
+               the readable tiers readable; 'all tiers' restores the full band
+               extent. Off-window bands/prints surface as counted overflow
+               markers in-canvas — nothing is silently hidden (§0 rails).
+               Persisted via terminal.js settings (localStorage 'btcq-terminal'). -->
+          <span class="heat-controls">
+            <label for="set-liq-range" title="±6% = fixed window around mark (25×/50×/100× bands); all tiers = full band + print extent (5×/10× reach ~±20%)">range</label>
+            <select id="set-liq-range">
+              <option value="pct6" selected>±6%</option>
+              <option value="all">all tiers</option>
+            </select>
+          </span>
         </h2>
         <div id="view-liqheat" class="liqheat-wrap"></div>
-        <p class="hint">bands = <b>model-estimated</b> liquidation clusters (α ∝ weight, normalized); dots in the left lane = liquidations that actually printed (§0.7 — kept visually separate). Re-estimated every 5s of event time.</p>
+        <p class="hint">bands = <b>model-estimated</b> liquidation clusters (α ∝ weight, normalized); dots in the left lane = liquidations that actually printed (§0.7 — kept visually separate). Re-estimated every 5s of event time. Default window = mark ± 6%; bands/prints beyond it are counted in edge markers, never silently dropped.</p>
       </section>
 
       <!-- O-2 (§4b): spoof/iceberg detections — HEURISTIC flags, labeled per row. -->
@@ -162,13 +174,17 @@
 
   <!-- Script order is a CONTRACT (DESIGN §4): vendor/lightweight-charts.js →
        livewire.js → terminal-adapters.js → terminal-state.js →
-       terminal-views.js → terminal.js. Each file is a plain IIFE exposing ONE
-       global; terminal.js consumes all of them and must load last. -->
+       terminal-views.js → terminal-replay.js → terminal.js. Each file is a
+       plain IIFE exposing ONE global; terminal-replay.js must precede
+       terminal.js (the bootstrap checks BTCQ_TERMINAL_REPLAY.active() at
+       startup for the ?replay=1 fixture-replay seam); terminal.js consumes
+       all of them and must load last. -->
   <script src="vendor/lightweight-charts.js"></script>
   <script src="livewire.js"></script>
   <script src="terminal-adapters.js"></script>
   <script src="terminal-state.js"></script>
   <script src="terminal-views.js"></script>
+  <script src="terminal-replay.js"></script>
   <script src="terminal.js"></script>
 </body>
 </html>

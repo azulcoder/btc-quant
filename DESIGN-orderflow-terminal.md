@@ -300,12 +300,31 @@ bars), while CVD gains **per-exchange, per-labeled** series (bybit/okx/coinbase)
 Everything in this table still requires the DEVELOPMENT.md §6 greenlight ritual. Building
 the collector buys *optionality*, not conclusions.
 
-## 7. Verification
+## 7. Verification — the three-layer system
 
-- `python -m pytest` (incl. new collector tests; network-free).
-- `node --check` on every dashboard JS file (existing guard) + `node scripts/check_terminal.cjs`.
-- Live smoke: run collector ≥ 60 s → row counts > 0 in trades/funding_mark; open
-  terminal.html → all three exchange chips green, tape/BBO/footprint moving; kill network
-  → chips degrade to stale/reconnecting (watchdog rail).
-- Existing dashboard unaffected: `node dashboard/app.js --check` still passes; index.html
-  manual smoke (livewire extraction is behavior-neutral).
+Layer 0 (static, every commit): `python -m pytest` (incl. collector tests; network-free);
+`node --check` on every dashboard JS file; `node scripts/check_terminal.cjs` (fixture
+smoke: adapters + stores replayed over the REAL captured frames, 16 assertion groups).
+
+- **L1 — deterministic browser harness** (`make verify-browser`,
+  `scripts/verify_terminal_browser.py`): serves the repo, opens
+  `terminal.html?replay=1` in headless Chromium. Replay mode
+  (`dashboard/terminal-replay.js`) drives the UNTOUCHED adapters with the captured
+  fixture frames on a rebased deterministic clock — chips read **replay**, the banner
+  gains a REPLAY MODE flag (never masquerades as live, §0). Asserts: zero console/page
+  errors, 4/4 chips, store counts advancing, every canvas non-blank, honesty flags
+  present; writes before/after screenshots to `reports/verify/` (gitignored). This is
+  how UI changes are SEEN without waiting for a human browser pass.
+- **L2 — live-wire invariants** (`make verify-wire`, `scripts/verify_wire_live.mjs`,
+  zero-dep node): drives the PRODUCTION adapter/store modules from the real endpoints
+  for ~45 s; checks books never crossed, venue mids coherent (≤80 bp), event-ts sane,
+  trades near mid, CVD bucket-sum ≡ overall, tickers merge finite. Catches exchange API
+  drift that frozen fixtures cannot. Exit 2 = offline (distinct from a code bug).
+- **L3 — tick-store QA** (`make check-ticks`, `scripts/check_ticks.py`): read-only
+  report card over `data/ticks.duckdb` — inventory + GB/30d projection, duplicate
+  trade_ids (FAIL), ts inversions, gap census (reported, NEVER filled — §0), cadence
+  p95 vs expectation, cross-venue mark divergence, liq sanity. The collector is
+  accumulating the future research dataset; L3 is the standing gate that keeps that
+  dataset honest. Run it periodically (weekly) and before any research pass touches
+  the store.
+- Existing dashboard unaffected: `node dashboard/app.js --check` still passes.

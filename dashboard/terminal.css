@@ -32,13 +32,21 @@ main.term-main {
   display: grid;
   gap: var(--sp-2);
   grid-template-columns: minmax(0, 2.1fr) minmax(300px, 1fr) minmax(290px, 1fr);
+  grid-template-rows: auto;   /* every row sizes to content — no fixed row heights */
   grid-template-areas:
     "stats stats stats"
     "fp    mid   right"
     "heat  heat  right"
     "cvd   cvd   cvd"
     "set   set   set";
-  align-items: start;
+  /* DEAD-SPACE fix: items STRETCH to fill their grid area (the grid default —
+     the old `align-items: start` pinned each panel to its natural height, so
+     whenever the 2-row-spanning right column was taller than fp+heat, the
+     leftover row height rendered as raw void under the footprint / heatmap).
+     Rows still size to CONTENT (auto tracks above); stretching only decides
+     where intra-row leftover goes — into the flex-fill canvases/lists below,
+     never into empty page background. */
+  align-items: stretch;
 }
 .area-stats { grid-area: stats; }
 .area-fp    { grid-area: fp; }
@@ -52,6 +60,15 @@ main.term-main {
 .term-col { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
 .term-col .panel { min-width: 0; }
 
+/* Flex-fill plumbing for the dead-space fix: the canvas panels become flex
+   columns whose canvas wrap absorbs any extra area height (canvas heights
+   below are MINIMUMS, not fixed — fitCanvas re-measures each draw, so a
+   grown box just yields a bigger, sharper plot). The LAST panel of each
+   stacked column flex-fills so column leftovers land inside a panel too. */
+.area-fp, .area-heat { display: flex; flex-direction: column; }
+.area-mid > .panel:last-child,
+.area-right > .panel:last-child { flex: 1 1 auto; display: flex; flex-direction: column; }
+
 /* Responsive collapse (<1100px): single column, natural reading order.
    Canvas panels shrink their fixed heights a step so phones aren't all-footprint. */
 @media (max-width: 1100px) {
@@ -59,20 +76,36 @@ main.term-main {
     grid-template-columns: 1fr;
     grid-template-areas: "stats" "fp" "mid" "right" "heat" "cvd" "set";
   }
-  .fp-wrap { height: 460px; }
-  .agg-wrap { height: 260px; }
-  .heat-wrap { height: 300px; }
+  .fp-wrap { min-height: 460px; }
+  .agg-wrap { min-height: 260px; }
+  .heat-wrap { min-height: 300px; }
   .liqheat-wrap { height: 240px; }
 }
 
 /* ─── Canvas mounts — views size their backing store from these CSS boxes
-   (DPR-aware in fitCanvas), so the height lives HERE, not in JS. ──────────── */
+   (DPR-aware in fitCanvas), so the height lives HERE, not in JS. The
+   flex-filling wraps (fp/agg/heat) carry MIN-heights — the aspect floor a
+   readable plot needs — and grow with their panel (dead-space fix above);
+   the right-column liq heatmap keeps a fixed height (its column's flexible
+   element is the detections list, below). ──────────────────────────────── */
 .term-canvas { display: block; width: 100%; height: 100%; }
-.fp-wrap  { height: 620px; position: relative; background: var(--bg); border-radius: var(--radius); }
-.agg-wrap { height: 300px; position: relative; background: var(--bg); border-radius: var(--radius); padding-bottom: 18px; }
-.agg-canvas { height: calc(100% - 0px); }
+.fp-wrap  { flex: 1 1 auto; min-height: 620px; position: relative; background: var(--bg); border-radius: var(--radius); }
+.agg-wrap { flex: 1 1 auto; min-height: 300px; position: relative; background: var(--bg); border-radius: var(--radius); }
+/* Canvases inside FLEXIBLE wraps are absolutely positioned (the wraps are
+   already position:relative): fitCanvas writes the measured size back into
+   the canvas width/height ATTRIBUTES, and an in-flow canvas would feed that
+   intrinsic size into the wrap's auto height — wrap grows → next draw
+   measures bigger → grows again (observed runaway: 620px → ~3000px). Out of
+   flow, the wrap's height comes only from min-height + flex, loop broken.
+   Canvas is a REPLACED element: absolute + width/height auto would snap to
+   its 300×150 intrinsic size, so the fill is written as explicit 100%s —
+   percentages resolve against the wrap's settled flex height, no feedback. */
+.fp-wrap > .term-canvas, .heat-wrap > .term-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+/* agg book reserves an 18px bottom strip for its in-panel legend. */
+.agg-wrap > .agg-canvas { position: absolute; top: 0; left: 0; width: 100%; height: calc(100% - 18px); }
+.agg-wrap > .term-legend { position: absolute; left: 0; right: 0; bottom: 0; }
 /* O-2 canvas mounts (§4b): book heatmap (wide) + liq heatmap (right column). */
-.heat-wrap    { height: 380px; position: relative; background: var(--bg); border-radius: var(--radius); }
+.heat-wrap    { flex: 1 1 auto; min-height: 380px; position: relative; background: var(--bg); border-radius: var(--radius); }
 .liqheat-wrap { height: 300px; position: relative; background: var(--bg); border-radius: var(--radius); }
 
 /* Book-heatmap panel-header controls (venue select + velocity tint toggle) —
@@ -198,16 +231,31 @@ table.ladder tr.spread td {
 /* ─── Tape — newest-first prints, aggressor-colored, whale emphasis ──────── */
 .tape-wrap { display: flex; flex-direction: column; }
 .tape-list { height: 380px; overflow-y: auto; }
+/* Column fix (wrap/clip defect): fixed-width UTC/ex columns + minmax data
+   columns — the grid equivalent of table-layout:fixed. Every cell is nowrap
+   (a two-line price row is unreadable on a tape), cells ellipsize under
+   extreme squeeze instead of wrapping, and the row carries right padding so
+   NOTIONAL never kisses the scrollbar/panel edge. PRICE gets a 72px floor —
+   it is the primary read, so at the narrowest 3-column band (~1100–1250px
+   viewport) the size/notional cells give way first; their floors are 0 so
+   the row itself can never overflow the panel (that overflow WAS the clip). */
 .tape-row {
   display: grid;
-  grid-template-columns: 62px 30px 1fr 72px 76px;
+  grid-template-columns: 62px 30px minmax(72px, 1.3fr) minmax(0, 0.85fr) minmax(0, 1.05fr);
   gap: var(--sp-2);
   font-family: var(--mono);
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums slashed-zero;
-  padding: 1px 2px;
+  padding: 1px 8px 1px 2px;
   align-items: baseline;
 }
+.tape-row > span { white-space: nowrap; min-width: 0; }
+.tape-row .px, .tape-row .qty { overflow: hidden; text-overflow: ellipsis; }
+/* The ▲/▼ aggressor glyph (styles.css .delta::before) must never introduce a
+   wrap point between glyph and number — inline-block pins it to the text.
+   (inline-block strips the content's trailing space; the margin restores the
+   original '▲ $…' gap without reintroducing a soft-wrap opportunity.) */
+.tape-row .px::before { display: inline-block; margin-right: 0.3em; }
 .tape-head {
   color: var(--muted);
   text-transform: uppercase;
@@ -276,8 +324,14 @@ table.ladder tr.spread td {
 .liq-badge.short { color: var(--up);   border: 1px solid var(--up); }
 
 /* ─── Detection feed (O-2, §4b) — heuristic spoof/iceberg flags ──────────── */
-.det-wrap { display: flex; flex-direction: column; }
-.det-list { height: 170px; overflow-y: auto; }
+/* Dead-space fix: the detections panel is the right column's flex-fill (see
+   .area-right rule above), so its list absorbs whatever height the column has
+   left instead of leaving raw void under the panel. min-height keeps a few
+   rows visible when the column is tight; the empty-state message centers in
+   the grown box rather than hugging the top of a tall blank. */
+.det-wrap { display: flex; flex-direction: column; flex: 1 1 auto; }
+.det-list { flex: 1 1 auto; min-height: 96px; overflow-y: auto; display: flex; flex-direction: column; }
+.det-list .chart-na { margin: auto 0; text-align: center; }
 .det-row {
   display: grid;
   grid-template-columns: 56px 96px 1fr 84px 42px 60px;

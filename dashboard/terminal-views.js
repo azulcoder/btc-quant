@@ -238,7 +238,10 @@
         layout: { background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace') },
         grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
         timeScale: { timeVisible: true, secondsVisible: true, borderColor: p.border },
-        rightPriceScale: { borderColor: p.border },
+        // scaleMargins keep the ONE lastValue label (the Σ line, below) clear
+        // of the pane edges — without them the label clips at the top when Σ
+        // is the session extreme (visual-defect fix; §4 legibility).
+        rightPriceScale: { borderColor: p.border, scaleMargins: { top: 0.12, bottom: 0.1 } },
         crosshair: { mode: 0 },
         localization: { priceFormatter: fmtCompactUsd },   // CVD is USD notional — compact axis
       });
@@ -250,7 +253,12 @@
       const addLine = (key, color, width, style, label) => {
         cvdSeries[key] = cvdChart.addLineSeries({
           color, lineWidth: width, lineStyle: style,
-          priceLineVisible: false, lastValueVisible: true,
+          // Right-axis labels: ONLY the Σ all-venues line keeps its lastValue
+          // pill — with 8 series the per-line pills stack into an unreadable
+          // pileup on the price scale (visual-defect fix). Identification of
+          // the other lines is the LEGEND's job (every line is labeled there,
+          // §4b per-source labels — nothing becomes anonymous by this).
+          priceLineVisible: false, lastValueVisible: key === 'sum',
           crosshairMarkerVisible: false,
         });
         legend.insertAdjacentHTML('beforeend',
@@ -800,8 +808,17 @@
         return;
       }
 
-      const centerX = w / 2, GAP = 6;
-      const halfW = centerX - GAP;
+      // Fixed CENTER PRICE GUTTER (visual-defect fix): price labels used to
+      // draw at the bars' inner edge — i.e. ON TOP of the stacked segments —
+      // and the qty label shared the same anchor, so price+qty+bars collided
+      // into mush. Bars now START at the gutter edges and grow outward, so
+      // the gutter is bar-free by construction: bid prices live in its left
+      // half, ask prices in its right half, and nothing ever paints under
+      // them. Rows still pair by RANK (see view header note).
+      const centerX = w / 2, PRICE_GUT = 104;   // 52px/side fits '$xxx,xxx' at 9px mono
+      const bidEdge = centerX - PRICE_GUT / 2;  // bid bars grow LEFT from here
+      const askEdge = centerX + PRICE_GUT / 2;  // ask bars grow RIGHT from here
+      const halfW = bidEdge;                    // usable bar+curve span per side
       const rowH = h / nLevels;
       let maxTot = 0, cumMax = 0, c = 0;
       for (const r of bids) { if (r.total > maxTot) maxTot = r.total; }
@@ -814,9 +831,16 @@
       const barScale = (halfW * 0.62) / maxTot;
       const cumScale = (halfW - 4) / cumMax;
 
-      // Center divider.
+      // Gutter edge hairlines (replace the old single center divider): they
+      // frame the price lane so it reads as chrome, not data.
       ctx.strokeStyle = p.border;
-      ctx.beginPath(); ctx.moveTo(centerX + 0.5, 0); ctx.lineTo(centerX + 0.5, h); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(bidEdge + 0.5, 0); ctx.lineTo(bidEdge + 0.5, h); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(askEdge - 0.5, 0); ctx.lineTo(askEdge - 0.5, h); ctx.stroke();
+
+      // Collision skip for price labels: 9px mono needs ~12px of row to stay
+      // apart, so label every row only when rowH ≥ 12, else every OTHER row
+      // (visual-defect fix — overlapping price text is worse than fewer labels).
+      const priceStep = rowH >= 12 ? 1 : 2;
 
       const drawSide = (rows, isBid) => {
         const sideCol = isBid ? p.up : p.down;
@@ -825,28 +849,32 @@
         for (let i = 0; i < rows.length; i++) {
           const r = rows[i];
           const y = i * rowH;
-          // Stacked segments from the center outward, per exchange (sorted for
-          // stable stacking order frame-to-frame).
+          // Stacked segments from the gutter edge outward, per exchange
+          // (sorted for stable stacking order frame-to-frame).
           let off = 0;
           const exKeys = Object.keys(r.byEx).sort();
           for (const ex of exKeys) {
             const seg = r.byEx[ex] * barScale;
             ctx.fillStyle = rgba(exColor(p, ex), 0.8);
-            if (isBid) ctx.fillRect(centerX - GAP - off - seg, y + 1.5, seg, rowH - 3);
-            else ctx.fillRect(centerX + GAP + off, y + 1.5, seg, rowH - 3);
+            if (isBid) ctx.fillRect(bidEdge - off - seg, y + 1.5, seg, rowH - 3);
+            else ctx.fillRect(askEdge + off, y + 1.5, seg, rowH - 3);
             off += seg;
           }
           cum += r.total;
-          cumPts.push([isBid ? centerX - GAP - cum * cumScale : centerX + GAP + cum * cumScale, y + rowH / 2]);
-          // Price at the inner edge (side-colored — plus side POSITION as the
-          // redundant cue), qty at the bar tip.
-          if (rowH >= 11) {
+          cumPts.push([isBid ? bidEdge - cum * cumScale : askEdge + cum * cumScale, y + rowH / 2]);
+          // Price in the CENTER GUTTER (side-colored — plus side POSITION as
+          // the redundant cue), thinned by priceStep so labels never touch.
+          if (rowH >= 11 && i % priceStep === 0) {
             ctx.fillStyle = sideCol; ctx.textAlign = isBid ? 'right' : 'left';
-            ctx.fillText(fmtUsd(r.price), isBid ? centerX - GAP - 3 : centerX + GAP + 3, y + rowH / 2 - (rowH >= 20 ? 4 : 0));
-            if (rowH >= 20) {
-              ctx.fillStyle = p.muted;
-              ctx.fillText(fmtQty(r.total), isBid ? centerX - GAP - 3 : centerX + GAP + 3, y + rowH / 2 + 5);
-            }
+            ctx.fillText(fmtUsd(r.price), isBid ? centerX - 4 : centerX + 4, y + rowH / 2);
+          }
+          // Qty at the bar END (just past the tip, in empty space) — only
+          // when the bar is long enough (≥28px) that the label reads as
+          // "this bar's size" instead of piling onto short-bar neighbours.
+          if (rowH >= 11 && off >= 28) {
+            ctx.fillStyle = p.muted;
+            ctx.textAlign = isBid ? 'right' : 'left';
+            ctx.fillText(fmtQty(r.total), isBid ? bidEdge - off - 3 : askEdge + off + 3, y + rowH / 2);
           }
         }
         // Cumulative depth step-curve.
@@ -976,7 +1004,13 @@
         const chip = chips[ex];
         chip.el.classList.remove('live', 'stale', 'error');
         if (!s) continue;
-        if (s.kind === 'open') { chip.el.classList.add('live'); chip.text.textContent = ex + ': live'; }
+        // kind 'open' renders the transport's OWN message, never a hardcoded
+        // 'live' (§0 honesty rail): livewire.js says 'live feed connected',
+        // the replay driver says 'replay' — hardcoding 'live' here mislabeled
+        // fixture replay as a live feed (verify_terminal_browser.py asserts
+        // no chip says 'live' in replay). The .live CLASS stays: it styles
+        // the healthy/green dot, it is not user-visible text.
+        if (s.kind === 'open') { chip.el.classList.add('live'); chip.text.textContent = ex + ': ' + (s.msg || 'live'); }
         else if (s.kind === 'stale') { chip.el.classList.add('stale'); chip.text.textContent = ex + ': ' + (s.msg || 'stale'); }
         else if (s.kind === 'reconnecting') { chip.el.classList.add('stale'); chip.text.textContent = ex + ': reconnecting…'; }
         else if (s.kind === 'error') { chip.el.classList.add('error'); chip.text.textContent = ex + ': offline'; }
@@ -1276,15 +1310,50 @@
   // side 'short' (above mark → forced BUY-backs) = --up — the same semantic
   // pair the liquidation feed badges use. Position (below/above the mark
   // line) is the redundant non-color cue.
+  //
+  // VIEW WINDOW (visual-defect fix): the y-axis used to span the FULL band +
+  // observed-print extent — the 5× tier alone puts bands ~±20% from every
+  // entry bucket, and a single low-price observed print dragged the axis to
+  // (and past) zero, compressing everything readable into a sliver. Default
+  // window is now mark ± 6% (covers the 25×/50×/100× bands and part of the
+  // 10× spread); an in-panel toggle (opts.rangeInput, persisted by the
+  // bootstrap) switches to 'all tiers' which derives the range from every
+  // band/print again. In BOTH modes the axis is clamped strictly > 0 — a
+  // negative BTC price axis asserts a price that cannot exist. Anything the
+  // window excludes is COUNTED into compact '+n bands above/below' overflow
+  // markers at the plot edges — nothing is silently hidden (§0 honesty rails).
   function LiqHeatmapView() {
     let root = null, canvas = null;
+    let rangeMode = 'pct6';   // 'pct6' (mark ± 6%, default) | 'all' (full tier extent)
+    let lastSlice = null, drawQueued = false;
     const OBS_LANE = 56, GUT_AXIS = 64;
+    const WINDOW_PCT = 0.06;  // ± fraction of mark for the default window
 
-    function mount(el) {
+    function mount(el, opts) {
       root = el;
+      const o = opts || {};
       canvas = document.createElement('canvas');
       canvas.className = 'term-canvas';
       root.appendChild(canvas);
+      // Range toggle lives in the panel chrome (terminal.html); the view owns
+      // its behavior, persistence stays in terminal.js — the same ownership
+      // split as TapeView's min-notional input and BookHeatmapView's velocity
+      // toggle. Redraws come from the CACHED slice (a toggle flip never
+      // fabricates a new data frame).
+      if (o.rangeInput) {
+        rangeMode = o.rangeInput.value === 'all' ? 'all' : 'pct6';
+        o.rangeInput.addEventListener('change', () => {
+          rangeMode = o.rangeInput.value === 'all' ? 'all' : 'pct6';
+          if (typeof o.onRange === 'function') o.onRange(rangeMode);
+          scheduleDraw();
+        });
+      }
+    }
+
+    function scheduleDraw() {
+      if (drawQueued || !lastSlice) return;
+      drawQueued = true;
+      requestAnimationFrame(() => { drawQueued = false; if (lastSlice) draw(lastSlice); });
     }
 
     /** Permanent in-canvas badge — top-right, warn palette (§0.4 label rail). */
@@ -1302,9 +1371,25 @@
       ctx.fillText(txt, x + 5, y + 8);
     }
 
-    /** slice = { est: LiqHeatmapModel.estimate() result ({bands, observed,
-     *  label}) or null before first estimate, mark, tickSize } */
-    function render(slice) {
+    /** Compact overflow marker (visual-defect fix): says how many estimated
+     *  bands (and observed prints) sit beyond the current window edge, so the
+     *  windowed view hides nothing silently (§0 honesty rails). */
+    function drawOverflow(ctx, p, x, y, w, arrow, nBands, nObs, where) {
+      const parts = [];
+      if (nBands) parts.push('+' + nBands + ' band' + (nBands === 1 ? '' : 's'));
+      if (nObs) parts.push('+' + nObs + ' print' + (nObs === 1 ? '' : 's'));
+      const txt = arrow + ' ' + parts.join(' · ') + ' ' + where;
+      ctx.font = '600 9px ' + cssVar('--mono', 'monospace');
+      const tw = ctx.measureText(txt).width;
+      const bx = x + (w - tw) / 2 - 5;
+      ctx.fillStyle = rgba(p.panel2, 0.92);
+      ctx.fillRect(bx, y - 7, tw + 10, 14);
+      ctx.strokeStyle = p.border; ctx.strokeRect(bx + 0.5, y - 6.5, tw + 9, 13);
+      ctx.fillStyle = p.muted; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(txt, x + w / 2, y);
+    }
+
+    function draw(slice) {
       if (!canvas) return;
       const { ctx, w, h } = fitCanvas(canvas);
       const p = pal();
@@ -1322,33 +1407,55 @@
         return;
       }
 
-      // Y extent: bands + observed prints + mark, small pad. All real inputs —
-      // the axis never extends to prices nothing references.
-      let pmin = mark, pmax = mark;
-      for (const b of est.bands) { if (b.price < pmin) pmin = b.price; if (b.price > pmax) pmax = b.price; }
-      for (const o of est.observed) { if (o.price < pmin) pmin = o.price; if (o.price > pmax) pmax = o.price; }
-      const pad = Math.max((pmax - pmin) * 0.04, tick * 2);
-      pmin -= pad; pmax += pad;
+      // Y window (see view header note). Default 'pct6' = mark ± 6% — a FIXED
+      // window around the one real anchor (mark), NEVER derived from the band
+      // extent, so one far-out 5×-tier band or a bad-tick observed print
+      // can't flatten the readable range. 'all' derives from every band +
+      // print + mark (the old behavior) with a small pad. Both modes clamp
+      // the floor strictly above 0: a $-negative axis asserts prices that
+      // cannot exist (§0 honesty — the axis never extends past reality).
+      let pmin, pmax;
+      if (rangeMode === 'all') {
+        pmin = mark; pmax = mark;
+        for (const b of est.bands) { if (b.price < pmin) pmin = b.price; if (b.price > pmax) pmax = b.price; }
+        for (const o of est.observed) { if (o.price < pmin) pmin = o.price; if (o.price > pmax) pmax = o.price; }
+        const pad = Math.max((pmax - pmin) * 0.04, tick * 2);
+        pmin -= pad; pmax += pad;
+      } else {
+        pmin = mark * (1 - WINDOW_PCT);
+        pmax = mark * (1 + WINDOW_PCT);
+      }
+      pmin = Math.max(pmin, tick);   // strictly > 0 (tick = smallest drawable bucket)
+
       const plotH = h - 4;
       const yOf = (price) => plotH * (pmax - price) / (pmax - pmin);
       const bandX = OBS_LANE + 4, bandW = w - GUT_AXIS - bandX;
       const bandH = Math.max(2, plotH * tick / (pmax - pmin));
 
       // Estimated bands: alpha ∝ normalized weight (max = 1 by construction).
+      // Off-window bands are COUNTED (drawn as edge markers below), never
+      // silently dropped.
+      let bandsAbove = 0, bandsBelow = 0, obsAbove = 0, obsBelow = 0;
       for (const b of est.bands) {
+        if (b.price > pmax) { bandsAbove++; continue; }
+        if (b.price < pmin) { bandsBelow++; continue; }
         ctx.fillStyle = rgba(b.side === 'long' ? p.down : p.up, 0.07 + 0.6 * b.weight);
         ctx.fillRect(bandX, yOf(b.price) - bandH / 2, bandW, bandH);
       }
 
-      // Mark line (--accent, dashed) + label at the axis.
+      // Mark line (--accent, dashed). Label split so nothing clips: the PRICE
+      // sits right-aligned in the axis gutter like every other axis label
+      // (the old 'mark $…' string was wider than the 64px gutter and clipped
+      // mid-digit), the word 'mark' rides the line inside the plot.
       const my = yOf(mark);
       ctx.save();
       ctx.setLineDash([5, 4]);
       ctx.strokeStyle = p.accent; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(0, my); ctx.lineTo(w - GUT_AXIS, my); ctx.stroke();
       ctx.restore();
-      font(9, true); ctx.fillStyle = p.accent; ctx.textAlign = 'left';
-      ctx.fillText('mark ' + fmtUsd(mark), w - GUT_AXIS + 2, my);
+      font(9, true); ctx.fillStyle = p.accent;
+      ctx.textAlign = 'right'; ctx.fillText(fmtUsd(mark), w - 2, my);
+      ctx.textAlign = 'left'; ctx.fillText('mark', bandX + 2, my - 6);
 
       // Side captions — the redundant text cue for what each half means.
       font(9, true); ctx.textAlign = 'left';
@@ -1368,6 +1475,10 @@
         for (const o of obs) { if (o.ts < tsMin) tsMin = o.ts; if (o.ts > tsMax) tsMax = o.ts; }
         const tspan = tsMax - tsMin;
         for (const o of obs) {
+          // Off-window prints are counted into the edge overflow markers —
+          // same no-silent-hiding rule as the bands.
+          if (o.price > pmax) { obsAbove++; continue; }
+          if (o.price < pmin) { obsBelow++; continue; }
           const x = tspan > 0 ? 8 + (OBS_LANE - 16) * (o.ts - tsMin) / tspan : OBS_LANE / 2;
           const y = yOf(o.price);
           if (y < 0 || y > plotH) continue;
@@ -1391,7 +1502,21 @@
         ctx.fillText(fmtUsd(price), w - 2, yOf(price));
       }
 
+      // Overflow markers at the window edges — the honest accounting for
+      // everything the window excludes (see view header note). Drawn last so
+      // no band/dot can paint over them.
+      if (bandsAbove + obsAbove > 0) drawOverflow(ctx, p, bandX, 10, bandW, '▲', bandsAbove, obsAbove, 'above');
+      if (bandsBelow + obsBelow > 0) drawOverflow(ctx, p, bandX, plotH - 20, bandW, '▼', bandsBelow, obsBelow, 'below');
+
       drawBadge(ctx, w, p);
+    }
+
+    /** slice = { est: LiqHeatmapModel.estimate() result ({bands, observed,
+     *  label}) or null before first estimate, mark, tickSize } — cached so
+     *  the range toggle can redraw without waiting for new data. */
+    function render(slice) {
+      lastSlice = slice;
+      draw(slice);
     }
 
     return { mount, render };

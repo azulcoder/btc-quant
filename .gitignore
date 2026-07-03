@@ -18,3 +18,7 @@ venv/
 mlflow.db
 mlartifacts/
 mlruns/
+
+# Browser-verification artifacts (scripts/verify_terminal_browser.py) —
+# screenshots of the fixture-replay terminal, regenerated on every run.
+reports/verify/

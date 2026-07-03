@@ -15,10 +15,11 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare scan test fetch dash collector collector-api
+.PHONY: help install backtest compare scan test fetch dash collector collector-api verify-browser verify-wire check-ticks
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
+	@echo "verify:  verify-browser (L1 fixture-replay in headless Chromium) | verify-wire (L2 live invariants, ~45s) | check-ticks (L3 tick-store QA)"
 	@echo "strategies: buy_and_hold ma_trend_filter tsmom pairs_coint carry"
 	@echo "collector needs opt-in deps: pip install -r requirements-collector.txt"
 
@@ -52,3 +53,21 @@ collector:
 collector-api:
 	@echo "BYOD API -> http://127.0.0.1:$(API_PORT)   (Ctrl-C to stop)"
 	python3 scripts/run_collector.py --symbol $(SYMBOL) --exchanges binancef,bybit --db data/ticks.duckdb --api-port $(API_PORT)
+
+# Terminal verification layers (DESIGN-orderflow-terminal.md §7).
+# L1: deterministic — replays the captured fixture frames through the real terminal in
+#     headless Chromium (?replay=1), asserts render + zero console errors, screenshots
+#     to reports/verify/. Needs: pip install playwright && playwright install chromium.
+verify-browser:
+	python3 scripts/verify_terminal_browser.py
+
+# L2: live wire — drives the PRODUCTION adapters/stores from the real public feeds for
+#     ~45s and checks cross-venue invariants (never-crossed books, coherent mids,
+#     ts sanity, CVD bucket sums). Exit 2 = offline (not a code bug).
+verify-wire:
+	node scripts/verify_wire_live.mjs --seconds 45
+
+# L3: tick-store QA report card over data/ticks.duckdb (gaps/dupes/cadence/coherence —
+#     reported, never filled). Run while the collector is stopped, or on a copy.
+check-ticks:
+	python3 scripts/check_ticks.py

@@ -49,7 +49,8 @@
   const LS_KEY = 'btcq-terminal';
   const TICKS = [1, 5, 10, 25, 50];        // $ tick grouping (default 10 — §4 task spec)
   const BARS = [60000, 300000];            // footprint bar interval: 1m | 5m
-  const DEFAULTS = { tick: 10, barMs: 60000, tapeMin: 0 };
+  const LIQ_RANGES = ['pct6', 'all'];      // liq-heatmap window: mark ± 6% (default) | full tier extent
+  const DEFAULTS = { tick: 10, barMs: 60000, tapeMin: 0, liqRange: 'pct6' };
 
   function loadSettings() {
     const s = Object.assign({}, DEFAULTS);
@@ -58,6 +59,7 @@
       if (TICKS.indexOf(j.tick) >= 0) s.tick = j.tick;
       if (BARS.indexOf(j.barMs) >= 0) s.barMs = j.barMs;
       if (Number.isFinite(j.tapeMin) && j.tapeMin >= 0) s.tapeMin = j.tapeMin;
+      if (LIQ_RANGES.indexOf(j.liqRange) >= 0) s.liqRange = j.liqRange;
     } catch (_) { /* corrupt storage → defaults */ }
     return s;
   }
@@ -66,6 +68,7 @@
     try {
       localStorage.setItem(LS_KEY, JSON.stringify({
         tick: settings.tick, barMs: settings.barMs, tapeMin: settings.tapeMin,
+        liqRange: settings.liqRange,
       }));
     } catch (_) { /* private mode / quota — settings just don't persist */ }
   }
@@ -256,7 +259,20 @@
   });
 
   const liqHeatView = V.LiqHeatmapView();
-  liqHeatView.mount($('view-liqheat'));
+  // Range toggle (visual-defect fix): the select lives in the panel chrome
+  // (terminal.html); the view owns its behavior, persistence lives here —
+  // the same split as the tape filter and the heatmap velocity toggle.
+  const liqRangeSel = $('set-liq-range');
+  liqRangeSel.value = settings.liqRange;
+  liqHeatView.mount($('view-liqheat'), {
+    rangeInput: liqRangeSel,
+    onRange: (v) => {
+      if (LIQ_RANGES.indexOf(v) < 0) return;
+      settings.liqRange = v;
+      saveSettings();
+      dirty.liqmap = true;   // repaint from stores too (view already redrew its cache)
+    },
+  });
 
   const detView = V.DetectionFeedView();
   detView.mount($('view-detect'));
@@ -267,17 +283,67 @@
   // alive keeps its own panels moving and the rest degrade honestly (chips go
   // amber/red, panels freeze at their last real data; nothing is interpolated).
   function chipStatus(ex) {
-    return (kind, msg) => { statuses[ex] = { kind, msg }; dirty.header = true; };
+    // Normalize the transport's open-state prose to a short chip token: livewire's
+    // makeSocket says 'live feed connected' / 'live feed recovered' — both ARE a live
+    // socket, so the chip reads 'live'; anything else (the replay driver's 'replay')
+    // passes through VERBATIM so fixture replay is never dressed up as live (§0 —
+    // verify_terminal_browser.py asserts no chip says 'live' under ?replay=1).
+    return (kind, msg) => {
+      const short = (kind === 'open' && /^live feed/.test(msg || '')) ? 'live' : msg;
+      statuses[ex] = { kind, msg: short };
+      dirty.header = true;
+    };
   }
-  LW.makeSocket(A.makeBybitAdapter(SYM, sink), { onStatus: chipStatus('bybit') });
-  LW.makeSocket(A.makeBinanceDepthAdapter(SYM, sink), { onStatus: chipStatus('binancef') });
-  LW.makeSocket(A.makeCoinbaseAdapter(SPOT, sink), { onStatus: chipStatus('coinbase') });
+  // Replay seam (L1 verification, DESIGN §0 honesty rails): with ?replay=1 the
+  // REAL adapters are driven from captured fixture frames on a deterministic
+  // synthetic clock (terminal-replay.js) instead of live sockets — chips say
+  // 'replay', never 'live'. The startLeg indirection is the WHOLE seam: same
+  // adapter, same api, only the transport differs.
+  const REPLAY = window.BTCQ_TERMINAL_REPLAY && window.BTCQ_TERMINAL_REPLAY.active();
+  function startLeg(name, adapter, api) {
+    if (REPLAY) window.BTCQ_TERMINAL_REPLAY.drive(name, adapter, api);
+    else LW.makeSocket(adapter, api);
+  }
+  startLeg('bybit', A.makeBybitAdapter(SYM, sink), { onStatus: chipStatus('bybit') });
+  startLeg('binancef', A.makeBinanceDepthAdapter(SYM, sink), { onStatus: chipStatus('binancef') });
+  startLeg('coinbase', A.makeCoinbaseAdapter(SPOT, sink), { onStatus: chipStatus('coinbase') });
   // O-2 (§4b): OKX leg — deeper agg book + its own labeled CVD line. The
   // adapter ctVal-scales CONTRACT sizes to BTC; default 0.01 is the pinned
   // BTC-USDT-SWAP value (fixtures _okx_ctval_note). Chip semantics identical.
-  LW.makeSocket(A.makeOkxAdapter(OKX_INST, sink), { onStatus: chipStatus('okx') });
-  const poller = A.makeBinanceRestPoller(SYM, sink);   // mark 5s / OI 60s → 'binancef' columns
-  poller.start();
+  startLeg('okx', A.makeOkxAdapter(OKX_INST, sink), { onStatus: chipStatus('okx') });
+  if (!REPLAY) {
+    // REST poller skipped in replay: it is real network (fapi.binance.com) and
+    // wall-clock-timed — both break the deterministic no-network replay rail.
+    const poller = A.makeBinanceRestPoller(SYM, sink);   // mark 5s / OI 60s → 'binancef' columns
+    poller.start();
+  }
+
+  // ─── Read-only debug hook FOR THE BROWSER HARNESS ────────────────────────
+  //
+  // scripts/verify_terminal_browser.py polls this to decide "the page is
+  // genuinely rendering data" (chips + store counts) without scraping pixels
+  // for state. READ-ONLY by construction: every method derives from existing
+  // stores/state and mutates nothing. Not a public API — the harness is the
+  // only intended consumer.
+  window.__BTCQ_TERMINAL_DEBUG = {
+    chips() {
+      const out = {};
+      for (const ex in statuses) out[ex] = statuses[ex].kind;
+      return out;
+    },
+    counts() {
+      const lad = bybitBook.grouped(settings.tick, 12);
+      const agg = aggBook.grouped(settings.tick, 14);
+      return {
+        tapeRows: tape.length,
+        ladderRows: lad.bids.length + lad.asks.length,
+        cvdPoints: cvds.bybit.series().t.length,
+        heatSamples: depthHist.bybit.samples().length,   // reads the CURRENT (rebuildable) store
+        aggLevels: agg.bids.length + agg.asks.length,
+        footprintBars: footprint.bars().length,
+      };
+    },
+  };
 
   // ─── Settings row wiring ────────────────────────────────────────────────
   const tickSel = $('set-tick');
@@ -401,6 +467,12 @@
     // freezes the MARKET panels, never connection health — a paused page that
     // also froze its chips could hide a dead feed behind the pause button.
     if (due('header', now)) {
+      // §0 honesty rail note: no chip relabeling happens here anymore —
+      // HeaderStatsView now renders the status MESSAGE the transport itself
+      // supplied ('replay' from terminal-replay.js, 'live feed connected'
+      // from livewire.js), so replay is labeled at the source instead of
+      // being patched over after the fact. verify_terminal_browser.py still
+      // asserts no chip ever says 'live' in replay.
       headerView.render({ marks, ois, statuses, sessionHigh, sessionLow, nowMs: now });
       priceEl.textContent = Number.isFinite(lastPrice)
         ? '$' + lastPrice.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })

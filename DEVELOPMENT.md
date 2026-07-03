@@ -104,6 +104,9 @@ node --check dashboard/app.js             # JS syntax (also quant.js, charts.js,
 node dashboard/app.js --check             # ppy guard: ppy()=365 (1d)/8760 (1h); no literal-365 at an annualization site
 python3 scripts/check_parity.py           # JS↔Python mirror parity (35 shared formulas; the one rule)
 node scripts/check_terminal.cjs           # orderflow terminal smoke: adapters+stores replayed over REAL captured WS frames (fixtures_ws.json)
+make verify-browser                       # L1: terminal.html?replay=1 in headless Chromium — render + zero-console-error gate + screenshots (needs playwright)
+make verify-wire                          # L2: ~45s live-wire invariants through the PRODUCTION adapters (exit 2 = offline, not a bug)
+make check-ticks                          # L3: tick-store QA report card (gaps/dupes/cadence/coherence — reported, never filled)
 # CSS brace balance:
 awk '{o+=gsub(/{/,"{");c+=gsub(/}/,"}")}END{print (o==c)?"balanced":"UNBALANCED"}' dashboard/styles.css
 python3 scripts/compare.py                # public OOS leaderboard (defaults to --start 2018-01-01)
