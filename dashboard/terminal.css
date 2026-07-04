@@ -38,6 +38,8 @@ main.term-main {
     "fp    mid   right"
     "heat  heat  right"
     "cvd   cvd   cvd"
+    "hist  hist  tpo"
+    "vp    farb  macro"
     "set   set   set";
   /* DEAD-SPACE fix: items STRETCH to fill their grid area (the grid default —
      the old `align-items: start` pinned each panel to its natural height, so
@@ -55,6 +57,12 @@ main.term-main {
 .area-heat  { grid-area: heat; }
 .area-cvd   { grid-area: cvd; }
 .area-set   { grid-area: set; }
+/* O-3 STRUCTURE section (§4c): row A = hist (2/3) + tpo (1/3); row B = thirds. */
+.area-hist  { grid-area: hist; }
+.area-tpo   { grid-area: tpo; }
+.area-vp    { grid-area: vp; }
+.area-farb  { grid-area: farb; }
+.area-macro { grid-area: macro; }
 
 /* Middle/right columns: stacked panels sharing the row height. */
 .term-col { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
@@ -74,12 +82,17 @@ main.term-main {
 @media (max-width: 1100px) {
   main.term-main {
     grid-template-columns: 1fr;
-    grid-template-areas: "stats" "fp" "mid" "right" "heat" "cvd" "set";
+    grid-template-areas:
+      "stats" "fp" "mid" "right" "heat" "cvd"
+      "hist" "tpo" "vp" "farb" "macro" "set";
   }
   .fp-wrap { min-height: 460px; }
   .agg-wrap { min-height: 260px; }
   .heat-wrap { min-height: 300px; }
   .liqheat-wrap { height: 240px; }
+  .hist-wrap { height: 300px; }
+  .tpo-wrap { height: 320px; }
+  .vp-wrap { height: 240px; }
 }
 
 /* ─── Canvas mounts — views size their backing store from these CSS boxes
@@ -389,3 +402,138 @@ table.ladder tr.spread td {
 /* ─── Settings row ───────────────────────────────────────────────────────── */
 .area-set select { min-width: 90px; }
 .area-set input[type="number"] { width: 110px; }
+
+/* ─── O-3 STRUCTURE panels (§4c) ─────────────────────────────────────────── */
+
+/* Historical chart mount (lightweight-charts sizes from this box) + the TPO/
+   composite-VP canvas mounts. Fixed heights (not flex-fill): the structure
+   row has no column partner to balance against, so a stable aspect beats
+   stretch here. */
+.hist-wrap { height: 380px; position: relative; background: var(--bg); border-radius: var(--radius); }
+.tpo-wrap  { height: 380px; position: relative; background: var(--bg); border-radius: var(--radius); }
+.vp-wrap   { height: 280px; position: relative; background: var(--bg); border-radius: var(--radius); }
+/* Honest empty-state note overlaying the chart mount (view toggles [hidden]). */
+.hist-note { position: absolute; top: 8px; left: 8px; right: 8px; z-index: 5; pointer-events: none; }
+
+/* Bar-replay flag in the panel header (§0: a rewound chart must never read
+   as the live edge) — warn palette, same visual language as .signal-tag.research. */
+.hist-flag {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  border: 1px solid var(--warn-fg);
+  text-transform: none;
+}
+
+/* Bar-replay control row under the chart. */
+.hist-replay-controls {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  padding-top: var(--sp-1);
+}
+/* display:flex above beats the UA sheet's [hidden]{display:none} — restate it
+   (same idiom as .chart-tip[hidden]/.overlay[hidden] in styles.css), else the
+   replay-mode hide in terminal.js silently no-ops and inert controls render
+   under the 'disabled in replay' note (observed in the L1 screenshot). */
+.hist-replay-controls[hidden] { display: none; }
+.hist-replay-controls input[type="range"] { flex: 1 1 auto; min-width: 60px; }
+.hist-replay-controls button, .hist-replay-controls select { font-size: var(--fs-xs); padding: 1px 6px; }
+
+/* Funding table — ladder-style mono density; per-venue source tag inline. */
+.farb-wrap { overflow-x: auto; }
+table.farb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums slashed-zero;
+  line-height: 1.6;
+}
+table.farb-table th {
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  padding: 1px var(--sp-2);
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+}
+table.farb-table th:first-child { text-align: left; }
+table.farb-table td { padding: 1px var(--sp-2); text-align: right; white-space: nowrap; }
+table.farb-table td.ex { text-align: left; font-weight: 600; }
+/* Venue hue = the fixed EX_TOKEN mapping (same as tape/agg-book/CVD). */
+table.farb-table td.ex-bybit { color: var(--c2); }
+table.farb-table td.ex-binancef { color: var(--c1); }
+table.farb-table td.ex-okx { color: var(--c3); }
+.farb-src { color: var(--g-400); font-weight: 400; font-size: 9px; }
+table.farb-table td.pos { color: var(--up); }
+table.farb-table td.neg { color: var(--down); }
+table.farb-table tr.farb-spread td {
+  text-align: center;
+  color: var(--fg);
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel-2);
+  padding: 2px var(--sp-2);
+}
+.farb-note {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  padding-top: var(--sp-1);
+}
+
+/* Macro strip: one cell per asset (label / price / session-%). */
+.macro-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 1px;
+  background: var(--border);          /* hairline separators (styles.css idiom) */
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: var(--sp-2);
+}
+.macro-cell { background: var(--bg-panel); padding: var(--sp-1) var(--sp-2); min-width: 0; }
+.macro-cell .k {
+  display: block;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.macro-cell .v { display: block; font-size: var(--fs-sm); font-weight: 600; white-space: nowrap; }
+.macro-cell .v.pos { color: var(--up); }
+.macro-cell .v.neg { color: var(--down); }
+.macro-src { color: var(--g-400); font-style: normal; font-size: 9px; text-transform: none; }
+.macro-scaled { color: var(--muted); font-weight: 400; font-size: var(--fs-xs); }
+
+/* Macro correlation block: label / value / window-or-n tag per row. */
+.macro-corr { font-family: var(--mono); font-size: var(--fs-xs); }
+.macro-corr-head {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 2px;
+  margin-bottom: 2px;
+}
+.macro-corr-row {
+  display: grid;
+  grid-template-columns: minmax(110px, auto) 1fr 2fr;
+  gap: var(--sp-2);
+  padding: 1px 2px;
+  align-items: baseline;
+}
+.macro-corr-row .num { text-align: right; font-variant-numeric: tabular-nums; }
+.macro-corr-row .macro-src { white-space: normal; }

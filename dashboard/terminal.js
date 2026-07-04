@@ -31,9 +31,9 @@
   const A = window.BTCQ_TERMINAL_ADAPTERS;
   const S = window.BTCQ_TERMINAL_STATE;
   const V = window.BTCQ_TERMINAL_VIEWS;
-  if (!LW || !A || !S || !V) {
-    // Script-order contract broken (§4 load order) — say so, render nothing.
-    console.error('terminal.js: missing globals (load order must be livewire → adapters → state → views → terminal)');
+  if (!LW || !A || !S || !V || !window.BTCQ_TERMINAL_HIST) {
+    // Script-order contract broken (§4/§4c load order) — say so, render nothing.
+    console.error('terminal.js: missing globals (load order must be livewire → adapters → state → hist → views → terminal)');
     return;
   }
 
@@ -151,6 +151,7 @@
   const dirty = {
     fp: true, dom: true, tape: true, agg: true, header: true, liq: true,
     heat: true, liqmap: true, det: true,   // O-2 panels (§4b)
+    hist: true, tpo: true, vp: true, farb: true, macro: true,   // O-3 STRUCTURE panels (§4c)
   };
   function dirtyAll() { for (const k in dirty) dirty[k] = true; }
 
@@ -301,7 +302,11 @@
   // adapter, same api, only the transport differs.
   const REPLAY = window.BTCQ_TERMINAL_REPLAY && window.BTCQ_TERMINAL_REPLAY.active();
   function startLeg(name, adapter, api) {
-    if (REPLAY) window.BTCQ_TERMINAL_REPLAY.drive(name, adapter, api);
+    // O-3 BYOD seam (§4c): sink rides along as the optional 4th arg — under
+    // ?replay=byod the driver feeds collector rows to the sink DIRECTLY
+    // (rows are already normalized; adapters bypassed); under ?replay=1 the
+    // 4th arg is ignored and fixture replay is bit-for-bit unchanged.
+    if (REPLAY) window.BTCQ_TERMINAL_REPLAY.drive(name, adapter, api, sink);
     else LW.makeSocket(adapter, api);
   }
   startLeg('bybit', A.makeBybitAdapter(SYM, sink), { onStatus: chipStatus('bybit') });
@@ -316,6 +321,275 @@
     // wall-clock-timed — both break the deterministic no-network replay rail.
     const poller = A.makeBinanceRestPoller(SYM, sink);   // mark 5s / OI 60s → 'binancef' columns
     poller.start();
+  }
+
+  // ─── O-3 STRUCTURE section (§4c): REST-fed panels + their polls ──────────
+  //
+  // All O-3 data is REST history / REST polls (terminal-hist.js). In replay
+  // modes EVERY new fetch/poll is skipped — they are real network and would
+  // break the deterministic L1 harness (same rail as the Binance REST poller
+  // above) — and each panel renders an honest 'disabled in replay' note
+  // instead of an empty-looking widget (empty-but-honest, §0.7: we say WHY
+  // there is nothing rather than fabricate something).
+  const HIST = window.BTCQ_TERMINAL_HIST;
+  let histView = null, tpoView = null, vpView = null, farbView = null, macroView = null;
+  // O-3 state caches (REST results; the frame loop only reads them).
+  let histBars = null;             // current-interval klines (chart + composite VP)
+  let histInterval = '60';         // bybit interval code — html select default (1h)
+  let tpoSessions = null, tpoTick = 10;
+  let vpData = null, vpTick = 10;
+  let okxFund = null, okxOiEv = null;   // OKX REST poll results (null → '—' cells)
+  const hlMids = {};               // latest HIP-3 mids by prefixed name (km:…/xyz:…)
+  const macroLasts = { PAXG: NaN, ETH: NaN };   // hourly kline last closes
+  let corr7d = null;               // {btcEth, btcPaxg, ethPaxg} — last rollingCorr values
+  const sessStore = S.SessionSeriesStore({ sampleMs: 60000 });   // §4c session-corr accumulator
+
+  /** Chart-friendly tick: smallest of 1/2/2.5/5×10^k covering `raw` — the
+   *  §4c 'niceRound' for adaptive TPO/VP grids (a raw range/60 would produce
+   *  ticks like $37.42 and unreadable axis labels). */
+  function niceRound(raw) {
+    if (!Number.isFinite(raw) || raw <= 0) return 1;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    for (const m of [1, 2, 2.5, 5, 10]) if (m * mag >= raw) return m * mag;
+    return 10 * mag;
+  }
+
+  if (REPLAY) {
+    // Honest replay note per §4c panel (see section header). The bar-replay
+    // control row is hidden too — inert controls would look broken, and the
+    // note already says why the panel is empty.
+    const NOTE = '<div class="chart-na">awaiting REST history — REST fetching is disabled in replay '
+      + '(deterministic L1 harness: no network beyond the local fixture file). '
+      + 'Nothing is fabricated to fill this panel (§0.7).</div>';
+    for (const id of ['view-hist', 'view-tpo', 'view-klinevp', 'view-farb', 'view-macro']) {
+      $(id).innerHTML = NOTE;
+    }
+    $('hist-replay-controls').hidden = true;
+    for (const id of ['set-hist-interval', 'set-hist-sma20', 'set-hist-sma50', 'set-hist-sma200', 'set-hist-ha', 'set-tpo-session']) {
+      $(id).disabled = true;
+    }
+  } else {
+    // ── Views (controls live in the panel chrome; views own their behavior —
+    // the TapeView filter-input ownership split). ──
+    histView = V.HistChartView();
+    histView.mount($('view-hist'), {
+      intervalSel: $('set-hist-interval'),
+      smaInputs: { 20: $('set-hist-sma20'), 50: $('set-hist-sma50'), 200: $('set-hist-sma200') },
+      haInput: $('set-hist-ha'),
+      playBtn: $('hist-play'), stepBtn: $('hist-step'), speedSel: $('hist-speed'),
+      scrub: $('hist-scrub'), liveBtn: $('hist-live'), flagEl: $('hist-replay-flag'),
+      onInterval: (v) => {
+        if (['5', '30', '60', '240', 'D'].indexOf(v) < 0) return;   // whitelist, like TICKS/BARS
+        histInterval = v;
+        refreshHist();   // refetch on interval change — the ONLY refresh (§0.7 no live merge)
+      },
+    });
+    tpoView = V.TpoView();
+    tpoView.mount($('view-tpo'), { sessionSel: $('set-tpo-session') });
+    vpView = V.KlineVpView();
+    vpView.mount($('view-klinevp'));
+    farbView = V.FundingArbView();
+    farbView.mount($('view-farb'));
+    macroView = V.MacroView();
+    macroView.mount($('view-macro'));
+
+    // ── Historical chart + composite VP: one fetch feeds both (§4c — the VP
+    // is built over the chart's CURRENT lookback+interval by construction). ──
+    function refreshHist() {
+      HIST.fetchBybitKlines(SYM, histInterval, 1000).then((bars) => {
+        histBars = bars;   // null on failure → the view says so, no retry storm
+        if (bars && bars.length) {
+          let lo = Infinity, hi = -Infinity;
+          for (const b of bars) { if (b.l < lo) lo = b.l; if (b.h > hi) hi = b.h; }
+          vpTick = niceRound((hi - lo) / 120);   // ~120 VP levels over the lookback
+          vpData = S.buildKlineVp(bars, { tickSize: vpTick });
+        } else {
+          vpData = null;
+        }
+        dirty.hist = true; dirty.vp = true;
+      });
+    }
+    refreshHist();
+
+    // ── TPO: 30m bars, last 5 UTC days (1000×30m ≈ 20.8 d covers it, §4c). ──
+    function refreshTpo() {
+      HIST.fetchBybitKlines(SYM, '30', 1000).then((bars) => {
+        if (!bars || !bars.length) { tpoSessions = null; dirty.tpo = true; return; }
+        const DAY = 86400000;
+        const lastDay = Math.floor(bars[bars.length - 1].ts / DAY);
+        const kept = bars.filter((b) => Math.floor(b.ts / DAY) > lastDay - 5);
+        // Adaptive tick = niceRound(sessionRange/60) (§4c) on the WIDEST of
+        // the 5 sessions: one shared grid keeps day-to-day POC/VA rows
+        // comparable, and sizing to the max range caps every session at
+        // ~60 letter rows (a median-sized tick would smear the widest day
+        // into sub-pixel rows).
+        let maxRange = 0;
+        const dayRange = new Map();
+        for (const b of kept) {
+          const d = Math.floor(b.ts / DAY);
+          const r = dayRange.get(d) || { lo: Infinity, hi: -Infinity };
+          if (b.l < r.lo) r.lo = b.l;
+          if (b.h > r.hi) r.hi = b.h;
+          dayRange.set(d, r);
+        }
+        for (const r of dayRange.values()) if (r.hi - r.lo > maxRange) maxRange = r.hi - r.lo;
+        tpoTick = niceRound(maxRange / 60);
+        tpoSessions = S.buildTpo(kept, { tickSize: tpoTick });
+        dirty.tpo = true;
+      });
+    }
+    refreshTpo();
+
+    // ── OKX funding/OI: NEW 60s REST poll (§4c FundingArbView leg). A null
+    // result simply keeps the previous value's staleness visible via the
+    // countdown / leaves '—' — silent-null tolerated by contract. ──
+    function pollOkx() {
+      HIST.fetchOkxFunding(OKX_INST).then((f) => { if (f) okxFund = f; dirty.farb = true; });
+      HIST.fetchOkxOi(OKX_INST).then((o) => { if (o) okxOiEv = o; dirty.farb = true; });
+    }
+    pollOkx();
+    setInterval(pollOkx, 60000);
+
+    // ── Hyperliquid HIP-3 mids: 10s poll of both dexs (§4c MacroView strip).
+    // normalizeHlMids filters to dex-prefixed names — the main-universe
+    // SPX6900 memecoin can never leak in. Samples also feed the
+    // SessionSeriesStore (its 60s gate downsamples the 10s poll) — the ONLY
+    // honest correlation input for history-less HIP-3 legs. ──
+    const HIP3_KEYS = ['km:US500', 'km:USTECH', 'km:GOLD', 'km:USOIL', 'xyz:XYZ100'];
+    function pollMids() {
+      Promise.all([HIST.fetchHlMids('km'), HIST.fetchHlMids('xyz')]).then(([km, xyz]) => {
+        // Date.now() here is the POLL time — the caller-supplied clock the
+        // store contract asks for (the store itself stays wall-clock-free).
+        const now = Date.now();
+        const merged = Object.assign({}, km || {}, xyz || {});
+        for (const k of HIP3_KEYS) {
+          if (Number.isFinite(merged[k])) {
+            hlMids[k] = merged[k];
+            sessStore.onSample(now, k, merged[k]);
+          }
+        }
+        // BTC leg sampled on the SAME cadence from the live bybit mark, so
+        // session-corr pairs align by sample index (§4c corr contract).
+        if (marks.bybit && Number.isFinite(marks.bybit.mark)) sessStore.onSample(now, 'BTC', marks.bybit.mark);
+        dirty.macro = true;
+      });
+    }
+    pollMids();
+    setInterval(pollMids, 10000);
+
+    // ── Macro history legs: hourly 1h-kline fetch for BTC/ETH/PAXG → last
+    // closes + the 7d rolling correlation (168 × 1h bars, computed once per
+    // hour — klines only grow hourly, re-fetching faster buys nothing). ──
+    function lastCorr7d(a, b) {
+      if (!a || !b || a.length < 2 || b.length < 2) return NaN;
+      // Align by bar timestamp FIRST (venues can differ in leading coverage /
+      // a missing bar), then log-returns over the common bars — index-aligned
+      // returns of misaligned bars would correlate different hours.
+      const mb = new Map();
+      for (const x of b) mb.set(x.ts, x.c);
+      const ca = [], cb = [];
+      for (const x of a) { const y = mb.get(x.ts); if (y != null) { ca.push(x.c); cb.push(y); } }
+      const ra = [], rb = [];
+      for (let i = 1; i < ca.length; i++) { ra.push(Math.log(ca[i] / ca[i - 1])); rb.push(Math.log(cb[i] / cb[i - 1])); }
+      const series = S.rollingCorr(ra, rb, 168);   // 7 d of 1 h bars (§4c label '7d · 1h bars')
+      return series.length ? series[series.length - 1].r : NaN;
+    }
+    function refreshMacroHistory() {
+      Promise.all([
+        HIST.fetchBybitKlines('BTCUSDT', '60', 400),   // 400 h ≈ 16.7 d ≥ the 168-bar window
+        HIST.fetchBybitKlines('ETHUSDT', '60', 400),
+        HIST.fetchBybitKlines('PAXGUSDT', '60', 400),  // PAXG = tokenized-gold proxy (§4c — no CME)
+      ]).then(([btc, eth, paxg]) => {
+        const now = Date.now();
+        // ETH/PAXG strip prices come from their own kline closes and are
+        // sampled into the session store only when genuinely refreshed —
+        // re-sampling a stale hourly close every minute would fabricate a
+        // flat series and drag any correlation toward 0 (§0.7).
+        if (eth && eth.length) { macroLasts.ETH = eth[eth.length - 1].c; sessStore.onSample(now, 'ETH', macroLasts.ETH); }
+        if (paxg && paxg.length) { macroLasts.PAXG = paxg[paxg.length - 1].c; sessStore.onSample(now, 'PAXG', macroLasts.PAXG); }
+        corr7d = {
+          btcEth: lastCorr7d(btc, eth),
+          btcPaxg: lastCorr7d(btc, paxg),
+          ethPaxg: lastCorr7d(eth, paxg),
+        };
+        dirty.macro = true;
+      });
+    }
+    refreshMacroHistory();
+    setInterval(refreshMacroHistory, 3600000);
+  }
+
+  // ── O-3 render-slice composers (read caches + stores; mutate nothing) ──
+
+  /** FundingArbView slice: per-venue mark/funding/OI, per-source (§4c).
+   *  intervalH: bybit + binancef BTC perps fund every 8 h (their
+   *  nextFundingTs spacing — stated venue constant); OKX's comes from its
+   *  funding response (normalizeOkxFunding derives it, fallback 8). */
+  function farbSlice(now) {
+    const by = marks.bybit, bn = marks.binancef;
+    const oiBy = ois.bybit, oiBn = ois.binancef;
+    return {
+      nowMs: now,
+      venues: {
+        bybit: {
+          mark: by ? by.mark : NaN, fundingRate: by ? by.fundingRate : NaN,
+          nextFundingTs: by ? by.nextFundingTs : NaN, intervalH: 8,
+          oi: oiBy ? oiBy.oi : NaN,
+          oiUsd: (oiBy && by && Number.isFinite(by.mark)) ? oiBy.oi * by.mark : NaN,
+        },
+        binancef: {
+          mark: bn ? bn.mark : NaN, fundingRate: bn ? bn.fundingRate : NaN,
+          nextFundingTs: bn ? bn.nextFundingTs : NaN, intervalH: 8,
+          oi: oiBn ? oiBn.oi : NaN,
+          oiUsd: (oiBn && bn && Number.isFinite(bn.mark)) ? oiBn.oi * bn.mark : NaN,
+        },
+        okx: {
+          mark: NaN,                          // no keyless OKX mark feed here —
+          last: lastPriceByEx.okx,            // the view shows last trade, labeled '(last)'
+          fundingRate: okxFund ? okxFund.fundingRate : NaN,
+          nextFundingTs: okxFund ? okxFund.nextFundingTs : NaN,
+          intervalH: okxFund ? okxFund.intervalH : 8,
+          oi: okxOiEv ? okxOiEv.oi : NaN,     // COIN (normalizeOkxOi returns oiCcy, §4c unit rail)
+          oiUsd: okxOiEv ? okxOiEv.oiUsd : NaN,
+        },
+      },
+    };
+  }
+
+  /** MacroView slice: mids strip + correlation block (§4c). */
+  function macroSlice() {
+    const items = [
+      { key: 'km:US500', label: 'US500', pctOnly: true, src: 'HL km' },   // scaled contract — % only
+      { key: 'km:USTECH', label: 'USTECH', src: 'HL km' },
+      { key: 'km:GOLD', label: 'GOLD', src: 'HL km' },
+      { key: 'km:USOIL', label: 'USOIL', src: 'HL km' },
+      { key: 'xyz:XYZ100', label: 'XYZ100', src: 'HL xyz' },
+      { key: 'PAXG', label: 'PAXG', src: 'bybit 1h' },
+      { key: 'ETH', label: 'ETH', src: 'bybit 1h' },
+      { key: 'BTC', label: 'BTC', src: 'bybit mark' },
+    ];
+    const strip = [];
+    for (const it of items) {
+      let px = NaN;
+      if (it.key.indexOf(':') >= 0) px = Number.isFinite(hlMids[it.key]) ? hlMids[it.key] : NaN;
+      else if (it.key === 'PAXG') px = macroLasts.PAXG;
+      else if (it.key === 'ETH') px = macroLasts.ETH;
+      else px = marks.bybit ? marks.bybit.mark : NaN;
+      const ser = sessStore.series(it.key);
+      const sessPct = ser.length >= 2 ? (ser[ser.length - 1].px / ser[0].px - 1) * 100 : NaN;
+      strip.push({ label: it.label, px, pctOnly: !!it.pctOnly, sessPct, src: it.src });
+    }
+    const sessCorr = [];
+    for (const it of items) {
+      if (it.key.indexOf(':') < 0) continue;   // session-corr cells are for the history-less HIP-3 legs
+      const c = sessStore.corr(it.key, 'BTC');
+      sessCorr.push({ label: it.label + ' × BTC', r: c.r, n: c.n });
+    }
+    // km:GOLD vs PAXG divergence — its own cell (§4c): the ~4% premium IS the
+    // tracking-error story; showing it beats hiding it inside either price.
+    const goldPrem = (Number.isFinite(hlMids['km:GOLD']) && Number.isFinite(macroLasts.PAXG) && macroLasts.PAXG > 0)
+      ? (hlMids['km:GOLD'] / macroLasts.PAXG - 1) * 100 : NaN;
+    return { strip, corr7d, sessCorr, goldPrem };
   }
 
   // ─── Read-only debug hook FOR THE BROWSER HARNESS ────────────────────────
@@ -390,8 +664,16 @@
   // fixed text-pool update (120ms), the CVD chart throttles itself further
   // inside FootprintView. Event ingestion is NEVER throttled — only paint.
   // heat/liqmap update at ~1s/5s data cadence anyway — budgets just cap bursts.
-  const MIN_MS = { fp: 250, dom: 120, tape: 180, agg: 220, header: 400, liq: 300, heat: 500, liqmap: 600, det: 250 };
-  const lastAt = { fp: 0, dom: 0, tape: 0, agg: 0, header: 0, liq: 0, heat: 0, liqmap: 0, det: 0 };
+  // O-3 budgets: hist/tpo/vp repaint only on (re)fetch or control changes;
+  // farb ticks with its 1s countdown; macro moves at poll cadence (≥10s).
+  const MIN_MS = {
+    fp: 250, dom: 120, tape: 180, agg: 220, header: 400, liq: 300, heat: 500, liqmap: 600, det: 250,
+    hist: 500, tpo: 800, vp: 800, farb: 500, macro: 800,
+  };
+  const lastAt = {
+    fp: 0, dom: 0, tape: 0, agg: 0, header: 0, liq: 0, heat: 0, liqmap: 0, det: 0,
+    hist: 0, tpo: 0, vp: 0, farb: 0, macro: 0,
+  };
 
   function due(key, now) {
     if (!dirty[key] || now - lastAt[key] < MIN_MS[key]) return false;
@@ -541,16 +823,38 @@
       if (due('det', now)) {
         detView.render({ events: detector.events() });
       }
+      // O-3 STRUCTURE panels (§4c) — null views in replay (honest notes were
+      // rendered instead; the dirty flags simply expire unread).
+      if (histView && due('hist', now)) {
+        histView.render({ bars: histBars });
+      }
+      if (tpoView && due('tpo', now)) {
+        tpoView.render({ sessions: tpoSessions, tickSize: tpoTick });
+      }
+      if (vpView && due('vp', now)) {
+        vpView.render({ vp: vpData, lastPrice, interval: histInterval });
+      }
+      if (farbView && due('farb', now)) {
+        farbView.render(farbSlice(now));
+      }
+      if (macroView && due('macro', now)) {
+        macroView.render(macroSlice());
+      }
     }
 
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 
-  // Time itself moves the funding countdown and rolls liqs out of the 1m/5m
-  // windows even when no event arrives — tick those panels once a second.
-  setInterval(() => { dirty.header = true; dirty.liq = true; }, 1000);
+  // Time itself moves the funding countdowns and rolls liqs out of the 1m/5m
+  // windows even when no event arrives — tick those panels once a second
+  // (farb joins in O-3: its 'next in' column is a countdown too, §4c).
+  setInterval(() => { dirty.header = true; dirty.liq = true; dirty.farb = true; }, 1000);
 
   // Canvas panels re-measure on their next draw; a resize makes them dirty.
-  window.addEventListener('resize', () => { dirty.fp = true; dirty.agg = true; dirty.heat = true; dirty.liqmap = true; });
+  // (O-3: tpo/vp are canvases too; the hist chart resizes itself in-view.)
+  window.addEventListener('resize', () => {
+    dirty.fp = true; dirty.agg = true; dirty.heat = true; dirty.liqmap = true;
+    dirty.tpo = true; dirty.vp = true;
+  });
 })();

@@ -5687,5 +5687,102 @@
    "cts": 1783079410826
   }
  ],
- "_okx_ctval_note": "OKX SWAP sizes (trades sz, books sz) are in CONTRACTS; BTC-USDT-SWAP ctVal=0.01 BTC (verified via /api/v5/public/instruments 2026-07-03). Adapters MUST multiply by ctVal."
+ "_okx_ctval_note": "OKX SWAP sizes (trades sz, books sz) are in CONTRACTS; BTC-USDT-SWAP ctVal=0.01 BTC (verified via /api/v5/public/instruments 2026-07-03). Adapters MUST multiply by ctVal.",
+ "bybit_rest_kline": {
+  "retCode": 0,
+  "retMsg": "OK",
+  "result": {
+   "symbol": "BTCUSDT",
+   "category": "linear",
+   "list": [
+    [
+     "1783119600000",
+     "62542.2",
+     "62578.2",
+     "62516.5",
+     "62537.1",
+     "59.008",
+     "3690641.9349"
+    ],
+    [
+     "1783117800000",
+     "62601.6",
+     "62643",
+     "62508.4",
+     "62542.2",
+     "401.563",
+     "25124953.8847"
+    ],
+    [
+     "1783116000000",
+     "62697",
+     "62716.1",
+     "62559.3",
+     "62601.6",
+     "522.079",
+     "32697332.5702"
+    ],
+    [
+     "1783114200000",
+     "62599.4",
+     "62800",
+     "62482",
+     "62697",
+     "855.879",
+     "53579043.761"
+    ],
+    [
+     "1783112400000",
+     "62748",
+     "62946.1",
+     "62581.7",
+     "62599.4",
+     "1783.151",
+     "111882389.2906"
+    ]
+   ]
+  },
+  "retExtInfo": {},
+  "time": 1783120004092
+ },
+ "okx_rest_funding": {
+  "code": "0",
+  "data": [
+   {
+    "formulaType": "withRate",
+    "fundingRate": "0.0000387369202921",
+    "fundingTime": "1783123200000",
+    "impactValue": "20000.0000000000000000",
+    "instId": "BTC-USDT-SWAP",
+    "instType": "SWAP",
+    "interestRate": "0.0001000000000000",
+    "maxFundingRate": "0.00375",
+    "method": "current_period",
+    "minFundingRate": "-0.00375",
+    "nextFundingRate": "",
+    "nextFundingTime": "1783152000000",
+    "premium": "-0.0004764196265702",
+    "prevFundingTime": "1783094400000",
+    "settFundingRate": "0.0000538283058701",
+    "settState": "settled",
+    "ts": "1783119985285"
+   }
+  ],
+  "msg": ""
+ },
+ "okx_rest_oi": {
+  "code": "0",
+  "data": [
+   {
+    "instId": "BTC-USDT-SWAP",
+    "instType": "SWAP",
+    "oi": "3133727.94000001118",
+    "oiCcy": "31337.2794000001118",
+    "oiUsd": "1959817785.0363069919161",
+    "ts": "1783120004270"
+   }
+  ],
+  "msg": ""
+ },
+ "_o3_notes": "O-3 REST fixtures captured 2026-07-04. Bybit kline list is NEWEST-FIRST [startMs,o,h,l,c,vol,turnover] strings \u2014 reverse for chronological. OKX funding 8h interval. HL HIP-3: main-universe \"SPX\" is the SPX6900 MEMECOIN (~$0.37), NOT the index \u2014 macro legs use dex=km assets (km:US500/USTECH/GOLD/USOIL) via candleSnapshot with dex-prefixed coin names."
 }

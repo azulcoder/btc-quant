@@ -1,4 +1,5 @@
-// terminal-state.js — orderflow terminal: pure in-memory stores (DESIGN-orderflow-terminal.md §4 + §4b).
+// terminal-state.js — orderflow terminal: pure in-memory stores + structure builders
+// (DESIGN-orderflow-terminal.md §4 + §4b + §4c).
 //
 // RESEARCH / DESCRIPTIVE ONLY. Everything held here is LIVE-DESCRIPTIVE session
 // state (§0.1): it is never merged into a backtested series or the OOS harness,
@@ -952,12 +953,415 @@
     return { estimate, tiers: tiers.slice(), mmr, tickSize };
   }
 
+  // ════════ O-3 (§4c) — structure builders: pure functions over klines ═════
+  //
+  // Everything below is a PURE FUNCTION (plus one tiny gated store) over
+  // chronological kline bars `[{ts,o,h,l,c,v}]` as normalized by
+  // terminal-hist.js. Wire reality worth restating here (§4c empirical data
+  // map, fixtures `bybit_rest_kline` + `_o3_notes`): Bybit REST klines arrive
+  // NEWEST-FIRST as string arrays — the fetcher reverses and Number()s BEFORE
+  // these builders ever see them; feeding a raw (un-reversed) list would build
+  // mirror-image sessions. Same two rails as the stores above: zero DOM, zero
+  // Date.now() — `new Date(ms)` over an INPUT timestamp (UTC date label) is a
+  // pure computation, not a wall-clock read.
+
+  /** Positive-finite-or-default: tick/period params must be > 0 — a zero or
+   *  negative tick would loop forever (or backwards) enumerating buckets, so
+   *  finiteOr() alone is not a sufficient guard here. */
+  function posOr(x, dflt) {
+    return Number.isFinite(x) && x > 0 ? x : dflt;
+  }
+
+  /** Well-formed kline bar for range work: ts + a sane low ≤ high. (v is
+   *  checked by buildKlineVp, the only consumer that reads it; o/c are not
+   *  consumed by any §4c builder.) Malformed bars are SKIPPED, never zero-
+   *  coerced — same hygiene rule as validTrade(). */
+  function validBar(b) {
+    return !!b && Number.isFinite(b.ts) && Number.isFinite(b.l)
+      && Number.isFinite(b.h) && b.h >= b.l;
+  }
+
+  // Hygiene cap on tick buckets per bar. A mis-scaled tickSize (say $0.01 on a
+  // $60k instrument with $500 bar ranges) or one corrupt h/l pair would try to
+  // allocate millions of row objects and stall the tab; a single bar spanning
+  // more ticks than this is bad data or a bad parameter, not market structure.
+  // Such bars are skipped (stated here, not hidden) rather than guessed at.
+  const MAX_BAR_BUCKETS = 20000;
+
+  /** Tick buckets covering [l, h], BOTH ends floor-snapped — the same DOWN-
+   *  bucketing grid as FootprintStore/ProfileStore, so TPO rows and kline-VP
+   *  levels line up with footprint cells and the session-VP gutter across
+   *  views. Returns null (caller skips the bar) on a corrupt/oversized range
+   *  — see MAX_BAR_BUCKETS. Prices are roundPx-canonical Map keys. */
+  function barBuckets(l, h, tick) {
+    const b0 = snapTick(l, tick, false);
+    const nUp = Math.round((snapTick(h, tick, false) - b0) / tick);
+    if (!(nUp >= 0) || nUp > MAX_BAR_BUCKETS) return null;
+    const out = new Array(nUp + 1);
+    for (let k = 0; k <= nUp; k++) out[k] = roundPx(b0 + k * tick);
+    return out;
+  }
+
+  /** 70% value-area expansion over an ascending-price weight array — the SAME
+   *  algorithm as ProfileStore.profile() (§4c binding: "value area = same 70%
+   *  expansion as ProfileStore"), factored out so buildTpo (weights = TPO
+   *  period counts) and buildKlineVp (weights = volumes) share one
+   *  implementation instead of drifting: start at the POC row, then repeatedly
+   *  absorb whichever SINGLE next row (above the accepted range vs below)
+   *  carries more weight — ties expand UPWARD, arbitrary but deterministic —
+   *  until ≥ 70% of total weight is covered. -1 sentinels: an exhausted side
+   *  always loses the comparison since every real weight is > 0. Returns
+   *  {loIdx, hiIdx} index bounds into the weights array. */
+  function valueArea70(weights, pocIdx) {
+    const n = weights.length;
+    let total = 0;
+    for (const w of weights) total += w;
+    const target = 0.7 * total;
+    let covered = weights[pocIdx];
+    let up = pocIdx + 1, dn = pocIdx - 1;
+    while (covered < target && (up < n || dn >= 0)) {
+      const vu = up < n ? weights[up] : -1;
+      const vd = dn >= 0 ? weights[dn] : -1;
+      if (vu >= vd) { covered += vu; up++; }
+      else { covered += vd; dn--; }
+    }
+    return { loIdx: dn + 1, hiIdx: up - 1 };
+  }
+
+  // ─── buildTpo(bars, {tickSize, periodMs}) — Market Profile / TPO (§4c) ───
+  //
+  // CLASSICAL TPO CONSTRUCTION — this IS the canonical method, not an
+  // approximation: Market Profile (Steidlmayer/CBOT) marks, for each 30-minute
+  // period, every price the market touched during that period. A 30m OHLC bar
+  // records exactly that touch range [l, h], so "one bar = one period letter
+  // across its full low..high" reproduces the textbook profile. Unlike
+  // buildKlineVp below, nothing intra-bar is being approximated, because TPO
+  // never used intra-period distribution in the first place — only touched/
+  // not-touched per period.
+  //
+  // Session = UTC DAY, exchange-agnostic: crypto perps trade 24/7 with no pit
+  // open/close to anchor a session, and the UTC day is the convention the
+  // venues' own daily klines and our collector timestamps (§3 schema, UTC ms)
+  // already use — so the profile a Bybit reader sees matches an OKX reader's.
+  //
+  // Period index is CLOCK-derived — floor(intra-day offset / periodMs), so
+  // 0..47 at the default 30m — NOT sequence-derived: a missing kline leaves a
+  // HOLE in the letters instead of silently re-lettering later periods (gaps
+  // are gaps, §0.7), and feeding finer bars (e.g. 5m) into 30m periods simply
+  // merges six bars into one letter via the per-row period Set.
+  //
+  // Sessions return NEWEST-FIRST — the TPO view's session selector reads [0]
+  // as "today" (same display convention as TapeStore.filtered/LiqStore.recent).
+  function buildTpo(bars, opts) {
+    const o = opts || {};
+    const tick = posOr(o.tickSize, 1);
+    const periodMs = posOr(o.periodMs, 1800000); // 30 m — the classical period
+    const DAY_MS = 86400000;
+    const days = new Map(); // dayIdx → {rows: Map(price → Set(periodIdx)), meta: [{p, l, h}]}
+    if (Array.isArray(bars)) {
+      for (const b of bars) {
+        if (!validBar(b)) continue;
+        const buckets = barBuckets(b.l, b.h, tick);
+        if (!buckets) continue; // corrupt range / mis-scaled tick — see MAX_BAR_BUCKETS
+        const dayIdx = Math.floor(b.ts / DAY_MS);
+        const p = Math.floor((b.ts - dayIdx * DAY_MS) / periodMs);
+        let d = days.get(dayIdx);
+        if (!d) { d = { rows: new Map(), meta: [] }; days.set(dayIdx, d); }
+        for (const price of buckets) {
+          let set = d.rows.get(price);
+          if (!set) { set = new Set(); d.rows.set(price, set); }
+          set.add(p);
+        }
+        d.meta.push({ p, l: b.l, h: b.h }); // raw l/h retained for the IB bracket
+      }
+    }
+
+    const sessions = [];
+    for (const [dayIdx, d] of days) {
+      const rows = [...d.rows.entries()]
+        .map(([price, set]) => ({ price, periods: [...set].sort((a, b2) => a - b2) }))
+        .sort((a, b2) => a.price - b2.price); // ascending — profile renders low→high
+      const counts = rows.map((r) => r.periods.length);
+      const lo = rows[0].price, hi = rows[rows.length - 1].price;
+
+      // POC = the row holding the MOST periods; tie → closest to the session
+      // MID (the classical TPO tiebreak — the profile's center of rotation),
+      // with mid computed on the BUCKETED range so the tiebreak lives on the
+      // same grid as the rows it ranks; a still-equidistant tie keeps the
+      // LOWER price (the ascending scan keeps its first hit — deterministic,
+      // same spirit as ProfileStore's lowest-price POC tie rule).
+      const mid = (lo + hi) / 2;
+      let pocIdx = 0;
+      for (let i = 1; i < rows.length; i++) {
+        if (counts[i] > counts[pocIdx]
+            || (counts[i] === counts[pocIdx]
+                && Math.abs(rows[i].price - mid) < Math.abs(rows[pocIdx].price - mid))) {
+          pocIdx = i;
+        }
+      }
+
+      // Value area on TPO COUNTS (periods per row), not volume — §4c: the
+      // same 70% expansion as ProfileStore with the weight swapped for the
+      // TPO analogue. VAH/VAL are the extreme accepted row prices.
+      const va = valueArea70(counts, pocIdx);
+
+      // Singles = rows printed in exactly ONE period AND strictly INSIDE the
+      // session's bucket range. Edges are excluded because session extremes
+      // are single-printed BY CONSTRUCTION — only the excursion bar touches
+      // them; in Market Profile terms those are the tails, a different object.
+      // Single-print analysis targets INTERIOR rows left behind by a fast
+      // one-directional move — that is the actual structure read.
+      const singles = [];
+      for (const r of rows) {
+        if (r.periods.length === 1 && r.price > lo && r.price < hi) singles.push(r.price);
+      }
+
+      // IB = range of the first 2 OBSERVED periods (classical initial balance
+      // = the first hour = two 30m letters). "Observed" deliberately: the
+      // oldest session of a limit-capped kline fetch starts mid-day, and
+      // anchoring to clock periods 0–1 would fabricate an IB from bars we
+      // never received (§0.7) — we bracket what actually arrived instead.
+      // Raw (un-bucketed) l/h: the bracket is a price range, not a row.
+      const ibIdx = new Set([...new Set(d.meta.map((m) => m.p))].sort((a, b2) => a - b2).slice(0, 2));
+      let ibHi = -Infinity, ibLo = Infinity;
+      for (const m of d.meta) {
+        if (!ibIdx.has(m.p)) continue;
+        if (m.h > ibHi) ibHi = m.h;
+        if (m.l < ibLo) ibLo = m.l;
+      }
+
+      sessions.push({
+        // Pure function of the bar ts — a date LABEL, not a wall-clock read.
+        date: new Date(dayIdx * DAY_MS).toISOString().slice(0, 10),
+        rows,
+        poc: rows[pocIdx].price,
+        vah: rows[va.hiIdx].price,
+        val: rows[va.loIdx].price,
+        singles,
+        ib: { hi: ibHi, lo: ibLo },
+      });
+    }
+    // Newest-first (ISO dates sort lexicographically = chronologically).
+    sessions.sort((a, b2) => (a.date < b2.date ? 1 : a.date > b2.date ? -1 : 0));
+    return sessions;
+  }
+
+  // ─── buildKlineVp(bars, {tickSize}) — composite VP from klines (§4c) ─────
+  //
+  // ⚠ APPROXIMATION, LABELED (§4c rail): OHLCV bars do not say WHERE inside
+  // [l, h] the volume printed, so each bar's v is spread UNIFORMLY across its
+  // tick buckets. The return value carries approx:'bar-range' and KlineVpView
+  // keeps a permanent badge — tick-accurate volume-at-price is the footprint
+  // gutter (live session) or the collector's stored trades (§3), NEVER this.
+  function buildKlineVp(bars, opts) {
+    const tick = posOr(opts && opts.tickSize, 1);
+    const APPROX = 'bar-range'; // §4c label — rides the return value itself
+    const vol = new Map(); // bucket → volume
+    if (Array.isArray(bars)) {
+      for (const b of bars) {
+        // v must be a positive finite number: a zero-volume bar adds nothing
+        // and its 0-rows would drag the HVN/LVN median gate toward zero.
+        if (!validBar(b) || !Number.isFinite(b.v) || b.v <= 0) continue;
+        const buckets = barBuckets(b.l, b.h, tick);
+        if (!buckets) continue;
+        const per = b.v / buckets.length; // the uniform spread — THE approximation
+        for (const price of buckets) vol.set(price, (vol.get(price) || 0) + per);
+      }
+    }
+    if (!vol.size) {
+      // ProfileStore's NaN convention: "no data" must never look like price 0.
+      return { levels: [], poc: NaN, vah: NaN, val: NaN, hvns: [], lvns: [], approx: APPROX };
+    }
+    const levels = [...vol.entries()]
+      .map(([price, v]) => ({ price, vol: v }))
+      .sort((a, b2) => a.price - b2.price); // ascending — VP renders low→high
+    const vols = levels.map((l) => l.vol);
+    const n = levels.length;
+
+    // POC: max-volume level, ties → LOWEST price (ProfileStore convention).
+    let pocIdx = 0;
+    for (let i = 1; i < n; i++) if (vols[i] > vols[pocIdx]) pocIdx = i;
+    const va = valueArea70(vols, pocIdx);
+
+    // HVN/LVN: local extrema vs a ±2-neighbor window, gated on PROMINENCE ≥
+    // 25% of the MEDIAN level volume. Why a prominence gate at all, and why
+    // 25%-of-median: the uniform spread manufactures plateaus and ±1-bucket
+    // ripple wherever overlapping bar ranges shift by a tick, so the strict
+    // ">" rule ProfileStore uses on real tick data would flag that
+    // discretization noise as structure here. Requiring a node to clear its
+    // strongest (weakest) window neighbor by a quarter of a typical level's
+    // volume keeps only features larger than the noise floor the bar-range
+    // approximation itself introduces. The window is ±2 (not ±1) so a one-
+    // bucket blip flanked at distance two by a near-equal cannot pass.
+    // Edge rows are excluded: a node needs graded neighbors on BOTH sides.
+    const sortedVols = vols.slice().sort((a, b2) => a - b2);
+    const med = n % 2 ? sortedVols[(n - 1) / 2] : 0.5 * (sortedVols[n / 2 - 1] + sortedVols[n / 2]);
+    const prom = 0.25 * med;
+    const hvns = [], lvns = [];
+    for (let i = 1; i < n - 1; i++) {
+      let maxN = -Infinity, minN = Infinity;
+      for (let j = Math.max(0, i - 2); j <= Math.min(n - 1, i + 2); j++) {
+        if (j === i) continue;
+        if (vols[j] > maxN) maxN = vols[j];
+        if (vols[j] < minN) minN = vols[j];
+      }
+      if (vols[i] - maxN >= prom) hvns.push(levels[i].price);
+      else if (minN - vols[i] >= prom) lvns.push(levels[i].price);
+    }
+
+    return {
+      levels,
+      poc: levels[pocIdx].price,
+      vah: levels[va.hiIdx].price,
+      val: levels[va.loIdx].price,
+      hvns, lvns,
+      approx: APPROX,
+    };
+  }
+
+  // ─── rollingCorr(retsA, retsB, window) — rolling Pearson series (§4c) ────
+
+  /** Pearson r over two equal-length CLEANED arrays (callers filter non-
+   *  finite pairs first). NaN when n < 2 or either side has zero variance —
+   *  the correlation of a constant is undefined, and NaN says "undefined"
+   *  where a fabricated 0 would claim "uncorrelated" (quant.js hygiene).
+   *  Clamped to [−1, 1]: float rounding can put a perfect fit at 1 + 2e−16
+   *  and a view mapping r to a color scale must never see |r| > 1. */
+  function pearsonR(xs, ys) {
+    const n = xs.length;
+    if (n < 2) return NaN;
+    let mx = 0, my = 0;
+    for (let i = 0; i < n; i++) { mx += xs[i]; my += ys[i]; }
+    mx /= n; my /= n;
+    let sxx = 0, syy = 0, sxy = 0;
+    for (let i = 0; i < n; i++) {
+      const dx = xs[i] - mx, dy = ys[i] - my;
+      sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+    }
+    const den = Math.sqrt(sxx * syy);
+    if (!(den > 0)) return NaN;
+    return Math.max(-1, Math.min(1, sxy / den));
+  }
+
+  /** Rolling Pearson correlation over ALIGNED return arrays (§4c — MacroView's
+   *  BTC×ETH×PAXG block; the caller aligns by bar timestamp first): one output
+   *  {i, r} per index of the common length, r computed over the trailing
+   *  `window` samples ending AT index i. NaN-safety, two layers:
+   *    - a pair with either side non-finite is SKIPPED, never coerced to 0 —
+   *      a fabricated flat return would drag r toward 0 (fake decorrelation);
+   *    - r = NaN while the window holds fewer than window/2 valid pairs —
+   *      below half a window the estimate is noise wearing a confident
+   *      number, so we return "unknown" instead (small-n honesty, the same
+   *      rail as SessionSeriesStore.corr's mandatory n).
+   *  O(n·window) full recompute, no incremental sums: at kline scale
+   *  (n ≤ ~1000, window ≤ ~168) that is microseconds, and it keeps the
+   *  NaN-skipping exact instead of drift-prone. */
+  function rollingCorr(retsA, retsB, window) {
+    if (!Array.isArray(retsA) || !Array.isArray(retsB)) return [];
+    const w = Math.floor(finiteOr(window, 0));
+    if (w < 2) return []; // a 1-sample "correlation" is undefined — refuse
+    const n = Math.min(retsA.length, retsB.length);
+    const out = [];
+    const xs = [], ys = [];
+    for (let i = 0; i < n; i++) {
+      xs.length = 0; ys.length = 0;
+      for (let j = Math.max(0, i - w + 1); j <= i; j++) {
+        const a = retsA[j], b = retsB[j];
+        if (Number.isFinite(a) && Number.isFinite(b)) { xs.push(a); ys.push(b); }
+      }
+      out.push({ i, r: xs.length < w / 2 ? NaN : pearsonR(xs, ys) });
+    }
+    return out;
+  }
+
+  // ─── SessionSeriesStore({sampleMs}) — polled mids + session corr (§4c) ───
+  //
+  // For legs with NO history endpoint — HIP-3 dex perps expose live `allMids`
+  // only; `candleSnapshot` returns empty/500 keyless (§4c empirical data map,
+  // fixtures `_o3_notes`) — the ONLY honest correlation is one built from mids
+  // WE sampled this session (§0.7: no fabricated history, no backfill from a
+  // source that does not exist). This store is that accumulator: terminal.js
+  // pushes every polled mid through onSample and the store keeps at most one
+  // sample per key per sampleMs, gated on the EVENT/response ts — no
+  // Date.now() (replay rail; the poller's timestamp is the clock).
+  //
+  // SESSION-ANCHORED + SMALL-N HONESTY (§4c): corr() returns {r, n} and
+  // callers MUST display n — MacroView labels cells `session · n=…` and hides
+  // them below n = 30. A correlation over twelve minutes of samples is an
+  // anecdote; the sample count is part of the result, not droppable metadata.
+  function SessionSeriesStore(opts) {
+    const sampleMs = posOr(opts && opts.sampleMs, 60000);
+    const byKey = new Map(); // key → [{ts, px}] ascending (the gate enforces order)
+
+    /** Record one polled mid. Gated: accepted only when ts is ≥ sampleMs past
+     *  the key's last ACCEPTED sample — a 5 s poller and a 60 s poller thus
+     *  feed identical series (cadence lives here, not in the caller), and the
+     *  same comparison drops out-of-order ts (recorded history is never
+     *  rewritten). px must be a positive finite price: returns() takes logs.
+     *  Memory: growth is gate-bounded (~1.4k samples/key/day at the default
+     *  cadence) and deliberately NOT ring-capped — evicting old samples would
+     *  silently turn "session-anchored" into "trailing window" and the
+     *  `session · n=…` label would lie. */
+    function onSample(ts, key, px) {
+      if (!Number.isFinite(ts) || !Number.isFinite(px) || px <= 0) return;
+      if (typeof key !== 'string' || !key) return;
+      let arr = byKey.get(key);
+      if (!arr) { arr = []; byKey.set(key, arr); }
+      if (arr.length && ts - arr[arr.length - 1].ts < sampleMs) return;
+      arr.push({ ts, px });
+    }
+
+    /** Accepted samples for one key, oldest→newest: [{ts, px}]. A copy —
+     *  small by construction (see onSample), so safe to hand out, unlike the
+     *  live-reference returns of CvdStore/DepthHistoryStore. Unknown key → []. */
+    function series(key) {
+      const arr = byKey.get(key);
+      return arr ? arr.slice() : [];
+    }
+
+    /** Log-returns between CONSECUTIVE accepted samples: ln(px_i / px_{i−1}).
+     *  Log, not simple (quant.js logReturns convention): symmetric, summable,
+     *  and what corr()/rollingCorr consume. Guaranteed finite because
+     *  onSample only admits positive finite prices. */
+    function returns(key) {
+      const arr = byKey.get(key) || [];
+      const out = [];
+      for (let i = 1; i < arr.length; i++) out.push(Math.log(arr[i].px / arr[i - 1].px));
+      return out;
+    }
+
+    /** Session correlation {r, n} between two keys' RETURN series, paired by
+     *  SAMPLE INDEX (§4c): every key is fed by the same poll loop from page
+     *  open, so index i is the same wall-slice on both sides. Caveat stated,
+     *  not hidden: a key that JOINED LATE is offset by its missed samples —
+     *  that skew is the price of index pairing; it is why the anchor is the
+     *  session and why n is mandatory display (a late joiner shows small n).
+     *  Returns, not prices: price series are near-integrated, so price-level
+     *  correlation reads ≈ 1 for any two drifting assets — meaningless.
+     *  r is NaN below 2 valid pairs or at zero variance (pearsonR); n is the
+     *  number of pairs actually used, NaN-skipped pairs excluded. */
+    function corr(keyA, keyB) {
+      const ra = returns(keyA), rb = returns(keyB);
+      const m = Math.min(ra.length, rb.length);
+      const xs = [], ys = [];
+      for (let i = 0; i < m; i++) {
+        if (Number.isFinite(ra[i]) && Number.isFinite(rb[i])) { xs.push(ra[i]); ys.push(rb[i]); }
+      }
+      return { r: pearsonR(xs, ys), n: xs.length };
+    }
+
+    return { onSample, series, returns, corr, sampleMs };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalState = {
     TapeStore, BookStore, AggBookStore, FootprintStore, CvdStore, ProfileStore, LiqStore,
     // O-2 (§4b): heatmap history + labeled heuristic/model layers.
     DepthHistoryStore, SpoofIcebergDetector, LiqHeatmapModel,
+    // O-3 (§4c): structure builders (pure functions over klines) + the
+    // session-correlation store for history-less HIP-3 legs.
+    buildTpo, buildKlineVp, rollingCorr, SessionSeriesStore,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalState;

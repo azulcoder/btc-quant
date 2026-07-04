@@ -1573,12 +1573,713 @@
     return { mount, render };
   }
 
+  // ─── O-3 shared chrome (§4c): permanent in-canvas honesty badge ──────────
+  //
+  // Same warn-palette badge as LiqHeatmapView's 'ESTIMATED (model)' (§0.4
+  // label rail), parameterized so KlineVpView can wear its mandatory
+  // 'bar-range approximation' text: drawn INTO the canvas every frame — it
+  // can never scroll away or be covered by data.
+  function drawWarnBadge(ctx, w, text) {
+    ctx.font = '600 9px ' + cssVar('--mono', 'monospace');
+    const tw = ctx.measureText(text).width;
+    const x = w - tw - 14, y = 4;
+    ctx.fillStyle = cssVar('--warn-bg', '#3a2a12');
+    ctx.fillRect(x, y, tw + 10, 15);
+    ctx.strokeStyle = cssVar('--warn-fg', '#ffd591');
+    ctx.strokeRect(x + 0.5, y + 0.5, tw + 9, 14);
+    ctx.fillStyle = cssVar('--warn-fg', '#ffd591');
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, x + 5, y + 8);
+  }
+
+  /** Signed percent with '—' for non-finite (never a fabricated 0 — §0.7). */
+  function fmtPct(x, dp) {
+    if (!Number.isFinite(x)) return '—';
+    const d = dp == null ? 2 : dp;
+    return (x > 0 ? '+' : '') + x.toFixed(d) + '%';
+  }
+
+  // ═══ HistChartView — Bybit kline candlesticks + volume + bar replay (O-3, §4c) ═══
+  //
+  // HISTORICAL PANEL, REST-fed, per-source labeled 'bybit linear klines ·
+  // REST' in the header. Deliberately NO live-WS merging (§0.7 honesty rail):
+  // appending live trades onto REST klines would splice two transports into
+  // one unlabeled series — this panel stays a pure REST snapshot, refreshed
+  // only on interval change, while the live panels above carry the session.
+  //
+  // BAR REPLAY (CryExc feature 13): a cursor reveals bars strictly in order —
+  // chart.setData only ever receives bars[0..cursor], so NOTHING right of the
+  // cursor exists in the chart (no peeking; scrubbing back cannot leak the
+  // future via autoscale or crosshair). While cursor < last bar the panel
+  // header shows a 'REPLAY (historical bars)' flag (§0 — a rewound chart must
+  // never read as the live edge); 'live edge' restores the full data set.
+  //
+  // Indicators: SMA 20/50/200 from window.Quant.sma (quant.js — house rule:
+  // never reimplement math that exists there). An SMA is a trailing window,
+  // so precomputing it over the FULL series and slicing to the cursor is
+  // bit-identical to computing on the revealed slice — no lookahead leaks.
+  // Heikin-Ashi is implemented LOCALLY below: it is a presentation transform
+  // (candle re-drawing convention), not portfolio math — quant.js is the home
+  // of testable math, not display recodings. SMAs stay computed on RAW closes
+  // even in HA mode (HA closes are synthetic; averaging them would present a
+  // made-up series as the market's moving average).
+  function HistChartView() {
+    let root = null, chart = null, candle = null, volume = null, legend = null, note = null;
+    let smaSeries = {};             // period → line series
+    let smaFull = {};               // period → full-length SMA array (raw closes)
+    const SMA_PERIODS = [20, 50, 200];
+    const SMA_TOKEN = { 20: 'c1', 50: 'c2', 200: 'c6' };   // categorical tokens — indicators aren't P&L
+    let bars = null;                // chronological bars (LIVE ref from bootstrap — read-only)
+    let cursor = -1;                // index of the last VISIBLE bar
+    let playing = false, timer = null, speed = 1;
+    let ha = false;
+    const smaOn = { 20: false, 50: false, 200: false };
+    let ctl = {};                   // control elements (from terminal.html chrome)
+
+    /** Heikin-Ashi transform — PRESENTATION ONLY (see view header): standard
+     *  recursion haC=(o+h+l+c)/4, haO=(prevHaO+prevHaC)/2 seeded at (o+c)/2.
+     *  Pure function of the input slice; input bars are never mutated. */
+    function heikinAshi(src) {
+      const out = new Array(src.length);
+      let prevO = NaN, prevC = NaN;
+      for (let i = 0; i < src.length; i++) {
+        const b = src[i];
+        const hc = (b.o + b.h + b.l + b.c) / 4;
+        const ho = i === 0 ? (b.o + b.c) / 2 : (prevO + prevC) / 2;
+        out[i] = { ts: b.ts, o: ho, h: Math.max(b.h, ho, hc), l: Math.min(b.l, ho, hc), c: hc, v: b.v };
+        prevO = ho; prevC = hc;
+      }
+      return out;
+    }
+
+    function stopPlay() {
+      playing = false;
+      if (timer) { clearInterval(timer); timer = null; }
+      if (ctl.playBtn) ctl.playBtn.textContent = '▶ play';
+    }
+
+    function startPlay() {
+      if (!bars || bars.length < 2) return;
+      // At the live edge there is nothing left to reveal — wrap to bar 0 so
+      // 'play' always means "watch the history unfold from the start".
+      if (cursor >= bars.length - 1) cursor = 0;
+      playing = true;
+      if (ctl.playBtn) ctl.playBtn.textContent = '⏸ pause';
+      if (timer) clearInterval(timer);
+      timer = setInterval(() => {
+        if (!bars || cursor >= bars.length - 1) { stopPlay(); return; }
+        cursor++;
+        setView();
+      }, Math.max(50, Math.round(1000 / speed)));
+    }
+
+    /** Push bars[0..cursor] into the chart. THE no-peek boundary: this is the
+     *  only place series data is set, and it never reads past the cursor. */
+    function setView() {
+      if (!chart || !bars || !bars.length) return;
+      const n = bars.length;
+      cursor = Math.max(0, Math.min(cursor, n - 1));
+      const p = pal();
+      const vis = bars.slice(0, cursor + 1);
+      const disp = ha ? heikinAshi(vis) : vis;
+      candle.setData(disp.map((b) => ({ time: b.ts / 1000, open: b.o, high: b.h, low: b.l, close: b.c })));
+      // Volume histogram always uses RAW bar volume + raw up/down coloring —
+      // HA recolors candles, not what actually traded.
+      volume.setData(vis.map((b) => ({ time: b.ts / 1000, value: b.v, color: rgba(b.c >= b.o ? p.up : p.down, 0.45) })));
+      for (const per of SMA_PERIODS) {
+        const s = smaSeries[per];
+        if (!s) continue;
+        if (smaOn[per] && smaFull[per]) {
+          const pts = [];
+          const arr = smaFull[per];
+          for (let i = 0; i <= cursor; i++) {
+            if (Number.isFinite(arr[i])) pts.push({ time: bars[i].ts / 1000, value: arr[i] });
+          }
+          s.setData(pts);
+          s.applyOptions({ visible: true });
+        } else {
+          s.applyOptions({ visible: false });
+        }
+      }
+      const replaying = cursor < n - 1;
+      if (ctl.flagEl) ctl.flagEl.hidden = !replaying;   // 'REPLAY (historical bars)' — §0 flag
+      if (ctl.scrub) { ctl.scrub.max = String(n - 1); ctl.scrub.value = String(cursor); }
+      renderLegend();
+    }
+
+    function renderLegend() {
+      if (!legend) return;
+      const p = pal();
+      let html = '';
+      for (const per of SMA_PERIODS) {
+        if (smaOn[per]) html += '<span><i class="sw" style="background:' + p[SMA_TOKEN[per]] + '"></i>SMA ' + per + '</span>';
+      }
+      if (ha) html += '<span>Heikin-Ashi (display transform — SMAs stay on raw closes)</span>';
+      html += '<span class="cvd-anchor">bybit linear klines · REST · no live merge (§0.7)</span>';
+      legend.innerHTML = html;
+    }
+
+    function mount(el, opts) {
+      root = el;
+      ctl = opts || {};
+      const LC = global.LightweightCharts;
+      if (!LC || !LC.createChart) {
+        // Honest degrade (index.html vendoring rule): say why, fabricate nothing.
+        root.innerHTML = '<div class="chart-na">vendored lightweight-charts unavailable — historical chart disabled.</div>';
+        return;
+      }
+      const p = pal();
+      chart = LC.createChart(root, {
+        height: root.clientHeight || 380,
+        layout: { background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace') },
+        grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
+        timeScale: { timeVisible: true, secondsVisible: false, borderColor: p.border },
+        rightPriceScale: { borderColor: p.border, scaleMargins: { top: 0.06, bottom: 0.22 } },
+        crosshair: { mode: 0 },
+      });
+      candle = chart.addCandlestickSeries({
+        upColor: p.up, downColor: p.down, wickUpColor: p.up, wickDownColor: p.down, borderVisible: false,
+      });
+      // Volume rides its own overlay scale pinned to the bottom ~16% of the pane.
+      volume = chart.addHistogramSeries({ priceScaleId: 'vol', priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false });
+      chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.84, bottom: 0 } });
+      for (const per of SMA_PERIODS) {
+        smaSeries[per] = chart.addLineSeries({
+          color: p[SMA_TOKEN[per]], lineWidth: 1, visible: false,
+          priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+        });
+      }
+      legend = document.createElement('div');
+      legend.className = 'term-cvd-legend';
+      root.appendChild(legend);
+      note = document.createElement('div');
+      note.className = 'chart-na hist-note';
+      note.textContent = 'awaiting bybit kline history (REST)…';
+      root.appendChild(note);
+
+      // Chart width tracks the container (lightweight-charts sizes once at
+      // create; without this a window resize leaves a stale-width canvas).
+      window.addEventListener('resize', () => {
+        if (chart) chart.applyOptions({ width: root.clientWidth });
+      });
+
+      // ── Control wiring — elements live in the panel chrome (terminal.html);
+      // the view owns their behavior (TapeView filter-input split). ──
+      if (ctl.intervalSel && typeof ctl.onInterval === 'function') {
+        ctl.intervalSel.addEventListener('change', () => ctl.onInterval(ctl.intervalSel.value));
+      }
+      if (ctl.smaInputs) {
+        for (const per of SMA_PERIODS) {
+          const inp = ctl.smaInputs[per];
+          if (!inp) continue;
+          smaOn[per] = !!inp.checked;
+          inp.addEventListener('change', () => { smaOn[per] = !!inp.checked; setView(); });
+        }
+      }
+      if (ctl.haInput) {
+        ha = !!ctl.haInput.checked;
+        ctl.haInput.addEventListener('change', () => { ha = !!ctl.haInput.checked; setView(); });
+      }
+      if (ctl.playBtn) ctl.playBtn.addEventListener('click', () => { if (playing) stopPlay(); else startPlay(); });
+      if (ctl.stepBtn) ctl.stepBtn.addEventListener('click', () => { stopPlay(); cursor++; setView(); });
+      if (ctl.speedSel) {
+        speed = Number(ctl.speedSel.value) || 1;
+        ctl.speedSel.addEventListener('change', () => {
+          speed = Number(ctl.speedSel.value) || 1;
+          if (playing) startPlay();   // re-arm the interval at the new cadence
+        });
+      }
+      if (ctl.scrub) ctl.scrub.addEventListener('input', () => { stopPlay(); cursor = Number(ctl.scrub.value) || 0; setView(); });
+      if (ctl.liveBtn) ctl.liveBtn.addEventListener('click', () => { stopPlay(); cursor = bars ? bars.length - 1 : -1; setView(); });
+    }
+
+    /** slice = { bars } — chronological klines from terminal-hist.js (already
+     *  reversed from Bybit's NEWEST-FIRST wire order) or null on fetch failure. */
+    function render(slice) {
+      if (!chart) return;
+      const next = slice && slice.bars;
+      if (next === bars) return;   // identity check: REST data only changes on (re)fetch
+      stopPlay();
+      bars = next;
+      if (!bars || !bars.length) {
+        note.hidden = false;
+        note.textContent = 'no kline history — bybit REST fetch failed or returned empty (transient; will retry on interval change)';
+        candle.setData([]); volume.setData([]);
+        for (const per of SMA_PERIODS) if (smaSeries[per]) smaSeries[per].setData([]);
+        return;
+      }
+      note.hidden = true;
+      const closes = bars.map((b) => b.c);
+      const Q = global.Quant;
+      for (const per of SMA_PERIODS) {
+        // quant.js sma — house rule: indicator math is never reimplemented here.
+        smaFull[per] = (Q && Q.sma) ? Q.sma(closes, per) : null;
+      }
+      cursor = bars.length - 1;   // fresh data always lands at the live edge
+      setView();
+      chart.timeScale().fitContent();
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ TpoView — Market Profile letter profile from 30m klines (O-3, §4c) ═══
+  //
+  // CLASSICAL TPO (see buildTpo in terminal-state.js): each 30m bar marks its
+  // full H–L range for its clock period — letters A..Z then a..v map period
+  // index 0..47 of the UTC day. Column-stacking per price row: the k-th
+  // letter at a row sits in the k-th letter column, so row width literally IS
+  // the TPO count. Header label 'kline-range TPO · 30m · bybit' (per-source,
+  // §0.7). POC line = --accent, VAH/VAL dashed --muted (same vocabulary as
+  // the footprint gutter); single prints get a '•' gutter mark; the initial
+  // balance (first 2 OBSERVED periods) draws as a left bracket.
+  function TpoView() {
+    let root = null, canvas = null, sessionSel = null;
+    let sessions = null, tick = 1;
+    let selDate = null;             // selected session date ('YYYY-MM-DD') — survives refreshes
+    const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv';   // 48 × 30m periods/UTC day
+    const GUT_LEFT = 26, GUT_AXIS = 58;
+
+    function mount(el, opts) {
+      root = el;
+      canvas = document.createElement('canvas');
+      canvas.className = 'term-canvas';
+      root.appendChild(canvas);
+      sessionSel = (opts || {}).sessionSel || null;
+      if (sessionSel) sessionSel.addEventListener('change', () => { selDate = sessionSel.value; draw(); });
+    }
+
+    function syncSelect() {
+      if (!sessionSel || !sessions) return;
+      const dates = sessions.map((s) => s.date);
+      const want = dates.join(',');
+      if (sessionSel.dataset.dates !== want) {
+        sessionSel.dataset.dates = want;
+        sessionSel.innerHTML = dates.map((d) => '<option value="' + esc(d) + '">' + esc(d) + '</option>').join('');
+      }
+      if (dates.indexOf(selDate) < 0) selDate = dates[0] || null;   // sessions are NEWEST-FIRST → [0] = today
+      if (selDate) sessionSel.value = selDate;
+    }
+
+    function draw() {
+      if (!canvas) return;
+      const { ctx, w, h } = fitCanvas(canvas);
+      const p = pal();
+      ctx.clearRect(0, 0, w, h);
+      ctx.textBaseline = 'middle';
+      const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
+
+      if (!sessions || !sessions.length) {
+        font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+        ctx.fillText('awaiting 30m kline history (bybit REST)…', 10, 18);
+        return;
+      }
+      let s = null;
+      for (const cand of sessions) if (cand.date === selDate) { s = cand; break; }
+      if (!s) s = sessions[0];
+      const rows = s.rows;   // price-ASCENDING (buildTpo contract)
+      const lo = rows[0].price, hi = rows[rows.length - 1].price;
+      const nRows = Math.round((hi - lo) / tick) + 1;
+      if (nRows > 400) {
+        font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+        ctx.fillText('session spans ' + nRows + ' rows at $' + tick + ' — degenerate tick, not drawn', 10, 18);
+        return;
+      }
+      const capH = 16;                        // caption strip at the top
+      const plotH = h - capH - 4;
+      const rowH = plotH / nRows;
+      const yOf = (price) => capH + ((hi - price) / tick) * rowH;   // row CENTER-ish top edge
+
+      // Letter geometry: fit the widest row; mono glyphs read down to ~6px.
+      let maxLetters = 1;
+      for (const r of rows) if (r.periods.length > maxLetters) maxLetters = r.periods.length;
+      const plotW = w - GUT_LEFT - GUT_AXIS;
+      const charW = Math.max(5, Math.min(10, Math.floor(plotW / maxLetters)));
+      const fpx = Math.max(6, Math.min(10, Math.floor(Math.min(rowH, charW) + 1)));
+
+      // Rows: letters column-stacked; VA membership brightens, POC row accents.
+      const singleSet = new Set(s.singles);
+      for (const r of rows) {
+        const y = yOf(r.price) + rowH / 2;
+        const inVa = r.price >= s.val && r.price <= s.vah;
+        font(fpx, r.price === s.poc);
+        ctx.textAlign = 'left';
+        for (let k = 0; k < r.periods.length; k++) {
+          const idx = r.periods[k];
+          ctx.fillStyle = r.price === s.poc ? p.accent : inVa ? p.fg : p.muted;
+          ctx.fillText(LETTERS[idx] || '?', GUT_LEFT + k * charW, y);
+        }
+        // Single prints (interior one-period rows): '•' gutter mark — the
+        // structure read is "price rejected fast", flagged without color.
+        if (singleSet.has(r.price)) {
+          font(9, true); ctx.fillStyle = p.accent2;
+          ctx.fillText('•', GUT_LEFT - 10, y);
+        }
+      }
+
+      // POC / VAH / VAL reference lines (footprint-gutter vocabulary). Labels
+      // sit in the same right gutter as the price axis, so they get an opaque
+      // backing box — otherwise they overprint the axis label at their row
+      // (observed collision in the live dogfood pass).
+      const hline = (price, color, dash, label) => {
+        if (!Number.isFinite(price)) return;
+        const y = yOf(price) + rowH / 2;
+        ctx.save();
+        if (dash) ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = color; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(GUT_LEFT - 4, y); ctx.lineTo(w - GUT_AXIS, y); ctx.stroke();
+        ctx.restore();
+        font(9, true);
+        const txt = label + ' ' + fmtUsd(price);
+        const tw = ctx.measureText(txt).width;
+        ctx.fillStyle = rgba(p.panel2, 0.95);
+        ctx.fillRect(w - GUT_AXIS + 1, y - 6, tw + 4, 12);
+        ctx.fillStyle = color; ctx.textAlign = 'left';
+        ctx.fillText(txt, w - GUT_AXIS + 2, y);
+      };
+      hline(s.poc, p.accent, false, 'POC');
+      hline(s.vah, p.muted, true, 'VAH');
+      hline(s.val, p.muted, true, 'VAL');
+
+      // IB bracket (left edge): first 2 OBSERVED periods' raw range — a
+      // bracket, not a row (raw l/h, clamped to the plot).
+      if (Number.isFinite(s.ib.hi) && Number.isFinite(s.ib.lo) && s.ib.hi >= s.ib.lo) {
+        const yT = Math.max(capH, yOf(Math.min(s.ib.hi, hi)));
+        const yB = Math.min(capH + plotH, yOf(Math.max(s.ib.lo, lo)) + rowH);
+        ctx.strokeStyle = p.accent2; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(8, yT); ctx.lineTo(4, yT); ctx.lineTo(4, yB); ctx.lineTo(8, yB);
+        ctx.stroke();
+        font(8, true); ctx.fillStyle = p.accent2;
+        ctx.save();
+        ctx.translate(10, (yT + yB) / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center';
+        ctx.fillText('IB', 0, 0);
+        ctx.restore();
+      }
+
+      // Price axis (right), thinned to ~16px spacing.
+      const labStep = Math.max(1, Math.ceil(16 / rowH));
+      font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'right';
+      for (let r = 0; r < nRows; r += labStep) {
+        const price = hi - r * tick;
+        ctx.fillText(fmtUsd(price), w - 2, yOf(price) + rowH / 2);
+      }
+
+      // Caption: session date + construction statement (per-source label).
+      font(9, true); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+      ctx.fillText(s.date + ' UTC · 30m letters · $' + tick + ' rows · • = single print', 4, 8);
+    }
+
+    /** slice = { sessions (buildTpo output, NEWEST-FIRST), tickSize } */
+    function render(slice) {
+      sessions = slice.sessions || null;
+      tick = slice.tickSize || 1;
+      syncSelect();
+      draw();
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ KlineVpView — composite volume profile from klines (O-3, §4c) ═══
+  //
+  // ⚠ BAR-RANGE APPROXIMATION, permanently badged (§4c rail): buildKlineVp
+  // spreads each bar's volume uniformly across its H–L ticks because OHLCV
+  // bars don't say where volume printed — tick-accurate VP is the footprint
+  // gutter (live session) or the collector's stored trades, never this panel.
+  // Follows the historical chart's lookback+interval (same bars, stated in
+  // the hint). HVN/LVN carry glyph ticks; levels away from the CURRENT price
+  // get dashed extension lines — untested at today's price until price
+  // returns to them (the CryExc 'extension' read).
+  function KlineVpView() {
+    let root = null, canvas = null;
+    const GUT_AXIS = 58;
+
+    function mount(el) {
+      root = el;
+      canvas = document.createElement('canvas');
+      canvas.className = 'term-canvas';
+      root.appendChild(canvas);
+    }
+
+    /** slice = { vp: buildKlineVp output, lastPrice, interval } */
+    function render(slice) {
+      if (!canvas) return;
+      const { ctx, w, h } = fitCanvas(canvas);
+      const p = pal();
+      ctx.clearRect(0, 0, w, h);
+      ctx.textBaseline = 'middle';
+      const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
+
+      const vp = slice.vp;
+      if (!vp || !vp.levels || !vp.levels.length) {
+        font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+        ctx.fillText('awaiting kline history for the composite profile…', 10, 30);
+        drawWarnBadge(ctx, w, 'bar-range approximation');
+        return;
+      }
+      const levels = vp.levels;   // price-ASCENDING (buildKlineVp contract)
+      const lo = levels[0].price, hi = levels[levels.length - 1].price;
+      const span = Math.max(hi - lo, 1e-9);
+      const capH = 16;
+      const plotH = h - capH - 4;
+      const rowH = Math.max(1, plotH / levels.length);
+      const yOf = (price) => capH + plotH * (hi - price) / span;
+      let maxVol = 0;
+      for (const lv of levels) if (lv.vol > maxVol) maxVol = lv.vol;
+      if (!(maxVol > 0)) return;
+      const barMaxW = w - GUT_AXIS - 8;
+
+      // Levels: in-VA bars brighter (--accent2 family), outside dimmer — the
+      // VA boundary is also drawn, so color is not the only cue.
+      for (const lv of levels) {
+        const y = yOf(lv.price);
+        const inVa = lv.price >= vp.val && lv.price <= vp.vah;
+        ctx.fillStyle = rgba(p.accent2, inVa ? 0.55 : 0.22);
+        ctx.fillRect(0, y - rowH / 2 + 0.5, barMaxW * (lv.vol / maxVol), Math.max(1, rowH - 1));
+      }
+
+      const last = slice.lastPrice;
+      // HVN/LVN glyph ticks at the bar tip + dashed EXTENSION lines out to the
+      // axis for nodes away from the current price (untested until revisited).
+      const mark = (price, glyph, color) => {
+        const y = yOf(price);
+        let vol = 0;
+        for (const lv of levels) if (lv.price === price) { vol = lv.vol; break; }
+        const xTip = barMaxW * (vol / maxVol);
+        if (Number.isFinite(last) && Math.abs(price - last) > span * 0.005) {
+          ctx.save();
+          ctx.setLineDash([3, 4]);
+          ctx.strokeStyle = rgba(color, 0.6); ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(xTip + 8, y); ctx.lineTo(w - GUT_AXIS, y); ctx.stroke();
+          ctx.restore();
+        }
+        font(9, true); ctx.fillStyle = color; ctx.textAlign = 'left';
+        ctx.fillText(glyph, xTip + 2, y);
+      };
+      for (const price of vp.hvns) mark(price, '◆', p.accent);
+      for (const price of vp.lvns) mark(price, '◇', p.accent2);
+
+      // POC / VAH / VAL lines + labels (same vocabulary as footprint/TPO).
+      // Labels get the same opaque backing as TpoView's: VAH/POC/VAL/last can
+      // land within a text-height of each other and would overprint.
+      const hline = (price, color, dash, label) => {
+        if (!Number.isFinite(price)) return;
+        const y = yOf(price);
+        ctx.save();
+        if (dash) ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = color; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - GUT_AXIS, y); ctx.stroke();
+        ctx.restore();
+        font(9, true);
+        const txt = label + ' ' + fmtUsd(price);
+        const tw = ctx.measureText(txt).width;
+        ctx.fillStyle = rgba(p.panel2, 0.95);
+        ctx.fillRect(w - GUT_AXIS + 1, y - 6, tw + 4, 12);
+        ctx.fillStyle = color; ctx.textAlign = 'left';
+        ctx.fillText(txt, w - GUT_AXIS + 2, y);
+      };
+      hline(vp.poc, p.accent, false, 'POC');
+      hline(vp.vah, p.muted, true, 'VAH');
+      hline(vp.val, p.muted, true, 'VAL');
+
+      // Current price reference (bybit live trades — same venue as the kline
+      // profile, so the overlay is single-source; labeled 'last').
+      if (Number.isFinite(last) && last >= lo && last <= hi) {
+        const y = yOf(last);
+        ctx.save();
+        ctx.setLineDash([2, 3]);
+        ctx.strokeStyle = p.fg; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - GUT_AXIS, y); ctx.stroke();
+        ctx.restore();
+        font(9, true);
+        const txt = 'last ' + fmtUsd(last);
+        const tw = ctx.measureText(txt).width;
+        ctx.fillStyle = rgba(p.panel2, 0.95);
+        ctx.fillRect(w - GUT_AXIS + 1, y - 6, tw + 4, 12);
+        ctx.fillStyle = p.fg; ctx.textAlign = 'left';
+        ctx.fillText(txt, w - GUT_AXIS + 2, y);
+      }
+
+      // Caption + permanent badge (§4c label rail — never scrolls away).
+      font(9, true); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+      // Canvas text, not markup — no esc() (that helper emits HTML entities);
+      // the interval string is our own whitelisted select value anyway.
+      ctx.fillText('composite VP · bybit klines (' + String(slice.interval || '') + ') · ◆ HVN · ◇ LVN · dashed = untested extension', 4, 8);
+      drawWarnBadge(ctx, w, 'bar-range approximation');
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ FundingArbView — cross-venue funding table (O-3, §4c) ═══
+  //
+  // DESCRIPTIVE ONLY — the note row states it verbatim: carry remains
+  // off-board (B3, RESEARCH.md); a funding spread here is a fact about three
+  // venues' prints, never a trade instruction. Sources are per-row labeled:
+  // bybit = live WS tickers, binancef = existing 5s/60s REST poller, okx =
+  // the O-3 60s REST poll (silent-null tolerated → '—' cells, §4c).
+  // Annualized = rate × 8760/intervalH (§4c formula); intervalH is 8 for
+  // bybit/binancef (their BTC-perp nextFundingTs spacing) and comes from the
+  // OKX funding response for okx (normalizeOkxFunding derives it, fallback 8).
+  function FundingArbView() {
+    let root = null, rows = {}, spreadEl = null;
+    const VENUES = ['bybit', 'binancef', 'okx'];
+    const SRC = { bybit: 'WS tickers', binancef: 'REST 5s/60s', okx: 'REST 60s' };
+
+    function mount(el) {
+      root = el;
+      const table = document.createElement('table');
+      table.className = 'farb-table';
+      table.innerHTML = '<thead><tr>'
+        + '<th>venue</th><th>mark</th><th>funding</th>'
+        + '<th title="rate × 8760/intervalH — descriptive, ignores compounding and rate drift">annualized</th>'
+        + '<th title="countdown to the displayed rate’s settlement">next in</th>'
+        + '<th>OI</th><th>OI $</th>'
+        + '</tr></thead>';
+      const tbody = document.createElement('tbody');
+      for (const ex of VENUES) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td class="ex ex-' + ex + '">' + ex + ' <span class="farb-src">' + SRC[ex] + '</span></td>'
+          + '<td class="num mark">—</td><td class="num fund">—</td><td class="num ann">—</td>'
+          + '<td class="num next">—</td><td class="num oi">—</td><td class="num oiusd">—</td>';
+        tbody.appendChild(tr);
+        rows[ex] = tr;
+      }
+      const sp = document.createElement('tr');
+      sp.className = 'farb-spread';
+      sp.innerHTML = '<td colspan="7">spread: —</td>';
+      tbody.appendChild(sp);
+      spreadEl = sp.firstChild;
+      table.appendChild(tbody);
+      root.appendChild(table);
+      root.insertAdjacentHTML('beforeend',
+        '<div class="farb-note">descriptive only — carry remains off-board (B3); a spread is a fact, not a trade.</div>');
+    }
+
+    /** slice = { venues: {ex → {mark, last, fundingRate, nextFundingTs,
+     *  intervalH, oi, oiUsd}}, nowMs } — bootstrap-composed; '—' for absent. */
+    function render(slice) {
+      if (!root) return;
+      const anns = [];   // [ex, annualized %] for the spread footer
+      for (const ex of VENUES) {
+        const v = (slice.venues || {})[ex] || {};
+        const tds = rows[ex].children;
+        // OKX has no keyless mark feed on this page — its price cell shows the
+        // venue's own LAST TRADE, labeled, rather than borrowing another
+        // venue's mark (§0.7 per-source rail).
+        if (Number.isFinite(v.mark)) tds[1].textContent = fmtUsd(v.mark, 1);
+        else if (Number.isFinite(v.last)) tds[1].textContent = fmtUsd(v.last, 1) + ' (last)';
+        else tds[1].textContent = '—';
+        const fr = v.fundingRate;
+        if (Number.isFinite(fr)) {
+          tds[2].textContent = (fr * 100).toFixed(4) + '%';
+          tds[2].className = 'num fund ' + (fr > 0 ? 'pos' : fr < 0 ? 'neg' : '');
+          const iv = Number.isFinite(v.intervalH) && v.intervalH > 0 ? v.intervalH : 8;
+          const ann = fr * (8760 / iv) * 100;   // §4c: rate × 8760/intervalH
+          tds[3].textContent = fmtPct(ann, 1);
+          tds[3].className = 'num ann ' + (ann > 0 ? 'pos' : ann < 0 ? 'neg' : '');
+          anns.push([ex, ann]);
+        } else {
+          tds[2].textContent = '—'; tds[2].className = 'num fund';
+          tds[3].textContent = '—'; tds[3].className = 'num ann';
+        }
+        tds[4].textContent = Number.isFinite(v.nextFundingTs) ? countdown(v.nextFundingTs - slice.nowMs) : '—';
+        tds[5].textContent = Number.isFinite(v.oi) ? fmtQty(v.oi) + ' BTC' : '—';
+        tds[6].textContent = Number.isFinite(v.oiUsd) ? fmtCompactUsd(v.oiUsd) : '—';
+      }
+      if (anns.length >= 2) {
+        let mx = anns[0], mn = anns[0];
+        for (const a of anns) { if (a[1] > mx[1]) mx = a; if (a[1] < mn[1]) mn = a; }
+        // Annualized %-points → basis points (1% = 100 bp).
+        spreadEl.textContent = 'annualized spread: ' + ((mx[1] - mn[1]) * 100).toFixed(1)
+          + ' bp (' + mx[0] + ' − ' + mn[0] + ')';
+      } else {
+        spreadEl.textContent = 'annualized spread: — (needs ≥ 2 venues reporting)';
+      }
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ MacroView — HIP-3 mids strip + correlation block (O-3, §4c) ═══
+  //
+  // The honest macro panel keyless crypto rails allow (§4c empirical map):
+  // Hyperliquid HIP-3 index/commodity perps expose LIVE MIDS ONLY (no
+  // keyless history), so HIP-3 legs show session-% from OUR polled samples
+  // and session correlation labeled with n — cells hide behind 'accruing'
+  // below n=30 because a 20-minute correlation is an anecdote wearing a
+  // number. History-backed legs (BTC/ETH/PAXG, Bybit klines) get a real 7d
+  // rolling correlation, labeled '7d · 1h bars'. km:GOLD vs PAXG divergence
+  // is its own cell: the HIP-3 gold perp persistently trades ~4% rich vs the
+  // tokenized-gold proxy — that tracking error is exactly why the caveat
+  // line exists, so we SHOW it instead of averaging it away.
+  function MacroView() {
+    let root = null, stripEl = null, corrEl = null;
+
+    function mount(el) {
+      root = el;
+      stripEl = document.createElement('div');
+      stripEl.className = 'macro-strip';
+      root.appendChild(stripEl);
+      corrEl = document.createElement('div');
+      corrEl.className = 'macro-corr';
+      root.appendChild(corrEl);
+      root.insertAdjacentHTML('beforeend',
+        '<div class="farb-note">on-chain perp/token proxies — tracking error vs the real index · no CME feeds.</div>');
+    }
+
+    /** slice = { strip:[{label, px, pctOnly, sessPct, src}],
+     *            corr7d:{btcEth,btcPaxg,ethPaxg}|null,
+     *            sessCorr:[{label, r, n}], goldPrem } — bootstrap-composed. */
+    function render(slice) {
+      if (!root) return;
+      let html = '';
+      for (const it of slice.strip || []) {
+        // km:US500 is a SCALED contract — its mid is not the index level, so
+        // the price cell is suppressed and only the %-change is meaningful.
+        const px = it.pctOnly ? '<span class="macro-scaled">(scaled — % only)</span>'
+          : (Number.isFinite(it.px) ? fmtUsd(it.px, it.px < 100 ? 2 : it.px < 10000 ? 1 : 0) : '—');
+        const cls = it.sessPct > 0 ? 'pos' : it.sessPct < 0 ? 'neg' : '';
+        html += '<div class="macro-cell">'
+          + '<span class="k">' + esc(it.label) + ' <i class="macro-src">' + esc(it.src || '') + '</i></span>'
+          + '<span class="v num">' + px + '</span>'
+          + '<span class="v num ' + cls + '" title="change since this page’s first sample — session-local, no backfill (§0.7)">' + fmtPct(it.sessPct) + ' <i class="macro-src">session</i></span>'
+          + '</div>';
+      }
+      stripEl.innerHTML = html;
+
+      const fmtR = (r) => Number.isFinite(r) ? r.toFixed(2) : '—';
+      const c7 = slice.corr7d;
+      let ch = '<div class="macro-corr-head">correlation</div>';
+      const row = (label, val, tag) =>
+        '<div class="macro-corr-row"><span>' + label + '</span><span class="num">' + val + '</span><span class="macro-src">' + tag + '</span></div>';
+      ch += row('BTC × ETH', fmtR(c7 ? c7.btcEth : NaN), '7d · 1h bars');
+      ch += row('BTC × PAXG', fmtR(c7 ? c7.btcPaxg : NaN), '7d · 1h bars');
+      ch += row('ETH × PAXG', fmtR(c7 ? c7.ethPaxg : NaN), '7d · 1h bars');
+      for (const sc of slice.sessCorr || []) {
+        // Small-n honesty (§4c): below n=30 the cell says it is ACCRUING —
+        // the sample count is part of the result, not droppable metadata.
+        if (sc.n >= 30) ch += row(esc(sc.label), fmtR(sc.r), 'session · n=' + sc.n);
+        else ch += row(esc(sc.label), 'n=' + (sc.n || 0) + ' — accruing', 'session');
+      }
+      ch += row('km:GOLD vs PAXG', fmtPct(slice.goldPrem, 2),
+        'divergence — the HIP-3 gold perp trades rich vs tokenized gold; informative, not an error to hide');
+      corrEl.innerHTML = ch;
+    }
+
+    return { mount, render };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalViews = {
     FootprintView, DomLadderView, TapeView, AggBookView, HeaderStatsView, LiqFeedView,
     // O-2 (§4b): depth-history heatmap + labeled model/heuristic panels.
     BookHeatmapView, LiqHeatmapView, DetectionFeedView,
+    // O-3 (§4c): structure panels — historical chart + TPO + composite VP +
+    // funding table + macro strip, every one per-source labeled.
+    HistChartView, TpoView, KlineVpView, FundingArbView, MacroView,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalViews;

@@ -135,6 +135,86 @@
       <div id="view-cvd" class="term-cvd"></div>
     </section>
 
+    <!-- ═══ O-3 STRUCTURE section (§4c) — REST-fed historical/structure panels,
+         between the CVD row and the settings row. Every panel header carries
+         its source/honesty label; in ?replay modes terminal.js replaces each
+         mount with an 'awaiting REST history (disabled in replay)' note —
+         REST polls are real network and would break the deterministic L1
+         harness (§0.2 / verification §7). ═══ -->
+
+    <!-- Row A, left 2/3: historical kline chart + bar replay. -->
+    <section class="panel area-hist">
+      <h2>historical chart — BTCUSDT
+        <span class="signal-tag descriptive" title="Bybit v5 REST klines (linear perp), fetched newest-first and reversed to chronological (§4c gotcha). NO live-WS merging (§0.7): this panel is a pure REST snapshot, refreshed only on interval change — the live panels above carry the session.">bybit linear klines · REST</span>
+        <span class="hist-flag" id="hist-replay-flag" hidden>REPLAY (historical bars)</span>
+        <span class="heat-controls">
+          <label for="set-hist-interval">interval</label>
+          <select id="set-hist-interval">
+            <option value="5">5m</option>
+            <option value="30">30m</option>
+            <option value="60" selected>1h</option>
+            <option value="240">4h</option>
+            <option value="D">1d</option>
+          </select>
+          <label title="Simple moving averages from quant.js (window.Quant.sma) over raw closes"><input type="checkbox" id="set-hist-sma20" /> SMA20</label>
+          <label><input type="checkbox" id="set-hist-sma50" /> SMA50</label>
+          <label><input type="checkbox" id="set-hist-sma200" /> SMA200</label>
+          <label title="Display transform of the same bars (candle re-drawing convention) — SMAs stay computed on raw closes"><input type="checkbox" id="set-hist-ha" /> Heikin-Ashi</label>
+        </span>
+      </h2>
+      <div id="view-hist" class="hist-wrap"></div>
+      <div class="hist-replay-controls" id="hist-replay-controls">
+        <button id="hist-play" type="button" title="Reveal bars in order from the start (or the scrub position)">▶ play</button>
+        <button id="hist-step" type="button" title="Advance one bar">step ›</button>
+        <label for="hist-speed">speed</label>
+        <select id="hist-speed">
+          <option value="1" selected>1 bar/s</option>
+          <option value="2">2 bars/s</option>
+          <option value="5">5 bars/s</option>
+          <option value="10">10 bars/s</option>
+        </select>
+        <input type="range" id="hist-scrub" min="0" max="0" value="0" step="1" aria-label="bar replay position" />
+        <button id="hist-live" type="button" title="Jump back to the newest fetched bar">live edge</button>
+      </div>
+      <p class="hint">bar replay reveals history strictly in order — the chart never holds bars right of the cursor (no peeking), and the <b>REPLAY (historical bars)</b> flag shows whenever the cursor is rewound. Fetched once per interval; <b>no live merging</b> (§0.7 — splicing WS trades onto REST klines would blend two transports into one unlabeled series).</p>
+    </section>
+
+    <!-- Row A, right 1/3: TPO / market profile from 30m klines. -->
+    <section class="panel area-tpo">
+      <h2>market profile
+        <span class="signal-tag descriptive" title="Classical TPO from 30m OHLC bars: each bar marks its full H–L range for its clock period — that IS the canonical Steidlmayer construction (touched/not-touched per period), nothing intra-bar is approximated. Sessions are UTC days.">kline-range TPO · 30m · bybit</span>
+        <span class="heat-controls">
+          <label for="set-tpo-session">session</label>
+          <select id="set-tpo-session"></select>
+        </span>
+      </h2>
+      <div id="view-tpo" class="tpo-wrap"></div>
+      <p class="hint">letters A..v = 30m UTC periods (missing klines leave letter holes — gaps stay gaps); <b>accent row = POC</b>, dashed = VAH/VAL (70% value area on TPO counts); <b>•</b> = interior single print; left bracket = initial balance (first 2 <i>observed</i> periods).</p>
+    </section>
+
+    <!-- Row B: composite VP | funding table | macro strip (thirds). -->
+    <section class="panel area-vp">
+      <h2>composite volume profile
+        <span class="signal-tag research" title="APPROXIMATION (§4c rail): OHLCV bars don’t say where volume printed inside the bar, so each bar’s volume is spread uniformly across its H–L ticks. Tick-accurate VP = the footprint gutter (live session) or the collector’s stored trades — never this panel.">bar-range approximation</span>
+      </h2>
+      <div id="view-klinevp" class="vp-wrap"></div>
+      <p class="hint">built over the historical chart's current lookback + interval (follows its interval select). ◆ HVN / ◇ LVN (local extrema with a prominence gate); dashed extensions = nodes away from the current price, untested until revisited.</p>
+    </section>
+
+    <section class="panel area-farb">
+      <h2>funding — cross-venue
+        <span class="signal-tag descriptive" title="Per-row sources: bybit = live WS tickers; binancef = the existing REST poller (5s mark / 60s OI); okx = O-3 REST poll (60s, silent-null tolerated → '—'). Annualized = rate × 8760/intervalH — descriptive only, carry remains off-board (B3).">bybit WS · binancef REST · okx REST 60s</span>
+      </h2>
+      <div id="view-farb" class="farb-wrap"></div>
+    </section>
+
+    <section class="panel area-macro">
+      <h2>macro — HIP-3 mids + proxies
+        <span class="signal-tag research" title="Hyperliquid HIP-3 dex perps (km:/xyz: prefixed — the main-universe 'SPX' is the SPX6900 memecoin and is filtered out by construction, §4c) expose LIVE MIDS ONLY keyless: no history, so HIP-3 cells carry session-% and session-corr labeled with n. History legs (BTC/ETH/PAXG) use Bybit 1h klines. On-chain proxies track their index with error; no CME feeds.">on-chain proxies · no CME</span>
+      </h2>
+      <div id="view-macro" class="macro-wrap"></div>
+    </section>
+
     <!-- Footer row 2: settings (persisted to localStorage 'btcq-terminal'). -->
     <section class="panel area-set">
       <div class="controls">
@@ -172,17 +252,22 @@
     <p>Live-descriptive orderflow terminal (DESIGN-orderflow-terminal.md). Everything above renders only what arrived over the public wire this session — <b>never a backtest input</b>, never merged into the OOS harness. Feeds: Bybit v5 linear (primary), Binance Futures depth WS + REST mark/OI, Coinbase Advanced Trade spot tape, OKX v5 swap book+trades (O-2). Liq heatmap = <b>model estimate</b>; spoof/iceberg flags = <b>heuristics</b> — both labeled in-panel. See <a href="../DISCLAIMER.md">DISCLAIMER.md</a>.</p>
   </footer>
 
-  <!-- Script order is a CONTRACT (DESIGN §4): vendor/lightweight-charts.js →
-       livewire.js → terminal-adapters.js → terminal-state.js →
-       terminal-views.js → terminal-replay.js → terminal.js. Each file is a
-       plain IIFE exposing ONE global; terminal-replay.js must precede
+  <!-- Script order is a CONTRACT (DESIGN §4/§4c): vendor/lightweight-charts.js →
+       quant.js → livewire.js → terminal-adapters.js → terminal-state.js →
+       terminal-hist.js → terminal-views.js → terminal-replay.js → terminal.js.
+       Each file is a plain IIFE exposing ONE global. O-3 additions: quant.js
+       (HistChartView reads window.Quant.sma — indicator math is never
+       reimplemented, house rule) and terminal-hist.js (REST fetchers/
+       normalizers consumed by terminal.js). terminal-replay.js must precede
        terminal.js (the bootstrap checks BTCQ_TERMINAL_REPLAY.active() at
-       startup for the ?replay=1 fixture-replay seam); terminal.js consumes
+       startup for the ?replay=1 / ?replay=byod seam); terminal.js consumes
        all of them and must load last. -->
   <script src="vendor/lightweight-charts.js"></script>
+  <script src="quant.js"></script>
   <script src="livewire.js"></script>
   <script src="terminal-adapters.js"></script>
   <script src="terminal-state.js"></script>
+  <script src="terminal-hist.js"></script>
   <script src="terminal-views.js"></script>
   <script src="terminal-replay.js"></script>
   <script src="terminal.js"></script>

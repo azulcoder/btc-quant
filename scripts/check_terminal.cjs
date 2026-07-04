@@ -46,6 +46,31 @@
 //                           long 90.5 / short 109.5), sides correct vs mark,
 //                           observed prints passed through UNblended, label:'estimated'
 //
+// O-3 additions (DESIGN §4c "check_terminal.cjs additions", binding list):
+//  17. Bybit REST klines  → normalizer REVERSES the NEWEST-FIRST list to
+//                           chronological, exact fixture numbers, input
+//                           unmutated, retCode error → null, NaN row dropped
+//  18. buildTpo           → constructed 30m bars: rows/periods, POC (count tie
+//                           broken toward session mid), VAH/VAL (70% expansion),
+//                           interior-only singles, IB = first 2 OBSERVED
+//                           periods — all EXACT; sessions per UTC day, newest-first
+//  19. buildKlineVp       → Σ levels.vol ≡ Σ bars.v (constructed exact + real
+//                           fixture bars ≤1e-9), POC tie → lowest, HVN
+//                           prominence gate, approx:'bar-range' label ALWAYS on
+//  20. rollingCorr        → identical series = +1 / inverted = −1 on every full
+//                           window, NaN below window/2 valid pairs, NaN pairs
+//                           SKIPPED (never zero-coerced), window < 2 refused
+//  21. OKX REST funding/OI → fundingRate exact; nextFundingTs = `fundingTime`
+//                           (the UPCOMING settlement — naming gotcha); intervalH
+//                           derived = 8 (+ fallback-8 path); OI = oiCcy COIN,
+//                           NOT the contracts `oi` field (§4b ctVal unit rail)
+//  22. HL mids normalizer → SPX-MEMECOIN GUARD: main-universe 'SPX' (SPX6900,
+//                           ~$0.37, NOT the index) can never surface for a
+//                           dex-filtered query — dex-prefixed keys only
+//  23. BYOD row→event     → exact field rename for ALL 5 collector tables
+//                           (trades/depth/liqs/funding/oi), §0.6 values pass
+//                           through UNCHANGED (no re-inversion), corrupt rows → null
+//
 // Exit: 0 with one PASS line per group; non-zero with a clear FAIL message
 // (plus stack) if any group breaks. Run: node scripts/check_terminal.cjs
 
@@ -55,6 +80,8 @@ const assert = require('assert');
 
 const A = require(path.join(__dirname, '..', 'dashboard', 'terminal-adapters.js'));
 const S = require(path.join(__dirname, '..', 'dashboard', 'terminal-state.js'));
+const H = require(path.join(__dirname, '..', 'dashboard', 'terminal-hist.js'));
+const R = require(path.join(__dirname, '..', 'dashboard', 'terminal-replay.js'));
 const FX = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures_ws.json'), 'utf8'));
 
 // makeSocket's liveApi surface, minus the socket: adapters only ever touch
@@ -816,6 +843,331 @@ group('liq heatmap model exact band math + estimated label', () => {
   assert.strictEqual(estNaN.bands.length, 0, 'non-finite mark must yield empty bands');
   assert.strictEqual(estNaN.observed.length, 1);
   assert.strictEqual(estNaN.label, 'estimated');
+});
+
+// ─── 17. Bybit REST klines: NEWEST-FIRST reversal + exact fixture numbers ────
+group('bybit REST kline normalizer reversal (exact fixture numbers)', () => {
+  const rawList = FX.bybit_rest_kline.result.list;
+  // Fixture precondition (§4c gotcha this whole group pins): the capture
+  // really is NEWEST-FIRST — a re-captured fixture that arrived chronological
+  // would let a reversal-dropping regression pass silently.
+  assert.ok(Number(rawList[0][0]) > Number(rawList[rawList.length - 1][0]),
+    'fixture precondition: bybit kline list must be NEWEST-FIRST');
+
+  const before = JSON.stringify(FX.bybit_rest_kline);
+  const bars = H.normalizeBybitKlines(FX.bybit_rest_kline);
+  // The normalizer iterates backwards instead of slice().reverse() so replays
+  // can reuse the cached fixture — pin that the input really is untouched.
+  assert.strictEqual(JSON.stringify(FX.bybit_rest_kline), before, 'normalizer must NOT mutate its input');
+
+  assert.strictEqual(bars.length, 5, 'one bar per fixture row');
+  for (let i = 1; i < bars.length; i++) {
+    assert.ok(bars[i].ts > bars[i - 1].ts, 'bars must come out CHRONOLOGICAL (oldest → newest)');
+  }
+  // Exact values, both ends: the fixture's LAST row (oldest) must land FIRST…
+  assert.strictEqual(bars[0].ts, 1783112400000, 'oldest wire row must land at index 0');
+  assert.strictEqual(bars[0].o, 62748);
+  assert.strictEqual(bars[0].h, 62946.1);
+  assert.strictEqual(bars[0].v, 1783.151);
+  // …and the fixture's FIRST row (newest) must land LAST, fully Number()ed.
+  const newest = bars[4];
+  assert.strictEqual(newest.ts, 1783119600000, 'newest wire row must land at the end');
+  assert.strictEqual(newest.o, 62542.2);
+  assert.strictEqual(newest.h, 62578.2);
+  assert.strictEqual(newest.l, 62516.5);
+  assert.strictEqual(newest.c, 62537.1);
+  assert.strictEqual(newest.v, 59.008);
+  for (const b of bars) {
+    for (const k of ['ts', 'o', 'h', 'l', 'c', 'v']) {
+      assert.ok(typeof b[k] === 'number' && Number.isFinite(b[k]), k + ' must be a finite Number (wire sends strings)');
+    }
+  }
+
+  // Bybit errors keep HTTP 200 — retCode is the real status → null (so the
+  // fetch wrapper's silent-null contract holds end-to-end).
+  assert.strictEqual(H.normalizeBybitKlines(Object.assign({}, FX.bybit_rest_kline, { retCode: 10001 })), null,
+    'retCode !== 0 must yield null');
+  assert.strictEqual(H.normalizeBybitKlines(null), null);
+  assert.strictEqual(H.normalizeBybitKlines({ retCode: 0, result: {} }), null, 'missing list must yield null');
+
+  // One malformed row is DROPPED (never a NaN bar), the rest of the history survives.
+  const mangled = JSON.parse(before);
+  mangled.result.list[2][3] = 'not-a-number';
+  const survived = H.normalizeBybitKlines(mangled);
+  assert.strictEqual(survived.length, 4, 'exactly the NaN row dropped, 4 bars kept');
+  assert.ok(!survived.some((b) => b.ts === 1783116000000), 'the mangled row is the one missing');
+});
+
+// ─── 18. buildTpo: constructed 30m bars — POC/VA/singles/IB exact (§4c) ──────
+group('buildTpo constructed bars: POC/VA/singles/IB exact + UTC sessions newest-first', () => {
+  const P = 1800000;   // 30 m — the classical TPO period
+  // Hand-derivable session on UTC day 0 (tick 1), plus one bar on day 1 so
+  // the per-UTC-day split and newest-first session order are both exercised.
+  //   period 0: 100..104  → rows 100-104 get letter 0
+  //   period 1: 102..106  → rows 102-106 get letter 1
+  //   period 2: 103..110  → rows 103-110 get letter 2
+  // Row counts (ascending 100..110): [1,1,2,3,3,2,2,1,1,1,1], total 18.
+  const bars = [
+    { ts: 0,        o: 100, h: 104, l: 100, c: 104, v: 10 },
+    { ts: P,        o: 104, h: 106, l: 102, c: 106, v: 5 },
+    { ts: 2 * P,    o: 106, h: 110, l: 103, c: 110, v: 2 },
+    { ts: 86400000, o: 200, h: 201, l: 200, c: 201, v: 1 },   // next UTC day
+  ];
+  const sessions = S.buildTpo(bars, { tickSize: 1, periodMs: P });
+
+  assert.strictEqual(sessions.length, 2, 'one session per UTC day');
+  assert.strictEqual(sessions[0].date, '1970-01-02', 'sessions newest-first ([0] = latest day)');
+  assert.strictEqual(sessions[1].date, '1970-01-01');
+
+  const s0 = sessions[1];   // the constructed 3-period day
+  assert.deepStrictEqual(s0.rows.map((r) => r.price),
+    [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110], 'rows ascending, one per tick touched');
+  assert.deepStrictEqual(s0.rows.map((r) => r.periods.length),
+    [1, 1, 2, 3, 3, 2, 2, 1, 1, 1, 1], 'per-row TPO counts (each bar letters its FULL l..h range)');
+  assert.deepStrictEqual(s0.rows[3].periods, [0, 1, 2], 'period indices ascending within a row');
+
+  // POC: rows 103 and 104 tie at 3 letters — the classical tiebreak goes to
+  // the row closest to the session mid (105), so 104 must win, EXACTLY.
+  assert.strictEqual(s0.poc, 104, 'count tie must break toward the session mid');
+  // 70% expansion on counts (target 12.6 of 18), hand-traced: absorb 103(3),
+  // 105(2), 106(2), 102(2) → covered 12 < 12.6, then the 107-vs-101 tie (1 vs
+  // 1) expands UPWARD → 107, covered 13 → VA rows = 102..107. Same algorithm
+  // as ProfileStore (shared valueArea70 helper).
+  assert.strictEqual(s0.vah, 107, 'VAH exact');
+  assert.strictEqual(s0.val, 102, 'VAL exact');
+
+  // Singles: 1-letter rows STRICTLY INSIDE the session range — 101 and
+  // 107..109 qualify; the extremes 100/110 are tails BY CONSTRUCTION and must
+  // NOT be flagged (§4c interior-only rule).
+  assert.deepStrictEqual(s0.singles, [101, 107, 108, 109], 'interior single prints exact (edges excluded)');
+
+  // IB = range of the first 2 OBSERVED periods (0 and 1): hi 106, lo 100 —
+  // raw bar extremes, not bucketed rows.
+  assert.deepStrictEqual(s0.ib, { hi: 106, lo: 100 }, 'initial balance exact');
+
+  // Hygiene: malformed bars are SKIPPED, never zero-coerced.
+  const dirty = S.buildTpo([bars[0], { ts: NaN, l: 1, h: 2 }, { ts: 0, l: 105, h: 104 }], { tickSize: 1, periodMs: P });
+  assert.strictEqual(dirty.length, 1, 'NaN-ts and h<l bars dropped');
+  assert.strictEqual(dirty[0].rows.length, 5, 'only the valid bar contributed rows');
+});
+
+// ─── 19. buildKlineVp: volume conservation + POC tie + 'bar-range' label ─────
+group('buildKlineVp volume conservation + bar-range approximation label', () => {
+  // Constructed exact case (tick 1): bar 1 spreads v=10 over 5 buckets
+  // (2 each), bar 2 puts v=3 entirely on 102 → levels [2,2,5,2,2].
+  const bars = [
+    { ts: 0,     o: 100, h: 104, l: 100, c: 104, v: 10 },
+    { ts: 60000, o: 102, h: 102, l: 102, c: 102, v: 3 },
+  ];
+  const vp = S.buildKlineVp(bars, { tickSize: 1 });
+  // §4c LABEL RAIL: the approximation label rides the RETURN VALUE itself so
+  // no view can drop it by accident — and it must be the exact token the
+  // KlineVpView badge renders.
+  assert.strictEqual(vp.approx, 'bar-range', "return value must carry approx:'bar-range'");
+  assert.deepStrictEqual(vp.levels.map((l) => l.price), [100, 101, 102, 103, 104], 'levels ascending');
+  assert.ok(approx(vp.levels[2].vol, 5), 'level 102 = 2 (spread) + 3 (point bar)');
+  assert.ok(approx(vp.levels.reduce((a, l) => a + l.vol, 0), 13), 'Σ levels.vol == Σ bars.v (13) on the constructed case');
+  assert.strictEqual(vp.poc, 102);
+  assert.strictEqual(vp.vah, 104); assert.strictEqual(vp.val, 101, '70% expansion exact');
+  assert.deepStrictEqual(vp.hvns, [102], 'the 5-vs-2 spike clears the 25%-of-median prominence gate');
+  assert.deepStrictEqual(vp.lvns, [], 'flat shoulders must NOT flag as LVNs');
+
+  // CONSERVATION on the REAL fixture bars through the REAL normalizer (messy
+  // floats: v like 1783.151 split over multi-bucket ranges): the uniform
+  // spread must neither invent nor lose volume — Σ levels ≡ Σ bars ≤ 1e-9.
+  const fbars = H.normalizeBybitKlines(FX.bybit_rest_kline);
+  const fvp = S.buildKlineVp(fbars, { tickSize: 10 });
+  const fsum = fvp.levels.reduce((a, l) => a + l.vol, 0);
+  const vsum = fbars.reduce((a, b) => a + b.v, 0);
+  assert.ok(Math.abs(fsum - vsum) <= 1e-9,
+    'fixture-bar conservation: Σ levels.vol ' + fsum + ' != Σ bars.v ' + vsum);
+  assert.strictEqual(fvp.approx, 'bar-range', 'label present on real data too');
+
+  // POC tie → LOWEST price (ProfileStore convention, deterministic).
+  const tie = S.buildKlineVp([
+    { ts: 0, o: 105, h: 105, l: 105, c: 105, v: 4 },
+    { ts: 1, o: 101, h: 101, l: 101, c: 101, v: 4 },
+  ], { tickSize: 1 });
+  assert.strictEqual(tie.poc, 101, 'POC tie must resolve to the LOWEST price');
+
+  // Empty input: NaN sentinels (no data must never look like price 0) and the
+  // label STILL present — a view rendering the empty state keeps its badge.
+  const empty = S.buildKlineVp([], { tickSize: 1 });
+  assert.ok(empty.levels.length === 0 && Number.isNaN(empty.poc) && Number.isNaN(empty.vah) && Number.isNaN(empty.val));
+  assert.strictEqual(empty.approx, 'bar-range');
+});
+
+// ─── 20. rollingCorr: ±identical = ±1, small-n NaN, NaN pairs skipped ────────
+group('rollingCorr identical=+1 / inverted=−1 / short-window NaN', () => {
+  const x = [0.01, -0.02, 0.015, 0.005, -0.01, 0.02, -0.005, 0.012];
+  const w = 4;
+
+  const same = S.rollingCorr(x, x, w);
+  assert.strictEqual(same.length, x.length, 'one output per aligned index');
+  assert.strictEqual(same[0].i, 0, 'outputs carry their index');
+  // Small-n honesty: index 0 holds ONE valid pair < w/2 → NaN, never a
+  // confident-looking number.
+  assert.ok(Number.isNaN(same[0].r), 'below window/2 valid pairs r must be NaN');
+  for (let i = w - 1; i < x.length; i++) {
+    assert.ok(approx(same[i].r, 1, 1e-12), 'identical series must read +1 on every full window (i=' + i + ')');
+  }
+
+  const inv = S.rollingCorr(x, x.map((v) => -v), w);
+  for (let i = w - 1; i < x.length; i++) {
+    assert.ok(approx(inv[i].r, -1, 1e-12), 'inverted series must read −1 on every full window (i=' + i + ')');
+  }
+
+  // A NaN pair is SKIPPED — the window correlates the remaining pairs instead
+  // of zero-coercing (a fabricated flat return would fake decorrelation).
+  const y = x.slice(); y[5] = NaN;
+  const sk = S.rollingCorr(x, y, w);
+  assert.ok(approx(sk[6].r, 1, 1e-12), 'window spanning the NaN pair must skip it and still read +1');
+  assert.ok(approx(sk[7].r, 1, 1e-12));
+
+  // Refusals: a 1-sample "correlation" is undefined; non-arrays have no rows.
+  assert.deepStrictEqual(S.rollingCorr(x, x, 1), [], 'window < 2 must be refused');
+  assert.deepStrictEqual(S.rollingCorr(null, x, w), [], 'non-array input must yield []');
+});
+
+// ─── 21. OKX REST funding + OI normalizers vs fixtures (§4c) ─────────────────
+group('okx REST funding (intervalH derivation) + OI (oiCcy unit rail) normalizers', () => {
+  // Funding: nextFundingTs must be OKX `fundingTime` — the UPCOMING settlement
+  // (naming gotcha: OKX `nextFundingTime` is the one AFTER that) — and
+  // intervalH is DERIVED from the fundingTime→nextFundingTime spacing.
+  const before = JSON.stringify(FX.okx_rest_funding);
+  const f = H.normalizeOkxFunding(FX.okx_rest_funding);
+  assert.strictEqual(JSON.stringify(FX.okx_rest_funding), before, 'normalizer must NOT mutate its input');
+  assert.strictEqual(f.fundingRate, 0.0000387369202921, 'fundingRate exact (Number of the wire string)');
+  assert.strictEqual(f.nextFundingTs, 1783123200000, 'nextFundingTs = fundingTime (upcoming settlement), NOT nextFundingTime');
+  assert.strictEqual(f.intervalH, 8, 'intervalH derived from the response spacing = 8h exactly');
+
+  // Fallback path (§4c): degenerate/absent spacing → the stated 8h fallback
+  // (never NaN — the annualization column divides by intervalH).
+  const clone = JSON.parse(before);
+  clone.data[0].nextFundingTime = '';
+  assert.strictEqual(H.normalizeOkxFunding(clone).intervalH, 8, 'missing nextFundingTime must fall back to 8');
+  assert.strictEqual(H.normalizeOkxFunding({ code: '51000', msg: 'err', data: [] }), null, "code !== '0' must yield null");
+  assert.strictEqual(H.normalizeOkxFunding({ code: '0', data: [] }), null, 'missing row must yield null');
+
+  // OI unit rail (§4b ctVal gotcha, REST edition): the raw `oi` field is
+  // CONTRACTS; `oiCcy` is COIN. Fixture precondition first, so a re-capture
+  // where the two fields agree can never vacuously pass the mixup check.
+  const raw = FX.okx_rest_oi.data[0];
+  assert.ok(approx(Number(raw.oi) * 0.01, Number(raw.oiCcy), 1e-6),
+    'fixture precondition: oi(contracts) × ctVal 0.01 == oiCcy(coin)');
+  const o = H.normalizeOkxOi(FX.okx_rest_oi);
+  assert.strictEqual(o.oi, 31337.2794000001118, 'oi must be oiCcy (COIN) — exact fixture number');
+  assert.notStrictEqual(o.oi, Number(raw.oi), 'returning the CONTRACTS field would overstate OKX OI 100×');
+  assert.strictEqual(o.oiUsd, Number(raw.oiUsd), 'oiUsd passed through Number()ed');
+  assert.ok(approx(o.oiUsd, 1959817785.0363069919161, 1e-3), 'oiUsd ≈ the captured $1.96B');
+  assert.strictEqual(o.ts, 1783120004270, 'ts = wire numeric-string ms as int');
+  assert.strictEqual(H.normalizeOkxOi({ code: '1', data: [] }), null, "code !== '0' must yield null");
+});
+
+// ─── 22. HL mids normalizer: the SPX-memecoin guard (§4c, honesty-critical) ──
+group('hl mids normalizer memecoin guard (main-universe SPX must never surface)', () => {
+  // Synthetic allMids-shaped payload — HIP-3 dexs expose LIVE mids only, so no
+  // captured fixture exists (fixtures _o3_notes); the shape is the documented
+  // flat {name: "mid-string"} object. It deliberately contains the
+  // honesty-critical trap: main-universe 'SPX' is the SPX6900 MEMECOIN
+  // (~$0.37), NOT the S&P 500 — filtered out BY CONSTRUCTION (only
+  // dex-prefixed keys pass), whatever the server includes.
+  const wire = {
+    SPX: '0.3712',            // the memecoin trap — MUST NOT surface
+    BTC: '62000.5',           // main-universe majors don't belong in a dex query either
+    'km:US500': '6234.5',
+    'km:GOLD': '3412.8',
+    'km:USOIL': 'not-a-number',   // NaN mid — dropped, never emitted
+    'xyz:XYZ100': '2201.1',
+  };
+  const km = H.normalizeHlMids(wire, 'km');
+  // deepStrictEqual pins the WHOLE object: nothing extra can hide in it.
+  assert.deepStrictEqual(km, { 'km:US500': 6234.5, 'km:GOLD': 3412.8 },
+    'km query must yield EXACTLY the finite km:-prefixed mids — SPX guarded out, NaN dropped');
+  assert.ok(!('SPX' in km), 'the SPX6900 memecoin must NEVER pass a dex-filtered query');
+
+  const xyz = H.normalizeHlMids(wire, 'xyz');
+  assert.deepStrictEqual(xyz, { 'xyz:XYZ100': 2201.1 }, 'prefix filter is per-dex');
+
+  // Guard preconditions: no dex → no prefix → the guard cannot hold → null
+  // (a permissive fallback would let 'SPX' through the moment dex is '').
+  assert.strictEqual(H.normalizeHlMids(wire, ''), null, 'empty dex must yield null');
+  assert.strictEqual(H.normalizeHlMids(wire, undefined), null, 'missing dex must yield null');
+  assert.strictEqual(H.normalizeHlMids(null, 'km'), null, 'non-object payload must yield null');
+  assert.strictEqual(H.normalizeHlMids(['km:US500'], 'km'), null, 'array payload is not an allMids object');
+});
+
+// ─── 23. BYOD row→event mapping exactness — all 5 collector tables (§4c) ─────
+group('byod row→event mapping exactness (all 5 tables)', () => {
+  const T0 = 1783076400123;
+
+  // trades: collector snake_case → §4 camelCase, values UNCHANGED — the §0.6
+  // aggressor conventions were applied at RECORD time (normalize_bybit_trade
+  // etc.), so re-deriving anything here would double-apply them.
+  assert.deepStrictEqual(
+    R.byodRowToEvent('trades', {
+      exchange: 'bybit', symbol: 'BTCUSDT', trade_id: '6c84…-uuid',
+      ts_ms: T0, price: 62000.5, qty: 0.25, aggressor_buy: true,
+    }),
+    { kind: 'trade', ex: 'bybit', ts: T0, price: 62000.5, qty: 0.25, aggressorBuy: true, id: '6c84…-uuid' },
+    'trades row must rename EXACTLY onto the §4 trade event');
+  assert.strictEqual(
+    R.byodRowToEvent('trades', { exchange: 'coinbase', trade_id: '1', ts_ms: T0, price: 1, qty: 1, aggressor_buy: false }).aggressorBuy,
+    false, 'stored false must stay false — NO re-inversion of already-normalized rows');
+
+  // depth_snapshots: JSON-string sides parsed, isSnapshot ALWAYS true (every
+  // stored row is a full merged top-20 book — BookStore must replace, not merge).
+  assert.deepStrictEqual(
+    R.byodRowToEvent('depth_snapshots', {
+      exchange: 'binancef', symbol: 'BTCUSDT', ts_ms: T0 + 1,
+      bids: '[[62000.1,1.5],[62000,2.25]]', asks: '[[62000.2,0.75]]',
+    }),
+    { kind: 'depth', ex: 'binancef', ts: T0 + 1, bids: [[62000.1, 1.5], [62000, 2.25]], asks: [[62000.2, 0.75]], isSnapshot: true },
+    'depth row must parse both sides and always set isSnapshot:true');
+  assert.strictEqual(
+    R.byodRowToEvent('depth_snapshots', { exchange: 'binancef', ts_ms: T0, bids: 'not json', asks: '[]' }),
+    null, 'corrupt depth JSON must be dropped, never guessed');
+
+  // liquidations: side is ALREADY the liquidated position ('long'|'short') —
+  // the §0.6 print-side inversion happened in normalize_bybit_liq; pass through.
+  assert.deepStrictEqual(
+    R.byodRowToEvent('liquidations', {
+      exchange: 'bybit', symbol: 'BTCUSDT', ts_ms: T0 + 2,
+      side: 'short', price: 61500, qty: 0.4, notional_usd: 24600,
+    }),
+    { kind: 'liq', ex: 'bybit', ts: T0 + 2, side: 'short', price: 61500, qty: 0.4, notionalUsd: 24600 },
+    'liq row must pass the stored (already-inverted) side through unchanged');
+
+  // funding_mark → §4 'mark' event vocabulary.
+  assert.deepStrictEqual(
+    R.byodRowToEvent('funding_mark', {
+      exchange: 'bybit', symbol: 'BTCUSDT', ts_ms: T0 + 3,
+      mark: 62001.1, index: 61998.7, funding_rate: 0.0001, next_funding_ts: 1783094400000,
+    }),
+    { kind: 'mark', ex: 'bybit', ts: T0 + 3, mark: 62001.1, index: 61998.7, fundingRate: 0.0001, nextFundingTs: 1783094400000 },
+    'funding_mark row must rename EXACTLY onto the §4 mark event');
+
+  // open_interest → §4 'oi' event.
+  assert.deepStrictEqual(
+    R.byodRowToEvent('open_interest', { exchange: 'binancef', symbol: 'BTCUSDT', ts_ms: T0 + 4, oi: 83456.123 }),
+    { kind: 'oi', ex: 'binancef', ts: T0 + 4, oi: 83456.123 },
+    'open_interest row must rename EXACTLY onto the §4 oi event');
+
+  // Hygiene: a row with no time has no home in any store; unknown tables are
+  // seam drift with BYOD_ENDPOINTS — both dropped, never guessed.
+  assert.strictEqual(R.byodRowToEvent('trades', { exchange: 'bybit', price: 1, qty: 1 }), null, 'missing ts_ms → null');
+  assert.strictEqual(R.byodRowToEvent('not_a_table', { ts_ms: T0 }), null, 'unknown table → null');
+  assert.strictEqual(R.byodRowToEvent('trades', null), null, 'null row → null');
+
+  // End-to-end sanity: the mapped events ARE what the real stores consume —
+  // run one mapped depth row through BookStore (replace semantics hold).
+  const book = S.BookStore();
+  book.applyDepth(R.byodRowToEvent('depth_snapshots', {
+    exchange: 'binancef', ts_ms: T0, bids: '[[62000.1,1.5]]', asks: '[[62000.2,0.75]]',
+  }));
+  const b = book.best();
+  assert.strictEqual(b.bid[0], 62000.1);
+  assert.strictEqual(b.ask[0], 62000.2);
 });
 
 // ─── Verdict ─────────────────────────────────────────────────────────────────

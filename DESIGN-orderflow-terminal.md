@@ -1,9 +1,11 @@
 # DESIGN — Orderflow Terminal (CryExc-inspired) + tick collector
 
-Status: **O-0 + O-1 shipped 2026-07-03 (`8c2781f`); O-2 shipped 2026-07-04** (orderbook
-heatmap, spoof/iceberg heuristics LABELED, liquidation heatmap LABELED model, OKX leg,
-per-exchange CVD — contracts in §4b). Later phases (O-3…O-5) are specced here and
-deferred — same greenlight discipline as DEVELOPMENT.md §6.
+Status: **O-0 + O-1 shipped 2026-07-03 (`8c2781f`); O-2 + verification system + O-3
+shipped 2026-07-04** (§4b heatmaps/OKX; §7 three-layer verification incl. deterministic
+browser replay; §4c structure views — TPO, kline VP, historical chart + no-peek bar
+replay, **BYOD tick replay from the collector store (verified end-to-end against a real
+8 h recording)**, cross-venue funding, macro proxies). O-4/O-5 specced and deferred —
+same greenlight discipline as DEVELOPMENT.md §6.
 
 Provenance: feature surface adapted from [Cryexc](https://cryexc.josedonato.com/) (José
 Donato's free orderflow terminal — footprint, DOM, heatmaps, TPO, whale/options flow;
@@ -258,6 +260,74 @@ bars), while CVD gains **per-exchange, per-labeled** series (bybit/okx/coinbase)
   pull + refill and stays quiet on a benign book, LiqHeatmapModel band math for a known
   (entry, L, mmr) → exact price, and `label` fields present on every heuristic/model output.
 
+## 4c. O-3 contracts — structure views (binding, same style as §4/§4b)
+
+Empirical data map (probed 2026-07-04, responses pinned in fixtures `_o3_notes` +
+`bybit_rest_kline` / `okx_rest_funding` / `okx_rest_oi`):
+- **Bybit REST klines** work (linear BTCUSDT/ETHUSDT/PAXGUSDT): list is **NEWEST-FIRST**
+  `[startMs,o,h,l,c,vol,turnover]` strings — reverse for chronological (gotcha).
+- **OKX REST** funding-rate + open-interest work (8 h funding interval).
+- **Hyperliquid**: main-universe `SPX` is the **SPX6900 memecoin (~$0.37), NOT the index**
+  — never label it macro. HIP-3 dexs carry real index/commodity perps (`km:US500`,
+  `km:USTECH`, `km:GOLD`, `km:USOIL`, `xyz:XYZ100`) with **live `allMids` only** —
+  `candleSnapshot` for HIP-3 returns empty/500 keyless → **no history**; macro history
+  legs therefore use **PAXG** (tokenized gold, Bybit klines ✓) and ETH; HIP-3 legs get
+  **session-correlation** built from polled mids (labeled `session · n=…`). `km:GOLD`
+  trades ~4% rich vs PAXG/xyz:GOLD — the tracking-error caveat is mandatory panel text.
+- **stooq is NOT keyless-scriptable** (JS challenge) — dropped, stated. **No CME feeds.**
+
+Modules:
+- **`dashboard/terminal-hist.js`** (new; pure REST fetchers + normalizers, dual-export):
+  `fetchBybitKlines(sym, interval, limit)` → chronological `[{ts,o,h,l,c,v}]` (Number()ed,
+  reversed); `fetchOkxFunding(instId)` → `{fundingRate, nextFundingTs, intervalH}`;
+  `fetchOkxOi(instId)` → `{oi, oiUsd, ts}`; `fetchHlMids(dex)` (POST allMids) →
+  `{name→Number(mid)}`. Each has a pure `normalize*` taking the parsed JSON (fixture-
+  tested) + a thin fetch wrapper (AbortController 10 s, silent-null on failure — comment).
+- **terminal-state.js additions (pure):**
+  `buildTpo(bars, {tickSize, periodMs=1.8e6})` → per-UTC-day sessions
+  `[{date, rows:[{price, periods:[i…]}], poc, vah, val, singles:[price…], ib:{hi,lo}}]`
+  — classical 30-min-bar TPO construction (each bar marks its full H-L range; that IS
+  the canonical method, comment it); value area = same 70 % expansion as ProfileStore.
+  `buildKlineVp(bars, {tickSize})` → `{levels, poc, vah, val, hvns, lvns}` distributing
+  each bar's volume **uniformly across its H-L range** — LABELED `bar-range
+  approximation` (tick-accurate VP = footprint gutter / collector); HVN/LVN as local
+  extrema vs median with min-prominence. `rollingCorr(retsA, retsB, window)` → aligned
+  Pearson series (NaN-safe). `SessionSeriesStore({sampleMs=60000})` — `onSample(ts, key,
+  px)` (gated ≥sampleMs per key), `returns(key)`, `corr(keyA, keyB)` → `{r, n}`.
+- **terminal-replay.js — BYOD mode:** `?replay=byod[&api=http://127.0.0.1:8788][&from=…
+  &to=…&speed=60]` fetches `/v1/trades|depth|liquidations|funding|oi` for the window
+  from the collector's BYOD API, merge-sorts by ts, and feeds the **sink directly**
+  with normalized events (BYOD rows are already normalized — adapters are bypassed,
+  comment why). Chips + banner read `replay (byod)` — your own recorded ticks, clearly
+  not live. `drive(name, adapter, api, sink)` gains the optional 4th arg (fixture mode
+  ignores it). Honest failure: API unreachable → chips 'error', banner explains
+  `make collector-api`.
+- **Views** (terminal-views.js) + layout (terminal.html/css — new STRUCTURE section
+  between CVD and settings):
+  `HistChartView` (wide): Bybit klines candlestick+volume (lightweight-charts),
+  interval 5m/30m/1h/4h/1d, SMA 20/50/200 + Heikin-Ashi toggles (math from quant.js —
+  never reimplement §house-rule), **bar replay**: play/pause/step/speed/scrub rendering
+  ONLY bars ≤ cursor (no peeking), 'REPLAY (historical bars)' flag while scrubbing;
+  source label `bybit linear klines`.
+  `TpoView`: letter profile per session, POC/VAH/VAL lines, single prints highlighted,
+  IB bracket, session selector (last 5 UTC days), label `kline-range TPO · 30 m`.
+  `KlineVpView`: composite VP over the chart lookback + HVN/LVN + extension lines of
+  untested levels; permanent `bar-range approximation` badge.
+  `FundingArbView`: venue table (bybit WS · binancef REST · okx REST 60 s poll):
+  mark / funding % / **annualized** (rate × 8760/intervalH) / next-funding countdown /
+  OI coin+USD; spread row (max−min annualized bp); note: `descriptive only — carry
+  remains off-board (B3)`.
+  `MacroView`: live mids strip (km:US500 *(scaled contract — % only)*, km:USTECH,
+  km:GOLD, km:USOIL, xyz:XYZ100, PAXG, ETH) with session-% vs BTC; correlation block:
+  BTC×ETH×PAXG rolling corr from 1 h klines (7 d window) + session-corr cells for HIP-3
+  legs once n≥30, every cell labeled window/n; caveat text: on-chain proxies, tracking
+  error, no CME feeds.
+- **check_terminal.cjs additions:** kline normalizer reversal (exact fixture numbers),
+  buildTpo on constructed bars (POC/VA/singles/IB exact), buildKlineVp distribution sum
+  ≡ Σvol + approximation label present, rollingCorr(±identical)=±1, OKX funding/OI
+  normalizers vs fixtures, BYOD row→event mapping, HL mids normalizer (memecoin-SPX
+  guard: main-universe SPX must NOT appear in macro keys).
+
 ## 5. CryExc → btc-quant feature map & phase plan
 
 | # | CryExc view | Phase | Rail notes |
@@ -304,7 +374,8 @@ the collector buys *optionality*, not conclusions.
 
 Layer 0 (static, every commit): `python -m pytest` (incl. collector tests; network-free);
 `node --check` on every dashboard JS file; `node scripts/check_terminal.cjs` (fixture
-smoke: adapters + stores replayed over the REAL captured frames, 16 assertion groups).
+smoke: adapters + stores + O-3 normalizers/builders replayed over the REAL captured
+frames/responses, 23 assertion groups).
 
 - **L1 — deterministic browser harness** (`make verify-browser`,
   `scripts/verify_terminal_browser.py`): serves the repo, opens
