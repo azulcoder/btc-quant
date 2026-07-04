@@ -1,11 +1,14 @@
-// terminal-hist.js — pure REST fetchers + normalizers for the STRUCTURE views (O-3).
+// terminal-hist.js — pure REST fetchers + normalizers for the STRUCTURE views
+// (O-3, §4c) and the INTELLIGENCE views (O-4, §4d).
 //
-// DESIGN-orderflow-terminal.md §4c contract: every fetcher is a THIN wrapper
-// (fetch + AbortController 10s + silent-null on failure) around a PURE
-// normalize*(parsedJson) function — the normalizers are what the fixture smoke
-// replays (scripts/fixtures_ws.json keys bybit_rest_kline / okx_rest_funding /
-// okx_rest_oi, captured 2026-07-04), so they are coded against REAL responses,
-// not remembered API docs.
+// DESIGN-orderflow-terminal.md §4c/§4d contract: every fetcher is a THIN
+// wrapper (fetch + AbortController 10s — 30s for the one 33 MB endpoint — +
+// silent-null on failure) around a PURE normalize*(parsedJson) function — the
+// normalizers are what the fixture smoke replays (scripts/fixtures_ws.json
+// keys bybit_rest_kline / okx_rest_funding / okx_rest_oi captured 2026-07-04;
+// bybit_rest_tickers / deribit_rest_book_summary / deribit_rest_dvol /
+// hl_leaderboard_sample / hl_clearinghouse_state captured 2026-07-05), so they
+// are coded against REAL responses, not remembered API docs.
 //
 // Empirical data map encoded here (DESIGN §4c, probed 2026-07-04):
 //   - Bybit REST klines (linear BTCUSDT/ETHUSDT/PAXGUSDT) return the list
@@ -22,6 +25,23 @@
 //     never leak into a macro panel.
 //   - No CME feeds; stooq is NOT keyless-scriptable (JS challenge) — dropped,
 //     stated. We render what public REST actually serves, nothing more (§0.2).
+//
+// O-4 empirical data map (DESIGN §4d, probed 2026-07-05, fixtures _o4_notes):
+//   - Deribit REST is CORS-OPEN to browser origins (verified: the
+//     access-control-allow-origin header echoes) — the chain/DVOL fetchers run
+//     straight from the page, no proxy. DVOL comes from
+//     get_index_price?index_name=btcdvol_usdc (the 'BTC-DVOL' ticker
+//     instrument is INVALID — probed, not assumed).
+//   - Deribit `mark_iv` is in PERCENT → /100 before any vol formula
+//     (DEVELOPMENT.md §5 — "forgetting this is a silent 100× bug").
+//   - Bybit `tickers?category=linear` returns ~720 symbols in ONE call, with
+//     `fundingIntervalHour` RESPONSE-PROVIDED per symbol and a 24h-VWAP proxy
+//     = turnover24h/volume24h (label '24h VWAP' — it is a proxy, not a
+//     tick-accurate VWAP).
+//   - HL leaderboard = 33 MB / ~40k rows — CALLERS gate the fetch behind an
+//     explicit user click (WhaleView's "discover top traders" button states
+//     the size); after the one-shot load, only light per-address
+//     clearinghouseState polls remain.
 //
 // Honesty rails (DESIGN §0): everything fetched here is LIVE-DESCRIPTIVE (§0.1)
 // — klines feed charts/TPO/VP panels and NEVER a backtest or the OOS harness.
@@ -150,6 +170,260 @@
     return out;
   }
 
+  // ─── O-4 pure normalizers (§4d — fixture-replayed like the O-3 set) ─────────
+
+  /**
+   * Number() with the empty-string trap closed: Number('') and Number(null)
+   * are 0, NOT NaN — so a pre-listing Bybit ticker row shipping lastPrice ''
+   * (the fixture's basisRate/preOpenPrice fields show '' is how Bybit spells
+   * "absent") would survive the NaN-row drop as a fake price-0 symbol, and a
+   * blank HL entryPx would render as entry $0. Blank on the wire means
+   * ABSENT, and absent must never become a plottable 0 (§0.7).
+   */
+  function num(v) {
+    return v === '' || v === null || v === undefined ? NaN : Number(v);
+  }
+
+  /**
+   * Bybit v5 REST tickers (category=linear, ~720 symbols in ONE call) →
+   * screener rows.
+   *
+   * Wire reality (fixture bybit_rest_tickers): every numeric field is a
+   * STRING → Number() everything; a row with a non-finite core is DROPPED
+   * (a screener bubble with NaN axes renders at the origin and lies).
+   *
+   * - vwap24h = turnover24h / volume24h. This is a PROXY (label '24h VWAP'
+   *   in ScreenerView): the true VWAP needs per-trade data; the 24h turnover ÷
+   *   24h volume ratio is the volume-weighted mean price of the window, which
+   *   is exactly the VWAP definition at bar granularity zero — but it is
+   *   response-derived, not tick-accumulated, so it stays labeled. null when
+   *   volume24h is 0 (new/dead listing) — never a fabricated 0/0.
+   * - fundingIntervalH = Number(fundingIntervalHour): RESPONSE-PROVIDED per
+   *   symbol (§4d — this beats the O-3 fallback-8 constant used when a venue
+   *   response carries no interval; some Bybit alts fund every 4h or 1h and a
+   *   blanket 8 would mis-annualize them 2–8×). Fallback 8 only when the
+   *   field is absent/degenerate.
+   * - annualizedFundingPct = fundingRate × (8760 / intervalH) × 100 — same
+   *   annualization as FundingArbView (§4c).
+   */
+  function normalizeBybitTickers(json) {
+    if (!json || json.retCode !== 0) return null;      // Bybit errors keep HTTP 200 — retCode is the real status
+    const list = json.result && json.result.list;
+    if (!Array.isArray(list)) return null;
+    const out = [];
+    for (const r of list) {
+      if (!r || typeof r.symbol !== 'string' || r.symbol === '') continue;
+      const last = num(r.lastPrice);
+      const turnover24h = num(r.turnover24h);
+      const volume24h = num(r.volume24h);
+      const pct24h = num(r.price24hPcnt) * 100;        // wire is a fraction (0.01536 = +1.536%)
+      const fundingRate = num(r.fundingRate);
+      const oiUsd = num(r.openInterestValue);
+      const mark = num(r.markPrice);
+      const index = num(r.indexPrice);
+      // NaN rows dropped (pre-listing symbols ship empty strings): every
+      // screener axis/encoding — x=pct24h, y=vwapDev, r=turnover, color=
+      // funding — must be plottable, and mark/index/oiUsd feed the hover
+      // readout. One bad symbol dies; the other ~719 survive.
+      if (!Number.isFinite(last) || !Number.isFinite(turnover24h) ||
+          !Number.isFinite(volume24h) || !Number.isFinite(pct24h) ||
+          !Number.isFinite(fundingRate) || !Number.isFinite(oiUsd) ||
+          !Number.isFinite(mark) || !Number.isFinite(index)) continue;
+      const fihRaw = num(r.fundingIntervalHour);
+      const fundingIntervalH = Number.isFinite(fihRaw) && fihRaw > 0 ? fihRaw : 8;
+      const vwap24h = volume24h > 0 ? turnover24h / volume24h : null;   // no volume → no VWAP, never 0/0
+      const vwapDevPct = vwap24h !== null && vwap24h > 0
+        ? ((last - vwap24h) / vwap24h) * 100
+        : null;                                        // dev is undefined without a VWAP — null, not 0 (flat lies)
+      const annualizedFundingPct = fundingRate * (8760 / fundingIntervalH) * 100;
+      out.push({
+        sym: r.symbol, last, vwap24h, vwapDevPct, pct24h, turnover24h,
+        fundingRate, fundingIntervalH, annualizedFundingPct, oiUsd, mark, index,
+      });
+    }
+    return out;
+  }
+
+  // Deribit option-name month tokens (mirrors app.js parseInstrument — that
+  // parser lives on the analytics page's script and terminal.html never loads
+  // app.js, so the terminal carries its own copy of the 12-entry table).
+  const DERIBIT_MONTHS = {
+    JAN: 1, FEB: 2, MAR: 3, APR: 4, MAY: 5, JUN: 6,
+    JUL: 7, AUG: 8, SEP: 9, OCT: 10, NOV: 11, DEC: 12,
+  };
+
+  /**
+   * Parse a Deribit option instrument name `CCY-DDMMMYY-STRIKE-C|P` (e.g.
+   * 'BTC-28AUG26-105000-C', and single-digit days like 'BTC-6JUL26-54000-P')
+   * → { expiryTs, strike, cp } | null.
+   *
+   * expiryTs = 08:00 UTC on the contract date — the Deribit convention
+   * (European cash-settled options expire 08:00 UTC; same rule app.js uses).
+   * Pure calendar math via Date.UTC on PARSED fields — no Date.now(), so the
+   * normalizer stays replay-deterministic.
+   */
+  function parseDeribitOptionName(name) {
+    const parts = String(name).split('-');
+    if (parts.length !== 4) return null;               // futures ('BTC-25SEP26') and spot pairs fall out here
+    const dateTok = parts[1];
+    const cp = parts[3].toUpperCase();
+    if (cp !== 'C' && cp !== 'P') return null;
+    if (dateTok.length < 6) return null;               // D MMM YY needs ≥6 chars
+    const month = DERIBIT_MONTHS[dateTok.slice(-5, -2).toUpperCase()];
+    if (!month) return null;
+    const day = parseInt(dateTok.slice(0, dateTok.length - 5), 10);
+    const year = 2000 + parseInt(dateTok.slice(-2), 10);
+    const strike = parseFloat(parts[2]);
+    if (!Number.isFinite(day) || !Number.isFinite(year) || !Number.isFinite(strike)) return null;
+    const expiryTs = Date.UTC(year, month - 1, day, 8, 0, 0);   // 08:00 UTC expiry (Deribit convention)
+    if (!Number.isFinite(expiryTs)) return null;
+    return { expiryTs, strike, cp };
+  }
+
+  /**
+   * Deribit get_book_summary_by_currency (kind=option) → { rows, skipped }.
+   *
+   * IV PERCENT TRAP (DEVELOPMENT.md §5): `mark_iv` arrives in PERCENT
+   * (fixture: 48.58 for BTC-28AUG26-105000-C) — divide by 100 to the decimal
+   * every vol formula (quant.js black76Greeks) expects. Forgetting this is a
+   * silent 100× bug; the fixture smoke pins iv === mark_iv/100 exactly.
+   * A non-finite mark_iv becomes iv NaN but the row is KEPT: PCR and max pain
+   * consume oi/volume and need no iv, so dropping the row would silently bias
+   * those; the GEX/smile consumers filter non-finite iv themselves (same
+   * choice app.js made).
+   *
+   * Rows with UNPARSEABLE names are skipped and COUNTED (`skipped`) — the
+   * OptionsView surfaces the count instead of silently shrinking the chain
+   * (§0: state what the wire delivered, including what we could not read).
+   * This endpoint has mark_iv only, no greeks (DEVELOPMENT §5) — greeks are
+   * client-side Black-76; the panel stays 'mark-only chain' + unsigned GEX
+   * (§0.5: dealer sign unknowable keyless).
+   */
+  function normalizeDeribitChain(json) {
+    const list = json && json.result;                  // JSON-RPC errors carry `error` and no result array
+    if (!Array.isArray(list)) return null;
+    const rows = [];
+    let skipped = 0;
+    for (const r of list) {
+      const p = r ? parseDeribitOptionName(r.instrument_name) : null;
+      if (!p) { skipped++; continue; }                 // counted, not silently dropped (see docstring)
+      const markIv = num(r.mark_iv);
+      rows.push({
+        name: r.instrument_name,
+        expiryTs: p.expiryTs,
+        strike: p.strike,
+        cp: p.cp,                                      // 'C' | 'P'
+        iv: Number.isFinite(markIv) ? markIv / 100 : NaN,   // PERCENT → decimal (the /100!)
+        oi: num(r.open_interest),                      // contracts (BTC) — PCR-by-OI + GEX weight
+        volume: num(r.volume),                         // 24h contracts — PCR-by-volume
+        markPrice: num(r.mark_price),                  // in BTC (Deribit quotes options in coin)
+        underlying: num(r.underlying_price),           // per-expiry synthetic future = Black-76 F
+      });
+    }
+    return { rows, skipped };
+  }
+
+  /**
+   * Deribit get_index_price (btcdvol_usdc) → Number | null. DVOL is Deribit's
+   * 30-day BTC implied-vol index in VOL POINTS (fixture: 38.68 ≈ 38.68% ann.)
+   * — displayed as-is in the OptionsView stat, never fed to a vol formula
+   * (that is what per-strike iv is for).
+   */
+  function normalizeDeribitDvol(json) {
+    const v = json && json.result ? num(json.result.index_price) : NaN;
+    return Number.isFinite(v) ? v : null;
+  }
+
+  /**
+   * HL leaderboard (33 MB — see fetchHlLeaderboard) → seed lists for the
+   * whale watchlist: { topByValue: [{addr, acctVal}], topByRoi30d: [{addr,
+   * roi, pnl}] }, each capped at n (default 10, §4d "seeds top-10 + top-10").
+   *
+   * Wire shape (fixture hl_leaderboard_sample): rows carry `ethAddress`,
+   * `accountValue` (string USD) and `windowPerformances` as an ARRAY OF PAIRS
+   * [[window, {pnl, roi, vlm}], …] — NOT an object. Inspected fixture window
+   * keys: 'day' | 'week' | 'month' | 'allTime'; 'month' is the 30d window the
+   * §4d ROI ranking wants (there is no literal '30d' key).
+   *
+   * ROI ranking excludes accounts with acctVal < $10k: dust accounts distort
+   * ROI (a $50 account that lucked into 40× outranks every real book while
+   * being unfollowable); the VALUE ranking keeps everyone — size is size.
+   */
+  function normalizeHlLeaderboard(json, n) {
+    const topN = Number.isFinite(n) && n > 0 ? n : 10;
+    const list = json && json.leaderboardRows;
+    if (!Array.isArray(list)) return null;
+    const rows = [];
+    for (const r of list) {
+      if (!r || typeof r.ethAddress !== 'string' || r.ethAddress === '') continue;
+      const acctVal = num(r.accountValue);
+      if (!Number.isFinite(acctVal)) continue;         // never rank a NaN book
+      let month = null;                                // the 30d window ({pnl, roi} strings)
+      if (Array.isArray(r.windowPerformances)) {
+        for (const pair of r.windowPerformances) {
+          if (Array.isArray(pair) && pair[0] === 'month' && pair[1]) { month = pair[1]; break; }
+        }
+      }
+      rows.push({
+        addr: r.ethAddress,
+        acctVal,
+        roi: month ? num(month.roi) : NaN,
+        pnl: month ? num(month.pnl) : NaN,
+      });
+    }
+    const topByValue = rows.slice()                    // slice(): the two sorts must not fight over one array
+      .sort((a, b) => b.acctVal - a.acctVal)
+      .slice(0, topN)
+      .map((r) => ({ addr: r.addr, acctVal: r.acctVal }));
+    const topByRoi30d = rows
+      .filter((r) => r.acctVal >= 10000 && Number.isFinite(r.roi))   // dust filter (see docstring) + no NaN ranks
+      .sort((a, b) => b.roi - a.roi)
+      .slice(0, topN)
+      .map((r) => ({ addr: r.addr, roi: r.roi, pnl: r.pnl }));
+    return { topByValue, topByRoi30d };
+  }
+
+  /**
+   * HL clearinghouseState → [{coin, szi, side, entryPx, posValue, uPnl,
+   * leverage}] from assetPositions[].position — the WhaleView row shape.
+   * These are PUBLIC on-chain facts (§4d rail: facts, not signals).
+   *
+   * Wire shapes (fixture hl_clearinghouse_state):
+   * - `szi` is a SIGNED string coin size — sign IS the direction (fixture
+   *   holds longs only; a short is a negative szi). side = szi > 0 ? long
+   *   : short; zero-size rows are dropped (no position, no direction).
+   * - `leverage` is an OBJECT { type: 'cross'|'isolated', value: 17 } — take
+   *   .value (inspected fixture); tolerate a bare number in case the isolated
+   *   shape differs; null when absent (render '—', never a fake 1×).
+   */
+  function normalizeHlPositions(json) {
+    const list = json && json.assetPositions;
+    if (!Array.isArray(list)) return null;
+    const out = [];
+    for (const ap of list) {
+      const p = ap && ap.position;
+      if (!p || typeof p.coin !== 'string' || p.coin === '') continue;
+      const szi = num(p.szi);
+      const entryPx = num(p.entryPx);
+      // szi/entryPx are the row's identity — non-finite (or flat-zero szi)
+      // rows are dropped; posValue/uPnl pass through num()ed and the view
+      // renders '—' on a NaN rather than hiding a real position.
+      if (!Number.isFinite(szi) || szi === 0 || !Number.isFinite(entryPx)) continue;
+      const levRaw = p.leverage && typeof p.leverage === 'object' ? p.leverage.value : p.leverage;
+      const leverage = Number.isFinite(num(levRaw)) ? num(levRaw) : null;
+      out.push({
+        coin: p.coin,
+        szi,
+        side: szi > 0 ? 'long' : 'short',              // the szi sign IS the direction
+        entryPx,
+        posValue: num(p.positionValue),
+        uPnl: num(p.unrealizedPnl),
+        leverage,
+      });
+    }
+    return out;
+  }
+
   // ─── Thin fetch wrappers (AbortController 10s, silent-null) ─────────────────
 
   /**
@@ -157,11 +431,12 @@
    * per-endpoint wrappers below catch and return null: a transient REST
    * failure is NOT a terminal state; the caller renders '—' and the next
    * poll/refresh retries (same rule as makeBinanceRestPoller). No fabricated
-   * values, no retry storms.
+   * values, no retry storms. `timeoutMs` overrides the 10s default for the
+   * ONE endpoint that genuinely needs longer (the 33 MB HL leaderboard, §4d).
    */
-  async function getJSON(url, init) {
+  async function getJSON(url, init, timeoutMs) {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 10000);
+    const t = setTimeout(() => ctrl.abort(), timeoutMs === undefined ? 10000 : timeoutMs);
     try {
       const opts = Object.assign({ headers: { Accept: 'application/json' } }, init || {});
       opts.signal = ctrl.signal;
@@ -223,10 +498,89 @@
     } catch (_) { return null; }        // transient REST failure ≠ terminal state — caller renders '—'
   }
 
+  // ─── O-4 fetch wrappers (§4d — same AbortController/silent-null pattern) ────
+
+  /**
+   * Bybit v5 tickers, category=linear: the WHOLE perp universe (~720 symbols)
+   * in ONE call (§4d empirical) — the screener/RSI-heatmap symbol source.
+   * One 30s poll of this single endpoint replaces 720 per-symbol calls.
+   */
+  async function fetchBybitAllTickers() {
+    try {
+      const j = await getJSON('https://api.bybit.com/v5/market/tickers?category=linear');
+      return normalizeBybitTickers(j);
+    } catch (_) { return null; }        // transient REST failure ≠ terminal state — caller renders '—'
+  }
+
+  /**
+   * Deribit option chain: get_book_summary_by_currency, kind=option — the
+   * whole currency's chain in one call (no per-instrument ticker fan-out;
+   * that is rate-limit hostile, DEVELOPMENT §5). Deribit REST is CORS-OPEN
+   * to browser origins (§4d, verified 2026-07-05) — fetched straight from
+   * the page, no proxy.
+   */
+  async function fetchDeribitChain(currency) {
+    try {
+      const j = await getJSON(
+        'https://www.deribit.com/api/v2/public/get_book_summary_by_currency' +
+        '?currency=' + encodeURIComponent(currency || 'BTC') + '&kind=option'
+      );
+      return normalizeDeribitChain(j);
+    } catch (_) { return null; }        // transient REST failure ≠ terminal state — caller renders '—'
+  }
+
+  /** Deribit DVOL (30d BTC IV index) via get_index_price?index_name=
+   *  btcdvol_usdc — the 'BTC-DVOL' ticker instrument is INVALID (probed,
+   *  fixtures _o4_notes), so the index endpoint is the one keyless source. */
+  async function fetchDeribitDvol() {
+    try {
+      const j = await getJSON(
+        'https://www.deribit.com/api/v2/public/get_index_price?index_name=btcdvol_usdc'
+      );
+      return normalizeDeribitDvol(j);
+    } catch (_) { return null; }        // transient REST failure ≠ terminal state — caller renders '—'
+  }
+
+  /**
+   * HL leaderboard — a 33 MB / ~40k-row payload (§4d empirical). CALLERS gate
+   * this behind an EXPLICIT user click (WhaleView's "discover top traders
+   * (~33 MB, one-shot)" button — the size is stated on the button); it is
+   * never polled and never auto-fired on page load. 30s abort instead of the
+   * usual 10s: 33 MB legitimately takes >10s on slower links, and aborting a
+   * download the user explicitly asked for would just waste the transfer.
+   * Returns the SMALL normalized seed lists, not the 33 MB parse.
+   */
+  async function fetchHlLeaderboard(n) {
+    try {
+      const j = await getJSON('https://stats-data.hyperliquid.xyz/Mainnet/leaderboard', undefined, 30000);
+      return normalizeHlLeaderboard(j, n);
+    } catch (_) { return null; }        // transient REST failure ≠ terminal state — caller renders '—'
+  }
+
+  /** HL per-address positions (POST info {type:'clearinghouseState', user})
+   *  — the LIGHT (~KB) per-address poll that follows the one-shot leaderboard
+   *  load. Public on-chain state: facts, not signals (§4d rail). */
+  async function fetchHlClearinghouse(addr) {
+    try {
+      const j = await getJSON('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'clearinghouseState', user: addr }),
+      });
+      return normalizeHlPositions(j);
+    } catch (_) { return null; }        // transient REST failure ≠ terminal state — caller renders '—'
+  }
+
   // ─── Export (ONE global + Node dual-export, quant.js pattern) ───────────────
   const HIST = {
+    // O-3 (§4c)
     normalizeBybitKlines, normalizeOkxFunding, normalizeOkxOi, normalizeHlMids,
     fetchBybitKlines, fetchOkxFunding, fetchOkxOi, fetchHlMids,
+    // O-4 (§4d)
+    normalizeBybitTickers, normalizeDeribitChain, normalizeDeribitDvol,
+    normalizeHlLeaderboard, normalizeHlPositions,
+    fetchBybitAllTickers, fetchDeribitChain, fetchDeribitDvol,
+    fetchHlLeaderboard, fetchHlClearinghouse,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = HIST;

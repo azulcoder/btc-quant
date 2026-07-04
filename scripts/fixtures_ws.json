@@ -5784,5 +5784,719 @@
   ],
   "msg": ""
  },
- "_o3_notes": "O-3 REST fixtures captured 2026-07-04. Bybit kline list is NEWEST-FIRST [startMs,o,h,l,c,vol,turnover] strings \u2014 reverse for chronological. OKX funding 8h interval. HL HIP-3: main-universe \"SPX\" is the SPX6900 MEMECOIN (~$0.37), NOT the index \u2014 macro legs use dex=km assets (km:US500/USTECH/GOLD/USOIL) via candleSnapshot with dex-prefixed coin names."
+ "_o3_notes": "O-3 REST fixtures captured 2026-07-04. Bybit kline list is NEWEST-FIRST [startMs,o,h,l,c,vol,turnover] strings \u2014 reverse for chronological. OKX funding 8h interval. HL HIP-3: main-universe \"SPX\" is the SPX6900 MEMECOIN (~$0.37), NOT the index \u2014 macro legs use dex=km assets (km:US500/USTECH/GOLD/USOIL) via candleSnapshot with dex-prefixed coin names.",
+ "bybit_rest_tickers": {
+  "retCode": 0,
+  "retMsg": "OK",
+  "result": {
+   "category": "linear",
+   "list": [
+    {
+     "symbol": "1000PEPEUSDT",
+     "lastPrice": "0.0027540",
+     "indexPrice": "0.0027547",
+     "markPrice": "0.0027540",
+     "prevPrice24h": "0.0025760",
+     "price24hPcnt": "0.069099",
+     "highPrice24h": "0.0028720",
+     "lowPrice24h": "0.0025610",
+     "prevPrice1h": "0.0027820",
+     "openInterest": "13811245100",
+     "openInterestValue": "38036169.01",
+     "singleOpenInterest": "6905622600",
+     "singleOpenInterestValue": "19018084.64",
+     "turnover24h": "94715818.1452",
+     "volume24h": "34496815100.0000",
+     "fundingRate": "0.0001",
+     "nextFundingTime": "1783209600000",
+     "predictedDeliveryPrice": "",
+     "basisRate": "",
+     "deliveryFeeRate": "",
+     "deliveryTime": "0",
+     "ask1Size": "741900",
+     "bid1Price": "0.0027520",
+     "ask1Price": "0.0027530",
+     "bid1Size": "5143000",
+     "basis": "",
+     "preOpenPrice": "",
+     "preQty": "",
+     "curPreListingPhase": "",
+     "fundingIntervalHour": "8",
+     "basisRateYear": "",
+     "fundingCap": "0.01"
+    },
+    {
+     "symbol": "BTCUSDT",
+     "lastPrice": "63100.30",
+     "indexPrice": "63118.24",
+     "markPrice": "63100.20",
+     "prevPrice24h": "62145.70",
+     "price24hPcnt": "0.01536",
+     "highPrice24h": "63212.20",
+     "lowPrice24h": "62076.00",
+     "prevPrice1h": "62881.80",
+     "openInterest": "57644.511",
+     "openInterestValue": "3637380173.00",
+     "singleOpenInterest": "28822.256",
+     "singleOpenInterestValue": "1818690118.05",
+     "turnover24h": "2384597440.4426",
+     "volume24h": "38072.4500",
+     "fundingRate": "0.00003549",
+     "nextFundingTime": "1783209600000",
+     "predictedDeliveryPrice": "",
+     "basisRate": "",
+     "deliveryFeeRate": "",
+     "deliveryTime": "0",
+     "ask1Size": "7.635",
+     "bid1Price": "63100.20",
+     "ask1Price": "63100.30",
+     "bid1Size": "0.740",
+     "basis": "",
+     "preOpenPrice": "",
+     "preQty": "",
+     "curPreListingPhase": "",
+     "fundingIntervalHour": "8",
+     "basisRateYear": "",
+     "fundingCap": "0.005"
+    },
+    {
+     "symbol": "DOGEUSDT",
+     "lastPrice": "0.07856",
+     "indexPrice": "0.07861",
+     "markPrice": "0.07857",
+     "prevPrice24h": "0.07666",
+     "price24hPcnt": "0.024784",
+     "highPrice24h": "0.07891",
+     "lowPrice24h": "0.07656",
+     "prevPrice1h": "0.07866",
+     "openInterest": "1231297676",
+     "openInterestValue": "96743058.40",
+     "singleOpenInterest": "615648838",
+     "singleOpenInterestValue": "48371529.20",
+     "turnover24h": "93568773.0337",
+     "volume24h": "1208231518.0000",
+     "fundingRate": "0.0001",
+     "nextFundingTime": "1783209600000",
+     "predictedDeliveryPrice": "",
+     "basisRate": "",
+     "deliveryFeeRate": "",
+     "deliveryTime": "0",
+     "ask1Size": "193448",
+     "bid1Price": "0.07855",
+     "ask1Price": "0.07856",
+     "bid1Size": "2380",
+     "basis": "",
+     "preOpenPrice": "",
+     "preQty": "",
+     "curPreListingPhase": "",
+     "fundingIntervalHour": "8",
+     "basisRateYear": "",
+     "fundingCap": "0.0058"
+    },
+    {
+     "symbol": "ETHUSDT",
+     "lastPrice": "1788.91",
+     "indexPrice": "1789.73",
+     "markPrice": "1788.96",
+     "prevPrice24h": "1735.55",
+     "price24hPcnt": "0.030745",
+     "highPrice24h": "1798.96",
+     "lowPrice24h": "1735.09",
+     "prevPrice1h": "1788.86",
+     "openInterest": "727005.02",
+     "openInterestValue": "1300582900.58",
+     "singleOpenInterest": "363502.51",
+     "singleOpenInterestValue": "650291450.29",
+     "turnover24h": "1319589691.7412",
+     "volume24h": "747343.3200",
+     "fundingRate": "0.00003583",
+     "nextFundingTime": "1783209600000",
+     "predictedDeliveryPrice": "",
+     "basisRate": "",
+     "deliveryFeeRate": "",
+     "deliveryTime": "0",
+     "ask1Size": "45.44",
+     "bid1Price": "1788.90",
+     "ask1Price": "1788.91",
+     "bid1Size": "0.44",
+     "basis": "",
+     "preOpenPrice": "",
+     "preQty": "",
+     "curPreListingPhase": "",
+     "fundingIntervalHour": "8",
+     "basisRateYear": "",
+     "fundingCap": "0.005"
+    },
+    {
+     "symbol": "SOLUSDT",
+     "lastPrice": "82.390",
+     "indexPrice": "82.449",
+     "markPrice": "82.403",
+     "prevPrice24h": "81.720",
+     "price24hPcnt": "0.008198",
+     "highPrice24h": "83.950",
+     "lowPrice24h": "81.250",
+     "prevPrice1h": "82.310",
+     "openInterest": "7493725",
+     "openInterestValue": "617505421.18",
+     "singleOpenInterest": "3746862.5",
+     "singleOpenInterestValue": "308752710.59",
+     "turnover24h": "545622682.0270",
+     "volume24h": "6625093.8000",
+     "fundingRate": "0.00000254",
+     "nextFundingTime": "1783209600000",
+     "predictedDeliveryPrice": "",
+     "basisRate": "",
+     "deliveryFeeRate": "",
+     "deliveryTime": "0",
+     "ask1Size": "1106.3",
+     "bid1Price": "82.390",
+     "ask1Price": "82.400",
+     "bid1Size": "353.8",
+     "basis": "",
+     "preOpenPrice": "",
+     "preQty": "",
+     "curPreListingPhase": "",
+     "fundingIntervalHour": "8",
+     "basisRateYear": "",
+     "fundingCap": "0.005"
+    },
+    {
+     "symbol": "XRPUSDT",
+     "lastPrice": "1.1734",
+     "indexPrice": "1.1743",
+     "markPrice": "1.1736",
+     "prevPrice24h": "1.1185",
+     "price24hPcnt": "0.049083",
+     "highPrice24h": "1.1805",
+     "lowPrice24h": "1.1182",
+     "prevPrice1h": "1.1696",
+     "openInterest": "200459456.5",
+     "openInterestValue": "235259218.15",
+     "singleOpenInterest": "100229728.3",
+     "singleOpenInterestValue": "117629609.13",
+     "turnover24h": "350276747.3603",
+     "volume24h": "305270886.8000",
+     "fundingRate": "-0.00000458",
+     "nextFundingTime": "1783209600000",
+     "predictedDeliveryPrice": "",
+     "basisRate": "",
+     "deliveryFeeRate": "",
+     "deliveryTime": "0",
+     "ask1Size": "20359.1",
+     "bid1Price": "1.1734",
+     "ask1Price": "1.1735",
+     "bid1Size": "832.9",
+     "basis": "",
+     "preOpenPrice": "",
+     "preQty": "",
+     "curPreListingPhase": "",
+     "fundingIntervalHour": "8",
+     "basisRateYear": "",
+     "fundingCap": "0.005"
+    }
+   ]
+  },
+  "retExtInfo": {},
+  "time": 1783186479543
+ },
+ "deribit_rest_book_summary": {
+  "jsonrpc": "2.0",
+  "result": [
+   {
+    "high": null,
+    "low": null,
+    "last": 0.0002,
+    "interest_rate": 0.0,
+    "instrument_name": "BTC-28AUG26-105000-C",
+    "bid_price": 0.0002,
+    "ask_price": 0.0004,
+    "open_interest": 161.3,
+    "mark_price": 0.00026511,
+    "creation_timestamp": 1783186478644,
+    "price_change": null,
+    "volume": 0.0,
+    "mark_iv": 48.58,
+    "underlying_price": 63358.41,
+    "underlying_index": "BTC-28AUG26",
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "estimated_delivery_price": 63068.17,
+    "volume_usd": 0.0,
+    "mid_price": 0.0003
+   },
+   {
+    "high": null,
+    "low": null,
+    "last": 0.2057,
+    "interest_rate": 0.0,
+    "instrument_name": "BTC-28AUG26-48000-C",
+    "bid_price": 0.246,
+    "ask_price": 0.253,
+    "open_interest": 37.5,
+    "mark_price": 0.24901439,
+    "creation_timestamp": 1783186478644,
+    "price_change": null,
+    "volume": 0.0,
+    "mark_iv": 51.87,
+    "underlying_price": 63358.41,
+    "underlying_index": "BTC-28AUG26",
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "estimated_delivery_price": 63068.17,
+    "volume_usd": 0.0,
+    "mid_price": 0.2495
+   },
+   {
+    "high": 0.009,
+    "low": 0.0065,
+    "last": 0.0065,
+    "interest_rate": 0.0,
+    "instrument_name": "BTC-24JUL26-56000-P",
+    "bid_price": 0.0055,
+    "ask_price": 0.0065,
+    "open_interest": 23.8,
+    "mark_price": 0.00593461,
+    "creation_timestamp": 1783186478644,
+    "price_change": -27.7778,
+    "volume": 3.6,
+    "mark_iv": 44.71,
+    "underlying_price": 63149.82,
+    "underlying_index": "BTC-24JUL26",
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "estimated_delivery_price": 63068.17,
+    "volume_usd": 1927.36,
+    "mid_price": 0.006
+   },
+   {
+    "high": 0.0033,
+    "low": 0.0031,
+    "last": 0.0032,
+    "interest_rate": 0.0,
+    "instrument_name": "BTC-25SEP26-35000-P",
+    "bid_price": 0.0025,
+    "ask_price": 0.0032,
+    "open_interest": 846.7,
+    "mark_price": 0.00297725,
+    "creation_timestamp": 1783186478644,
+    "price_change": 0.0,
+    "volume": 3.7,
+    "mark_iv": 67.79,
+    "underlying_price": 63559.75,
+    "underlying_index": "BTC-25SEP26",
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "estimated_delivery_price": 63068.17,
+    "volume_usd": 736.89,
+    "mid_price": 0.00285
+   },
+   {
+    "high": 0.086,
+    "low": 0.078,
+    "last": 0.078,
+    "interest_rate": 0.0,
+    "instrument_name": "BTC-25SEP26-64000-P",
+    "bid_price": 0.076,
+    "ask_price": 0.0775,
+    "open_interest": 482.4,
+    "mark_price": 0.07701274,
+    "creation_timestamp": 1783186478644,
+    "price_change": -9.3023,
+    "volume": 1.4,
+    "mark_iv": 38.65,
+    "underlying_price": 63559.77,
+    "underlying_index": "BTC-25SEP26",
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "estimated_delivery_price": 63068.17,
+    "volume_usd": 7217.61,
+    "mid_price": 0.07675
+   },
+   {
+    "high": null,
+    "low": null,
+    "last": 1.2259,
+    "interest_rate": 0.0,
+    "instrument_name": "BTC-25SEP26-135000-P",
+    "bid_price": null,
+    "ask_price": null,
+    "open_interest": 11.5,
+    "mark_price": 1.12424987,
+    "creation_timestamp": 1783186478644,
+    "price_change": null,
+    "volume": 0.0,
+    "mark_iv": 56.09,
+    "underlying_price": 63559.75,
+    "underlying_index": "BTC-25SEP26",
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "estimated_delivery_price": 63068.17,
+    "volume_usd": 0.0,
+    "mid_price": null
+   },
+   {
+    "high": 0.024,
+    "low": 0.0215,
+    "last": 0.022,
+    "interest_rate": 0.0,
+    "instrument_name": "BTC-28AUG26-56000-P",
+    "bid_price": 0.0205,
+    "ask_price": 0.022,
+    "open_interest": 655.6,
+    "mark_price": 0.02121095,
+    "creation_timestamp": 1783186478644,
+    "price_change": -6.383,
+    "volume": 6.3,
+    "mark_iv": 43.43,
+    "underlying_price": 63358.41,
+    "underlying_index": "BTC-28AUG26",
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "estimated_delivery_price": 63068.17,
+    "volume_usd": 9197.78,
+    "mid_price": 0.02125
+   },
+   {
+    "high": 0.037,
+    "low": 0.0335,
+    "last": 0.037,
+    "interest_rate": 0.0,
+    "instrument_name": "BTC-25DEC26-80000-C",
+    "bid_price": 0.0365,
+    "ask_price": 0.0375,
+    "open_interest": 6874.1,
+    "mark_price": 0.03713205,
+    "creation_timestamp": 1783186478644,
+    "price_change": 8.8235,
+    "volume": 78.8,
+    "mark_iv": 40.03,
+    "underlying_price": 64227.28,
+    "underlying_index": "BTC-25DEC26",
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "estimated_delivery_price": 63068.17,
+    "volume_usd": 175076.7,
+    "mid_price": 0.037
+   },
+   {
+    "high": null,
+    "low": null,
+    "last": 0.6285,
+    "interest_rate": 0.0,
+    "instrument_name": "BTC-25DEC26-105000-P",
+    "bid_price": 0.6325,
+    "ask_price": 0.648,
+    "open_interest": 109.4,
+    "mark_price": 0.64047057,
+    "creation_timestamp": 1783186478644,
+    "price_change": null,
+    "volume": 0.0,
+    "mark_iv": 40.57,
+    "underlying_price": 64227.28,
+    "underlying_index": "BTC-25DEC26",
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "estimated_delivery_price": 63068.17,
+    "volume_usd": 0.0,
+    "mid_price": 0.64025
+   },
+   {
+    "high": null,
+    "low": null,
+    "last": 0.0001,
+    "interest_rate": 0,
+    "instrument_name": "BTC-6JUL26-54000-P",
+    "bid_price": null,
+    "ask_price": 0.0001,
+    "open_interest": 75.3,
+    "mark_price": 1.9e-07,
+    "creation_timestamp": 1783186478644,
+    "price_change": null,
+    "volume": 0.0,
+    "mark_iv": 57.71,
+    "underlying_price": 63068.17,
+    "underlying_index": "index_price",
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "estimated_delivery_price": 63068.17,
+    "volume_usd": 0.0,
+    "mid_price": null
+   }
+  ],
+  "usIn": 1783186479015082,
+  "usOut": 1783186479015243,
+  "usDiff": 161,
+  "testnet": false
+ },
+ "deribit_rest_dvol": {
+  "jsonrpc": "2.0",
+  "result": {
+   "estimated_delivery_price": 38.68,
+   "index_price": 38.68
+  },
+  "usIn": 1783186480233199,
+  "usOut": 1783186480233407,
+  "usDiff": 208,
+  "testnet": false
+ },
+ "hl_leaderboard_sample": {
+  "leaderboardRows": [
+   {
+    "ethAddress": "0xa822a9ceb6d6cb5b565bd10098abcfa9cf18d748",
+    "accountValue": "13295008398.5851707458",
+    "windowPerformances": [
+     [
+      "day",
+      {
+       "pnl": "83697072.4149619937",
+       "roi": "0.0063344065",
+       "vlm": "0.0"
+      }
+     ],
+     [
+      "week",
+      {
+       "pnl": "499954764.998593986",
+       "roi": "0.0390507877",
+       "vlm": "0.0"
+      }
+     ],
+     [
+      "month",
+      {
+       "pnl": "0.0",
+       "roi": "0.0",
+       "vlm": "0.0"
+      }
+     ],
+     [
+      "allTime",
+      {
+       "pnl": "-500.0",
+       "roi": "-0.0312634237",
+       "vlm": "0.0"
+      }
+     ]
+    ],
+    "prize": 0,
+    "displayName": null
+   },
+   {
+    "ethAddress": "0x1c498a93b145e7a73d69691e9023f6f308e1cc3f",
+    "accountValue": "5039903229.5638132095",
+    "windowPerformances": [
+     [
+      "day",
+      {
+       "pnl": "122541710.4378699958",
+       "roi": "0.0249201775",
+       "vlm": "0.0"
+      }
+     ],
+     [
+      "week",
+      {
+       "pnl": "293250773.6749879718",
+       "roi": "0.061780331",
+       "vlm": "0.0"
+      }
+     ],
+     [
+      "month",
+      {
+       "pnl": "0.0",
+       "roi": "0.0",
+       "vlm": "0.0"
+      }
+     ],
+     [
+      "allTime",
+      {
+       "pnl": "-500.0",
+       "roi": "-1.0",
+       "vlm": "0.0"
+      }
+     ]
+    ],
+    "prize": 0,
+    "displayName": null
+   },
+   {
+    "ethAddress": "0x24de6b77e8bc31c40aa452926daa6bbab7a71b0f",
+    "accountValue": "2060028789.2086191177",
+    "windowPerformances": [
+     [
+      "day",
+      {
+       "pnl": "0.0",
+       "roi": "0.0",
+       "vlm": "0.0"
+      }
+     ],
+     [
+      "week",
+      {
+       "pnl": "142230135.0203469992",
+       "roi": "0.0741617437",
+       "vlm": "0.0"
+      }
+     ],
+     [
+      "month",
+      {
+       "pnl": "14464050.7791530006",
+       "roi": "0.0070708003",
+       "vlm": "0.0"
+      }
+     ],
+     [
+      "allTime",
+      {
+       "pnl": "-500.0",
+       "roi": "-0.1",
+       "vlm": "0.0"
+      }
+     ]
+    ],
+    "prize": 0,
+    "displayName": null
+   }
+  ]
+ },
+ "hl_clearinghouse_state": {
+  "marginSummary": {
+   "accountValue": "15591294.0555259995",
+   "totalNtlPos": "75774708.8030319959",
+   "totalRawUsd": "-60183414.7475060001",
+   "totalMarginUsed": "11961465.7376869991"
+  },
+  "crossMarginSummary": {
+   "accountValue": "15591294.0555259995",
+   "totalNtlPos": "75774708.8030319959",
+   "totalRawUsd": "-60183414.7475060001",
+   "totalMarginUsed": "11961465.7376869991"
+  },
+  "crossMaintenanceMarginUsed": "3884866.8363490002",
+  "withdrawable": "3048319.8568890002",
+  "assetPositions": [
+   {
+    "type": "oneWay",
+    "position": {
+     "coin": "SOL",
+     "szi": "169806.92",
+     "leverage": {
+      "type": "cross",
+      "value": 17
+     },
+     "entryPx": "74.6913",
+     "positionValue": "14000920.1678400002",
+     "unrealizedPnl": "1317808.6891600001",
+     "returnOnEquity": "1.7663447769",
+     "liquidationPx": null,
+     "marginUsed": "823583.5392840001",
+     "maxLeverage": 20,
+     "cumFunding": {
+      "allTime": "44017.179455",
+      "sinceOpen": "15726.692466",
+      "sinceChange": "13063.318867"
+     }
+    }
+   },
+   {
+    "type": "oneWay",
+    "position": {
+     "coin": "AAVE",
+     "szi": "81683.16",
+     "leverage": {
+      "type": "cross",
+      "value": 10
+     },
+     "entryPx": "85.3694",
+     "positionValue": "7315625.4927599998",
+     "unrealizedPnl": "342381.43968",
+     "returnOnEquity": "0.4909930544",
+     "liquidationPx": null,
+     "marginUsed": "731562.549276",
+     "maxLeverage": 10,
+     "cumFunding": {
+      "allTime": "17859.835792",
+      "sinceOpen": "17859.835792",
+      "sinceChange": "16865.709961"
+     }
+    }
+   },
+   {
+    "type": "oneWay",
+    "position": {
+     "coin": "WLD",
+     "szi": "9737082.5999999996",
+     "leverage": {
+      "type": "cross",
+      "value": 10
+     },
+     "entryPx": "0.51467",
+     "positionValue": "4282076.815002",
+     "unrealizedPnl": "-729377.9248489999",
+     "returnOnEquity": "-1.4554215546",
+     "liquidationPx": null,
+     "marginUsed": "428207.6815",
+     "maxLeverage": 10,
+     "cumFunding": {
+      "allTime": "22717.0851",
+      "sinceOpen": "22717.0851",
+      "sinceChange": "20206.680438"
+     }
+    }
+   },
+   {
+    "type": "oneWay",
+    "position": {
+     "coin": "NEAR",
+     "szi": "4228103.2999999998",
+     "leverage": {
+      "type": "cross",
+      "value": 10
+     },
+     "entryPx": "2.2171",
+     "positionValue": "8592774.3365899995",
+     "unrealizedPnl": "-781390.91177",
+     "returnOnEquity": "-0.8335578594",
+     "liquidationPx": null,
+     "marginUsed": "859277.433659",
+     "maxLeverage": 10,
+     "cumFunding": {
+      "allTime": "65897.27791",
+      "sinceOpen": "65897.27791",
+      "sinceChange": "54502.885881"
+     }
+    }
+   },
+   {
+    "type": "oneWay",
+    "position": {
+     "coin": "HYPE",
+     "szi": "136619.44",
+     "leverage": {
+      "type": "cross",
+      "value": 2
+     },
+     "entryPx": "70.5358",
+     "positionValue": "9660223.9829600006",
+     "unrealizedPnl": "23649.59908",
+     "returnOnEquity": "0.0049083",
+     "liquidationPx": null,
+     "marginUsed": "4830111.9914800003",
+     "maxLeverage": 10,
+     "cumFunding": {
+      "allTime": "335827.065238",
+      "sinceOpen": "95161.422989",
+      "sinceChange": "76577.785429"
+     }
+    }
+   }
+  ],
+  "time": 1783186479014
+ },
+ "_o4_notes": "O-4 fixtures captured 2026-07-05. Deribit REST is CORS-open to browser origins (verified: access-control-allow-origin echoes). DVOL via get_index_price?index_name=btcdvol_usdc (BTC-DVOL ticker instrument is invalid). HL leaderboard = 33 MB / 40k rows -> browser loads it OPT-IN once, extracts top-N, then polls light clearinghouseState per address. Bybit tickers: 720 linear symbols in ONE call; VWAP proxy = turnover24h/volume24h (label: 24h VWAP); fundingIntervalHour is response-provided (use it, not the 8h constant)."
 }

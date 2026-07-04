@@ -215,6 +215,81 @@
       <div id="view-macro" class="macro-wrap"></div>
     </section>
 
+    <!-- ═══ O-4 INTELLIGENCE section (§4d) — screener / RSI / options / whales /
+         alerts / confluence, after STRUCTURE. Rail: everything here is a
+         DESCRIPTIVE read or attention trigger — the IC run-log measured ≈0
+         forward IC for board signals, so no panel below is a score to trade
+         (each header carries its §4d source/honesty label). REST-fed panels
+         (screener/RSI/options/whales) are replaced by an honest
+         'disabled in replay' note in ?replay modes (deterministic L1, §7);
+         confluence + alerts read the live stores and run in both modes. ═══ -->
+
+    <!-- Row A: VWAP screener (1/2) + RSI heatmap (1/2). -->
+    <section class="panel area-scr">
+      <h2>VWAP screener — bybit linear
+        <span class="signal-tag descriptive" title="ONE 30s REST call carries all ~720 linear symbols (§4d). x = 24h %, y = last vs the 24h-VWAP PROXY (turnover24h/volume24h — response-derived, labeled, not a tick-accurate VWAP), r ∝ √turnover, color = funding sign (α ∝ |annualized|). A hot quadrant is a 24h fact, not a signal.">bybit linear · 24h VWAP = turnover/volume</span>
+        <span class="heat-controls">
+          <label for="set-scr-top">slice</label>
+          <select id="set-scr-top">
+            <option value="40" selected>top 40</option>
+            <option value="all">all</option>
+          </select>
+        </span>
+      </h2>
+      <div id="view-screener" class="scr-wrap"></div>
+      <p class="hint">bubble = one perp symbol; quadrant cross at 0/0. Rows without 24h volume have no VWAP and are <b>counted, not plotted</b> (a fabricated 0-deviation would lie). BTCUSDT wears the accent ring.</p>
+    </section>
+
+    <section class="panel area-rsi">
+      <h2>RSI heatmap — top-40 by turnover
+        <span class="signal-tag descriptive" title="Last 1h RSI-14 (Wilder, quant.js rsi — indicator math is never reimplemented) per top-40 screener symbol; 40 kline fetches behind a 4-way politeness pool, refreshed on demand + every 5min. The strip renders partial state honestly as symbols land.">1h RSI-14 · bybit klines</span>
+        <span class="heat-controls">
+          <span id="rsi-progress" title="loaded symbols / batch size — honest partial state (§4d)">—</span>
+          <button id="rsi-refresh" type="button" title="re-fetch 1h klines for the current top-40 (also auto-refreshes every 5min)">refresh</button>
+        </span>
+      </h2>
+      <div id="view-rsi" class="rsi-wrap"></div>
+      <p class="hint">30/70 zones shaded; symbols at the extremes (&lt;25 or &gt;75) are named. Vertical position is turnover <b>rank</b> (layout), not a data axis. An oscillator extreme is a description, not an entry.</p>
+    </section>
+
+    <!-- Row B: options (2/3) + confluence (1/3). -->
+    <section class="panel area-opts">
+      <h2>options — Deribit BTC
+        <span class="signal-tag descriptive" title="get_book_summary_by_currency (kind=option), 60s poll, CORS-open (§4d). The endpoint serves mark_iv ONLY (PERCENT → /100 in the normalizer) and no greeks — greeks are client-side Black-76 (quant.js) on the mark surface.">deribit · mark-only chain</span>
+        <span class="signal-tag research" title="§0.5 (non-negotiable): the dealer's side of each open contract is unknowable keyless, so gamma exposure stays UNSIGNED Σ|Γ|·OI — a concentration map, never a flip level or dealer-positioning claim.">unsigned Σ|Γ|·OI — dealer sign unknowable (§0.5)</span>
+        <span class="heat-controls">
+          <label for="set-opt-expiry">expiry</label>
+          <select id="set-opt-expiry"></select>
+        </span>
+      </h2>
+      <div id="view-options" class="opts-wrap"></div>
+      <p class="hint">smile + max pain read the <b>selected expiry</b>; term structure, heatmap, PCR and the GEX profile span every live expiry. Max pain / GEX are the same descriptive positioning reads as the analytics page — <b>never a forecast</b>.</p>
+    </section>
+
+    <section class="panel area-conf">
+      <h2>confluence — 9 mechanical reads
+        <span class="signal-tag research" title="The CryExc 'mechanical analysis' board, rebuilt with the §4d honesty rail: 9 descriptive category reads + a tally, evaluated every 5s of event time from the live stores. The IC run-log found ≈0 forward IC for board signals — the mandatory sentence below the tally says so on-page.">un-validated · NOT a signal</span>
+      </h2>
+      <div id="view-conf" class="conf-wrap"></div>
+      <p class="hint">a missing feed reads <b>n/a</b>, never 'neutral' — absence is not an opinion (§0.7). REST-fed reads (TPO, SMA50) are n/a in replay.</p>
+    </section>
+
+    <!-- Row C: whale watch (1/2) + alerts (1/2). -->
+    <section class="panel area-whale">
+      <h2>whale watch — Hyperliquid
+        <span class="signal-tag descriptive" title="clearinghouseState is public on-chain state, queryable for any address — positions are FACTS, not signals (§4d). Watchlist persists locally (cap 25); each address polls every 60s, staggered. The leaderboard discover button is a one-shot ~33 MB opt-in download and says so before fetching.">public on-chain state — facts, not signals</span>
+      </h2>
+      <div id="view-whale" class="whale-wrap"></div>
+    </section>
+
+    <section class="panel area-alerts">
+      <h2>alerts
+        <span class="signal-tag research" title="AlertEngine (§4d): descriptive attention triggers over session facts — price cross, whale print, liq burst, funding flip, CVD divergence (heuristic), book imbalance, detector pass-through (heuristic), OI jump, basis. 60s per-rule cooldown, event-time driven. Un-validated: a trigger is a ping, never an entry.">descriptive triggers — un-validated · not signals</span>
+      </h2>
+      <div id="view-alerts" class="alerts-wrap"></div>
+      <p class="hint">thresholds are <b>visible inputs</b> (no defaults hidden in engine logic, §4d); a threshold-kind with an empty box cannot fire. Browser notifications are opt-in and fire only while the tab is hidden — the in-page feed already covers the visible case.</p>
+    </section>
+
     <!-- Footer row 2: settings (persisted to localStorage 'btcq-terminal'). -->
     <section class="panel area-set">
       <div class="controls">
@@ -249,7 +324,7 @@
   </main>
 
   <footer>
-    <p>Live-descriptive orderflow terminal (DESIGN-orderflow-terminal.md). Everything above renders only what arrived over the public wire this session — <b>never a backtest input</b>, never merged into the OOS harness. Feeds: Bybit v5 linear (primary), Binance Futures depth WS + REST mark/OI, Coinbase Advanced Trade spot tape, OKX v5 swap book+trades (O-2). Liq heatmap = <b>model estimate</b>; spoof/iceberg flags = <b>heuristics</b> — both labeled in-panel. See <a href="../DISCLAIMER.md">DISCLAIMER.md</a>.</p>
+    <p>Live-descriptive orderflow terminal (DESIGN-orderflow-terminal.md). Everything above renders only what arrived over the public wire this session — <b>never a backtest input</b>, never merged into the OOS harness. Feeds: Bybit v5 linear (primary), Binance Futures depth WS + REST mark/OI, Coinbase Advanced Trade spot tape, OKX v5 swap book+trades (O-2), Deribit options REST + Hyperliquid public state (O-4). Liq heatmap = <b>model estimate</b>; spoof/iceberg flags = <b>heuristics</b>; screener/confluence/alerts = <b>un-validated descriptive reads</b> (IC run-log ≈ 0) — all labeled in-panel. See <a href="../DISCLAIMER.md">DISCLAIMER.md</a>.</p>
   </footer>
 
   <!-- Script order is a CONTRACT (DESIGN §4/§4c): vendor/lightweight-charts.js →

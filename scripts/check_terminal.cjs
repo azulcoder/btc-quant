@@ -71,6 +71,45 @@
 //                           (trades/depth/liqs/funding/oi), §0.6 values pass
 //                           through UNCHANGED (no re-inversion), corrupt rows → null
 //
+// O-4 additions (DESIGN §4d "check_terminal.cjs additions", binding list):
+//  24. Bybit REST tickers → 24h-VWAP proxy === turnover24h/volume24h (≤1e-9,
+//                           null on zero volume — never a fabricated 0/0),
+//                           fundingIntervalH RESPONSE-provided (fallback 8
+//                           only when absent), annualized = rate×(8760/H)×100,
+//                           pct24h ×100, the Number('')===0 trap (blank wire
+//                           field → row dropped, never a plottable 0)
+//  25. Deribit chain + DVOL → name parse ('BTC-28AUG26-105000-C' + the
+//                           single-digit-day edge) → strike/cp/expiryTs
+//                           verified against hand-computed Date.UTC at the
+//                           08:00 UTC convention; iv === mark_iv/100 (the
+//                           PERCENT trap, DEVELOPMENT §5); unparseable names
+//                           SKIPPED AND COUNTED; DVOL = 38.68 (the PINNED
+//                           payload — §0: real capture wins)
+//  26. HL leaderboard/positions → topByValue addr + acctVal exact,
+//                           `windowPerformances` PAIR-ARRAY parse ('month' =
+//                           the 30d window), dust (<$10k) excluded from the
+//                           ROI ranking ONLY; positions szi/side/entry/
+//                           leverage.value vs fixture, szi<0 → short
+//  27. buildScreener       → turnover-USD ranking on the REAL fixture rows,
+//                           topN slice + 'all' passthrough, total = universe
+//                           size, non-finite turnover sinks (never dropped),
+//                           input unmutated
+//  28. confluenceReads     → EXACTLY the 9 §4d categories in order, each
+//                           driven bullish AND bearish, n/a on missing feeds
+//                           (never neutral), response-provided funding
+//                           interval honored, tally sums to 9, the mandatory
+//                           IC-honesty label VERBATIM
+//  29. AlertEngine         → per-kind fire + cooldown for all 9 rule kinds,
+//                           cvd-divergence carries label:'heuristic' both
+//                           directions, thresholds injected (no threshold →
+//                           cannot fire), event-ts driven (NaN ts → [])
+//  30. unsigned GEX + PCR  → Black-76 Γ > 0 on a pinned real chain row
+//                           (T from the fixture's own creation_timestamp),
+//                           call Γ ≡ put Γ, Σ|Γ|·OI over two constructed
+//                           rows === the hand sum (quant.js — the view's
+//                           math source), PCR-by-OI exact on constructed
+//                           rows AND vs hand-summed raw fixture OI
+//
 // Exit: 0 with one PASS line per group; non-zero with a clear FAIL message
 // (plus stack) if any group breaks. Run: node scripts/check_terminal.cjs
 
@@ -82,6 +121,10 @@ const A = require(path.join(__dirname, '..', 'dashboard', 'terminal-adapters.js'
 const S = require(path.join(__dirname, '..', 'dashboard', 'terminal-state.js'));
 const H = require(path.join(__dirname, '..', 'dashboard', 'terminal-hist.js'));
 const R = require(path.join(__dirname, '..', 'dashboard', 'terminal-replay.js'));
+// quant.js is the O-4 views' options-math source (§4d: Γ via black76Greeks,
+// max pain via maxPain — the house rule forbids reimplementing either), so
+// group 30 drives it directly with normalized chain rows.
+const Q = require(path.join(__dirname, '..', 'dashboard', 'quant.js'));
 const FX = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures_ws.json'), 'utf8'));
 
 // makeSocket's liveApi surface, minus the socket: adapters only ever touch
@@ -1168,6 +1211,493 @@ group('byod row→event mapping exactness (all 5 tables)', () => {
   const b = book.best();
   assert.strictEqual(b.bid[0], 62000.1);
   assert.strictEqual(b.ask[0], 62000.2);
+});
+
+// ─── 24. Bybit REST tickers: VWAP proxy + response fundingIntervalHour (§4d) ─
+group('bybit REST tickers normalizer (24h-VWAP proxy + response funding interval)', () => {
+  const before = JSON.stringify(FX.bybit_rest_tickers);
+  const rows = H.normalizeBybitTickers(FX.bybit_rest_tickers);
+  assert.strictEqual(JSON.stringify(FX.bybit_rest_tickers), before, 'normalizer must NOT mutate its input');
+  assert.strictEqual(rows.length, 6, 'all 6 fixture symbols survive');
+
+  // §4d headline: vwap24h = turnover24h / volume24h to 1e-9, EXACT fixture
+  // numbers (the '24h VWAP' proxy the ScreenerView labels).
+  const btc = rows.find((r) => r.sym === 'BTCUSDT');
+  assert.ok(btc, 'BTCUSDT present');
+  const expVwap = 2384597440.4426 / 38072.45;
+  assert.ok(approx(btc.vwap24h, expVwap), 'vwap24h must equal turnover24h/volume24h (Δ ≤ 1e-9), got ' + btc.vwap24h);
+  assert.strictEqual(btc.last, 63100.30, 'last = Number(lastPrice)');
+  assert.ok(approx(btc.vwapDevPct, ((63100.30 - expVwap) / expVwap) * 100, 1e-12), 'vwapDevPct = (last−vwap)/vwap ×100');
+  // Wire price24hPcnt is a FRACTION (0.01536) → ×100 to the % the scatter plots.
+  assert.ok(approx(btc.pct24h, 1.536, 1e-12), 'pct24h = price24hPcnt × 100');
+  // §4d: fundingIntervalHour is RESPONSE-PROVIDED — use it, not the 8h constant.
+  assert.strictEqual(btc.fundingIntervalH, 8, 'fundingIntervalH = Number(fundingIntervalHour) from the response');
+  assert.strictEqual(btc.fundingRate, 0.00003549, 'fundingRate exact');
+  assert.ok(approx(btc.annualizedFundingPct, 0.00003549 * (8760 / 8) * 100, 1e-12),
+    'annualized = rate × (8760/intervalH) × 100');
+  assert.strictEqual(btc.oiUsd, 3637380173.00, 'oiUsd = openInterestValue');
+  assert.strictEqual(btc.mark, 63100.20);
+  assert.strictEqual(btc.index, 63118.24);
+  // Sign preserved through annualization (XRPUSDT funds negative in the capture).
+  const xrp = rows.find((r) => r.sym === 'XRPUSDT');
+  assert.strictEqual(xrp.fundingRate, -0.00000458, 'fixture precondition: a negative-funding symbol exists');
+  assert.ok(xrp.annualizedFundingPct < 0, 'negative funding must stay negative annualized');
+
+  // Response interval ≠ 8 must be USED (some alts fund 4h/1h — a blanket 8
+  // would mis-annualize 2–8×); absent/degenerate interval falls back to 8.
+  const alt = JSON.parse(before);
+  alt.result.list[1].fundingIntervalHour = '4';
+  const btc4 = H.normalizeBybitTickers(alt).find((r) => r.sym === 'BTCUSDT');
+  assert.strictEqual(btc4.fundingIntervalH, 4, 'response interval 4 must win over the 8h constant');
+  assert.ok(approx(btc4.annualizedFundingPct, 0.00003549 * (8760 / 4) * 100, 1e-12), 'annualization uses the response interval');
+  const noFih = JSON.parse(before);
+  noFih.result.list[1].fundingIntervalHour = '';
+  assert.strictEqual(H.normalizeBybitTickers(noFih).find((r) => r.sym === 'BTCUSDT').fundingIntervalH, 8,
+    'absent interval falls back to 8 (stated fallback, not a hidden constant)');
+
+  // Zero volume → vwap/dev NULL (a new/dead listing has no VWAP), row kept.
+  const zv = JSON.parse(before);
+  zv.result.list[1].volume24h = '0.0000';
+  const rz = H.normalizeBybitTickers(zv).find((r) => r.sym === 'BTCUSDT');
+  assert.strictEqual(rz.vwap24h, null, 'volume 0 → vwap24h null, never a fabricated 0/0');
+  assert.strictEqual(rz.vwapDevPct, null, 'no VWAP → no deviation (null, not 0 — flat lies)');
+
+  // The Number('')===0 trap: Bybit spells "absent" as '' (the fixture's own
+  // basisRate/preOpenPrice fields show it) — a blank lastPrice must DROP the
+  // row, not plot a price-0 symbol at the origin.
+  const blank = JSON.parse(before);
+  blank.result.list[0].lastPrice = '';
+  const survived = H.normalizeBybitTickers(blank);
+  assert.strictEqual(survived.length, 5, 'blank-field row dropped, the other 5 survive');
+  assert.ok(!survived.some((r) => r.sym === '1000PEPEUSDT'), 'the blanked symbol is the one missing');
+  assert.ok(!survived.some((r) => r.last === 0), 'no row may surface a fake price 0');
+
+  assert.strictEqual(H.normalizeBybitTickers(Object.assign({}, FX.bybit_rest_tickers, { retCode: 10001 })), null,
+    'retCode !== 0 must yield null');
+  assert.strictEqual(H.normalizeBybitTickers(null), null);
+});
+
+// ─── 25. Deribit chain name-parse + iv PERCENT/100 + DVOL (§4d) ──────────────
+group('deribit chain normalizer (name parse + iv/100) + dvol exact', () => {
+  const before = JSON.stringify(FX.deribit_rest_book_summary);
+  const ch = H.normalizeDeribitChain(FX.deribit_rest_book_summary);
+  assert.strictEqual(JSON.stringify(FX.deribit_rest_book_summary), before, 'normalizer must NOT mutate its input');
+  // {rows, skipped} shape: skipped is COUNTED, never silently hidden (§0).
+  assert.strictEqual(ch.rows.length, 10, 'all 10 captured instruments parse');
+  assert.strictEqual(ch.skipped, 0, 'nothing skipped on the real capture');
+
+  // Headline row, every field vs the wire; expiry against a HAND-COMPUTED
+  // Date.UTC at the Deribit 08:00 UTC convention, plus the literal epoch
+  // (python-datetime cross-checked) so a Date.UTC misuse cannot self-confirm.
+  const r0 = ch.rows.find((r) => r.name === 'BTC-28AUG26-105000-C');
+  assert.ok(r0, 'BTC-28AUG26-105000-C present');
+  assert.strictEqual(r0.strike, 105000, 'strike from the name');
+  assert.strictEqual(r0.cp, 'C', 'call/put flag from the name');
+  assert.strictEqual(r0.expiryTs, Date.UTC(2026, 7, 28, 8, 0, 0), 'expiry = 08:00 UTC on the contract date');
+  assert.strictEqual(r0.expiryTs, 1787904000000, 'expiry epoch ms exact (2026-08-28T08:00Z)');
+  // THE §4d TRAP: mark_iv arrives in PERCENT (48.58) — /100 or every vol
+  // formula downstream is silently 100× off (DEVELOPMENT §5).
+  assert.strictEqual(r0.iv, 48.58 / 100, 'iv === mark_iv/100 exactly');
+  assert.strictEqual(r0.iv, 0.4858, 'iv decimal exact');
+  assert.strictEqual(r0.oi, 161.3, 'oi = open_interest (BTC contracts)');
+  assert.strictEqual(r0.volume, 0, 'volume passthrough');
+  assert.strictEqual(r0.markPrice, 0.00026511, 'markPrice (coin-quoted)');
+  assert.strictEqual(r0.underlying, 63358.41, 'underlying = per-expiry synthetic future (Black-76 F)');
+
+  // Single-digit day edge, straight from the real capture ('BTC-6JUL26-…').
+  const r1 = ch.rows.find((r) => r.name === 'BTC-6JUL26-54000-P');
+  assert.ok(r1, 'single-digit-day instrument present in the capture');
+  assert.strictEqual(r1.strike, 54000);
+  assert.strictEqual(r1.cp, 'P');
+  assert.strictEqual(r1.expiryTs, Date.UTC(2026, 6, 6, 8, 0, 0), 'D MMM YY (no leading zero) must parse');
+  assert.strictEqual(r1.expiryTs, 1783324800000, 'expiry epoch ms exact (2026-07-06T08:00Z)');
+  assert.strictEqual(r1.iv, 57.71 / 100);
+
+  // Unparseable names (futures, perps) are skipped AND counted — the
+  // OptionsView surfaces the count instead of silently shrinking the chain.
+  const dirty = JSON.parse(before);
+  dirty.result.push({ instrument_name: 'BTC-25SEP26', mark_iv: 50 });          // a future — 3 tokens
+  dirty.result.push({ instrument_name: 'BTC_USDC-PERPETUAL', mark_iv: 50 });   // a perp — no date/strike/cp
+  const ch2 = H.normalizeDeribitChain(dirty);
+  assert.strictEqual(ch2.rows.length, 10, 'options still parse alongside the junk');
+  assert.strictEqual(ch2.skipped, 2, 'both non-option names counted, not hidden');
+  assert.strictEqual(H.normalizeDeribitChain({ error: { code: 1 } }), null, 'JSON-RPC error payload → null');
+  assert.strictEqual(H.normalizeDeribitChain(null), null);
+  // Non-finite mark_iv → iv NaN but the row is KEPT: PCR/max-pain need oi,
+  // not iv — dropping the row would silently bias both.
+  const noIv = JSON.parse(before);
+  noIv.result[0].mark_iv = null;
+  const chN = H.normalizeDeribitChain(noIv);
+  assert.strictEqual(chN.rows.length, 10, 'iv-less row kept for the OI consumers');
+  assert.ok(Number.isNaN(chN.rows.find((r) => r.name === 'BTC-28AUG26-105000-C').iv), 'its iv reads NaN, never 0');
+
+  // DVOL: the PINNED capture says 38.68 (§0 — the real payload wins; the §4d
+  // list's "38.67" was a transcription slip, corrected in DESIGN 2026-07-05).
+  assert.strictEqual(H.normalizeDeribitDvol(FX.deribit_rest_dvol), 38.68, 'DVOL = result.index_price exact');
+  assert.strictEqual(H.normalizeDeribitDvol({ result: {} }), null, 'missing index_price → null');
+  assert.strictEqual(H.normalizeDeribitDvol(null), null);
+});
+
+// ─── 26. HL leaderboard (pair-array parse + dust rule) + whale positions ─────
+group('hl leaderboard windowPerformances parse + dust exclusion + positions', () => {
+  const before = JSON.stringify(FX.hl_leaderboard_sample);
+  const lb = H.normalizeHlLeaderboard(FX.hl_leaderboard_sample);
+  assert.strictEqual(JSON.stringify(FX.hl_leaderboard_sample), before, 'normalizer must NOT mutate its input');
+
+  // Top by account value: addr + Number()ed acctVal exact.
+  assert.strictEqual(lb.topByValue.length, 3, 'all 3 fixture rows rank (n=10 default caps)');
+  assert.strictEqual(lb.topByValue[0].addr, '0xa822a9ceb6d6cb5b565bd10098abcfa9cf18d748', 'largest book first');
+  assert.strictEqual(lb.topByValue[0].acctVal, Number('13295008398.5851707458'), 'acctVal Number()ed exact');
+  assert.strictEqual(lb.topByValue[1].addr, '0x1c498a93b145e7a73d69691e9023f6f308e1cc3f');
+  assert.strictEqual(lb.topByValue[2].addr, '0x24de6b77e8bc31c40aa452926daa6bbab7a71b0f');
+
+  // ROI window: windowPerformances is an ARRAY OF PAIRS [[window, {…}], …]
+  // and 'month' is the 30d window (there is no literal '30d' key — wire
+  // reality). Only one fixture row has a nonzero month ROI — it must rank #1.
+  assert.strictEqual(lb.topByRoi30d[0].addr, '0x24de6b77e8bc31c40aa452926daa6bbab7a71b0f', 'pair-array month window drives the ROI rank');
+  assert.strictEqual(lb.topByRoi30d[0].roi, 0.0070708003, 'month roi exact');
+  assert.strictEqual(lb.topByRoi30d[0].pnl, Number('14464050.7791530006'), 'month pnl exact');
+
+  // Dust rule (§4d): acctVal < $10k is excluded from the ROI ranking ONLY —
+  // a $52 account that lucked into 40× must not outrank every real book —
+  // while the VALUE ranking keeps everyone (size is size).
+  const dusty = JSON.parse(before);
+  dusty.leaderboardRows.push({
+    ethAddress: '0xdust', accountValue: '52.10',
+    windowPerformances: [['month', { pnl: '2000.0', roi: '40.0', vlm: '0' }]],
+  });
+  const lb2 = H.normalizeHlLeaderboard(dusty);
+  assert.ok(!lb2.topByRoi30d.some((r) => r.addr === '0xdust'), 'dust excluded from the ROI ranking');
+  assert.strictEqual(lb2.topByValue.length, 4, 'dust still counts in the VALUE ranking');
+  const lbN = H.normalizeHlLeaderboard(FX.hl_leaderboard_sample, 2);
+  assert.strictEqual(lbN.topByValue.length, 2, 'n caps the value list');
+  assert.strictEqual(lbN.topByRoi30d.length, 2, 'n caps the ROI list');
+  assert.strictEqual(H.normalizeHlLeaderboard({}), null, 'missing leaderboardRows → null');
+
+  // Whale positions: assetPositions[].position → the WhaleView row shape.
+  const pBefore = JSON.stringify(FX.hl_clearinghouse_state);
+  const pos = H.normalizeHlPositions(FX.hl_clearinghouse_state);
+  assert.strictEqual(JSON.stringify(FX.hl_clearinghouse_state), pBefore, 'normalizer must NOT mutate its input');
+  assert.strictEqual(pos.length, 5, 'all 5 fixture positions survive');
+  const sol = pos.find((p) => p.coin === 'SOL');
+  assert.strictEqual(sol.szi, 169806.92, 'szi Number()ed, sign intact');
+  assert.strictEqual(sol.side, 'long', 'szi > 0 → long (the sign IS the direction)');
+  assert.strictEqual(sol.entryPx, 74.6913, 'entryPx exact');
+  assert.strictEqual(sol.posValue, Number('14000920.1678400002'), 'posValue = positionValue');
+  assert.strictEqual(sol.uPnl, Number('1317808.6891600001'), 'uPnl = unrealizedPnl');
+  assert.strictEqual(sol.leverage, 17, 'leverage = leverage.value (the OBJECT wire shape)');
+  assert.strictEqual(pos.find((p) => p.coin === 'HYPE').leverage, 2, 'per-position leverage varies');
+
+  // The fixture holds longs only — construct the short so BOTH sides are
+  // exercised (same why as the liq-side precondition in group 6).
+  assert.ok(pos.every((p) => p.side === 'long'), 'fixture precondition: capture is all-long');
+  const shorted = JSON.parse(pBefore);
+  shorted.assetPositions[0].position.szi = '-100.5';
+  const ps = H.normalizeHlPositions(shorted)[0];
+  assert.strictEqual(ps.side, 'short', 'negative szi → short');
+  assert.strictEqual(ps.szi, -100.5, 'sign preserved on the row');
+  // Zero size = no position = no direction → dropped; bare-number leverage
+  // tolerated; missing payload → null.
+  const edge = JSON.parse(pBefore);
+  edge.assetPositions[1].position.leverage = 5;
+  edge.assetPositions[2].position.szi = '0';
+  const pe = H.normalizeHlPositions(edge);
+  assert.strictEqual(pe.find((p) => p.coin === 'AAVE').leverage, 5, 'bare-number leverage shape tolerated');
+  assert.ok(!pe.some((p) => p.coin === 'WLD'), 'zero-szi row dropped');
+  assert.strictEqual(H.normalizeHlPositions({}), null, 'missing assetPositions → null');
+});
+
+// ─── 27. buildScreener: turnover-USD ranking + slice honesty (§4d) ───────────
+group('buildScreener turnover ranking + topN slice + honest total', () => {
+  // Rank the REAL normalized fixture rows: turnover24h (USD — the only
+  // cross-symbol-comparable key; volume24h is base-coin apples vs oranges).
+  const rows = H.normalizeBybitTickers(FX.bybit_rest_tickers);
+  const symsBefore = rows.map((r) => r.sym).join(',');
+  const s3 = S.buildScreener(rows, { topN: 3 });
+  assert.strictEqual(rows.map((r) => r.sym).join(','), symsBefore, 'input array must NOT be mutated (slice-before-sort)');
+  assert.deepStrictEqual(s3.rows.map((r) => r.sym), ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
+    'fixture turnover order: BTC $2.38B > ETH $1.32B > SOL $546M');
+  assert.strictEqual(s3.total, 6, "total states the TRUE universe size (the 'top 3 of 6' header)");
+  // Default topN = 40 > universe → everything; topN ≤ 0 = the 'all' passthrough.
+  assert.strictEqual(S.buildScreener(rows).rows.length, 6, 'default top-40 on 6 rows keeps all 6');
+  const all = S.buildScreener(rows, { topN: 0 });
+  assert.strictEqual(all.rows.length, 6, "topN 0 = 'all' passthrough");
+  for (let i = 1; i < all.rows.length; i++) {
+    assert.ok(all.rows[i].turnover24h <= all.rows[i - 1].turnover24h, 'rows descending by turnover');
+  }
+  // Non-finite turnover SINKS to the end but is never dropped — total must
+  // keep stating the real universe size.
+  const mixed = S.buildScreener([{ sym: 'NANO', turnover24h: NaN }, { sym: 'REAL', turnover24h: 5 }], { topN: 0 });
+  assert.deepStrictEqual(mixed.rows.map((r) => r.sym), ['REAL', 'NANO'], 'NaN turnover sinks, never dropped');
+  assert.strictEqual(mixed.total, 2);
+  assert.deepStrictEqual(S.buildScreener(null), { rows: [], total: 0 }, 'no tickers → empty, total 0');
+});
+
+// ─── 28. confluenceReads: 9 categories, both directions, n/a rail (§4d) ──────
+group('confluenceReads all-9 both directions + n/a-on-missing + tally + IC label', () => {
+  const CATS = ['footprint Δ-trend', 'CVD slope', 'price vs POC/VA', 'TPO position',
+    'funding sign/extreme', 'OI 1h change', 'liq-pressure 5m', 'book top-10 imbalance', 'price vs SMA50'];
+  const LABEL = 'un-validated descriptive reads — forward IC of board signals ≈ 0 (RESEARCH-ic-runlog); NOT a signal';
+  const readOf = (out, cat) => out.reads.find((r) => r.category === cat).read;
+
+  // All-bullish drive: price above both value areas, net buy flow, positive
+  // CVD slope, CROWDED SHORTS (negative funding extreme → contrarian
+  // bullish), OI building, short-side liq pressure, bid-heavy book, close
+  // above SMA50.
+  const bull = S.confluenceReads({
+    fpDeltas: [2, 3, 1], cvdSlope: 5,
+    price: 110, poc: 100, vah: 105, val: 95,
+    tpoPoc: 100, tpoVah: 105, tpoVal: 95,
+    fundingRate: -0.0005,               // ×(8760/8)×100 = −54.8%/yr — crowded shorts
+    oiChangePct1h: 1.0, liqImb5m: -0.8, bookImb: 0.5,
+    sma50: 100, lastClose: 101,
+  });
+  assert.deepStrictEqual(bull.reads.map((r) => r.category), CATS, 'EXACTLY the 9 §4d categories, in order');
+  for (const c of CATS) assert.strictEqual(readOf(bull, c), 'bullish', c + ' must read bullish on the bullish drive');
+  assert.deepStrictEqual(bull.tally, { bullish: 9, bearish: 0, neutral: 0, na: 0 }, 'tally counts every read');
+  assert.strictEqual(bull.label, LABEL, 'the mandatory IC-honesty sentence, VERBATIM');
+
+  // All-bearish mirror (crowded LONGS: positive funding extreme → bearish).
+  const bear = S.confluenceReads({
+    fpDeltas: [-2, -3, -1], cvdSlope: -5,
+    price: 90, poc: 100, vah: 105, val: 95,
+    tpoPoc: 100, tpoVah: 105, tpoVal: 95,
+    fundingRate: 0.0005,
+    oiChangePct1h: -1.0, liqImb5m: 0.8, bookImb: -0.5,
+    sma50: 100, lastClose: 99,
+  });
+  for (const c of CATS) assert.strictEqual(readOf(bear, c), 'bearish', c + ' must read bearish on the bearish drive');
+  assert.deepStrictEqual(bear.tally, { bullish: 0, bearish: 9, neutral: 0, na: 0 });
+  assert.strictEqual(bear.label, LABEL);
+
+  // §4d: the RESPONSE-PROVIDED funding interval must drive the annualization
+  // — the same rate reads neutral at 8h (5.5%/yr) but crowded at 1h (43.8%/yr).
+  const in8 = { fundingRate: 0.00005 };
+  assert.strictEqual(readOf(S.confluenceReads(in8), 'funding sign/extreme'), 'neutral', '0.005%/8h ≈ 5.5%/yr — baseline carry');
+  assert.strictEqual(readOf(S.confluenceReads(Object.assign({ fundingIntervalH: 1 }, in8)), 'funding sign/extreme'),
+    'bearish', 'same rate every 1h ≈ 43.8%/yr — crowded longs');
+
+  // n/a rail (§0.7): a missing feed must NEVER default to neutral — 'neutral'
+  // claims "I looked and it is balanced", a fabricated read when nothing
+  // arrived. Empty inputs → all 9 n/a; a single present feed leaves 8 n/a.
+  const na = S.confluenceReads({});
+  assert.deepStrictEqual(na.tally, { bullish: 0, bearish: 0, neutral: 0, na: 9 }, 'no feeds → 9 × n/a, ZERO neutral');
+  assert.ok(na.reads.every((r) => r.read === 'n/a'), "every read is 'n/a', none invented");
+  assert.strictEqual(na.label, LABEL, 'label present even on an all-n/a board');
+  const one = S.confluenceReads({ cvdSlope: 0 });
+  assert.strictEqual(readOf(one, 'CVD slope'), 'neutral', 'a PRESENT flat feed is a genuine neutral');
+  assert.deepStrictEqual(one.tally, { bullish: 0, bearish: 0, neutral: 1, na: 8 }, 'tally always sums to 9');
+
+  // Dead-bands read neutral, not directional: balanced flow, inside-value
+  // price, mild OI/liq/book/SMA moves.
+  const mid = S.confluenceReads({
+    fpDeltas: [1, -1], cvdSlope: 0,
+    price: 100, poc: 100, vah: 105, val: 95,
+    tpoPoc: 100, tpoVah: 105, tpoVal: 95,
+    fundingRate: 0.00001, oiChangePct1h: 0.2, liqImb5m: 0.1, bookImb: 0.1,
+    sma50: 100, lastClose: 100.05,
+  });
+  assert.deepStrictEqual(mid.tally, { bullish: 0, bearish: 0, neutral: 9, na: 0 }, 'dead-band drive → 9 × neutral');
+});
+
+// ─── 29. AlertEngine: per-kind fire + cooldown + heuristic label (§4d) ───────
+group('alert engine per-kind fire/cooldown + cvd-divergence heuristic label', () => {
+  const T0 = 1783186000000;
+  const CD = 60000;   // default cooldownMs
+  const eng = (rule) => S.AlertEngine({ rules: [rule] });
+
+  // price-cross: fires on a CROSS in either direction; the first evaluate
+  // only seeds prev; prev keeps tracking THROUGH the cooldown so the rule
+  // re-arms against reality, not a frozen snapshot.
+  {
+    const e = eng({ id: 'pc', kind: 'price-cross', threshold: 100 });
+    assert.strictEqual(e.evaluate({ ts: T0, price: 99 }).length, 0, 'first sight only seeds prev');
+    const up = e.evaluate({ ts: T0 + 1000, price: 100.5 });
+    assert.strictEqual(up.length, 1, 'upward cross fires');
+    assert.strictEqual(up[0].kind, 'price-cross');
+    assert.strictEqual(up[0].ts, T0 + 1000, 'event ts = snap ts (event-time driven)');
+    assert.strictEqual(e.evaluate({ ts: T0 + 2000, price: 99 }).length, 0, 'cross inside cooldown suppressed');
+    // prev tracked through the cooldown: 99 is on record, so the next
+    // post-cooldown tick at 101 is a genuine re-cross and must fire…
+    assert.strictEqual(e.evaluate({ ts: T0 + 1000 + CD, price: 101 }).length, 1, 'post-cooldown re-cross fires (prev tracked)');
+    // …and the DOWNWARD direction fires symmetrically.
+    assert.strictEqual(e.evaluate({ ts: T0 + 1000 + 2 * CD, price: 98 }).length, 1, 'downward cross fires');
+    assert.strictEqual(e.evaluate({ ts: T0 + 1000 + 3 * CD, price: 98.5 }).length, 0, 'no cross (same side) → quiet');
+  }
+
+  // whale-print: ONE event per evaluate — the largest qualifying notional.
+  {
+    const e = eng({ id: 'wp', kind: 'whale-print', threshold: 1e6 });
+    const mk = (qty, buy) => ({ ts: T0, price: 60000, qty, aggressorBuy: buy, id: String(qty), kind: 'trade', ex: 'bybit' });
+    const ev = e.evaluate({ ts: T0, trades: [mk(20, true), mk(50, false), mk(0.1, true)] });
+    assert.strictEqual(ev.length, 1, 'one event per evaluate — the largest print, not per-print spam');
+    assert.ok(ev[0].msg.indexOf('3000000') >= 0 && ev[0].msg.indexOf('sell') >= 0, 'largest = $3M sell, got: ' + ev[0].msg);
+    assert.strictEqual(e.evaluate({ ts: T0 + 1000, trades: [mk(50, false)] }).length, 0, 'cooldown suppresses');
+    assert.strictEqual(e.evaluate({ ts: T0 + CD, trades: [mk(50, false)] }).length, 1, 'post-cooldown fires again');
+    // Thresholds are INJECTED (§4d): a threshold-less rule cannot fire.
+    const bare = eng({ id: 'wp2', kind: 'whale-print' });
+    assert.strictEqual(bare.evaluate({ ts: T0, trades: [mk(1000, true)] }).length, 0, 'no threshold → cannot fire, ever');
+  }
+
+  // liq-1m: caller-summed LiqStore-style notional ≥ threshold.
+  {
+    const e = eng({ id: 'lq', kind: 'liq-1m', threshold: 5e6 });
+    assert.strictEqual(e.evaluate({ ts: T0, liq1mUsd: 6e6 }).length, 1, 'fires at $6M ≥ $5M');
+    assert.strictEqual(e.evaluate({ ts: T0 + 1000, liq1mUsd: 9e6 }).length, 0, 'still-breached inside cooldown stays quiet');
+    assert.strictEqual(e.evaluate({ ts: T0 + CD, liq1mUsd: 6e6 }).length, 1, 're-fires after cooldown');
+  }
+
+  // funding-flip: last-NONZERO-sign tracking — + → 0 → − is ONE flip (zero is
+  // "nobody pays", not a side).
+  {
+    const e = eng({ id: 'ff', kind: 'funding-flip' });
+    assert.strictEqual(e.evaluate({ ts: T0, fundingRate: 0.0001 }).length, 0, 'first sign only seeds');
+    assert.strictEqual(e.evaluate({ ts: T0 + 1000, fundingRate: 0 }).length, 0, 'zero is not a flip');
+    const flip = e.evaluate({ ts: T0 + 2000, fundingRate: -0.0001 });
+    assert.strictEqual(flip.length, 1, '+ → 0 → − reads as exactly ONE flip');
+    assert.ok(flip[0].msg.indexOf('positive → negative') >= 0, 'direction stated: ' + flip[0].msg);
+    const back = e.evaluate({ ts: T0 + 2000 + CD, fundingRate: 0.0001 });
+    assert.strictEqual(back.length, 1, 'flip back fires after cooldown');
+    assert.ok(back[0].msg.indexOf('negative → positive') >= 0);
+  }
+
+  // cvd-divergence: §4d headline — price HH on a CVD lower-high (bearish) and
+  // the LL/HL mirror (bullish); EVERY event carries label:'heuristic' (a
+  // descriptive pattern, not a validated one). n ≥ 4 floor.
+  {
+    const e = eng({ id: 'dv', kind: 'cvd-divergence' });
+    const bearish = e.evaluate({ ts: T0, window: { price: [100, 101, 102, 103], cvd: [50, 60, 55, 58] } });
+    assert.strictEqual(bearish.length, 1, 'HH price + LH CVD fires');
+    assert.strictEqual(bearish[0].label, 'heuristic', "divergence event MUST carry label:'heuristic'");
+    assert.ok(bearish[0].msg.indexOf('bearish') >= 0, 'direction in the message');
+    const bullish = e.evaluate({ ts: T0 + CD, window: { price: [103, 102, 101, 100], cvd: [55, 50, 58, 60] } });
+    assert.strictEqual(bullish.length, 1, 'LL price + HL CVD fires (mirror)');
+    assert.strictEqual(bullish[0].label, 'heuristic');
+    assert.ok(bullish[0].msg.indexOf('bullish') >= 0);
+    const tiny = eng({ id: 'dv2', kind: 'cvd-divergence' });
+    assert.strictEqual(tiny.evaluate({ ts: T0, window: { price: [100, 101, 103], cvd: [60, 55, 50] } }).length, 0,
+      'n < 4 cannot compare extrema — quiet');
+  }
+
+  // book-imbalance: |x| ≥ threshold, either sign.
+  {
+    const e = eng({ id: 'bi', kind: 'book-imbalance', threshold: 0.4 });
+    assert.strictEqual(e.evaluate({ ts: T0, bookImb: 0.3 }).length, 0, 'below threshold quiet');
+    const bid = e.evaluate({ ts: T0 + 1000, bookImb: 0.5 });
+    assert.strictEqual(bid.length, 1, 'bid-heavy fires');
+    assert.ok(bid[0].msg.indexOf('bid-heavy') >= 0);
+    const ask = e.evaluate({ ts: T0 + 1000 + CD, bookImb: -0.5 });
+    assert.strictEqual(ask.length, 1, 'ask-heavy fires (|x|)');
+    assert.ok(ask[0].msg.indexOf('ask-heavy') >= 0);
+  }
+
+  // detector-pass: forwards each §4b detector event, PRESERVING the
+  // 'heuristic' badge (re-defaulted if a caller stripped it — no layer may
+  // drop it); the cooldown then gates subsequent passes.
+  {
+    const e = eng({ id: 'dp', kind: 'detector-pass' });
+    const evs = e.evaluate({
+      ts: T0,
+      detectorEvents: [
+        { kind: 'spoof-pull', price: 95, label: 'heuristic' },
+        { kind: 'iceberg-refill', price: 100 },   // stripped label — must be re-defaulted
+      ],
+    });
+    assert.strictEqual(evs.length, 2, 'each detector event forwards individually');
+    assert.ok(evs.every((x) => x.label === 'heuristic'), 'heuristic badge preserved AND re-defaulted');
+    assert.ok(evs[0].msg.indexOf('spoof-pull') >= 0 && evs[1].msg.indexOf('iceberg-refill') >= 0);
+    assert.strictEqual(e.evaluate({ ts: T0 + 1000, detectorEvents: [{ kind: 'spoof-pull', price: 95 }] }).length, 0,
+      'cooldown gates subsequent passes');
+  }
+
+  // oi-jump + basis-bp: |x| ≥ injected threshold.
+  {
+    const e = eng({ id: 'oj', kind: 'oi-jump', threshold: 2 });
+    assert.strictEqual(e.evaluate({ ts: T0, oiChangePct1h: 1 }).length, 0);
+    assert.strictEqual(e.evaluate({ ts: T0 + 1000, oiChangePct1h: 2.5 }).length, 1, 'OI jump fires');
+    assert.strictEqual(e.evaluate({ ts: T0 + 1000 + CD, oiChangePct1h: -2.5 }).length, 1, 'OI drop fires (|x|)');
+    const b = eng({ id: 'bb', kind: 'basis-bp', threshold: 20 });
+    assert.strictEqual(b.evaluate({ ts: T0, basisBp: 10 }).length, 0);
+    assert.strictEqual(b.evaluate({ ts: T0 + 1000, basisBp: 25 }).length, 1, 'rich basis fires');
+    assert.strictEqual(b.evaluate({ ts: T0 + 1000 + CD, basisBp: -25 }).length, 1, 'discount basis fires (|x|)');
+  }
+
+  // Hygiene: event-ts is the ONLY clock — no ts, no events (nothing may be
+  // timestamped by guessing); disabled rules are invisible; the ring retains.
+  {
+    const e = eng({ id: 'lq', kind: 'liq-1m', threshold: 1 });
+    assert.strictEqual(e.evaluate(null).length, 0, 'null snap → []');
+    assert.strictEqual(e.evaluate({ liq1mUsd: 9e9 }).length, 0, 'missing ts → [] (event-time honesty)');
+    assert.strictEqual(e.evaluate({ ts: NaN, liq1mUsd: 9e9 }).length, 0, 'NaN ts → []');
+    const off = eng({ id: 'x', kind: 'liq-1m', threshold: 1, enabled: false });
+    assert.strictEqual(off.evaluate({ ts: T0, liq1mUsd: 9e9 }).length, 0, 'disabled rule never fires');
+    e.evaluate({ ts: T0, liq1mUsd: 5 });
+    assert.strictEqual(e.events().length, 1, 'events() replays the retained ring');
+    assert.strictEqual(e.events()[0].ruleId, 'lq');
+  }
+});
+
+// ─── 30. Unsigned GEX sanity + PCR-by-OI math (§4d / §0.5) ───────────────────
+group('unsigned GEX (black76 Γ>0, Σ|Γ|·OI hand sum) + PCR by OI', () => {
+  const YEAR_MS = 31536000000;   // 365d — the OptionsView constant (quant.js periodsPerYear=365 convention)
+
+  // A PINNED real chain row through the REAL normalizer, T from the
+  // fixture's own creation_timestamp (the view's nowTs = slice ts rule —
+  // never Date.now(), so this stays deterministic forever).
+  const ch = H.normalizeDeribitChain(FX.deribit_rest_book_summary);
+  const nowTs = FX.deribit_rest_book_summary.result[0].creation_timestamp;
+  assert.ok(Number.isFinite(nowTs), 'fixture precondition: capture carries creation_timestamp');
+  const r = ch.rows.find((x) => x.name === 'BTC-25DEC26-80000-C');
+  assert.ok(r, 'pinned row BTC-25DEC26-80000-C present');
+  const T = (r.expiryTs - nowTs) / YEAR_MS;
+  assert.ok(T > 0, 'pinned expiry is live relative to its own capture ts');
+  // iv is the normalizer's /100 decimal — feeding black76Greeks the raw
+  // PERCENT value is exactly the silent 100× bug this chain of asserts pins.
+  const g = Q.black76Greeks(r.underlying, r.strike, r.iv, T, r.cp).gamma;
+  assert.ok(Number.isFinite(g) && g > 0, 'Black-76 Γ must be finite and > 0 on a live near-money row, got ' + g);
+  // Γ is call/put-identical in Black-76 — the unsigned Σ|Γ|·OI therefore
+  // cannot depend on the cp mix at a strike (structural sanity).
+  assert.strictEqual(Q.black76Greeks(r.underlying, r.strike, r.iv, T, 'P').gamma, g, 'call Γ ≡ put Γ');
+  // And the PERCENT-trap tripwire: raw mark_iv (48-ish "decimal" = 4858% vol)
+  // would produce a wildly smaller gamma — assert the decimal iv differs.
+  const gWrong = Q.black76Greeks(r.underlying, r.strike, r.iv * 100, T, r.cp).gamma;
+  assert.ok(!(Math.abs(gWrong - g) <= 1e-12), 'iv fed as PERCENT must NOT reproduce the decimal-iv gamma');
+
+  // Σ|Γ|·OI over two constructed rows === the hand-computed sum, through
+  // quant.js gammaConcentration (the same |Γ|·OI-by-strike accumulation the
+  // GEX profile draws — §4d: unsigned Σ|gamma|·OI convention, §0.5).
+  const fwd = 63000, t = 0.25;
+  const rows2 = [
+    { strike: 60000, type: 'C', oi: 100, iv: 0.5 },
+    { strike: 60000, type: 'P', oi: 50, iv: 0.45 },
+  ];
+  const g1 = Q.black76Greeks(fwd, 60000, 0.5, t, 'C').gamma;
+  const g2 = Q.black76Greeks(fwd, 60000, 0.45, t, 'P').gamma;
+  const gc = Q.gammaConcentration(rows2, fwd, t);
+  assert.deepStrictEqual(gc.strikes, [60000], 'both rows accumulate onto the one strike');
+  assert.strictEqual(gc.gammaOi[0], Math.abs(g1) * 100 + Math.abs(g2) * 50,
+    'Σ|Γ|·OI must equal the hand sum EXACTLY (same op order)');
+  assert.ok(gc.gammaOi[0] > 0, 'gamma mass positive');
+
+  // PCR by OI, constructed: puts 15 / calls 30 = 0.5 exactly (quant.js
+  // maxPain.pcRatio — the same put/call-OI ratio arithmetic as the view tile).
+  const mp = Q.maxPain([
+    { strike: 100, type: 'C', oi: 30, underlying: 100 },
+    { strike: 100, type: 'P', oi: 15, underlying: 100 },
+  ]);
+  assert.strictEqual(mp.pcRatio, 0.5, 'PCR by OI = ΣputOI/ΣcallOI exact');
+  assert.strictEqual(mp.maxPain, 100, 'single-strike slice pins max pain there');
+
+  // PCR on the REAL chain vs a hand sum straight off the RAW wire fields —
+  // pins the whole path (name-parse cp + oi passthrough + ratio) at once.
+  let cOi = 0, pOi = 0;
+  for (const raw of FX.deribit_rest_book_summary.result) {
+    const cp = raw.instrument_name.slice(-1);
+    if (cp === 'C') cOi += raw.open_interest; else pOi += raw.open_interest;
+  }
+  assert.ok(cOi > 0 && pOi > 0, 'fixture precondition: both calls and puts carry OI');
+  const mpAll = Q.maxPain(ch.rows.map((x) => ({ strike: x.strike, type: x.cp, oi: x.oi, underlying: x.underlying })));
+  assert.ok(approx(mpAll.pcRatio, pOi / cOi, 1e-12), 'chain PCR by OI ' + mpAll.pcRatio + ' != raw-wire hand sum ' + (pOi / cOi));
 });
 
 // ─── Verdict ─────────────────────────────────────────────────────────────────

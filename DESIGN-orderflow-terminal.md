@@ -4,8 +4,10 @@ Status: **O-0 + O-1 shipped 2026-07-03 (`8c2781f`); O-2 + verification system + 
 shipped 2026-07-04** (§4b heatmaps/OKX; §7 three-layer verification incl. deterministic
 browser replay; §4c structure views — TPO, kline VP, historical chart + no-peek bar
 replay, **BYOD tick replay from the collector store (verified end-to-end against a real
-8 h recording)**, cross-venue funding, macro proxies). O-4/O-5 specced and deferred —
-same greenlight discipline as DEVELOPMENT.md §6.
+8 h recording)**, cross-venue funding, macro proxies). **O-4 shipped 2026-07-05** (§4d
+intelligence — VWAP/RSI screeners, Deribit options widget w/ unsigned GEX, HL whale
+watchlist, 9-rule alert engine, 9-read descriptive confluence — every read labeled
+un-validated). O-5 specced and deferred — same greenlight discipline as DEVELOPMENT.md §6.
 
 Provenance: feature surface adapted from [Cryexc](https://cryexc.josedonato.com/) (José
 Donato's free orderflow terminal — footprint, DOM, heatmaps, TPO, whale/options flow;
@@ -328,6 +330,73 @@ Modules:
   normalizers vs fixtures, BYOD row→event mapping, HL mids normalizer (memecoin-SPX
   guard: main-universe SPX must NOT appear in macro keys).
 
+## 4d. O-4 contracts — intelligence views (binding; fixtures `_o4_notes` + captures 2026-07-05)
+
+Rails first: screeners / alerts / confluence are **descriptive reads, never signals** —
+the IC run-log found NO board signal with significant forward IC, so every tally/read
+carries "un-validated · not a score to trade". Whale positions = **public on-chain
+facts**. Options stay **mark-only + unsigned GEX** (§0.5; `mark_iv` is PERCENT → /100,
+DEVELOPMENT §5). Empirical: Deribit REST is **CORS-open** to browser origins (verified);
+DVOL via `get_index_price?index_name=btcdvol_usdc`; **HL leaderboard = 33 MB / 40 k rows**
+→ opt-in one-shot load (button states the size), then light per-address
+`clearinghouseState` polls; Bybit `tickers?category=linear` = **720 symbols in ONE call**
+with `fundingIntervalHour` response-provided (use it — not the 8 h constant) and 24 h
+VWAP proxy = `turnover24h/volume24h` (labeled `24h VWAP`).
+
+- **terminal-hist.js additions** (same fetcher+normalizer pattern):
+  `fetchBybitAllTickers()`, `fetchDeribitChain('BTC')` (book_summary by currency,
+  kind=option), `fetchDeribitDvol()`, `fetchHlLeaderboard()` (33 MB — callers gate),
+  `fetchHlClearinghouse(addr)`; pure `normalize*` for each (fixture-tested):
+  tickers → `{sym, last, vwap24h, vwapDevPct, pct24h, turnover24h, fundingRate,
+  fundingIntervalH, annualizedFundingPct, oiUsd, mark, index}`; chain rows →
+  `{name, expiryTs, strike, cp:'C'|'P', iv (decimal — /100!), oi, volume, markPrice,
+  underlying}` (parse `BTC-28AUG26-105000-C`); leaderboard → `{topByValue:[{addr,
+  acctVal}], topByRoi30d:[…]}` (parse `windowPerformances`); positions →
+  `[{coin, szi, side, entryPx, posValue, uPnl, leverage}]`.
+- **terminal-state.js additions (pure):**
+  `buildScreener(tickers, {topN})` → rows sorted by turnover (default top 40, 'all'
+  passthrough); `confluenceReads(inputs)` → exactly 9 labeled categories (footprint
+  Δ-trend, CVD slope, price vs POC/VA, TPO position, funding sign/extreme, OI 1 h
+  change, liq-pressure 5 m imbalance, book top-10 imbalance, price vs SMA50 hist trend)
+  each `{category, read:'bullish'|'bearish'|'neutral'|'n/a', detail}` + tally — output
+  object carries `label:'un-validated descriptive reads — forward IC of board signals
+  ≈ 0 (RESEARCH-ic-runlog); NOT a signal'`; `AlertEngine({rules})` — `evaluate(snap)`
+  → events, rule kinds: price-cross, whale-print≥$X, liq-1m≥$X, funding-flip,
+  cvd-divergence (price HH & CVD lower-high in window — `label:'heuristic'`),
+  book-imbalance≥X%, detector-passthrough, oi-jump≥X%/h, basis≥X bp; per-rule cooldown
+  (default 60 s, event-ts driven), thresholds injected (no defaults hidden in logic).
+- **Views** (+ layout: new INTELLIGENCE section after STRUCTURE):
+  `ScreenerView` — canvas bubble scatter (x = 24 h %, y = VWAP-dev %, r ∝ √turnover,
+  color = funding sign/degree), hover readout, top-40/all toggle, header
+  `bybit linear · 24h VWAP = turnover/volume`;
+  `RsiHeatmapView` — RSI-14 (quant.js `rsi`) on 1 h klines for top-N-by-turnover
+  bubbles with 30/70 bands; batch fetch on demand + 5 min refresh, progress honest
+  (`n/40 loaded`); label `1h RSI-14 · bybit klines`;
+  `OptionsView` — Deribit chain: IV smile per selected expiry + term structure,
+  strike×expiry IV heatmap, PCR (by OI and by volume), **unsigned GEX profile**
+  Σ|Γ|·OI by strike (Γ via quant.js `black76Greeks`, F = underlying, iv decimal),
+  max pain (quant.js `maxPain`), DVOL stat; labels `mark-only chain` + `unsigned —
+  dealer sign unknowable (§0.5)`;
+  `WhaleView` — HL watchlist table (addr short, coin, side, szi, entry, uPnL, lev),
+  add-address input + localStorage, `discover top traders (~33 MB, one-shot)` button
+  → seeds top-10 by acctVal + top-10 by 30 d ROI, per-address 60 s polls (cap 25);
+  label `public on-chain state (Hyperliquid) — facts, not signals`;
+  `AlertsView` — rule table with enable + threshold inputs (persisted), live alert
+  feed, browser Notification opt-in, banner `descriptive triggers — un-validated`;
+  `ConfluenceView` — the 9 reads + tally + the mandatory IC-honesty line.
+  Also: HeaderStatsView renders the transport msg for kind `error` when present
+  (('byod api unreachable') — closes the O-3 chip-visibility flag).
+- **Wiring:** polls — tickers 30 s (one call), RSI batch on demand/5 min, chain 60 s,
+  whale 60 s/address; ALL disabled in replay modes (deterministic L1 — same rule as
+  O-3; panels show the honest replay-disabled note).
+- **check_terminal.cjs additions:** normalizer exactness vs the pinned fixtures
+  (BTCUSDT vwap = turnover/volume to 1e-9; deribit name-parse strike/expiry/cp +
+  iv/100; dvol 38.68 — the pinned capture's value (§0: real payload wins);
+  leaderboard top-N incl. `windowPerformances` parse; whale
+  positions szi/side/entry), `confluenceReads` both-directions per category + tally +
+  mandatory label, `AlertEngine` fire/cooldown/divergence-label per rule kind,
+  unsigned-GEX sanity (Γ > 0, Σ matches a hand-computed strike), PCR math.
+
 ## 5. CryExc → btc-quant feature map & phase plan
 
 | # | CryExc view | Phase | Rail notes |
@@ -374,8 +443,8 @@ the collector buys *optionality*, not conclusions.
 
 Layer 0 (static, every commit): `python -m pytest` (incl. collector tests; network-free);
 `node --check` on every dashboard JS file; `node scripts/check_terminal.cjs` (fixture
-smoke: adapters + stores + O-3 normalizers/builders replayed over the REAL captured
-frames/responses, 23 assertion groups).
+smoke: adapters + stores + O-3/O-4 normalizers/builders replayed over the REAL captured
+frames/responses, 30 assertion groups).
 
 - **L1 — deterministic browser harness** (`make verify-browser`,
   `scripts/verify_terminal_browser.py`): serves the repo, opens

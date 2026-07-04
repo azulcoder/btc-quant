@@ -1013,7 +1013,16 @@
         if (s.kind === 'open') { chip.el.classList.add('live'); chip.text.textContent = ex + ': ' + (s.msg || 'live'); }
         else if (s.kind === 'stale') { chip.el.classList.add('stale'); chip.text.textContent = ex + ': ' + (s.msg || 'stale'); }
         else if (s.kind === 'reconnecting') { chip.el.classList.add('stale'); chip.text.textContent = ex + ': reconnecting…'; }
-        else if (s.kind === 'error') { chip.el.classList.add('error'); chip.text.textContent = ex + ': offline'; }
+        else if (s.kind === 'error') {
+          // O-4 fix (§4d — closes the O-3 flag): kind 'error' renders the
+          // transport's OWN message when it carries one — the BYOD driver
+          // reports 'byod api unreachable', which tells the user WHAT broke
+          // (start `make collector-api`), where the old hardcoded 'offline'
+          // hid the actionable cause. 'offline' stays as the fallback for
+          // transports that error without prose (same honesty rule as the
+          // kind-'open' branch above: the transport speaks, we don't dub it).
+          chip.el.classList.add('error'); chip.text.textContent = ex + ': ' + (s.msg || 'offline');
+        }
       }
     }
 
@@ -2271,6 +2280,1074 @@
     return { mount, render };
   }
 
+  // ════════ O-4 (§4d) — INTELLIGENCE views: descriptive reads, never signals ═
+  //
+  // §4d rail, restated at the section boundary because every panel below is
+  // exactly the kind of "board" a reader wants to trade: the IC run-log
+  // (RESEARCH-ic-runlog.md) measured ≈0 forward IC for board signals, so
+  // screener quadrants, RSI extremes, confluence tallies and alert triggers
+  // are DESCRIPTIVE session facts — each view carries its honesty label in
+  // visible chrome, and nothing here ever feeds the OOS harness (§0.1).
+
+  // ═══ ScreenerView — VWAP-deviation bubble scatter (O-4, §4d) ═══
+  //
+  // ONE Bybit REST call carries the whole ~720-symbol linear universe (§4d
+  // empirical map); buildScreener ranks by 24h turnover and this view plots
+  // the slice: x = 24h % change, y = last-vs-24h-VWAP deviation % (VWAP =
+  // turnover24h/volume24h — a PROXY, labeled '24h VWAP', response-derived
+  // rather than tick-accumulated), r ∝ √turnover clamped 3–24 px, color =
+  // funding SIGN (--up positive / --down negative — the sign of a printed
+  // rate, not a trade direction) with alpha ∝ |annualized funding|.
+  // Quadrant gridlines cross at 0/0. BTCUSDT wears an accent ring — it is
+  // the terminal's subject and the eye needs to find it among 40 bubbles.
+  // Rows with a null vwapDevPct (no 24h volume → no VWAP) have no honest y
+  // coordinate: they are COUNTED in the corner text, never plotted at a
+  // fabricated 0 (§0.7).
+  function ScreenerView() {
+    let root = null, canvas = null;
+    let lastSlice = null, mouse = null, drawQueued = false;
+    let hits = [];   // {x, y, r, row} from the last draw — hover hit-testing
+    const PAD = { l: 48, r: 14, t: 16, b: 26 };
+
+    function mount(el, opts) {
+      root = el;
+      const o = opts || {};
+      canvas = document.createElement('canvas');
+      canvas.className = 'term-canvas';
+      root.appendChild(canvas);
+      // Hover redraws come from the CACHED slice (FootprintView pattern —
+      // the mouse never fabricates a new data frame).
+      canvas.addEventListener('mousemove', (e) => {
+        const r = canvas.getBoundingClientRect();
+        mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
+        scheduleDraw();
+      });
+      canvas.addEventListener('mouseleave', () => { mouse = null; scheduleDraw(); });
+      // top-40/all toggle lives in the panel chrome (terminal.html); the view
+      // owns its behavior, persistence stays in terminal.js (TapeView split).
+      if (o.topInput && typeof o.onTop === 'function') {
+        o.topInput.addEventListener('change', () => o.onTop(o.topInput.value));
+      }
+    }
+
+    function scheduleDraw() {
+      if (drawQueued || !lastSlice) return;
+      drawQueued = true;
+      requestAnimationFrame(() => { drawQueued = false; if (lastSlice) draw(lastSlice); });
+    }
+
+    function draw(slice) {
+      const { ctx, w, h } = fitCanvas(canvas);
+      const p = pal();
+      ctx.clearRect(0, 0, w, h);
+      ctx.textBaseline = 'middle';
+      const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
+
+      const rows = slice.rows || [];
+      const pts = [];
+      let noVwap = 0;
+      for (const r of rows) {
+        if (!r || !Number.isFinite(r.pct24h)) continue;
+        if (!Number.isFinite(r.vwapDevPct)) { noVwap++; continue; }   // no VWAP → no y — counted, not zeroed
+        pts.push(r);
+      }
+      if (!pts.length) {
+        font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+        ctx.fillText('awaiting bybit tickers (REST, 30s poll — one call carries the whole linear universe)…', 10, 18);
+        hits = [];
+        return;
+      }
+
+      // Axis ranges: data-driven, FORCED to include 0 on both axes — the
+      // 0/0 quadrant cross IS the read (up-and-above-VWAP vs the rest) —
+      // then padded 8% so edge bubbles don't clip.
+      let xmin = 0, xmax = 0, ymin = 0, ymax = 0, tMax = 0;
+      for (const r of pts) {
+        if (r.pct24h < xmin) xmin = r.pct24h;
+        if (r.pct24h > xmax) xmax = r.pct24h;
+        if (r.vwapDevPct < ymin) ymin = r.vwapDevPct;
+        if (r.vwapDevPct > ymax) ymax = r.vwapDevPct;
+        if (Number.isFinite(r.turnover24h) && r.turnover24h > tMax) tMax = r.turnover24h;
+      }
+      const xpad = Math.max((xmax - xmin) * 0.08, 0.5), ypad = Math.max((ymax - ymin) * 0.08, 0.2);
+      xmin -= xpad; xmax += xpad; ymin -= ypad; ymax += ypad;
+      const plotW = w - PAD.l - PAD.r, plotH = h - PAD.t - PAD.b;
+      const X = (v) => PAD.l + plotW * (v - xmin) / (xmax - xmin);
+      const Y = (v) => PAD.t + plotH * (ymax - v) / (ymax - ymin);
+
+      // Quadrant gridlines at 0/0 (§4d) + axis labels.
+      ctx.strokeStyle = p.grid; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(X(0), PAD.t); ctx.lineTo(X(0), PAD.t + plotH); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(PAD.l, Y(0)); ctx.lineTo(PAD.l + plotW, Y(0)); ctx.stroke();
+      font(9); ctx.fillStyle = p.muted;
+      ctx.textAlign = 'center';
+      for (const v of [xmin + xpad, 0, xmax - xpad]) ctx.fillText(fmtPct(v, 1) + ' 24h', X(v), h - PAD.b / 2);
+      ctx.textAlign = 'right';
+      for (const v of [ymin + ypad, 0, ymax - ypad]) ctx.fillText(fmtPct(v, 1), PAD.l - 4, Y(v));
+      ctx.save();
+      ctx.translate(10, PAD.t + plotH / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center';
+      ctx.fillText('vs 24h VWAP', 0, 0);
+      ctx.restore();
+
+      // Bubbles, LARGEST drawn first so small caps stay visible (and hover-
+      // able) on top of the majors they overlap.
+      const sorted = pts.slice().sort((a, b) => {
+        const ta = Number.isFinite(a.turnover24h) ? a.turnover24h : 0;
+        const tb = Number.isFinite(b.turnover24h) ? b.turnover24h : 0;
+        return tb - ta;
+      });
+      hits = [];
+      for (const r of sorted) {
+        const x = X(r.pct24h), y = Y(r.vwapDevPct);
+        const t = Number.isFinite(r.turnover24h) && r.turnover24h > 0 ? r.turnover24h : 0;
+        // §4d encoding: r ∝ √turnover, clamped 3–24 px (sqrt = area ∝ value).
+        const rad = Math.max(3, Math.min(24, 3 + 21 * Math.sqrt(tMax > 0 ? t / tMax : 0)));
+        const hue = r.fundingRate > 0 ? p.up : r.fundingRate < 0 ? p.down : p.muted;
+        // Intensity ∝ |annualized funding| — 100%/yr saturates (≈ 9× the
+        // ~11%/yr neutral BTC baseline; anything hotter is already extreme).
+        const a = 0.2 + 0.6 * Math.min(1, Math.abs(Number.isFinite(r.annualizedFundingPct) ? r.annualizedFundingPct : 0) / 100);
+        ctx.fillStyle = rgba(hue, a * 0.5);
+        ctx.strokeStyle = rgba(hue, Math.min(1, a + 0.25));
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        if (r.sym === 'BTCUSDT') {
+          // The terminal's subject gets an accent ring + tag (emphasis, §4d).
+          ctx.strokeStyle = p.accent; ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.arc(x, y, rad + 2.5, 0, Math.PI * 2); ctx.stroke();
+          font(9, true); ctx.fillStyle = p.accent; ctx.textAlign = 'left';
+          ctx.fillText('BTC', x + rad + 5, y);
+        }
+        hits.push({ x, y, r: rad, row: r });
+      }
+
+      // Corner honesty line: slice size vs true universe + the unplottables.
+      font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+      const topTxt = slice.topMode === 'all' ? 'all' : 'top ' + rows.length;
+      ctx.fillText(topTxt + ' of ' + (slice.total || rows.length) + ' by 24h turnover · color = funding sign, α ∝ |annualized|'
+        + (noVwap ? ' · ' + noVwap + ' rows lack a 24h VWAP (not plotted)' : ''), 6, 8);
+
+      // Hover readout: topmost bubble under the cursor (hits end = smallest/
+      // last-drawn, so iterate from the end).
+      if (mouse) {
+        let hit = null;
+        for (let i = hits.length - 1; i >= 0; i--) {
+          const b = hits[i];
+          const dx = mouse.x - b.x, dy = mouse.y - b.y;
+          if (dx * dx + dy * dy <= (b.r + 2) * (b.r + 2)) { hit = b; break; }
+        }
+        if (hit) {
+          const r = hit.row;
+          ctx.strokeStyle = p.fg; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.arc(hit.x, hit.y, hit.r + 1.5, 0, Math.PI * 2); ctx.stroke();
+          const txt = r.sym + ' · last ' + fmtUsd(r.last, r.last < 10 ? 4 : 1)
+            + ' · vwap dev ' + fmtPct(r.vwapDevPct) + ' · funding ' + fmtPct(r.annualizedFundingPct, 1) + '/yr'
+            + ' · OI ' + fmtCompactUsd(r.oiUsd);
+          font(10);
+          const tw = ctx.measureText(txt).width;
+          ctx.fillStyle = rgba(p.panel2, 0.92);
+          ctx.fillRect(6, h - 24, tw + 14, 18);
+          ctx.strokeStyle = p.border; ctx.strokeRect(6.5, h - 23.5, tw + 13, 17);
+          ctx.fillStyle = p.fg; ctx.textAlign = 'left';
+          ctx.fillText(txt, 13, h - 15);
+        }
+      }
+    }
+
+    /** slice = { rows, total, topMode } — buildScreener() output composed by
+     *  terminal.js from the 30s tickers poll. */
+    function render(slice) {
+      lastSlice = slice;
+      draw(slice);
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ RsiHeatmapView — 1h RSI-14 strip for the top-40 by turnover (O-4, §4d) ═══
+  //
+  // Horizontal RSI 0–100 axis; one bubble per symbol at x = its last 1h
+  // RSI-14 value (quant.js `rsi` — indicator math is never reimplemented,
+  // house rule), r ∝ √turnover. 30/70 band shading + reference lines mark
+  // the conventional zones; symbols at the extremes (<25 or >75) get name
+  // labels. Bubble hue = which side of the 50 midline (--up above / --down
+  // below, α ∝ distance) — a statement about the printed oscillator value,
+  // not a trade direction (§4d rail). Vertical position is RANK (turnover
+  // order), which is why the y axis carries no scale — it is layout, not data.
+  // The header's 'n/40 loaded' progress is HONEST PARTIAL STATE: 40 symbols
+  // = 40 kline fetches (politeness-capped in terminal.js), and the strip
+  // renders what has genuinely arrived rather than waiting to fake a
+  // complete batch.
+  function RsiHeatmapView() {
+    let root = null, canvas = null, progressEl = null;
+    let lastSlice = null, mouse = null, drawQueued = false;
+    let hits = [];
+    const PAD = { l: 14, r: 14, t: 18, b: 22 };
+
+    function mount(el, opts) {
+      root = el;
+      const o = opts || {};
+      progressEl = o.progressEl || null;   // header 'n/40 loaded' span (terminal.html chrome)
+      canvas = document.createElement('canvas');
+      canvas.className = 'term-canvas';
+      root.appendChild(canvas);
+      canvas.addEventListener('mousemove', (e) => {
+        const r = canvas.getBoundingClientRect();
+        mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
+        scheduleDraw();
+      });
+      canvas.addEventListener('mouseleave', () => { mouse = null; scheduleDraw(); });
+    }
+
+    function scheduleDraw() {
+      if (drawQueued || !lastSlice) return;
+      drawQueued = true;
+      requestAnimationFrame(() => { drawQueued = false; if (lastSlice) draw(lastSlice); });
+    }
+
+    function draw(slice) {
+      const { ctx, w, h } = fitCanvas(canvas);
+      const p = pal();
+      ctx.clearRect(0, 0, w, h);
+      ctx.textBaseline = 'middle';
+      const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
+
+      if (progressEl) {
+        progressEl.textContent = slice.total
+          ? slice.loaded + '/' + slice.total + ' loaded'
+          : '—';
+      }
+
+      const items = (slice.items || []).slice().sort((a, b) => b.turnover24h - a.turnover24h);
+      const plotW = w - PAD.l - PAD.r, plotH = h - PAD.t - PAD.b;
+      const X = (rsi) => PAD.l + plotW * (rsi / 100);
+
+      // 30/70 zone shading + reference lines FIRST (chrome under data).
+      ctx.fillStyle = rgba(p.muted, 0.07);
+      ctx.fillRect(PAD.l, PAD.t, X(30) - PAD.l, plotH);
+      ctx.fillRect(X(70), PAD.t, PAD.l + plotW - X(70), plotH);
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = p.grid; ctx.lineWidth = 1;
+      for (const v of [30, 50, 70]) {
+        ctx.beginPath(); ctx.moveTo(X(v), PAD.t); ctx.lineTo(X(v), PAD.t + plotH); ctx.stroke();
+      }
+      ctx.restore();
+      font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'center';
+      for (const v of [0, 30, 50, 70, 100]) ctx.fillText(String(v), X(v), h - PAD.b / 2);
+
+      if (!items.length) {
+        font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+        ctx.fillText(slice.total
+          ? 'loading 1h klines… (' + slice.loaded + '/' + slice.total + ' — partial state shown as it arrives)'
+          : 'awaiting the screener universe (RSI batch starts after the first tickers poll)…', 10, 8);
+        hits = [];
+        return;
+      }
+
+      let tMax = 0;
+      for (const it of items) if (Number.isFinite(it.turnover24h) && it.turnover24h > tMax) tMax = it.turnover24h;
+      const n = items.length;
+      hits = [];
+      for (let i = 0; i < n; i++) {
+        const it = items[i];
+        if (!Number.isFinite(it.rsi)) continue;
+        const x = X(Math.max(0, Math.min(100, it.rsi)));
+        const y = PAD.t + (n === 1 ? plotH / 2 : (i + 0.5) * plotH / n);   // rank layout, not data
+        const t = Number.isFinite(it.turnover24h) && it.turnover24h > 0 ? it.turnover24h : 0;
+        const rad = Math.max(3, Math.min(16, 3 + 13 * Math.sqrt(tMax > 0 ? t / tMax : 0)));
+        const hue = it.rsi >= 50 ? p.up : p.down;
+        const a = 0.18 + 0.62 * Math.min(1, Math.abs(it.rsi - 50) / 50);
+        ctx.fillStyle = rgba(hue, a * 0.55);
+        ctx.strokeStyle = rgba(hue, Math.min(1, a + 0.2));
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        // Extreme labels (§4d: <25 or >75) — name the outliers; label sits on
+        // the empty side of the bubble so it never crosses the 30/70 zones.
+        if (it.rsi < 25 || it.rsi > 75) {
+          font(9, true); ctx.fillStyle = p.fg;
+          ctx.textAlign = it.rsi < 25 ? 'left' : 'right';
+          ctx.fillText(it.sym.replace(/USDT$/, ''), it.rsi < 25 ? x + rad + 4 : x - rad - 4, y);
+        }
+        hits.push({ x, y, r: rad, it });
+      }
+
+      font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+      ctx.fillText('1h RSI-14 (Wilder, quant.js) · r ∝ √24h turnover · y = turnover rank (layout only)', 6, 8);
+
+      if (mouse) {
+        let hit = null;
+        for (let i = hits.length - 1; i >= 0; i--) {
+          const b = hits[i];
+          const dx = mouse.x - b.x, dy = mouse.y - b.y;
+          if (dx * dx + dy * dy <= (b.r + 2) * (b.r + 2)) { hit = b; break; }
+        }
+        if (hit) {
+          ctx.strokeStyle = p.fg; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.arc(hit.x, hit.y, hit.r + 1.5, 0, Math.PI * 2); ctx.stroke();
+          const txt = hit.it.sym + ' · RSI ' + hit.it.rsi.toFixed(1) + ' · turnover ' + fmtCompactUsd(hit.it.turnover24h);
+          font(10);
+          const tw = ctx.measureText(txt).width;
+          ctx.fillStyle = rgba(p.panel2, 0.92);
+          ctx.fillRect(6, h - 24, tw + 14, 18);
+          ctx.strokeStyle = p.border; ctx.strokeRect(6.5, h - 23.5, tw + 13, 17);
+          ctx.fillStyle = p.fg; ctx.textAlign = 'left';
+          ctx.fillText(txt, 13, h - 15);
+        }
+      }
+    }
+
+    /** slice = { items:[{sym, rsi, turnover24h}], loaded, total } — the RSI
+     *  batch state terminal.js accumulates (partial by design). */
+    function render(slice) {
+      lastSlice = slice;
+      draw(slice);
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ OptionsView — Deribit chain: smile / term / heatmap / unsigned GEX (O-4, §4d) ═══
+  //
+  // MARK-ONLY CHAIN (§4d): the book-summary endpoint carries mark_iv and no
+  // greeks — greeks here are client-side Black-76 (quant.js black76Greeks)
+  // on the normalizer's already-/100 decimal iv (the §4d PERCENT trap closes
+  // upstream in terminal-hist.js). GEX stays UNSIGNED Σ|Γ|·OI (§0.5: the
+  // dealer's side of each open contract is unknowable keyless — signed GEX
+  // is refused, stated in the panel chrome, not merely omitted).
+  //
+  // Time-to-expiry uses the SLICE's nowTs (the bootstrap's frame timestamp)
+  // — never Date.now() inside the view — so one snapshot draws one
+  // deterministic profile (replay/testability rail, same as the stores).
+  function OptionsView() {
+    let root = null, statsEl = null, expirySel = null;
+    let cv = {};          // 'smile' | 'term' | 'heat' | 'gex' → canvas
+    let lastSlice = null;
+    let selExp = '';      // selected expiryTs (string) — survives refreshes
+    const YEAR_MS = 31536000000;   // 365d year — quant.js periodsPerYear=365 convention
+
+    function medianFinite(arr) {
+      const a = arr.filter(Number.isFinite).sort((x, y) => x - y);
+      if (!a.length) return NaN;
+      const m = a.length >> 1;
+      return a.length % 2 ? a[m] : 0.5 * (a[m - 1] + a[m]);
+    }
+
+    function mount(el, opts) {
+      root = el;
+      expirySel = (opts || {}).expirySel || null;
+      statsEl = document.createElement('div');
+      statsEl.className = 'opt-stats';
+      root.appendChild(statsEl);
+      const grid = document.createElement('div');
+      grid.className = 'opt-grid';
+      const cell = (key, cap, wide) => {
+        const d = document.createElement('div');
+        d.className = 'opt-cell' + (wide ? ' wide' : '');
+        d.innerHTML = '<div class="opt-cap">' + cap + '</div>';
+        const cwrap = document.createElement('div');
+        cwrap.className = 'opt-cv';
+        const c = document.createElement('canvas');
+        c.className = 'term-canvas';
+        cwrap.appendChild(c);
+        d.appendChild(cwrap);
+        grid.appendChild(d);
+        cv[key] = c;
+      };
+      cell('smile', 'IV smile — selected expiry (mark IV %)');
+      cell('term', 'term structure — ATM mark IV per expiry');
+      cell('heat', 'strike × expiry IV heatmap (α ∝ mark IV)', true);
+      cell('gex', 'unsigned GEX — Σ|Γ|·OI by strike, all expiries', true);
+      root.appendChild(grid);
+      // Expiry select lives in the panel chrome (terminal.html); redraws come
+      // from the cached slice (TpoView session-select pattern).
+      if (expirySel) expirySel.addEventListener('change', () => { selExp = expirySel.value; redraw(); });
+    }
+
+    /** Chain rows grouped per expiry, ascending, FUTURE-only: T ≤ 0 has no
+     *  vol/greek meaning (Deribit only lists live instruments; the guard is
+     *  for the boundary minutes around 08:00 UTC expiry). */
+    function groupChain(chain, nowTs) {
+      const by = new Map();
+      for (const r of chain.rows) {
+        if (!r || !Number.isFinite(r.expiryTs) || r.expiryTs <= nowTs) continue;
+        let g = by.get(r.expiryTs);
+        if (!g) { g = []; by.set(r.expiryTs, g); }
+        g.push(r);
+      }
+      return [...by.entries()].sort((a, b) => a[0] - b[0]);
+    }
+    const expTok = (rows) => String(rows[0].name).split('-')[1] || '?';
+
+    function syncSelect(exps) {
+      if (!expirySel) return;
+      const key = exps.map((e) => e[0]).join(',');
+      if (expirySel.dataset.exps !== key) {
+        expirySel.dataset.exps = key;
+        expirySel.innerHTML = exps.map((e) =>
+          '<option value="' + e[0] + '">' + esc(expTok(e[1])) + '</option>').join('');
+      }
+      let found = false;
+      for (const e of exps) if (String(e[0]) === selExp) { found = true; break; }
+      if (!found) selExp = exps.length ? String(exps[0][0]) : '';
+      if (selExp) expirySel.value = selExp;
+    }
+
+    /** ATM read for one expiry: F = median per-expiry synthetic underlying;
+     *  ATM strike = nearest listed strike to F; iv = mean of the finite C/P
+     *  mark IVs at that strike (they should agree by put-call parity on a
+     *  mark surface; averaging tolerates one side being NaN). */
+    function atm(rows) {
+      const F = medianFinite(rows.map((r) => r.underlying));
+      if (!Number.isFinite(F)) return { F: NaN, iv: NaN };
+      let bestK = NaN, bestD = Infinity;
+      for (const r of rows) {
+        if (!Number.isFinite(r.iv) || r.iv <= 0) continue;
+        const d = Math.abs(r.strike - F);
+        if (d < bestD) { bestD = d; bestK = r.strike; }
+      }
+      if (!Number.isFinite(bestK)) return { F, iv: NaN };
+      let s = 0, n = 0;
+      for (const r of rows) {
+        if (r.strike === bestK && Number.isFinite(r.iv) && r.iv > 0) { s += r.iv; n++; }
+      }
+      return { F, iv: n ? s / n : NaN };
+    }
+
+    function blank(c, msg, p) {
+      const { ctx, w, h } = fitCanvas(c);
+      ctx.clearRect(0, 0, w, h);
+      ctx.textBaseline = 'middle';
+      ctx.font = '10px ' + cssVar('--mono', 'monospace');
+      ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+      ctx.fillText(msg, 8, 14);
+    }
+
+    // ── IV smile: iv% vs strike, calls + puts as separate labeled series ──
+    function drawSmile(c, rows, p) {
+      const { ctx, w, h } = fitCanvas(c);
+      ctx.clearRect(0, 0, w, h);
+      ctx.textBaseline = 'middle';
+      const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
+      const fin = rows.filter((r) => Number.isFinite(r.iv) && r.iv > 0 && Number.isFinite(r.strike));
+      if (!fin.length) { blank(c, 'no finite mark IVs at this expiry', p); return; }
+      const cs = fin.filter((r) => r.cp === 'C').sort((a, b) => a.strike - b.strike);
+      const ps = fin.filter((r) => r.cp === 'P').sort((a, b) => a.strike - b.strike);
+      const F = medianFinite(rows.map((r) => r.underlying));
+      let kMin = Infinity, kMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+      for (const r of fin) {
+        if (r.strike < kMin) kMin = r.strike;
+        if (r.strike > kMax) kMax = r.strike;
+        const v = r.iv * 100;
+        if (v < vMin) vMin = v;
+        if (v > vMax) vMax = v;
+      }
+      const vPad = Math.max((vMax - vMin) * 0.1, 1);
+      vMin -= vPad; vMax += vPad;
+      const PADL = 34, PADR = 8, PADT = 8, PADB = 16;
+      const plotW = w - PADL - PADR, plotH = h - PADT - PADB;
+      const X = (k) => PADL + plotW * (k - kMin) / Math.max(kMax - kMin, 1e-9);
+      const Y = (v) => PADT + plotH * (vMax - v) / (vMax - vMin);
+      // F reference line (accent, dashed) — the smile is read around it.
+      if (Number.isFinite(F) && F >= kMin && F <= kMax) {
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = p.accent; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(X(F), PADT); ctx.lineTo(X(F), PADT + plotH); ctx.stroke();
+        ctx.restore();
+        font(8, true); ctx.fillStyle = p.accent; ctx.textAlign = 'center';
+        ctx.fillText('F', X(F), PADT - 3);
+      }
+      const series = (arr, color) => {
+        if (!arr.length) return;
+        ctx.strokeStyle = color; ctx.lineWidth = 1.25;
+        ctx.beginPath();
+        for (let i = 0; i < arr.length; i++) {
+          const x = X(arr[i].strike), y = Y(arr[i].iv * 100);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.fillStyle = color;
+        for (const r of arr) { ctx.beginPath(); ctx.arc(X(r.strike), Y(r.iv * 100), 1.75, 0, Math.PI * 2); ctx.fill(); }
+      };
+      series(cs, p.c2);   // calls / puts = categorical tokens, not P&L hues
+      series(ps, p.c3);
+      font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'right';
+      for (const v of [vMin + vPad, (vMin + vMax) / 2, vMax - vPad]) ctx.fillText(v.toFixed(1) + '%', PADL - 3, Y(v));
+      ctx.textAlign = 'center';
+      const kStep = Math.max(1, Math.ceil(4 / Math.max(1, plotW / 90)));
+      for (let k = kMin; k <= kMax + 1e-9; k += Math.max((kMax - kMin) / 4, 1e-9) * kStep) {
+        ctx.fillText((k / 1000).toFixed(0) + 'k', X(k), h - PADB / 2);
+      }
+      font(9, true); ctx.textAlign = 'left';
+      ctx.fillStyle = p.c2; ctx.fillText('C', PADL + 4, PADT + 4);
+      ctx.fillStyle = p.c3; ctx.fillText('P', PADL + 14, PADT + 4);
+    }
+
+    // ── Term structure sparkline: ATM iv per expiry, equal column spacing ──
+    function drawTerm(c, exps, p) {
+      const { ctx, w, h } = fitCanvas(c);
+      ctx.clearRect(0, 0, w, h);
+      ctx.textBaseline = 'middle';
+      const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
+      const pts = [];
+      for (const [ts, rows] of exps) {
+        const a = atm(rows);
+        if (Number.isFinite(a.iv)) pts.push({ ts, tok: expTok(rows), iv: a.iv * 100 });
+      }
+      if (pts.length < 1) { blank(c, 'no ATM IVs derivable from the chain', p); return; }
+      let vMin = Infinity, vMax = -Infinity;
+      for (const q of pts) { if (q.iv < vMin) vMin = q.iv; if (q.iv > vMax) vMax = q.iv; }
+      const vPad = Math.max((vMax - vMin) * 0.15, 1);
+      vMin -= vPad; vMax += vPad;
+      const PADL = 34, PADR = 10, PADT = 8, PADB = 16;
+      const plotW = w - PADL - PADR, plotH = h - PADT - PADB;
+      const X = (i) => PADL + (pts.length === 1 ? plotW / 2 : plotW * i / (pts.length - 1));
+      const Y = (v) => PADT + plotH * (vMax - v) / (vMax - vMin);
+      ctx.strokeStyle = p.accent2; ctx.lineWidth = 1.25;
+      ctx.beginPath();
+      for (let i = 0; i < pts.length; i++) { const x = X(i), y = Y(pts[i].iv); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+      ctx.stroke();
+      ctx.fillStyle = p.accent2;
+      for (let i = 0; i < pts.length; i++) { ctx.beginPath(); ctx.arc(X(i), Y(pts[i].iv), 2, 0, Math.PI * 2); ctx.fill(); }
+      font(9); ctx.fillStyle = p.muted;
+      ctx.textAlign = 'right';
+      for (const v of [vMin + vPad, vMax - vPad]) ctx.fillText(v.toFixed(1) + '%', PADL - 3, Y(v));
+      // Expiry tokens, thinned to available width (~46px per label).
+      ctx.textAlign = 'center';
+      const step = Math.max(1, Math.ceil(pts.length / Math.max(1, Math.floor(plotW / 46))));
+      for (let i = 0; i < pts.length; i += step) ctx.fillText(pts[i].tok, X(i), h - PADB / 2);
+      // First/last values labeled — the term slope is the read.
+      font(9, true); ctx.fillStyle = p.fg;
+      ctx.textAlign = 'left'; ctx.fillText(pts[0].iv.toFixed(1) + '%', X(0) + 4, Y(pts[0].iv) - 7);
+      if (pts.length > 1) {
+        ctx.textAlign = 'right';
+        ctx.fillText(pts[pts.length - 1].iv.toFixed(1) + '%', X(pts.length - 1) - 4, Y(pts[pts.length - 1].iv) - 7);
+      }
+    }
+
+    // ── Strike × expiry IV heatmap: index grid (chain-matrix layout), α ∝ iv ──
+    function drawHeat(c, exps, p) {
+      const { ctx, w, h } = fitCanvas(c);
+      ctx.clearRect(0, 0, w, h);
+      ctx.textBaseline = 'middle';
+      const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
+      if (!exps.length) { blank(c, 'no live expiries in the chain', p); return; }
+      // Strike window 0.55–1.8 × the chain-wide median F: the far wings list
+      // strikes to 5×F with near-zero OI; letting them onto the axis would
+      // compress the tradeable body into a sliver. Clipped strikes are
+      // COUNTED in the corner text — never silently dropped (§0 rails).
+      const allU = [];
+      for (const [, rows] of exps) for (const r of rows) allU.push(r.underlying);
+      const F0 = medianFinite(allU);
+      const lo = Number.isFinite(F0) ? 0.55 * F0 : -Infinity;
+      const hi = Number.isFinite(F0) ? 1.8 * F0 : Infinity;
+      const cellIv = new Map();   // 'k|ts' → {s, n} (mean of finite C/P ivs)
+      const kSet = new Set();
+      let clipped = 0;
+      for (const [ts, rows] of exps) {
+        for (const r of rows) {
+          if (!Number.isFinite(r.iv) || r.iv <= 0 || !Number.isFinite(r.strike)) continue;
+          if (r.strike < lo || r.strike > hi) { clipped++; continue; }
+          kSet.add(r.strike);
+          const key = r.strike + '|' + ts;
+          const cell = cellIv.get(key) || { s: 0, n: 0 };
+          cell.s += r.iv; cell.n++;
+          cellIv.set(key, cell);
+        }
+      }
+      const strikes = [...kSet].sort((a, b) => a - b);
+      if (!strikes.length) { blank(c, 'no finite IVs inside the 0.55–1.8×F strike window', p); return; }
+      let vMin = Infinity, vMax = -Infinity;
+      for (const cell of cellIv.values()) {
+        const v = cell.s / cell.n;
+        if (v < vMin) vMin = v;
+        if (v > vMax) vMax = v;
+      }
+      const span = Math.max(vMax - vMin, 1e-9);
+      const PADL = 8, PADR = 46, PADT = 4, PADB = 16;
+      const plotW = w - PADL - PADR, plotH = h - PADT - PADB;
+      const colW = plotW / exps.length, rowH = plotH / strikes.length;
+      // Row index = strike RANK (uniform grid — the standard chain matrix;
+      // wing gaps in $ would otherwise leave most of the plot empty).
+      for (let ci = 0; ci < exps.length; ci++) {
+        const ts = exps[ci][0];
+        for (let ri = 0; ri < strikes.length; ri++) {
+          const cell = cellIv.get(strikes[ri] + '|' + ts);
+          if (!cell) continue;   // unlisted strike at this expiry — a gap stays a gap
+          const v = cell.s / cell.n;
+          ctx.fillStyle = rgba(p.accent2, 0.08 + 0.8 * (v - vMin) / span);
+          ctx.fillRect(PADL + ci * colW, PADT + (strikes.length - 1 - ri) * rowH, Math.max(1, colW - 1), Math.max(1, rowH - 0.5));
+        }
+      }
+      font(9); ctx.fillStyle = p.muted;
+      ctx.textAlign = 'left';
+      const kStep = Math.max(1, Math.ceil(strikes.length / Math.max(2, Math.floor(plotH / 14))));
+      for (let ri = 0; ri < strikes.length; ri += kStep) {
+        ctx.fillText((strikes[ri] / 1000) + 'k', PADL + plotW + 4, PADT + (strikes.length - 1 - ri) * rowH + rowH / 2);
+      }
+      ctx.textAlign = 'center';
+      const eStep = Math.max(1, Math.ceil(exps.length / Math.max(1, Math.floor(plotW / 52))));
+      for (let ci = 0; ci < exps.length; ci += eStep) {
+        ctx.fillText(expTok(exps[ci][1]), PADL + ci * colW + colW / 2, h - PADB / 2);
+      }
+      font(9); ctx.textAlign = 'left'; ctx.fillStyle = p.muted;
+      ctx.fillText('α: ' + (vMin * 100).toFixed(0) + '–' + (vMax * 100).toFixed(0) + '% IV'
+        + (clipped ? ' · +' + clipped + ' wing rows outside 0.55–1.8×F (not drawn)' : ''), PADL, PADT + 6);
+    }
+
+    // ── Unsigned GEX profile: Σ|Γ|·OI per strike across ALL live expiries ──
+    function drawGex(c, chain, nowTs, p) {
+      const { ctx, w, h } = fitCanvas(c);
+      ctx.clearRect(0, 0, w, h);
+      ctx.textBaseline = 'middle';
+      const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
+      const Q = global.Quant;
+      if (!Q || !Q.black76Greeks) { blank(c, 'quant.js unavailable — no client-side greeks, nothing is faked', p); return; }
+      if (!Number.isFinite(nowTs)) { blank(c, 'no snapshot timestamp — T to expiry not computable', p); return; }
+      const acc = new Map();   // strike → Σ|Γ|·OI
+      for (const r of chain.rows) {
+        // T from the SLICE ts (see view header) — a pure function of one snapshot.
+        const T = (r.expiryTs - nowTs) / YEAR_MS;
+        if (!(T > 0) || !Number.isFinite(r.iv) || r.iv <= 0) continue;
+        if (!Number.isFinite(r.underlying) || !Number.isFinite(r.strike)) continue;
+        const oi = Number.isFinite(r.oi) ? r.oi : 0;
+        if (oi <= 0) continue;   // no open contracts → no gamma mass to sum
+        // F = the row's own per-expiry synthetic future (§4d contract); iv is
+        // already the /100 decimal (normalizer closes the PERCENT trap).
+        const g = Q.black76Greeks(r.underlying, r.strike, r.iv, T, r.cp).gamma;
+        if (!Number.isFinite(g)) continue;
+        acc.set(r.strike, (acc.get(r.strike) || 0) + Math.abs(g) * oi);
+      }
+      const strikes = [...acc.keys()].sort((a, b) => a - b);
+      if (!strikes.length) { blank(c, 'no strike carries finite Γ·OI (empty/expiring chain)', p); return; }
+      let vMax = 0, kTop = NaN;
+      for (const k of strikes) { const v = acc.get(k); if (v > vMax) { vMax = v; kTop = k; } }
+      const PADL = 8, PADR = 8, PADT = 16, PADB = 16;
+      const plotW = w - PADL - PADR, plotH = h - PADT - PADB;
+      const barW = plotW / strikes.length;
+      for (let i = 0; i < strikes.length; i++) {
+        const v = acc.get(strikes[i]);
+        const bh = plotH * (v / vMax);
+        ctx.fillStyle = rgba(strikes[i] === kTop ? p.accent : p.accent2, strikes[i] === kTop ? 0.9 : 0.55);
+        ctx.fillRect(PADL + i * barW, PADT + plotH - bh, Math.max(1, barW - 1), bh);
+      }
+      // Top-GEX strike labeled (§4d) — the profile's one headline number.
+      const topI = strikes.indexOf(kTop);
+      font(9, true); ctx.fillStyle = p.accent;
+      ctx.textAlign = topI > strikes.length / 2 ? 'right' : 'left';
+      ctx.fillText('max ' + vMax.toPrecision(3) + ' @ ' + fmtUsd(kTop),
+        PADL + topI * barW + (topI > strikes.length / 2 ? -4 : barW + 4), PADT + 2);
+      font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'center';
+      const kStep = Math.max(1, Math.ceil(strikes.length / Math.max(1, Math.floor(plotW / 56))));
+      for (let i = 0; i < strikes.length; i += kStep) {
+        ctx.fillText((strikes[i] / 1000) + 'k', PADL + i * barW + barW / 2, h - PADB / 2);
+      }
+      // §0.5 statement drawn INTO the canvas — it can never scroll away.
+      font(9); ctx.textAlign = 'left'; ctx.fillStyle = p.muted;
+      ctx.fillText('unsigned Σ|Γ|·OI (contract Γ × BTC OI) — NOT dealer positioning; sign unknowable keyless (§0.5)', PADL, 7);
+    }
+
+    function tile(k, v, title) {
+      return '<div class="tstat" title="' + esc(title || '') + '"><span class="k">' + k
+        + '</span><span class="v num">' + v + '</span></div>';
+    }
+
+    function renderStats(chain, dvol, selRows, selTok) {
+      let cOi = 0, pOi = 0, cV = 0, pV = 0;
+      for (const r of chain.rows) {
+        const oi = Number.isFinite(r.oi) ? r.oi : 0;
+        const vol = Number.isFinite(r.volume) ? r.volume : 0;
+        if (r.cp === 'C') { cOi += oi; cV += vol; } else { pOi += oi; pV += vol; }
+      }
+      const pcrOi = cOi > 0 ? pOi / cOi : NaN;
+      const pcrV = cV > 0 ? pV / cV : NaN;
+      const Q = global.Quant;
+      let mp = NaN;
+      if (Q && Q.maxPain && selRows.length) {
+        // quant.js maxPain wants {strike, type, oi, underlying} rows — a
+        // PER-EXPIRY construct (each expiry settles alone), so it reads the
+        // selected expiry's slice, not the whole chain.
+        mp = Q.maxPain(selRows.map((r) => ({ strike: r.strike, type: r.cp, oi: r.oi, underlying: r.underlying }))).maxPain;
+      }
+      statsEl.innerHTML =
+        tile('DVOL', Number.isFinite(dvol) ? dvol.toFixed(2) : '—', 'Deribit 30d BTC implied-vol index, vol points — displayed as-is, never fed to a vol formula')
+        + tile('PCR by OI', Number.isFinite(pcrOi) ? pcrOi.toFixed(2) : '—', 'put OI / call OI, all live expiries (BTC contracts)')
+        + tile('PCR by vol', Number.isFinite(pcrV) ? pcrV.toFixed(2) : '—', 'put 24h volume / call 24h volume, all live expiries')
+        + tile('max pain (' + esc(selTok || '—') + ')', Number.isFinite(mp) ? fmtUsd(mp) : '—', 'strike minimizing option-holder payout at the SELECTED expiry (quant.js maxPain) — descriptive OI clustering, not a forecast')
+        + tile('chain', chain.rows.length + ' rows · ' + chain.skipped + ' skipped', 'options parsed from the book summary; skipped = unparseable instrument names, counted not hidden (§0)');
+    }
+
+    function redraw() {
+      if (!root) return;
+      const slice = lastSlice || {};
+      const chain = slice.chain;
+      const p = pal();
+      if (!chain || !Array.isArray(chain.rows) || !chain.rows.length) {
+        statsEl.innerHTML = '<div class="chart-na">awaiting Deribit chain (REST, 60s poll — mark-only book summary)…</div>';
+        for (const k in cv) blank(cv[k], 'awaiting chain…', p);
+        return;
+      }
+      const nowTs = Number.isFinite(slice.nowTs) ? slice.nowTs : NaN;
+      const exps = groupChain(chain, Number.isFinite(nowTs) ? nowTs : 0);
+      syncSelect(exps);
+      let sel = null;
+      for (const e of exps) if (String(e[0]) === selExp) { sel = e; break; }
+      const selRows = sel ? sel[1] : [];
+      renderStats(chain, slice.dvol, selRows, sel ? expTok(sel[1]) : '');
+      if (selRows.length) drawSmile(cv.smile, selRows, p);
+      else blank(cv.smile, 'no live expiry selected', p);
+      drawTerm(cv.term, exps, p);
+      drawHeat(cv.heat, exps, p);
+      drawGex(cv.gex, chain, nowTs, p);
+    }
+
+    /** slice = { chain: normalizeDeribitChain() result, dvol: Number|null,
+     *  nowTs } — composed by terminal.js from the 60s chain/DVOL polls. */
+    function render(slice) {
+      lastSlice = slice;
+      redraw();
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ WhaleView — Hyperliquid watchlist positions table (O-4, §4d) ═══
+  //
+  // PUBLIC ON-CHAIN FACTS (§4d rail, footer verbatim): clearinghouseState is
+  // queryable for any address — these are positions, not signals, and copying
+  // a whale is exactly the kind of board-read the IC run-log zeroed. The
+  // 'discover' button states the 33 MB cost BEFORE fetching (confirm()
+  // dialog) — the leaderboard is a one-shot opt-in load, never polled (§4d
+  // empirical map). Address persistence / polling live in terminal.js; the
+  // view owns its controls' behavior (TapeView ownership split).
+  function WhaleView() {
+    let root = null, list = null, statusEl = null, addInput = null, btcInput = null;
+    let btcOnly = true;
+    let lastSlice = null;
+    let cb = {};
+
+    function shortAddr(a) { return a.slice(0, 6) + '…' + a.slice(-4); }
+
+    function mount(el, opts) {
+      root = el;
+      cb = opts || {};
+      btcOnly = cb.btcOnly !== false;
+      const controls = document.createElement('div');
+      controls.className = 'whale-controls';
+      controls.innerHTML =
+        '<input type="text" class="whale-add" placeholder="0x… address" spellcheck="false" />'
+        + '<button type="button" class="whale-add-btn">watch</button>'
+        + '<label title="show BTC positions only (default) — other coins are facts too, just off-topic here"><input type="checkbox" class="whale-btc" /> BTC only</label>'
+        // §4d: the button STATES the size — a 33 MB fetch must never be a surprise.
+        + '<button type="button" class="whale-discover" title="one-shot full-leaderboard download; seeds top-10 by account value + top-10 by 30d ROI (deduped, cap 25)">discover top traders (~33 MB, one-shot)</button>'
+        + '<span class="whale-status"></span>';
+      root.appendChild(controls);
+      addInput = controls.querySelector('.whale-add');
+      btcInput = controls.querySelector('.whale-btc');
+      btcInput.checked = btcOnly;
+      statusEl = controls.querySelector('.whale-status');
+      root.insertAdjacentHTML('beforeend',
+        '<div class="whale-row whale-head"><span>addr</span><span>coin</span><span>side</span>'
+        + '<span>size</span><span>entry</span><span>uPnL</span><span>lev</span><span></span></div>');
+      list = document.createElement('div');
+      list.className = 'whale-list';
+      root.appendChild(list);
+      // §4d footer label — mandatory panel text.
+      root.insertAdjacentHTML('beforeend',
+        '<div class="farb-note">public on-chain state (Hyperliquid) — facts, not signals.</div>');
+
+      const submit = () => {
+        const a = (addInput.value || '').trim().toLowerCase();
+        if (!/^0x[0-9a-f]{40}$/.test(a)) {
+          statusEl.textContent = 'not a valid 0x… address';
+          return;
+        }
+        addInput.value = '';
+        if (typeof cb.onAdd === 'function') cb.onAdd(a);
+      };
+      controls.querySelector('.whale-add-btn').addEventListener('click', submit);
+      addInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+      controls.querySelector('.whale-discover').addEventListener('click', () => {
+        // The size statement is IN the dialog too — consent must be informed
+        // at the moment of the click, not just readable on the button (§4d).
+        if (!window.confirm('Download the FULL Hyperliquid leaderboard now?\n\n'
+          + 'This is a ~33 MB one-shot transfer (~40k rows). It seeds the watchlist with the '
+          + 'top-10 accounts by value and top-10 by 30d ROI (deduped, 25-address cap), then only '
+          + 'light per-address polls follow.')) return;
+        if (typeof cb.onDiscover === 'function') cb.onDiscover();
+      });
+      btcInput.addEventListener('change', () => {
+        btcOnly = !!btcInput.checked;
+        if (typeof cb.onBtcOnly === 'function') cb.onBtcOnly(btcOnly);
+        if (lastSlice) render(lastSlice);   // re-filter the cached slice — no new data fabricated
+      });
+      // Remove buttons live inside re-rendered innerHTML → one delegated
+      // listener at mount instead of re-binding per render.
+      list.addEventListener('click', (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest('[data-rm]') : null;
+        if (btn && typeof cb.onRemove === 'function') cb.onRemove(btn.getAttribute('data-rm'));
+      });
+    }
+
+    /** slice = { entries:[{addr, positions|null|undefined, ts}], discovering,
+     *  note } — terminal.js composes from its 60s staggered polls. */
+    function render(slice) {
+      if (!list) return;
+      lastSlice = slice;
+      statusEl.textContent = slice.discovering
+        ? 'downloading leaderboard (~33 MB)…'
+        : (slice.note || '');
+      const entries = slice.entries || [];
+      if (!entries.length) {
+        list.innerHTML = '<div class="chart-na">no addresses watched — add a 0x… address or use the discover button '
+          + '(it states its 33 MB cost up front).</div>';
+        return;
+      }
+      let html = '';
+      for (const en of entries) {
+        const a = esc(en.addr);
+        const rmBtn = '<span><button type="button" class="whale-rm" data-rm="' + a + '" title="stop watching">×</button></span>';
+        const head = '<span class="addr" title="' + a + '">' + esc(shortAddr(en.addr)) + '</span>';
+        if (en.positions === undefined) {
+          html += '<div class="whale-row">' + head + '<span class="whale-note-cell">awaiting first poll…</span>'
+            + '<span></span><span></span><span></span><span></span><span></span>' + rmBtn + '</div>';
+          continue;
+        }
+        if (en.positions === null) {
+          html += '<div class="whale-row">' + head + '<span class="whale-note-cell">fetch failed — retrying on the 60s cycle</span>'
+            + '<span></span><span></span><span></span><span></span><span></span>' + rmBtn + '</div>';
+          continue;
+        }
+        const pos = btcOnly ? en.positions.filter((q) => q.coin === 'BTC') : en.positions;
+        if (!pos.length) {
+          html += '<div class="whale-row">' + head + '<span class="whale-note-cell">'
+            + (en.positions.length ? 'no BTC position (' + en.positions.length + ' other coin' + (en.positions.length === 1 ? '' : 's') + ' hidden by the filter)' : 'no open positions')
+            + '</span><span></span><span></span><span></span><span></span><span></span>' + rmBtn + '</div>';
+          continue;
+        }
+        for (let i = 0; i < pos.length; i++) {
+          const q = pos[i];
+          const long = q.side === 'long';
+          html += '<div class="whale-row">'
+            + (i === 0 ? head : '<span></span>')
+            + '<span class="coin">' + esc(q.coin) + '</span>'
+            // Position-side badge, NOT the liq-badge pair (those are inverted
+            // on purpose: a LONG *liquidation* is a forced sell). A plain
+            // long position wears --up, a short --down; the text is the
+            // non-color cue as everywhere else.
+            + '<span class="side-badge ' + (long ? 'long' : 'short') + '">' + (long ? 'LONG' : 'SHORT') + '</span>'
+            + '<span class="num">' + fmtQty(Math.abs(q.szi)) + '</span>'
+            + '<span class="num">' + fmtUsd(q.entryPx, q.entryPx < 10 ? 4 : 1) + '</span>'
+            + '<span class="num ' + (q.uPnl > 0 ? 'pos' : q.uPnl < 0 ? 'neg' : '') + '">' + fmtCompactUsd(q.uPnl) + '</span>'
+            + '<span class="num">' + (Number.isFinite(q.leverage) ? q.leverage + '×' : '—') + '</span>'
+            + (i === 0 ? rmBtn : '<span></span>')
+            + '</div>';
+        }
+      }
+      list.innerHTML = html;
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ AlertsView — rule table + live trigger feed (O-4, §4d) ═══
+  //
+  // DESCRIPTIVE TRIGGERS, UN-VALIDATED (§4d banner — in the panel header AND
+  // repeated above the feed): AlertEngine events are attention pings about
+  // facts that already printed, never entries. Thresholds are INJECTED here
+  // (visible inputs) so no default hides inside engine logic (§4d contract);
+  // kinds that need a threshold and have none simply cannot fire — the
+  // engine surfaces the config gap by staying silent.
+  function AlertsView() {
+    // One row per §4d rule kind (order = the contract's list). th = the
+    // threshold's unit hint; null = the kind is threshold-free.
+    const KIND_DEFS = [
+      { kind: 'price-cross', label: 'price cross', th: '$ level' },
+      { kind: 'whale-print', label: 'whale print', th: '$ notional ≥' },
+      { kind: 'liq-1m', label: '1m liquidations', th: '$ ≥' },
+      { kind: 'funding-flip', label: 'funding sign flip', th: null },
+      { kind: 'cvd-divergence', label: 'CVD divergence', th: null, heur: true },
+      { kind: 'book-imbalance', label: 'book imbalance', th: '|imb| ≥ (0–1)' },
+      { kind: 'detector-pass', label: 'spoof/iceberg pass-through', th: null, heur: true },
+      { kind: 'oi-jump', label: 'OI jump', th: '|%/h| ≥' },
+      { kind: 'basis-bp', label: 'basis', th: '|bp| ≥' },
+    ];
+    let root = null, feed = null, notifyBtn = null, notifyState = null;
+    let rowEls = new Map();   // kind → {enable, th}
+    let cb = {};
+
+    function collectRules() {
+      const out = [];
+      for (const def of KIND_DEFS) {
+        const els = rowEls.get(def.kind);
+        const raw = els.th ? Number(els.th.value) : NaN;
+        out.push({
+          id: def.kind, kind: def.kind,
+          enabled: !!els.enable.checked,
+          // Empty/garbage input → null: the engine treats a missing threshold
+          // as "cannot fire" rather than inventing a number (§4d).
+          threshold: els.th && els.th.value !== '' && Number.isFinite(raw) ? raw : null,
+        });
+      }
+      return out;
+    }
+
+    function setNotifyState() {
+      if (typeof Notification === 'undefined') {
+        notifyState.textContent = 'notifications unsupported in this browser';
+        notifyBtn.disabled = true;
+        return;
+      }
+      const p = Notification.permission;
+      notifyState.textContent = p === 'granted' ? 'notifications ON (fire when tab hidden)'
+        : p === 'denied' ? 'notifications blocked in browser settings'
+        : 'in-page feed only';
+      notifyBtn.disabled = p !== 'default';
+    }
+
+    function mount(el, opts) {
+      root = el;
+      cb = opts || {};
+      const rules = Array.isArray(cb.rules) ? cb.rules : [];
+      const byKind = new Map();
+      for (const r of rules) if (r && r.kind) byKind.set(r.kind, r);
+
+      const bar = document.createElement('div');
+      bar.className = 'alert-bar';
+      bar.innerHTML = '<button type="button" class="alert-notify">enable browser notifications</button>'
+        + '<span class="alert-notify-state"></span>';
+      root.appendChild(bar);
+      notifyBtn = bar.querySelector('.alert-notify');
+      notifyState = bar.querySelector('.alert-notify-state');
+      notifyBtn.addEventListener('click', () => {
+        if (typeof Notification === 'undefined') return;
+        Notification.requestPermission().then(setNotifyState).catch(() => setNotifyState());
+      });
+      setNotifyState();
+
+      const table = document.createElement('div');
+      table.className = 'alert-rules';
+      rowEls = new Map();
+      for (const def of KIND_DEFS) {
+        const saved = byKind.get(def.kind) || {};
+        const row = document.createElement('div');
+        row.className = 'alert-rule';
+        row.innerHTML = '<label><input type="checkbox" /> ' + def.label
+          + (def.heur ? ' <span class="det-badge">heuristic</span>' : '') + '</label>'
+          + (def.th
+            ? '<input type="number" step="any" placeholder="' + def.th + '" title="' + def.th + '" />'
+            : '<span class="alert-noth">no threshold</span>');
+        const enable = row.querySelector('input[type="checkbox"]');
+        const th = row.querySelector('input[type="number"]');
+        enable.checked = saved.enabled !== false && saved.enabled !== undefined ? !!saved.enabled : false;
+        if (th && Number.isFinite(saved.threshold)) th.value = String(saved.threshold);
+        const onChange = () => { if (typeof cb.onRules === 'function') cb.onRules(collectRules()); };
+        enable.addEventListener('change', onChange);
+        if (th) th.addEventListener('change', onChange);
+        rowEls.set(def.kind, { enable, th });
+        table.appendChild(row);
+      }
+      root.appendChild(table);
+      root.insertAdjacentHTML('beforeend',
+        '<div class="farb-note">descriptive triggers — un-validated · not signals. Cooldown 60s per rule (event-time).</div>');
+      feed = document.createElement('div');
+      feed.className = 'alert-feed';
+      root.appendChild(feed);
+    }
+
+    /** slice = { events (engine.events(), oldest→newest), fresh (just-fired
+     *  this evaluate — the Notification candidates) }. */
+    function render(slice) {
+      if (!feed) return;
+      const evs = (slice.events || []).slice().reverse().slice(0, 40);
+      if (!evs.length) {
+        feed.innerHTML = '<div class="chart-na">no triggers yet — rules fire on live session facts only (nothing is replayed into the feed).</div>';
+      } else {
+        let html = '';
+        for (const ev of evs) {
+          html += '<div class="alert-row">'
+            + '<span class="ts">' + hms(ev.ts) + '</span>'
+            + '<span class="alert-kind">' + esc(ev.kind) + '</span>'
+            + '<span class="alert-msg">' + esc(ev.msg) + '</span>'
+            + (ev.label ? '<span class="det-badge">' + esc(ev.label) + '</span>' : '<span></span>')
+            + '</div>';
+        }
+        feed.innerHTML = html;
+      }
+      // System notifications fire ONLY while the page is hidden: when the tab
+      // is visible the in-page feed already shows the event — an OS popup on
+      // top of it would double-noise the same fact; hidden is exactly when
+      // the feed cannot be seen and a ping earns its interruption.
+      const fresh = slice.fresh || [];
+      if (fresh.length && typeof Notification !== 'undefined'
+          && Notification.permission === 'granted' && document.hidden) {
+        for (const ev of fresh.slice(0, 3)) {   // cap: a cascade must not spawn 20 popups
+          try {
+            new Notification('terminal alert — descriptive, not a signal', { body: ev.kind + ': ' + ev.msg });
+          } catch (_) { /* Notification constructor can throw on some platforms — the in-page feed already has it */ }
+        }
+      }
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ ConfluenceView — the 9 mechanical reads + tally + IC-honesty line (O-4, §4d) ═══
+  //
+  // Renders confluenceReads() verbatim: 9 rows (category / read badge /
+  // detail), the tally strip, and the MANDATORY IC-honesty sentence as
+  // always-visible text under the tally — §4d requires it in the layout, not
+  // in a tooltip, because a tally without it reads as a score to trade.
+  // 'n/a' rows are absence, not opinion (a missing feed never counts toward
+  // a direction — the builder enforces it, this view keeps the distinction
+  // visible with its own badge style).
+  function ConfluenceView() {
+    let root = null, rowsEl = null, tallyEl = null, labelEl = null;
+
+    function mount(el) {
+      root = el;
+      rowsEl = document.createElement('div');
+      rowsEl.className = 'conf-rows';
+      root.appendChild(rowsEl);
+      tallyEl = document.createElement('div');
+      tallyEl.className = 'conf-tally';
+      root.appendChild(tallyEl);
+      labelEl = document.createElement('div');
+      labelEl.className = 'farb-note conf-label';
+      root.appendChild(labelEl);
+    }
+
+    /** slice = { conf: confluenceReads() output | null (pre-first-gate) }. */
+    function render(slice) {
+      if (!rowsEl) return;
+      const conf = slice.conf;
+      if (!conf) {
+        rowsEl.innerHTML = '<div class="chart-na">accruing live reads — the board evaluates every 5s of event time.</div>';
+        tallyEl.textContent = '';
+        labelEl.textContent = '';
+        return;
+      }
+      let html = '';
+      for (const r of conf.reads) {
+        const cls = r.read === 'bullish' ? 'bull' : r.read === 'bearish' ? 'bear' : r.read === 'neutral' ? 'neut' : 'na';
+        html += '<div class="conf-row">'
+          + '<span class="conf-cat">' + esc(r.category) + '</span>'
+          + '<span class="conf-badge ' + cls + '">' + esc(r.read) + '</span>'
+          + '<span class="conf-detail">' + esc(r.detail) + '</span>'
+          + '</div>';
+      }
+      rowsEl.innerHTML = html;
+      const t = conf.tally;
+      tallyEl.innerHTML = '<span class="pos">' + t.bullish + ' bullish</span> · '
+        + '<span class="neg">' + t.bearish + ' bearish</span> · '
+        + '<span>' + t.neutral + ' neutral</span> · '
+        + '<span class="conf-na">' + t.na + ' n/a</span>';
+      labelEl.textContent = conf.label;   // §4d mandatory sentence — visible, verbatim
+    }
+
+    return { mount, render };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalViews = {
@@ -2280,6 +3357,9 @@
     // O-3 (§4c): structure panels — historical chart + TPO + composite VP +
     // funding table + macro strip, every one per-source labeled.
     HistChartView, TpoView, KlineVpView, FundingArbView, MacroView,
+    // O-4 (§4d): intelligence panels — descriptive reads/triggers, never
+    // signals; every panel carries its source/honesty label in visible chrome.
+    ScreenerView, RsiHeatmapView, OptionsView, WhaleView, AlertsView, ConfluenceView,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalViews;

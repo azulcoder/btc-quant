@@ -50,16 +50,70 @@
   const TICKS = [1, 5, 10, 25, 50];        // $ tick grouping (default 10 — §4 task spec)
   const BARS = [60000, 300000];            // footprint bar interval: 1m | 5m
   const LIQ_RANGES = ['pct6', 'all'];      // liq-heatmap window: mark ± 6% (default) | full tier extent
-  const DEFAULTS = { tick: 10, barMs: 60000, tapeMin: 0, liqRange: 'pct6' };
+  const SCR_TOPS = ['40', 'all'];          // screener slice: top-40 by turnover (default) | whole universe
+
+  // O-4 (§4d) alert-rule defaults — the SEED the AlertsView inputs edit and
+  // the ONLY place thresholds are defaulted (§4d: no defaults hidden in
+  // engine logic — everything below is visible in the rules table). One rule
+  // per kind, id = kind. price-cross ships disabled with no level: a price
+  // level is the user's opinion, not ours to invent.
+  const ALERT_KINDS = ['price-cross', 'whale-print', 'liq-1m', 'funding-flip',
+    'cvd-divergence', 'book-imbalance', 'detector-pass', 'oi-jump', 'basis-bp'];
+  const DEFAULT_RULES = [
+    { kind: 'price-cross', enabled: false, threshold: null },
+    { kind: 'whale-print', enabled: true, threshold: 250000 },   // mirrors the tape's ◆ whale bar
+    { kind: 'liq-1m', enabled: true, threshold: 1000000 },
+    { kind: 'funding-flip', enabled: true, threshold: null },
+    { kind: 'cvd-divergence', enabled: true, threshold: null },
+    { kind: 'book-imbalance', enabled: true, threshold: 0.6 },   // top-10 depth ≥ 80/20 one-sided
+    { kind: 'detector-pass', enabled: true, threshold: null },
+    { kind: 'oi-jump', enabled: true, threshold: 2 },            // |%/h| — deliberate repositioning, not drift
+    { kind: 'basis-bp', enabled: true, threshold: 25 },
+  ];
+
+  const DEFAULTS = {
+    tick: 10, barMs: 60000, tapeMin: 0, liqRange: 'pct6',
+    // O-4 (§4d): screener slice, whale watchlist (+BTC filter), alert rules.
+    screenerTop: '40', whaleBtcOnly: true, whaleAddrs: [], alertRules: DEFAULT_RULES,
+  };
 
   function loadSettings() {
     const s = Object.assign({}, DEFAULTS);
+    // Deep-copy the array/object defaults — settings.whaleAddrs.push() must
+    // never mutate DEFAULTS (a shared reference would corrupt the fallback).
+    s.whaleAddrs = [];
+    s.alertRules = DEFAULT_RULES.map((r) => Object.assign({ id: r.kind }, r));
     try {
       const j = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
       if (TICKS.indexOf(j.tick) >= 0) s.tick = j.tick;
       if (BARS.indexOf(j.barMs) >= 0) s.barMs = j.barMs;
       if (Number.isFinite(j.tapeMin) && j.tapeMin >= 0) s.tapeMin = j.tapeMin;
       if (LIQ_RANGES.indexOf(j.liqRange) >= 0) s.liqRange = j.liqRange;
+      // O-4 whitelists (same rule as above: only recognized values return
+      // from storage — a hand-edited blob can't smuggle an unsupported state):
+      if (SCR_TOPS.indexOf(j.screenerTop) >= 0) s.screenerTop = j.screenerTop;
+      if (typeof j.whaleBtcOnly === 'boolean') s.whaleBtcOnly = j.whaleBtcOnly;
+      if (Array.isArray(j.whaleAddrs)) {
+        // Addresses must LOOK like EVM addresses (they go straight into POST
+        // bodies + innerHTML data-attrs) and honor the §4d cap of 25.
+        s.whaleAddrs = j.whaleAddrs
+          .filter((a) => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a))
+          .map((a) => a.toLowerCase())
+          .filter((a, i, arr) => arr.indexOf(a) === i)
+          .slice(0, 25);
+      }
+      if (Array.isArray(j.alertRules)) {
+        // Stored rules OVERRIDE matching defaults by kind — unknown kinds are
+        // dropped (stale storage from a future/older build must not feed the
+        // engine rules it can't evaluate), missing kinds keep their default.
+        for (const r of j.alertRules) {
+          if (!r || ALERT_KINDS.indexOf(r.kind) < 0) continue;
+          const dst = s.alertRules.find((d) => d.kind === r.kind);
+          if (!dst) continue;
+          dst.enabled = r.enabled === true;
+          dst.threshold = Number.isFinite(r.threshold) ? r.threshold : null;
+        }
+      }
     } catch (_) { /* corrupt storage → defaults */ }
     return s;
   }
@@ -69,6 +123,9 @@
       localStorage.setItem(LS_KEY, JSON.stringify({
         tick: settings.tick, barMs: settings.barMs, tapeMin: settings.tapeMin,
         liqRange: settings.liqRange,
+        screenerTop: settings.screenerTop, whaleBtcOnly: settings.whaleBtcOnly,
+        whaleAddrs: settings.whaleAddrs,
+        alertRules: settings.alertRules.map((r) => ({ kind: r.kind, enabled: r.enabled, threshold: r.threshold })),
       }));
     } catch (_) { /* private mode / quota — settings just don't persist */ }
   }
@@ -147,11 +204,17 @@
   let sessionHigh = NaN, sessionLow = NaN;   // Bybit perp prints since page open
   let lastPrice = NaN;
 
+  // ─── O-4 intelligence feed state (§4d) — consumed by the 5s intel gate ──
+  let lastBybitTs = NaN;      // newest bybit trade/mark EVENT ts — the intel gate's clock (no Date.now() in the gate: replay rail)
+  const pendingTrades = [];   // trades since the last AlertEngine evaluate (whale-print input), bounded below
+  const oiHistBybit = [];     // [{ts, oi}] ring (~2h) — the 'OI 1h change' read needs history the WS event alone doesn't carry
+
   // ─── Dirty flags — the ONLY signal that a view needs repainting ─────────
   const dirty = {
     fp: true, dom: true, tape: true, agg: true, header: true, liq: true,
     heat: true, liqmap: true, det: true,   // O-2 panels (§4b)
     hist: true, tpo: true, vp: true, farb: true, macro: true,   // O-3 STRUCTURE panels (§4c)
+    scr: true, rsi: true, opts: true, whale: true, alerts: true, conf: true,   // O-4 INTELLIGENCE panels (§4d)
   };
   function dirtyAll() { for (const k in dirty) dirty[k] = true; }
 
@@ -165,6 +228,15 @@
         // labeled store — the panel legend names every line per venue.
         if (cvds[ev.ex]) { cvds[ev.ex].onTrade(ev); dirty.fp = true; }
         lastPriceByEx[ev.ex] = ev.price;   // heatmap polyline trail source
+        // O-4 (§4d): whale-print alert input — EVERY venue's prints qualify
+        // (the tape mixes venues deliberately and a $2M Coinbase sweep is as
+        // notable as a Bybit one; each event names its rule, not its venue).
+        // Bounded: between 5s evaluates even a 100-trade/s burst stays ≤500;
+        // the cap only bites if the intel gate stalls, and then dropping the
+        // OLDEST keeps the newest (largest-recent) prints evaluable.
+        pendingTrades.push(ev);
+        if (pendingTrades.length > 4000) pendingTrades.splice(0, pendingTrades.length - 4000);
+        if (ev.ex === 'bybit' && Number.isFinite(ev.ts) && !(lastBybitTs >= ev.ts)) lastBybitTs = ev.ts;
         if (ev.ex === 'bybit') {
           // Primary-leg flow stores only (see header note on venue blending).
           // §0.7 RAIL: OKX (and coinbase) trades deliberately NEVER reach
@@ -204,10 +276,17 @@
       case 'mark':
         marks[ev.ex] = ev;
         dirty.header = true;
+        if (ev.ex === 'bybit' && Number.isFinite(ev.ts) && !(lastBybitTs >= ev.ts)) lastBybitTs = ev.ts;
         break;
       case 'oi':
         ois[ev.ex] = ev;
         dirty.header = true;
+        // O-4 (§4d): keep ~2h of bybit OI samples so 'OI 1h change' compares
+        // real history instead of extrapolating one print (event-ts pruned).
+        if (ev.ex === 'bybit' && Number.isFinite(ev.ts) && Number.isFinite(ev.oi)) {
+          oiHistBybit.push({ ts: ev.ts, oi: ev.oi });
+          while (oiHistBybit.length && oiHistBybit[0].ts < ev.ts - 7200000) oiHistBybit.shift();
+        }
         break;
       default:
         // Unknown kind = adapter/store contract drift — drop loudly in dev,
@@ -519,6 +598,383 @@
     setInterval(refreshMacroHistory, 3600000);
   }
 
+  // ─── O-4 INTELLIGENCE section (§4d): screener / RSI / options / whales /
+  // alerts / confluence ──────────────────────────────────────────────────
+  //
+  // Two transport classes, two replay rules (§4d wiring contract):
+  //   - REST-fed panels (screener tickers 30s, RSI kline batch, Deribit chain
+  //     + DVOL 60s, whale clearinghouse 60s/address) are DISABLED in replay
+  //     modes — real network breaks the deterministic L1 harness — and each
+  //     panel renders the honest 'disabled in replay' note (same rail as O-3).
+  //   - Confluence + alerts read the EXISTING live stores (footprint, CVD,
+  //     profile, book, liqs, detector), which replay drives deterministically
+  //     — so those two panels run in BOTH modes, gated on EVENT time.
+  //
+  // Rail restated (§4d): everything in this section is a DESCRIPTIVE read or
+  // attention trigger — the IC run-log measured ≈0 forward IC for board
+  // signals, and the confluence label / alerts banner say so on the page.
+  let screenerView = null, rsiView = null, optionsView = null, whaleView = null;
+  // O-4 REST caches (the frame loop only reads them).
+  let tickerRows = null;           // normalizeBybitTickers() rows (30s poll)
+  let btcTicker = null;            // the BTCUSDT row — response-provided fundingIntervalHour for the confluence read
+  let rsiState = { items: [], loaded: 0, total: 0 };   // partial-by-design RSI batch state
+  let rsiGen = 0;                  // batch generation — a new refresh abandons stale in-flight completions
+  let rsiStarted = false;
+  let chainData = null, dvolVal = null;   // Deribit 60s poll results
+  const whaleState = new Map();    // addr → {positions, ts, polledAt, pending}
+  let whaleDiscovering = false, whaleNote = '';
+  let whaleRR = 0;                 // round-robin cursor for the staggered polls
+
+  // Confluence + alert state (both modes — store-fed, event-ts gated).
+  let confData = null;             // last confluenceReads() output
+  let lastIntelTs = -Infinity;     // event-ts of the last intel evaluation (5s gate)
+  const alertFresh = [];           // events fired since the last AlertsView render (Notification candidates)
+  const intelWin = { price: [], cvd: [] };   // per-gate samples for cvd-divergence (ring 24 ≈ 2min)
+  let detSeenIntel = null;         // newest detector event already forwarded to the engine
+  // Engine rules come from the persisted settings; threshold null → undefined
+  // so the engine's Number.isFinite() gate reads "no threshold, cannot fire".
+  function engineRules() {
+    return settings.alertRules.map((r) => ({
+      id: r.kind, kind: r.kind, enabled: !!r.enabled,
+      threshold: Number.isFinite(r.threshold) ? r.threshold : undefined,
+    }));
+  }
+  const alertEngine = S.AlertEngine({ rules: engineRules(), cooldownMs: 60000 });
+
+  // Confluence + alerts views mount in BOTH modes (store-fed — see section
+  // header); their inputs simply carry more 'n/a' in replay because the REST
+  // legs (TPO, SMA50, funding interval) are honestly absent.
+  const confView = V.ConfluenceView();
+  confView.mount($('view-conf'));
+  const alertsView = V.AlertsView();
+  alertsView.mount($('view-alerts'), {
+    rules: settings.alertRules,
+    onRules: (rules) => {
+      settings.alertRules = rules;
+      saveSettings();
+      alertEngine.setRules(engineRules());   // surviving ids keep their cooldown/tracker state (engine contract)
+      dirty.alerts = true;
+    },
+  });
+
+  if (REPLAY) {
+    // Honest replay note for the REST-fed O-4 panels (§4d wiring rule — same
+    // text discipline as the O-3 STRUCTURE notes above).
+    const NOTE4 = '<div class="chart-na">awaiting REST data — REST polls are disabled in replay '
+      + '(deterministic L1 harness: no network beyond the local fixture file). '
+      + 'Nothing is fabricated to fill this panel (§0.7).</div>';
+    for (const id of ['view-screener', 'view-rsi', 'view-options', 'view-whale']) {
+      $(id).innerHTML = NOTE4;
+    }
+    for (const id of ['set-scr-top', 'rsi-refresh', 'set-opt-expiry']) {
+      $(id).disabled = true;
+    }
+  } else {
+    // ── Views (controls in the panel chrome; views own their behavior). ──
+    screenerView = V.ScreenerView();
+    const scrTopSel = $('set-scr-top');
+    scrTopSel.value = settings.screenerTop;
+    screenerView.mount($('view-screener'), {
+      topInput: scrTopSel,
+      onTop: (v) => {
+        if (SCR_TOPS.indexOf(v) < 0) return;   // whitelist, like TICKS/BARS
+        settings.screenerTop = v;
+        saveSettings();
+        dirty.scr = true;
+      },
+    });
+    rsiView = V.RsiHeatmapView();
+    rsiView.mount($('view-rsi'), { progressEl: $('rsi-progress') });
+    optionsView = V.OptionsView();
+    optionsView.mount($('view-options'), { expirySel: $('set-opt-expiry') });
+    whaleView = V.WhaleView();
+    whaleView.mount($('view-whale'), {
+      btcOnly: settings.whaleBtcOnly,
+      onBtcOnly: (v) => { settings.whaleBtcOnly = !!v; saveSettings(); },
+      onAdd: (addr) => {
+        if (settings.whaleAddrs.indexOf(addr) >= 0) { whaleNote = 'already watching ' + addr.slice(0, 6) + '…'; dirty.whale = true; return; }
+        if (settings.whaleAddrs.length >= 25) { whaleNote = 'watchlist cap (25) reached — remove one first'; dirty.whale = true; return; }
+        settings.whaleAddrs.push(addr);
+        saveSettings();
+        whaleNote = '';
+        dirty.whale = true;
+      },
+      onRemove: (addr) => {
+        const i = settings.whaleAddrs.indexOf(addr);
+        if (i < 0) return;
+        settings.whaleAddrs.splice(i, 1);
+        whaleState.delete(addr);
+        saveSettings();
+        dirty.whale = true;
+      },
+      onDiscover: () => {
+        // The 33 MB leaderboard is ONE-SHOT and user-consented (the view's
+        // confirm() dialog stated the size before this callback ran, §4d).
+        if (whaleDiscovering) return;
+        whaleDiscovering = true;
+        whaleNote = '';
+        dirty.whale = true;
+        HIST.fetchHlLeaderboard(10).then((lb) => {
+          whaleDiscovering = false;
+          if (!lb) {
+            whaleNote = 'leaderboard fetch failed — nothing seeded (retry the button)';
+            dirty.whale = true;
+            return;
+          }
+          // Seed top-10 by account value + top-10 by 30d ROI, deduped, cap 25.
+          let added = 0;
+          for (const r of lb.topByValue.concat(lb.topByRoi30d)) {
+            const a = String(r.addr || '').toLowerCase();
+            if (!/^0x[0-9a-f]{40}$/.test(a)) continue;
+            if (settings.whaleAddrs.indexOf(a) >= 0) continue;
+            if (settings.whaleAddrs.length >= 25) break;
+            settings.whaleAddrs.push(a);
+            added++;
+          }
+          saveSettings();
+          whaleNote = 'seeded ' + added + ' address' + (added === 1 ? '' : 'es')
+            + ' (top-10 by value + top-10 by 30d ROI, deduped)';
+          dirty.whale = true;
+        });
+      },
+    });
+
+    // ── Screener universe: ONE tickers call carries all ~720 linear symbols
+    // (§4d empirical map) — a single 30s poll, never per-symbol fan-out. ──
+    function pollTickers() {
+      HIST.fetchBybitAllTickers().then((rows) => {
+        if (rows && rows.length) {
+          tickerRows = rows;
+          btcTicker = null;
+          for (const r of rows) if (r.sym === SYM) { btcTicker = r; break; }
+          if (!rsiStarted) { rsiStarted = true; refreshRsi(); }   // RSI batch needs the universe first
+        }
+        dirty.scr = true;   // null result → the view keeps saying 'awaiting tickers'
+      });
+    }
+
+    // ── RSI batch: 1h klines for the screener's top-40 by turnover, through
+    // quant.js rsi(closes, 14) — 40 fetches behind a 4-way concurrency pool
+    // (politeness cap: Bybit tolerates bursts, but 40 simultaneous kline hits
+    // from one browser is rude and rate-limit bait). Progress is HONEST
+    // partial state: the strip renders each symbol as it lands, and the
+    // header counts 'n/40 loaded' (§4d). ──
+    function refreshRsi() {
+      const Q = window.Quant;
+      if (!tickerRows || !Q || !Q.rsi) { dirty.rsi = true; return; }
+      const top = S.buildScreener(tickerRows, { topN: 40 }).rows;
+      if (!top.length) { dirty.rsi = true; return; }
+      const gen = ++rsiGen;   // a newer refresh abandons this batch's stragglers
+      rsiState = { items: [], loaded: 0, total: top.length };
+      dirty.rsi = true;
+      let idx = 0;
+      const next = () => {
+        if (gen !== rsiGen || idx >= top.length) return;
+        const row = top[idx++];
+        // 50×1h bars: RSI-14 needs 15; the extra history settles Wilder's
+        // recursive smoothing instead of reading a cold-start artifact.
+        HIST.fetchBybitKlines(row.sym, '60', 50).then((bars) => {
+          if (gen !== rsiGen) return;
+          rsiState.loaded++;
+          if (bars && bars.length >= 15) {
+            const series = Q.rsi(bars.map((b) => b.c), 14);
+            const last = series[series.length - 1];
+            if (Number.isFinite(last)) {
+              rsiState.items.push({ sym: row.sym, rsi: last, turnover24h: row.turnover24h });
+            }
+          }
+          // Failed fetches still count as 'loaded' — the progress denominator
+          // is attempts, and a missing bubble IS the honest render of a miss.
+          dirty.rsi = true;
+          next();
+        });
+      };
+      for (let k = 0; k < 4; k++) next();   // the politeness cap: 4 in flight
+    }
+    $('rsi-refresh').addEventListener('click', refreshRsi);
+
+    // ── Deribit chain + DVOL: 60s poll (CORS-open, fetched straight from the
+    // page — §4d empirical). null keeps the last good chain on display; the
+    // view's stats say when the chain is absent entirely. ──
+    function pollOptions() {
+      HIST.fetchDeribitChain('BTC').then((c) => { if (c) chainData = c; dirty.opts = true; });
+      HIST.fetchDeribitDvol().then((d) => { if (d !== null) dvolVal = d; dirty.opts = true; });
+    }
+
+    // ── Whale polls: one clearinghouseState POST per 2.5s tick, round-robin,
+    // each address gated to ≥60s — STAGGERED so 25 watched addresses (the
+    // cap) spread over a ~62.5s sweep instead of firing a 25-request burst
+    // every minute at the same API. ──
+    function whaleTick() {
+      const n = settings.whaleAddrs.length;
+      if (!n) return;
+      const now = Date.now();
+      for (let k = 0; k < n; k++) {
+        const addr = settings.whaleAddrs[whaleRR % n];
+        whaleRR++;
+        const st = whaleState.get(addr);
+        if (st && (st.pending || (Number.isFinite(st.polledAt) && now - st.polledAt < 60000))) continue;
+        whaleState.set(addr, Object.assign({}, st, { pending: true, polledAt: now }));
+        HIST.fetchHlClearinghouse(addr).then((pos) => {
+          const cur = whaleState.get(addr);
+          if (!cur) return;   // removed from the watchlist mid-flight
+          whaleState.set(addr, {
+            // null (failed) keeps the last real positions; ts marks the last
+            // SUCCESS so a stale row is at least honestly datable.
+            positions: pos !== null ? pos : cur.positions,
+            ts: pos !== null ? Date.now() : cur.ts,
+            polledAt: cur.polledAt, pending: false,
+          });
+          dirty.whale = true;
+        });
+        break;   // one address per tick — the stagger
+      }
+    }
+
+    pollTickers();
+    setInterval(pollTickers, 30000);
+    setInterval(refreshRsi, 300000);   // §4d: 5min auto-refresh on top of the button
+    pollOptions();
+    setInterval(pollOptions, 60000);
+    whaleTick();
+    setInterval(whaleTick, 2500);
+  }
+
+  // ── O-4 intel gate (§4d): confluence inputs + AlertEngine snapshot, both
+  // assembled from EXISTING stores every ≥5s of EVENT time (lastBybitTs — the
+  // same event-clock discipline as the liq-model gate: no fresh bybit events
+  // → no re-read, and replay evaluates deterministically). ──
+
+  /** CVD slope over the trailing ~60s of bybit samples, USD/s. NaN below 5s
+   *  of span — a two-sample "slope" is noise wearing a number. */
+  function cvdSlope60s() {
+    const s = cvds.bybit.series();
+    const n = s.t.length;
+    if (n < 2) return NaN;
+    const tL = s.t[n - 1];
+    let i0 = n - 1;
+    while (i0 > 0 && s.t[i0 - 1] >= tL - 60000) i0--;
+    if (i0 === n - 1) return NaN;
+    const dt = (tL - s.t[i0]) / 1000;
+    if (!(dt >= 5)) return NaN;
+    return (s.overall[n - 1] - s.overall[i0]) / dt;
+  }
+
+  /** Bybit OI %-change normalized to per-hour. NaN below 10min of history —
+   *  extrapolating a 1-minute wiggle ×60 would fabricate a rate (§0.7). */
+  function oiChangePct1h(nowTs) {
+    if (oiHistBybit.length < 2) return NaN;
+    const newest = oiHistBybit[oiHistBybit.length - 1];
+    let oldest = null;
+    for (const smp of oiHistBybit) { if (smp.ts >= nowTs - 3600000) { oldest = smp; break; } }
+    if (!oldest || oldest === newest || !(oldest.oi > 0)) return NaN;
+    const spanMs = newest.ts - oldest.ts;
+    if (spanMs < 600000) return NaN;
+    return (newest.oi / oldest.oi - 1) * 100 * (3600000 / spanMs);
+  }
+
+  /** Long-vs-short liquidation notional imbalance over the trailing 5m
+   *  (event-ts window): +1 = all longs liquidated. NaN when nothing printed
+   *  — no liqs is absence, not balance. */
+  function liqImb5m(nowTs) {
+    let longUsd = 0, shortUsd = 0;
+    for (const l of liq.recent()) {
+      if (!(l.ts > nowTs - 300000 && l.ts <= nowTs)) continue;
+      if (l.side === 'long') longUsd += l.notionalUsd;
+      else if (l.side === 'short') shortUsd += l.notionalUsd;
+    }
+    const tot = longUsd + shortUsd;
+    return tot > 0 ? (longUsd - shortUsd) / tot : NaN;
+  }
+
+  /** Top-10 grouped bid-vs-ask depth imbalance on the bybit book: +1 = all
+   *  bids. NaN on an empty book (pre-snapshot) — absence, not balance. */
+  function bookImb10() {
+    const g = bybitBook.grouped(settings.tick, 10);
+    let b = 0, a = 0;
+    for (const r of g.bids) b += r.qty;
+    for (const r of g.asks) a += r.qty;
+    return b + a > 0 ? (b - a) / (b + a) : NaN;
+  }
+
+  /** Last close + SMA50 from the hist chart's CURRENT bars (quant.js sma —
+   *  house rule) — NaNs while the REST history is absent (e.g. replay). */
+  function sma50FromHist() {
+    const Q = window.Quant;
+    if (!histBars || histBars.length < 51 || !Q || !Q.sma) return { sma: NaN, close: NaN };
+    const closes = histBars.map((b) => b.c);
+    const arr = Q.sma(closes, 50);
+    return { sma: arr[arr.length - 1], close: closes[closes.length - 1] };
+  }
+
+  function maybeIntel() {
+    const ts = lastBybitTs;
+    if (!Number.isFinite(ts) || ts - lastIntelTs < 5000) return;
+    lastIntelTs = ts;
+
+    // ── Confluence inputs — plain values from the existing stores/caches
+    // (§4d contract: the builder never touches a store). Missing feeds stay
+    // NaN/empty and read 'n/a' — never a fabricated 'neutral'. ──
+    const prof = profile.profile();
+    const tpo = tpoSessions && tpoSessions.length ? tpoSessions[0] : null;   // newest UTC session (REST — null in replay)
+    const mBy = marks.bybit;
+    const sm = sma50FromHist();
+    const finished = [];
+    for (const b of footprint.bars()) if (b.finished) finished.push(b.delta);
+    confData = S.confluenceReads({
+      fpDeltas: finished.slice(-20),   // last ≤20 finished bars — the recent flow, not the whole ring
+      cvdSlope: cvdSlope60s(),
+      price: lastPrice,
+      poc: prof.poc, vah: prof.vah, val: prof.val,
+      tpoPoc: tpo ? tpo.poc : NaN, tpoVah: tpo ? tpo.vah : NaN, tpoVal: tpo ? tpo.val : NaN,
+      fundingRate: mBy ? mBy.fundingRate : NaN,
+      // Response-provided interval from the tickers poll when known (§4d —
+      // beats the 8h constant); the builder falls back to 8 on its own.
+      fundingIntervalH: btcTicker ? btcTicker.fundingIntervalH : undefined,
+      oiChangePct1h: oiChangePct1h(ts),
+      liqImb5m: liqImb5m(ts),
+      bookImb: bookImb10(),
+      sma50: sm.sma, lastClose: sm.close,
+    });
+    dirty.conf = true;
+
+    // ── AlertEngine snapshot — same gate, same event clock. ──
+    // Divergence window: one {price, CVD} sample per gate, ring 24 ≈ 2min.
+    if (Number.isFinite(lastPrice)) {
+      const cs = cvds.bybit.series();
+      intelWin.price.push(lastPrice);
+      intelWin.cvd.push(cs.overall.length ? cs.overall[cs.overall.length - 1] : NaN);
+      if (intelWin.price.length > 24) { intelWin.price.shift(); intelWin.cvd.shift(); }
+    }
+    // Detector events NEW since the last evaluate (identity scan — the ring
+    // caps at 100, so a plain count goes blind after it wraps).
+    const detEvs = detector.events();
+    let newDet = [];
+    if (detEvs.length) {
+      const i = detSeenIntel ? detEvs.lastIndexOf(detSeenIntel) : -1;
+      newDet = i >= 0 ? detEvs.slice(i + 1) : detEvs.slice();
+      detSeenIntel = detEvs[detEvs.length - 1];
+    }
+    const fired = alertEngine.evaluate({
+      ts,
+      price: lastPrice,
+      trades: pendingTrades,
+      liq1mUsd: liq.sumWindow(60000, ts),
+      fundingRate: mBy ? mBy.fundingRate : NaN,
+      window: { price: intelWin.price.slice(), cvd: intelWin.cvd.slice() },
+      bookImb: bookImb10(),
+      detectorEvents: newDet,
+      oiChangePct1h: oiChangePct1h(ts),
+      basisBp: (mBy && Number.isFinite(mBy.mark) && Number.isFinite(mBy.index) && mBy.index !== 0)
+        ? ((mBy.mark - mBy.index) / mBy.index) * 1e4 : NaN,
+    });
+    pendingTrades.length = 0;   // consumed — the next snapshot sees only newer prints
+    if (fired.length) {
+      for (const ev of fired) alertFresh.push(ev);
+      dirty.alerts = true;
+    }
+  }
+
   // ── O-3 render-slice composers (read caches + stores; mutate nothing) ──
 
   /** FundingArbView slice: per-venue mark/funding/OI, per-source (§4c).
@@ -666,13 +1122,18 @@
   // heat/liqmap update at ~1s/5s data cadence anyway — budgets just cap bursts.
   // O-3 budgets: hist/tpo/vp repaint only on (re)fetch or control changes;
   // farb ticks with its 1s countdown; macro moves at poll cadence (≥10s).
+  // O-4 budgets: scr/rsi/opts move at REST-poll cadence (30–60s) — budgets
+  // just cap redraw bursts from hover-independent dirty flips; conf/alerts
+  // tick with the 5s intel gate; whale at its 60s/address polls.
   const MIN_MS = {
     fp: 250, dom: 120, tape: 180, agg: 220, header: 400, liq: 300, heat: 500, liqmap: 600, det: 250,
     hist: 500, tpo: 800, vp: 800, farb: 500, macro: 800,
+    scr: 800, rsi: 500, opts: 1000, whale: 600, alerts: 300, conf: 800,
   };
   const lastAt = {
     fp: 0, dom: 0, tape: 0, agg: 0, header: 0, liq: 0, heat: 0, liqmap: 0, det: 0,
     hist: 0, tpo: 0, vp: 0, farb: 0, macro: 0,
+    scr: 0, rsi: 0, opts: 0, whale: 0, alerts: 0, conf: 0,
   };
 
   function due(key, now) {
@@ -744,6 +1205,7 @@
     const now = Date.now();
     sampleDepth();
     maybeEstimateLiq();
+    maybeIntel();   // O-4 (§4d): confluence + alert evaluation on the 5s event-ts gate
 
     // The header (with its conn chips) renders even while paused: pause
     // freezes the MARKET panels, never connection health — a paused page that
@@ -840,6 +1302,34 @@
       if (macroView && due('macro', now)) {
         macroView.render(macroSlice());
       }
+      // O-4 INTELLIGENCE panels (§4d). REST-fed views are null in replay
+      // (honest notes were rendered instead); conf/alerts run in both modes.
+      if (screenerView && due('scr', now)) {
+        const topN = settings.screenerTop === 'all' ? 0 : 40;   // buildScreener: topN ≤ 0 → whole universe
+        const scr = S.buildScreener(tickerRows || [], { topN });
+        screenerView.render({ rows: scr.rows, total: scr.total, topMode: settings.screenerTop });
+      }
+      if (rsiView && due('rsi', now)) {
+        rsiView.render(rsiState);
+      }
+      if (optionsView && due('opts', now)) {
+        // nowTs rides the slice (frame clock) — the view must not read
+        // Date.now() itself for T-to-expiry (§4d GEX contract).
+        optionsView.render({ chain: chainData, dvol: dvolVal, nowTs: now });
+      }
+      if (whaleView && due('whale', now)) {
+        const entries = settings.whaleAddrs.map((a) => {
+          const st = whaleState.get(a);
+          return { addr: a, positions: st ? st.positions : undefined, ts: st ? st.ts : NaN };
+        });
+        whaleView.render({ entries, discovering: whaleDiscovering, note: whaleNote });
+      }
+      if (due('conf', now)) {
+        confView.render({ conf: confData });
+      }
+      if (due('alerts', now)) {
+        alertsView.render({ events: alertEngine.events(), fresh: alertFresh.splice(0) });
+      }
     }
 
     requestAnimationFrame(frame);
@@ -852,9 +1342,11 @@
   setInterval(() => { dirty.header = true; dirty.liq = true; dirty.farb = true; }, 1000);
 
   // Canvas panels re-measure on their next draw; a resize makes them dirty.
-  // (O-3: tpo/vp are canvases too; the hist chart resizes itself in-view.)
+  // (O-3: tpo/vp are canvases too; the hist chart resizes itself in-view.
+  // O-4: screener/RSI/options are canvases; whale/alerts/confluence are DOM.)
   window.addEventListener('resize', () => {
     dirty.fp = true; dirty.agg = true; dirty.heat = true; dirty.liqmap = true;
     dirty.tpo = true; dirty.vp = true;
+    dirty.scr = true; dirty.rsi = true; dirty.opts = true;
   });
 })();

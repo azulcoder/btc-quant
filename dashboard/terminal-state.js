@@ -1,5 +1,5 @@
 // terminal-state.js — orderflow terminal: pure in-memory stores + structure builders
-// (DESIGN-orderflow-terminal.md §4 + §4b + §4c).
+// (DESIGN-orderflow-terminal.md §4 + §4b + §4c + §4d).
 //
 // RESEARCH / DESCRIPTIVE ONLY. Everything held here is LIVE-DESCRIPTIVE session
 // state (§0.1): it is never merged into a backtested series or the OOS harness,
@@ -1353,6 +1353,445 @@
     return { onSample, series, returns, corr, sampleMs };
   }
 
+  // ════════ O-4 (§4d) — intelligence builders: descriptive reads, NEVER signals ═
+  //
+  // §4d rail, restated where it bites: screener rows, confluence reads and
+  // alert events are DESCRIPTIVE. The IC run-log (RESEARCH-ic-runlog.md)
+  // measured ≈0 forward IC for board signals, so nothing below is a score to
+  // trade — confluenceReads() carries that sentence on its return value and
+  // AlertEngine events are attention triggers, not entries. Same two rails as
+  // everything above: zero DOM, zero Date.now() (input ts is the only clock).
+
+  // ─── buildScreener(tickerRows, {topN}) — turnover-ranked screener rows (§4d) ─
+  //
+  // PURE PASS-THROUGH SHAPING: the VIEW renders (bubbles, colors, hover);
+  // this just ranks and slices. Input = normalizeBybitTickers() rows
+  // (terminal-hist §4d shape: {sym, last, vwap24h, vwapDevPct, pct24h,
+  // turnover24h, fundingRate, fundingIntervalH, annualizedFundingPct, oiUsd,
+  // mark, index}) — ONE Bybit call carries all ~720 linear symbols (§4d
+  // empirical map), so the slice keeps the bubble canvas readable; it is not
+  // a data limit. Sort key = turnover24h (USD): the only ranking comparable
+  // ACROSS symbols — volume24h is in base coins (38k BTC vs 34B PEPE says
+  // nothing). Rows with non-finite turnover sink to the END, never get
+  // dropped: `total` must state the true universe size so the view's
+  // "top 40 of 720" header stays honest. topN ≤ 0 → all rows (§4d 'all'
+  // passthrough). The input array is not mutated (slice-before-sort).
+  function buildScreener(tickerRows, opts) {
+    const topN = finiteOr(opts && opts.topN, 40);
+    const src = Array.isArray(tickerRows) ? tickerRows.filter((r) => !!r) : [];
+    const rows = src.slice().sort((a, b) => {
+      const ta = Number.isFinite(a.turnover24h) ? a.turnover24h : -Infinity;
+      const tb = Number.isFinite(b.turnover24h) ? b.turnover24h : -Infinity;
+      return tb - ta;
+    });
+    return { rows: topN > 0 ? rows.slice(0, Math.floor(topN)) : rows, total: src.length };
+  }
+
+  // ─── confluenceReads(inputs) — the 9-category mechanical board (§4d) ─────
+  //
+  // EXACTLY the nine §4d categories (footprint Δ-trend, CVD slope, price vs
+  // POC/VA, TPO position, funding sign/extreme, OI 1h change, liq-pressure
+  // 5m, book top-10 imbalance, price vs SMA50), each read one of
+  // 'bullish'|'bearish'|'neutral'|'n/a' plus a human detail string. Inputs
+  // are PLAIN VALUES assembled by terminal.js from the live stores — this
+  // function never touches a store (pure, replayable):
+  //   { fpDeltas:[last N finished-bar deltas], cvdSlope, price, poc, vah,
+  //     val, tpoPoc, tpoVah, tpoVal, fundingRate, fundingIntervalH (optional,
+  //     default 8 — pass Bybit's response-provided fundingIntervalHour when
+  //     known, §4d: not the 8h constant), oiChangePct1h (%/h), liqImb5m
+  //     (−1..1, long-liq vs short-liq notional: +1 = all longs liquidated),
+  //     bookImb (−1..1, top-10 bid vs ask depth: +1 = all bids), sma50,
+  //     lastClose }
+  //
+  // A missing feed must NEVER default to 'neutral' — absence is not
+  // information (§0.7): 'neutral' claims "I looked and it is balanced",
+  // which is a fabricated read when nothing arrived. Missing/non-finite
+  // input → 'n/a', counted in tally.na, never in the directional tally.
+  //
+  // The returned label is MANDATORY VIEW TEXT (§4d): it rides the return
+  // value itself so no view can render the tally without it.
+  function confluenceReads(inputs) {
+    const inp = inputs || {};
+    const fin = Number.isFinite;
+    const reads = [];
+    const NA = 'no feed'; // n/a detail — absence stated plainly, never dressed up
+    const row = (category, read, detail) => { reads.push({ category, read, detail }); };
+
+    // Shared value-area position rule (categories 3 + 4 — session VP and TPO
+    // apply the same acceptance logic to their own levels): trading ABOVE
+    // the value area = buyers accepting higher prices (bullish read), BELOW
+    // = sellers accepting lower (bearish), INSIDE = balance/rotation —
+    // a genuine 'neutral' read of a present feed, unlike 'n/a'.
+    const vaRow = (category, price, poc, vah, val) => {
+      if (!fin(price) || !fin(poc) || !fin(vah) || !fin(val)) return row(category, 'n/a', NA);
+      if (price > vah) return row(category, 'bullish', 'price ' + price + ' > VAH ' + vah + ' (POC ' + poc + ')');
+      if (price < val) return row(category, 'bearish', 'price ' + price + ' < VAL ' + val + ' (POC ' + poc + ')');
+      return row(category, 'neutral', 'inside value ' + val + '..' + vah + ' (POC ' + poc + ')');
+    };
+
+    // 1. Footprint Δ-trend — net signed aggressor flow over the last N
+    //    finished bars, scale-free: ΣΔ/Σ|Δ| ∈ [−1, 1]. Threshold 0.2 (WHY:
+    //    net flow must be ≥20% of gross before calling a trend — below that,
+    //    buyers and sellers traded near-symmetric size and the residual's
+    //    sign is chop, not flow). Non-finite entries are skipped (hygiene);
+    //    an empty/absent array is a missing feed → n/a, not neutral.
+    {
+      const deltas = Array.isArray(inp.fpDeltas) ? inp.fpDeltas.filter(fin) : [];
+      if (!deltas.length) row('footprint Δ-trend', 'n/a', NA);
+      else {
+        let net = 0, gross = 0;
+        for (const d of deltas) { net += d; gross += Math.abs(d); }
+        const r = gross > 0 ? net / gross : 0; // all-zero deltas = genuinely balanced
+        row('footprint Δ-trend',
+          r > 0.2 ? 'bullish' : r < -0.2 ? 'bearish' : 'neutral',
+          'ΣΔ/Σ|Δ| = ' + r.toFixed(2) + ' over ' + deltas.length + ' bars');
+      }
+    }
+
+    // 2. CVD slope — SIGN only. WHY no magnitude threshold: the slope's unit
+    //    depends on the caller's window choice; inventing a "$X/s is steep"
+    //    constant here would be a threshold hidden in logic (§4d forbids
+    //    exactly that for AlertEngine — same discipline here). Sign is
+    //    unit-free and honest; exactly 0 is genuinely flat → neutral.
+    {
+      const s = inp.cvdSlope;
+      if (!fin(s)) row('CVD slope', 'n/a', NA);
+      else row('CVD slope', s > 0 ? 'bullish' : s < 0 ? 'bearish' : 'neutral', 'slope ' + s);
+    }
+
+    // 3. Price vs session POC/VA (live ProfileStore levels).
+    vaRow('price vs POC/VA', inp.price, inp.poc, inp.vah, inp.val);
+
+    // 4. TPO position (buildTpo's newest session levels) — same rule, the
+    //    structural (30m-period) counterpart to the live profile above.
+    vaRow('TPO position', inp.price, inp.tpoPoc, inp.tpoVah, inp.tpoVal);
+
+    // 5. Funding sign/extreme — CONTRARIAN crowding read on the ANNUALIZED
+    //    rate. WHY 30%/yr: neutral BTC perp funding ≈ 0.01%/8h ≈ 11%/yr, so
+    //    30%/yr ≈ 3× baseline — one side is paying real money to stay in
+    //    (crowded). Crowded longs (positive extreme) → bearish read, crowded
+    //    shorts → bullish; anything milder is baseline carry → neutral.
+    //    Interval: response-provided fundingIntervalHour when the caller
+    //    passes it (§4d — not the 8h constant), 8h fallback otherwise.
+    {
+      const f = inp.fundingRate;
+      if (!fin(f)) row('funding sign/extreme', 'n/a', NA);
+      else {
+        const intervalH = posOr(inp.fundingIntervalH, 8);
+        const annPct = f * (8760 / intervalH) * 100;
+        row('funding sign/extreme',
+          annPct > 30 ? 'bearish' : annPct < -30 ? 'bullish' : 'neutral',
+          annPct.toFixed(1) + '%/yr annualized' + (Math.abs(annPct) > 30 ? ' — crowded' : ''));
+      }
+    }
+
+    // 6. OI 1h change — the classic board convention: rising OI = new
+    //    positioning entering (read bullish inflow), falling = deleveraging
+    //    (read bearish). Textbook caveat, stated not hidden: OI classically
+    //    CONFIRMS a trend rather than owning a direction — this naive read
+    //    is exactly the kind of board signal the IC run-log measured at ≈0
+    //    forward IC, hence the mandatory label on the return value.
+    //    Threshold ±0.5%/h (WHY: on a multi-billion-USD OI base that is a
+    //    deliberate positioning change, not minute-to-minute drift).
+    {
+      const oi = inp.oiChangePct1h;
+      if (!fin(oi)) row('OI 1h change', 'n/a', NA);
+      else row('OI 1h change',
+        oi > 0.5 ? 'bullish' : oi < -0.5 ? 'bearish' : 'neutral',
+        oi.toFixed(2) + '%/h open interest');
+    }
+
+    // 7. Liq-pressure 5m — liqImb5m ∈ [−1, 1], +1 = ALL liquidated notional
+    //    was longs. Long liqs print as forced SELLS (bearish pressure);
+    //    short liqs as forced BUYS (squeeze fuel → bullish). Threshold 0.5
+    //    (WHY: x − (1−x) ≥ 0.5 ⇒ one side carries ≥75% of the 5m liq
+    //    notional — cascades are bursty, a 60/40 split is ordinary churn).
+    {
+      const li = inp.liqImb5m;
+      if (!fin(li)) row('liq-pressure 5m', 'n/a', NA);
+      else row('liq-pressure 5m',
+        li > 0.5 ? 'bearish' : li < -0.5 ? 'bullish' : 'neutral',
+        'imbalance ' + li.toFixed(2) + ' (long-liq vs short-liq)');
+    }
+
+    // 8. Book top-10 imbalance — bookImb ∈ [−1, 1], +1 = all bids. Threshold
+    //    0.25 (§4d: bids carrying ≥62.5% of top-10 depth). WHY the wide
+    //    dead-band: resting depth is the most spoofable input on this board
+    //    (the §4b detector exists precisely because of that), so a modest
+    //    skew is noise or bait — only a heavy one gets a read.
+    {
+      const bi = inp.bookImb;
+      if (!fin(bi)) row('book top-10 imbalance', 'n/a', NA);
+      else row('book top-10 imbalance',
+        bi > 0.25 ? 'bullish' : bi < -0.25 ? 'bearish' : 'neutral',
+        'imbalance ' + bi.toFixed(2) + ' (bid vs ask)');
+    }
+
+    // 9. Price vs SMA50 — the historical-trend leg: last 1h kline close vs
+    //    its SMA50 (both computed by the caller from Bybit klines, quant.js
+    //    sma — never reimplemented here). Dead-band ±10bp (WHY: a close
+    //    sitting ON the average, within spread-and-float distance, is not a
+    //    trend statement in either direction). sma50 must be > 0: it divides.
+    {
+      const sma = inp.sma50, c = inp.lastClose;
+      if (!fin(sma) || !fin(c) || sma <= 0) row('price vs SMA50', 'n/a', NA);
+      else {
+        const dev = c / sma - 1;
+        row('price vs SMA50',
+          dev > 0.001 ? 'bullish' : dev < -0.001 ? 'bearish' : 'neutral',
+          'close ' + c + ' vs SMA50 ' + sma + ' (' + (dev * 100).toFixed(2) + '%)');
+      }
+    }
+
+    // Tally counts READS only — n/a rows are counted apart (they are absence,
+    // not opinion) so bullish+bearish+neutral+na always sums to 9.
+    const tally = { bullish: 0, bearish: 0, neutral: 0, na: 0 };
+    for (const r of reads) tally[r.read === 'n/a' ? 'na' : r.read]++;
+    return {
+      reads,
+      tally,
+      // §4d mandatory IC-honesty sentence — verbatim from the contract.
+      label: 'un-validated descriptive reads — forward IC of board signals ≈ 0 (RESEARCH-ic-runlog); NOT a signal',
+    };
+  }
+
+  // ─── AlertEngine({rules, cooldownMs}) — descriptive alert triggers (§4d) ─
+  //
+  // Rules are ATTENTION triggers, never entries (§4d rail — AlertsView's
+  // banner reads "descriptive triggers — un-validated"). rules = [{id, kind,
+  // threshold?, enabled}] with THRESHOLDS INJECTED by the caller (§4d: no
+  // defaults hidden in logic — a kind that needs a threshold and lacks a
+  // finite one simply cannot fire; that surfaces the config bug instead of
+  // alerting on an invented number).
+  //
+  // evaluate(snap) is EVENT-TS driven: snap.ts is the only clock — cooldown
+  // arithmetic, event timestamps, everything (replay rail: same snaps in →
+  // same events out; no Date.now()). Snap fields consumed per kind (each
+  // optional — a missing field just means that kind cannot fire this pass):
+  //   ts        — required; without an event time nothing can be honestly
+  //               timestamped, so evaluate() returns [] rather than guessing
+  //   price     — last trade price                          (price-cross)
+  //   trades    — normalized §4 trade events NEW since the last evaluate
+  //                                                          (whale-print)
+  //   liq1mUsd  — LiqStore.sumWindow(60000, snap.ts), caller-computed — the
+  //               engine never reaches into stores (pure)    (liq-1m)
+  //   fundingRate                                            (funding-flip)
+  //   window    — {price:[…], cvd:[…]} aligned recent samples (cvd-divergence)
+  //   bookImb   — −1..1 top-10 bid vs ask                    (book-imbalance)
+  //   detectorEvents — SpoofIcebergDetector events NEW since last evaluate
+  //                                                          (detector-pass)
+  //   oiChangePct1h — %/h                                    (oi-jump)
+  //   basisBp   — (mark−index)/index in bp                   (basis-bp)
+  //
+  // Per-rule COOLDOWN (default 60 s): after a rule fires, further fires are
+  // suppressed until snap.ts has advanced ≥ cooldownMs. WHY: a threshold
+  // that stays breached (funding stays extreme, book stays lopsided) would
+  // otherwise re-alert on every evaluate tick — alert fatigue turns alerts
+  // into noise. Tracker state (price-cross prev, funding sign) keeps
+  // updating THROUGH the cooldown so a rule re-arms against current reality,
+  // not against a snapshot frozen at its last fire.
+  function AlertEngine(opts) {
+    const o = opts || {};
+    const cooldownMs = finiteOr(o.cooldownMs, 60000);
+    const ring = makeRing(200); // §4d: events() retains the last 200
+    const state = new Map();    // rule id → {lastFireTs, prevPrice, prevFundingSign}
+    let rules = [];
+
+    /** Replace the rule set (AlertsView edits rules in place). State for ids
+     *  that SURVIVE is kept — editing one rule must not re-arm the others'
+     *  cooldowns or wipe a price-cross's prev; state for removed ids is
+     *  pruned so deleted rules do not leak memory. Malformed rules (no id /
+     *  no kind) are dropped here, once, instead of re-checked per evaluate. */
+    function setRules(next) {
+      rules = Array.isArray(next)
+        ? next.filter((r) => r && r.id != null && typeof r.kind === 'string')
+        : [];
+      const ids = new Set(rules.map((r) => r.id));
+      for (const id of [...state.keys()]) if (!ids.has(id)) state.delete(id);
+    }
+    setRules(o.rules);
+
+    function stateFor(id) {
+      let s = state.get(id);
+      if (!s) { s = { lastFireTs: NaN, prevPrice: NaN, prevFundingSign: 0 }; state.set(id, s); }
+      return s;
+    }
+
+    /** Half-window extremum helpers for cvd-divergence. Non-finite entries
+     *  are skipped; an all-invalid half returns ±Infinity, which the caller
+     *  rejects — a divergence "detected" against missing data would be a
+     *  fabricated pattern (§0.7). */
+    function hiOf(a, s, e) { let m = -Infinity; for (let i = s; i < e; i++) if (Number.isFinite(a[i]) && a[i] > m) m = a[i]; return m; }
+    function loOf(a, s, e) { let m = Infinity; for (let i = s; i < e; i++) if (Number.isFinite(a[i]) && a[i] < m) m = a[i]; return m; }
+
+    /** Evaluate every enabled rule against one snapshot. Returns ONLY the
+     *  newly-fired events [{ts, ruleId, kind, msg, label?}]; events() replays
+     *  the retained ring. */
+    function evaluate(snap) {
+      const out = [];
+      if (!snap || !Number.isFinite(snap.ts)) return out; // no event time — see header
+      const ts = snap.ts;
+      for (const rule of rules) {
+        // Disabled = invisible: no firing AND no tracking, so re-enabling
+        // starts from a fresh seed instead of firing off a stale prev.
+        if (rule.enabled === false) continue;
+        const st = stateFor(rule.id);
+        const th = rule.threshold; // injected or absent — never defaulted here
+        const fired = [];          // {msg, label?} candidates from this rule
+
+        switch (rule.kind) {
+          case 'price-cross': {
+            // Fires on a CROSS in either direction (§4d), not on "is
+            // beyond": prev strictly on one side, now at-or-beyond the
+            // other (landing exactly ON the level counts as reaching it).
+            // The first evaluate only seeds prev — you cannot cross a line
+            // you were never seen on one side of.
+            const px = snap.price;
+            if (Number.isFinite(px) && Number.isFinite(th)) {
+              const prev = st.prevPrice;
+              if (Number.isFinite(prev)
+                  && ((prev < th && px >= th) || (prev > th && px <= th))) {
+                fired.push({ msg: 'price crossed ' + th + ' (' + prev + ' → ' + px + ')' });
+              }
+              st.prevPrice = px; // tracks through cooldown — see header
+            }
+            break;
+          }
+          case 'whale-print': {
+            // One event per evaluate — the LARGEST qualifying print: with a
+            // cooldown in force anyway, per-print spam adds noise, not
+            // information. Notional = price·qty (USD, linear contracts).
+            if (!Number.isFinite(th)) break; // threshold required (§4d)
+            const trades = Array.isArray(snap.trades) ? snap.trades : [];
+            let best = null, bestN = -Infinity;
+            for (const t of trades) {
+              if (!validTrade(t)) continue;
+              const n = t.price * t.qty;
+              if (n >= th && n > bestN) { bestN = n; best = t; }
+            }
+            if (best) {
+              const side = best.aggressorBuy === true ? ' buy' : best.aggressorBuy === false ? ' sell' : '';
+              fired.push({ msg: 'whale print $' + Math.round(bestN) + side + ' @ ' + best.price });
+            }
+            break;
+          }
+          case 'liq-1m': {
+            // liq1mUsd is LiqStore-style: sumWindow(60000, snap.ts), summed
+            // by the caller so this engine stays store-free (pure).
+            if (Number.isFinite(th) && Number.isFinite(snap.liq1mUsd) && snap.liq1mUsd >= th) {
+              fired.push({ msg: '1m liquidations $' + Math.round(snap.liq1mUsd) + ' ≥ $' + th });
+            }
+            break;
+          }
+          case 'funding-flip': {
+            // Sign change of the funding rate — the paying side swapped.
+            // Tracks the last NONZERO sign so +→0→− still reads as ONE flip
+            // (zero is "nobody pays", not a side; no threshold needed).
+            const f = snap.fundingRate;
+            if (Number.isFinite(f) && f !== 0) {
+              const sign = f > 0 ? 1 : -1;
+              if (st.prevFundingSign !== 0 && sign !== st.prevFundingSign) {
+                fired.push({
+                  msg: 'funding flipped ' + (sign > 0 ? 'negative → positive' : 'positive → negative') + ' (now ' + f + ')',
+                });
+              }
+              st.prevFundingSign = sign; // tracks through cooldown
+            }
+            break;
+          }
+          case 'cvd-divergence': {
+            // ⚠ HEURISTIC (§4d — the label rides the event): a two-half
+            // window comparison — price prints a higher high while CVD
+            // prints a lower high (bearish read: price rising on fading net
+            // flow) and the mirror lower-low / higher-low (bullish read).
+            // This is a DESCRIPTIVE PATTERN, not a validated one:
+            // divergences resolve both ways, and the IC run-log grants no
+            // board signal forward IC. n ≥ 4 (2 samples per half) is the
+            // floor for comparing extrema at all.
+            const w = snap.window;
+            const ps = w && Array.isArray(w.price) ? w.price : [];
+            const cs = w && Array.isArray(w.cvd) ? w.cvd : [];
+            const n = Math.min(ps.length, cs.length);
+            if (n >= 4) {
+              const half = n >> 1;
+              const p1h = hiOf(ps, 0, half), p2h = hiOf(ps, half, n);
+              const c1h = hiOf(cs, 0, half), c2h = hiOf(cs, half, n);
+              const p1l = loOf(ps, 0, half), p2l = loOf(ps, half, n);
+              const c1l = loOf(cs, 0, half), c2l = loOf(cs, half, n);
+              const finAll = (...xs) => xs.every(Number.isFinite);
+              if (finAll(p1h, p2h, c1h, c2h) && p2h > p1h && c2h < c1h) {
+                fired.push({ msg: 'bearish CVD divergence: price higher-high ' + p2h + ' on a CVD lower-high', label: 'heuristic' });
+              } else if (finAll(p1l, p2l, c1l, c2l) && p2l < p1l && c2l > c1l) {
+                fired.push({ msg: 'bullish CVD divergence: price lower-low ' + p2l + ' on a CVD higher-low', label: 'heuristic' });
+              }
+            }
+            break;
+          }
+          case 'book-imbalance': {
+            const bi = snap.bookImb;
+            if (Number.isFinite(th) && Number.isFinite(bi) && Math.abs(bi) >= th) {
+              fired.push({ msg: 'book ' + (bi > 0 ? 'bid' : 'ask') + '-heavy: imbalance ' + bi.toFixed(2) + ' (|x| ≥ ' + th + ')' });
+            }
+            break;
+          }
+          case 'detector-pass': {
+            // Pass-through of SpoofIcebergDetector events the caller
+            // collected since the last evaluate. Their 'heuristic' label is
+            // PRESERVED (re-defaulted if a caller stripped it) — §4b: no
+            // layer may drop that badge. Each event forwards individually
+            // (distinct facts); the cooldown then gates subsequent passes.
+            const evs = Array.isArray(snap.detectorEvents) ? snap.detectorEvents : [];
+            for (const dev of evs) {
+              if (!dev || typeof dev.kind !== 'string') continue;
+              fired.push({
+                msg: dev.kind + (Number.isFinite(dev.price) ? ' @ ' + dev.price : ''),
+                label: typeof dev.label === 'string' && dev.label ? dev.label : 'heuristic',
+              });
+            }
+            break;
+          }
+          case 'oi-jump': {
+            const oi = snap.oiChangePct1h;
+            if (Number.isFinite(th) && Number.isFinite(oi) && Math.abs(oi) >= th) {
+              fired.push({ msg: 'OI ' + (oi > 0 ? 'jump +' : 'drop ') + oi.toFixed(2) + '%/h (|x| ≥ ' + th + '%/h)' });
+            }
+            break;
+          }
+          case 'basis-bp': {
+            const b = snap.basisBp;
+            if (Number.isFinite(th) && Number.isFinite(b) && Math.abs(b) >= th) {
+              fired.push({ msg: 'basis ' + b.toFixed(1) + ' bp (|x| ≥ ' + th + ' bp)' });
+            }
+            break;
+          }
+          default: break; // unknown kind (stale saved rules) — ignored, never guessed
+        }
+
+        if (fired.length) {
+          // Cooldown gate. NaN lastFireTs (never fired) fails the `<` and
+          // passes; a ts that regressed below lastFireTs stays suppressed
+          // (event-time honesty — we do not fire into the past).
+          if (!(ts - st.lastFireTs < cooldownMs)) {
+            st.lastFireTs = ts;
+            for (const f of fired) {
+              const ev = { ts, ruleId: rule.id, kind: rule.kind, msg: f.msg };
+              if (f.label) ev.label = f.label; // heuristic badge rides the event
+              ring.push(ev);
+              out.push(ev);
+            }
+          }
+        }
+      }
+      return out;
+    }
+
+    /** Retained events, oldest→newest, ≤200 (ring). Views reverse for
+     *  newest-first display — same convention as LiqStore.recent(). */
+    function events() { return ring.toArray(); }
+
+    return { evaluate, events, setRules, cooldownMs };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalState = {
@@ -1362,6 +1801,9 @@
     // O-3 (§4c): structure builders (pure functions over klines) + the
     // session-correlation store for history-less HIP-3 legs.
     buildTpo, buildKlineVp, rollingCorr, SessionSeriesStore,
+    // O-4 (§4d): intelligence builders — descriptive reads/triggers, never
+    // signals (IC-honesty label mandatory on the confluence output).
+    buildScreener, confluenceReads, AlertEngine,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalState;
