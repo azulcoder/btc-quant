@@ -69,11 +69,12 @@ econ:
 # maintenance gap. archive-dry stages local parquet only (nothing uploaded, nothing
 # pruned); archive is the real lifecycle (prune runs only after the upload is
 # byte-verified, and asks for confirmation); archive-list shows what is offsite.
+# Extra flags via ARGS, e.g.:  make archive ARGS="--month 2026-07 --partial"
 archive:
-	python3 scripts/archive_ticks.py --db data/ticks.duckdb --out data/archive --upload --prune
+	python3 scripts/archive_ticks.py --db data/ticks.duckdb --out data/archive --upload --prune $(ARGS)
 
 archive-dry:
-	python3 scripts/archive_ticks.py --db data/ticks.duckdb --out data/archive
+	python3 scripts/archive_ticks.py --db data/ticks.duckdb --out data/archive $(ARGS)
 
 archive-list:
 	python3 scripts/archive_ticks.py --list
