@@ -15,12 +15,13 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare scan test fetch dash collector collector-api verify-browser verify-wire check-ticks econ archive archive-dry archive-list
+.PHONY: help install backtest compare scan test fetch dash collector collector-api verify-browser verify-wire check-ticks econ archive archive-dry archive-list hf-sync
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
 	@echo "verify:  verify-browser (L1 fixture-replay in headless Chromium) | verify-wire (L2 live invariants, ~45s) | check-ticks (L3 tick-store QA)"
 	@echo "archive: archive-dry (export closed months to local parquet ONLY) | archive (export + upload to GitHub Releases + prune) | archive-list (what is offsite)"
+	@echo "hf:      hf-sync (closed day files -> HF dataset, verify on Hub, then delete local; ARGS=--dry-run to stage only, ARGS=--yes for cron)"
 	@echo "strategies: buy_and_hold ma_trend_filter tsmom pairs_coint carry"
 	@echo "collector needs opt-in deps: pip install -r requirements-collector.txt"
 
@@ -46,14 +47,17 @@ dash:
 	@echo "Dashboard -> http://127.0.0.1:$(PORT)   (Ctrl-C to stop)"
 	python3 -m http.server $(PORT) --directory dashboard
 
-# O-0 tick collector (DESIGN-orderflow-terminal.md §3). Keyless public feeds ->
-# data/ticks.duckdb (gitignored, keep-all). Opt-in deps: requirements-collector.txt.
+# Tick collector v2 (DESIGN-orderflow-terminal.md §3 + §3c). Keyless public feeds ->
+# per-UTC-day files under data/ticks/ (event-time rotation; closed days are immutable
+# and move to the HF dataset via `make hf-sync`). All five venues by default:
+# bybit + binancef + okx + coinbase + deribit. Opt-in deps: requirements-collector.txt.
+# Legacy single-file mode: ARGS="--db data/ticks.duckdb --exchanges binancef,bybit".
 collector:
-	python3 scripts/run_collector.py --symbol $(SYMBOL) --exchanges binancef,bybit --db data/ticks.duckdb
+	python3 scripts/run_collector.py --symbol $(SYMBOL) $(ARGS)
 
 collector-api:
 	@echo "BYOD API -> http://127.0.0.1:$(API_PORT)   (Ctrl-C to stop)"
-	python3 scripts/run_collector.py --symbol $(SYMBOL) --exchanges binancef,bybit --db data/ticks.duckdb --api-port $(API_PORT)
+	python3 scripts/run_collector.py --symbol $(SYMBOL) --api-port $(API_PORT) $(ARGS)
 
 # O-5 econ-calendar mirror (DESIGN-orderflow-terminal.md §4e): the faireconomy
 # JSON has NO CORS header so the browser cannot fetch it — this writes the
@@ -79,6 +83,16 @@ archive-dry:
 archive-list:
 	python3 scripts/archive_ticks.py --list
 
+# HF data lifecycle (DESIGN §3c — the SCHEDULED path; the GH-Release archive above
+# stays functional as a frozen artifact): every CLOSED UTC day file in data/ticks/
+# is exported to ZSTD parquet, uploaded to the HF dataset azulcoder/btc-quant-ticks
+# (hive layout data/date=YYYY-MM-DD/ + sha256 manifest), verified ON THE HUB, and
+# only then deleted locally (today + yesterday always stay local for the BYOD API).
+# Needs NO collector stop. Daily automation: scripts/com.btcquant.hfsync.plist.example.
+# Extra flags via ARGS, e.g.:  make hf-sync ARGS="--dry-run"   |   ARGS="--yes"
+hf-sync:
+	python3 scripts/upload_hf.py $(ARGS)
+
 # Terminal verification layers (DESIGN-orderflow-terminal.md §7).
 # L1: deterministic — replays the captured fixture frames through the real terminal in
 #     headless Chromium (?replay=1), asserts render + zero console errors, screenshots
@@ -95,4 +109,4 @@ verify-wire:
 # L3: tick-store QA report card over data/ticks.duckdb (gaps/dupes/cadence/coherence —
 #     reported, never filled). Run while the collector is stopped, or on a copy.
 check-ticks:
-	python3 scripts/check_ticks.py
+	python3 scripts/check_ticks.py --db data/ticks

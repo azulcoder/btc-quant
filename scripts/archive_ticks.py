@@ -160,6 +160,41 @@ def _sq(s: Any) -> str:
     return str(s).replace("'", "''")
 
 
+def export_parquet_verified(
+    con, table: str, dest: Path, a: int, b: int, src_stats: tuple
+) -> tuple[int, Optional[int], Optional[int], int]:
+    """Export-then-verify seam shared by BOTH lifecycles (this script's monthly
+    GitHub-Release path and scripts/upload_hf.py's daily HF path — DESIGN §3c):
+    COPY the ``[a, b)`` ts_ms range of ``table`` to ZSTD parquet at ``dest``, then
+    RE-READ the written file and verify it against ``src_stats`` = (count, ts_min,
+    ts_max) from the source query — exact row count, exact ts extent, and extent
+    inside ``[a, b)``. Returns (rows, ts_min, ts_max, bytes).
+
+    Raises ArchiveAbort on any mismatch; the bad file is KEPT for inspection and
+    the caller prunes/deletes nothing (archive-then-prune creed, §0 rails).
+    ``table`` must come from a caller-side whitelist/validated name — it is
+    interpolated, not bound (COPY cannot take parameters).
+    """
+    con.execute(
+        f"COPY (SELECT * FROM {table} "  # noqa: S608 — caller-whitelisted name
+        f"WHERE ts_ms >= {int(a)} AND ts_ms < {int(b)} ORDER BY ts_ms) "
+        f"TO '{_sq(dest)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+    )
+    n, tmin, tmax = con.execute(
+        "SELECT count(*), min(ts_ms), max(ts_ms) FROM read_parquet(?)", [str(dest)]
+    ).fetchone()
+    src_n, src_min, src_max = src_stats
+    if n != src_n or tmin != src_min or tmax != src_max or not (a <= tmin and tmax < b):
+        raise ArchiveAbort(
+            f"export verification FAILED for {dest}: parquet has {n} rows "
+            f"[{_fmt_ts(tmin)}..{_fmt_ts(tmax)}], source had {src_n} "
+            f"[{_fmt_ts(src_min)}..{_fmt_ts(src_max)}] in "
+            f"[{_fmt_ts(a)}..{_fmt_ts(b)}) — file kept for inspection, "
+            "nothing pruned/deleted"
+        )
+    return n, tmin, tmax, dest.stat().st_size
+
+
 def next_partial_index(entries: list[dict], table: str, month: str) -> int:
     """N for the next ``_pN`` suffix = 1 + max existing partial index on the
     release/manifest for this table+month (data assets are immutable — a second
@@ -753,27 +788,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                             f"{dest} already exists locally — refusing to overwrite an archive "
                             "file (immutability rail); move it away or prune the manifest first"
                         )
-                    con.execute(
-                        f"COPY (SELECT * FROM {j['table']} "  # noqa: S608 — whitelist
-                        f"WHERE ts_ms >= {j['a']} AND ts_ms < {j['b']} ORDER BY ts_ms) "
-                        f"TO '{_sq(dest)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                    n, tmin, tmax, n_bytes = export_parquet_verified(
+                        con, j["table"], dest, j["a"], j["b"],
+                        (j["src_count"], j["src_min"], j["src_max"]),
                     )
-                    n, tmin, tmax = con.execute(
-                        "SELECT count(*), min(ts_ms), max(ts_ms) FROM read_parquet(?)", [str(dest)]
-                    ).fetchone()
-                    if n != j["src_count"] or tmin != j["src_min"] or tmax != j["src_max"] or not (
-                        j["a"] <= tmin and tmax < j["b"]
-                    ):
-                        raise ArchiveAbort(
-                            f"export verification FAILED for {dest}: parquet has {n} rows "
-                            f"[{_fmt_ts(tmin)}..{_fmt_ts(tmax)}], source had {j['src_count']} "
-                            f"[{_fmt_ts(j['src_min'])}..{_fmt_ts(j['src_max'])}] in "
-                            f"[{_fmt_ts(j['a'])}..{_fmt_ts(j['b'])}) — file kept for inspection, "
-                            "nothing pruned"
-                        )
                     j["rows"] = n
                     j["ts_min"], j["ts_max"] = tmin, tmax
-                    j["bytes"] = dest.stat().st_size
+                    j["bytes"] = n_bytes
                     print(
                         f"[3/7] exported {j['file']}: {n:,} rows, {_fmt_bytes(j['bytes'])} "
                         f"(re-read verified{' — PARTIAL month' if j['partial'] else ''})"

@@ -4,9 +4,11 @@ __pycache__/
 .ipynb_checkpoints/
 data/*.csv
 data/*.json
-# O-0 tick collector store (DESIGN-orderflow-terminal.md §3) — local research
-# history, single-writer DuckDB file + its WAL. Never committed.
+# Tick collector store (DESIGN-orderflow-terminal.md §3 + §3c) — local research
+# history: the legacy single file, the §3c per-UTC-day rotation directory, and
+# their WALs. Never committed.
 data/ticks.duckdb
+data/ticks/
 data/*.duckdb.wal
 # Archive-pipeline staging (scripts/archive_ticks.py — DESIGN §3 data lifecycle):
 # parquet exports + manifests bound for GitHub Releases, plus the prune/rebuild

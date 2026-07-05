@@ -30,9 +30,10 @@
     <string>/Library/Frameworks/Python.framework/Versions/3.13/bin/python3</string>
     <string>scripts/run_collector.py</string>
     <string>--symbol</string><string>BTCUSDT</string>
-    <string>--exchanges</string><string>binancef,bybit</string>
-    <string>--db</string><string>data/ticks.duckdb</string>
     <string>--api-port</string><string>8788</string>
+    <!-- v2 defaults (DESIGN §3c): rotation mode under data/ticks/, all five venues
+         (bybit + binancef + okx + coinbase + deribit). Closed day files move to the
+         HF dataset daily via com.btcquant.hfsync.plist.example — no collector stop. -->
   </array>
 
   <key>WorkingDirectory</key>

@@ -1,27 +1,37 @@
-"""test_collector.py — fixture-driven tests for the O-0 tick collector (DESIGN §3).
+"""test_collector.py — fixture-driven tests for the tick collector (DESIGN §3 + §3c).
 
 Fully deterministic, **no network**. Every wire-shaped input is a REAL frame
-captured live on 2026-07-03 (``scripts/fixtures_ws.json`` — see the provenance
+captured live on 2026-07-03/05 (``scripts/fixtures_ws.json`` — see the provenance
 note in that file and DESIGN-orderflow-terminal.md §2), so the normalizers are
-tested against what the wire actually delivers, not remembered docs.
+tested against what the wire actually delivers, not remembered docs. The OKX and
+Coinbase frames are the SAME ones the JS adapters were proven against.
 
 What is asserted
 ----------------
 1. **Aggressor/side conventions per §0.6** — Bybit ``publicTrade.S`` is the taker
    side used as-is; Bybit ``allLiquidation`` printed side ``Buy`` == a **short**
-   was liquidated (the forced buy-back).
+   was liquidated (the forced buy-back); Coinbase ``side`` is the MAKER side
+   (inverted); Binance aggTrades ``m`` true -> SELL aggressor; OKX ``side`` is
+   the taker used as-is.
 2. **Bybit ``tickers`` partial-delta MERGE** — deltas omit unchanged fields; a
    merged row keeps the snapshot's mark when the delta only moved the index, and
    a delta arriving before any snapshot yields NO rows (never invent a mark).
-3. **Bybit ``orderbook.50`` snapshot+delta semantics** — qty ``"0"`` deletes a
-   level; depth rows are top-20, best-first.
+3. **Book semantics** — Bybit ``orderbook.50`` (top-50 stored, §3c) and OKX
+   ``books`` (ctVal-scaled, top-50) snapshot+delta, qty/sz ``"0"`` deletes.
 4. **Binance shapes** — combined-endpoint ``{stream,data}`` unwrap for depth;
-   REST ``premiumIndex``/``openInterest`` map to exact schema tuples.
-5. **Store contract** — schema create + insert/query roundtrip on a tmp DB; the
+   REST ``premiumIndex``/``openInterest``/``aggTrades``/crowding endpoints map to
+   exact schema tuples (crowding is LONG format; oi_hist -> coin AND usd rows).
+5. **Deribit** — DVOL row; chain name parsing (DDMMMYY -> 08:00 UTC), iv stored
+   as mark_iv/100 DECIMAL, unparseable names skipped + counted.
+6. **Store contract** — schema create + insert/query roundtrip on a tmp DB; the
    500-row auto-flush; the 1/s downsampler gate.
-6. **BYOD API** — /health, /v1/info, filters (symbol/start_ms/end_ms/limit),
-   400 on bad params, 404 on unknown paths — via http.client against a real
-   ThreadingHTTPServer on an ephemeral port.
+7. **§3c rotation** — event-time day routing (incl. a batch straddling UTC
+   midnight), the 5-minute grace window, closed == immutable (late rows dropped
+   + counted), migrate-legacy count conservation.
+8. **BYOD API** — /health, /v1/info, filters (symbol/start_ms/end_ms/limit),
+   400 on bad params, 404 on unknown paths (legacy mode, contract UNCHANGED);
+   rotation mode: cross-day-file reads, aggregated /v1/info row_counts, and the
+   410 'archived' answer with the hf:// hint for pre-local ranges.
 
 Collector deps are opt-in (requirements-collector.txt): this module skips
 cleanly when duckdb is absent. The normalizers themselves need neither dep.
@@ -29,6 +39,7 @@ cleanly when duckdb is absent. The normalizers themselves need neither dep.
 
 from __future__ import annotations
 
+import asyncio
 import http.client
 import json
 import threading
@@ -172,7 +183,7 @@ def test_normalize_bybit_ticker_does_not_mutate_prior_state():
 
 
 # --------------------------------------------------------------------------- #
-# 4. Bybit orderbook.50 — snapshot + deltas; qty "0" deletes; top-20 rows      #
+# 4. Bybit orderbook.50 — snapshot + deltas; qty "0" deletes; top-50 rows (§3c) #
 # --------------------------------------------------------------------------- #
 def test_bybit_book_snapshot_plus_deltas():
     book = collector.BybitBook()
@@ -194,7 +205,8 @@ def test_bybit_book_snapshot_plus_deltas():
     row = book.depth_row(1783076454366)
     assert row[:3] == ("bybit", "BTCUSDT", 1783076454366)
     bids, asks = json.loads(row[3]), json.loads(row[4])
-    assert len(bids) == 20 and len(asks) == 20  # top-20 storage (DESIGN §3)
+    # §3c: the stream IS orderbook.50 — store all of it (was top-20 pre-v2).
+    assert len(bids) == 50 and len(asks) == 50
     assert bids[0] == [61855.00, 4.588]  # best-first: bids descending
     assert asks[0] == [61855.10, 1.773]  # best-first: asks ascending
     assert bids == sorted(bids, key=lambda lvl: -lvl[0])
@@ -267,8 +279,12 @@ def test_schema_roundtrip(tmp_path):
             "depth_snapshots",
             "funding_mark",
             "open_interest",
+            "crowding",  # §3c new tables
+            "dvol",
+            "options_chain",
         } <= tables
-        # (symbol, ts_ms) index per table (DESIGN §3)
+        # (symbol, ts_ms) index per table (DESIGN §3); ts-only for the two
+        # Deribit single-instrument tables (§3c — they carry no symbol column).
         idx = {r[0] for r in con.execute("SELECT index_name FROM duckdb_indexes()").fetchall()}
         assert {
             "idx_trades_symbol_ts",
@@ -276,6 +292,9 @@ def test_schema_roundtrip(tmp_path):
             "idx_depth_symbol_ts",
             "idx_funding_symbol_ts",
             "idx_oi_symbol_ts",
+            "idx_crowding_symbol_ts",
+            "idx_dvol_ts",
+            "idx_options_chain_ts",
         } <= idx
 
         lock = threading.Lock()
@@ -289,21 +308,32 @@ def test_schema_roundtrip(tmp_path):
         )
         depth_rows = collector.normalize_binance_depth(_FIXTURES["binancef_depth20"][0])
         liq_rows = [("bybit", "BTCUSDT", 1783076500000, "short", 61000.0, 0.5, 30500.0)]
+        crowding_rows = collector.normalize_binance_taker_ls(
+            _FIXTURES["binancef_rest_taker_ls"], "BTCUSDT"
+        )
+        dvol_rows = collector.normalize_deribit_dvol(_FIXTURES["deribit_rest_dvol"])
+        chain_rows, _ = collector.normalize_deribit_chain(_FIXTURES["deribit_rest_book_summary"])
 
         writer.add("trades", trade_rows)
         writer.add("funding_mark", funding_rows)
         writer.add("open_interest", oi_rows)
         writer.add("depth_snapshots", depth_rows)
         writer.add("liquidations", liq_rows)
+        writer.add("crowding", crowding_rows)
+        writer.add("dvol", dvol_rows)
+        writer.add("options_chain", chain_rows)
         # Below both flush triggers -> rows are still only buffered.
         assert con.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
-        assert writer.flush() == 5
+        assert writer.flush() == 5 + len(crowding_rows) + len(dvol_rows) + len(chain_rows)
 
         assert con.execute("SELECT * FROM trades").fetchall() == trade_rows
         assert con.execute("SELECT * FROM funding_mark").fetchall() == funding_rows
         assert con.execute("SELECT * FROM open_interest").fetchall() == oi_rows
         assert con.execute("SELECT * FROM depth_snapshots").fetchall() == depth_rows
         assert con.execute("SELECT * FROM liquidations").fetchall() == liq_rows
+        assert con.execute("SELECT * FROM crowding").fetchall() == crowding_rows
+        assert con.execute("SELECT * FROM dvol").fetchall() == dvol_rows
+        assert con.execute("SELECT * FROM options_chain").fetchall() == chain_rows
         assert writer.flush() == 0  # nothing pending after a flush
     finally:
         con.close()
@@ -432,8 +462,457 @@ def test_run_raises_actionable_hint_when_deps_missing(monkeypatch):
 
 
 def test_run_rejects_unknown_exchange_codes():
-    """coinbase is terminal-only for now — a loud refusal beats a silent no-op."""
-    with pytest.raises(ValueError, match="coinbase"):
-        collector.run(exchanges=("coinbase",), db="never_created.duckdb")
+    """Unknown codes fail loudly; v2 accepts all five §3c venues by name."""
+    with pytest.raises(ValueError, match="kraken"):
+        collector.run(exchanges=("kraken",), db="never_created.duckdb")
     with pytest.raises(ValueError, match="retention_days"):
         collector.run(retention_days=0, db="never_created.duckdb")
+    # Rotation + retention is refused: closed-day pruning is the HF lifecycle's
+    # verify-then-delete job (§3c), never an in-place DELETE on immutable files.
+    with pytest.raises(ValueError, match="rotation"):
+        collector.run(retention_days=30, db="never_created_dir")
+
+
+# --------------------------------------------------------------------------- #
+# 10. OKX trades + books (§3c) — CONTRACTS × ctVal(0.01) -> coin; taker as-is  #
+# --------------------------------------------------------------------------- #
+def test_normalize_okx_trade_ctval_and_taker_side():
+    """The §3c pin: sz 200 CONTRACTS -> 2.00 BTC, taker side used AS-IS (§0.6)."""
+    rows = collector.normalize_okx_trade(_FIXTURES["okx_trades"][0])
+    assert rows == [
+        ("okx", "BTC-USDT-SWAP", "2760725237", 1783079412162, 62010.0, 2.0, True)
+    ]
+    # side 'sell' -> aggressor_buy False; 4.49 contracts -> 0.0449 BTC.
+    rows = collector.normalize_okx_trade(_FIXTURES["okx_trades"][1])
+    assert rows == [
+        ("okx", "BTC-USDT-SWAP", "2760725239", 1783079412468, 62009.9, 0.0449, False)
+    ]
+
+
+def test_okx_book_snapshot_updates_and_ctval_scaling():
+    book = collector.OkxBook()
+    assert book.depth_row(1) is None  # never emit an empty book as an observation
+
+    ts = book.apply(_FIXTURES["okx_books_snapshot"][0])
+    assert ts == 1783079411709  # row ts, not arrival time
+    assert book.bids[62009.9] == 8.8358  # 883.58 CONTRACTS × 0.01 -> BTC
+    assert book.asks[62010.0] == pytest.approx(1.9013)  # 190.13 × 0.01
+
+    for update in _FIXTURES["okx_books_update"]:
+        ts = book.apply(update)
+    assert ts == 1783079412009  # ts advances with each applied update frame
+    assert 62009.2 not in book.bids  # sz "0" tombstone deleted the level
+    assert 62008.7 not in book.bids  # deleted by update 1
+    assert book.asks[62010.0] == pytest.approx(3.356)  # upserted by the last update
+
+    row = book.depth_row(ts)
+    assert row[:3] == ("okx", "BTC-USDT-SWAP", 1783079412009)
+    bids, asks = json.loads(row[3]), json.loads(row[4])
+    assert len(asks) == 50  # top-50 storage (§3c) — the whole point of the leg
+    # Best bid survives; its qty was UPSERTED by the last update (614.58 × 0.01).
+    assert bids[0][0] == 62009.9 and bids[0][1] == pytest.approx(6.1458)
+    assert bids == sorted(bids, key=lambda lvl: -lvl[0])
+    assert asks == sorted(asks, key=lambda lvl: lvl[0])
+
+
+# --------------------------------------------------------------------------- #
+# 11. OKX REST funding / OI (§3c) — 60 s polls; oi = oiCcy COIN                #
+# --------------------------------------------------------------------------- #
+def test_normalize_okx_funding_exact_row_and_null_mark():
+    """fundingTime is the UPCOMING settlement; mark/index are honest NULLs."""
+    rows = collector.normalize_okx_funding(_FIXTURES["okx_rest_funding"])
+    assert rows == [
+        (
+            "okx",
+            "BTC-USDT-SWAP",
+            1783119985285,
+            None,  # this endpoint has no mark price — NULL, never invented (§0.7)
+            None,
+            float("0.0000387369202921"),
+            1783123200000,  # fundingTime (upcoming settlement), NOT nextFundingTime
+        )
+    ]
+    assert collector.normalize_okx_funding({"code": "1", "data": []}) == []  # error code
+
+
+def test_normalize_okx_oi_uses_coin_not_contracts():
+    rows = collector.normalize_okx_oi(_FIXTURES["okx_rest_oi"])
+    # oiCcy (COIN) — the raw `oi` field is CONTRACTS and would overstate 100x.
+    assert rows == [("okx", "BTC-USDT-SWAP", 1783120004270, float("31337.2794000001118"))]
+    assert rows[0][3] != float("3133727.94000001118")  # NOT the contracts field
+    assert collector.normalize_okx_oi(None) == []
+
+
+# --------------------------------------------------------------------------- #
+# 12. Coinbase market_trades (§3c) — MAKER-side inversion + seed/dedup rules   #
+# --------------------------------------------------------------------------- #
+def test_normalize_coinbase_trades_inversion_and_ordering():
+    """§0.6 gotcha: side is the MAKER's — side=SELL means an aggressive BUYER."""
+    trades = _FIXTURES["coinbase_market_trades_snapshot"][0]["events"][0]["trades"]
+    rows = collector.normalize_coinbase_trades(trades)
+    assert len(rows) == 100
+    ids = [int(r[2]) for r in rows]
+    assert ids == sorted(ids)  # wire is NEWEST-first; rows come out oldest-first
+    by_id = {r[2]: r for r in rows}
+    # side=BUY (maker bought — a resting bid was hit) -> aggressor_buy False.
+    assert by_id["1049465696"] == (
+        "coinbase", "BTC-USD", "1049465696", 1783076454619, 61805.6, 3e-08, False
+    )
+    # side=SELL (a resting ask was lifted) -> aggressor_buy True.
+    assert by_id["1049465694"][6] is True
+
+
+def test_coinbase_tape_seed_once_and_dedupe():
+    """Port of the proven JS rules: first snapshot seeds, later ones are skipped,
+    updates before the seed are ignored, ids never repeat across batches."""
+    tape = collector.CoinbaseTape()
+    # An update BEFORE any snapshot is ignored (wait for the seed — JS rule).
+    assert tape.apply(_FIXTURES["coinbase_market_trades_update"][0]) == []
+
+    rows = tape.apply(_FIXTURES["coinbase_market_trades_snapshot"][0])
+    assert len(rows) == 100 and tape.seeded is True
+    # A reconnect re-fires the snapshot: skipped — never re-dump the batch.
+    assert tape.apply(_FIXTURES["coinbase_market_trades_snapshot"][0]) == []
+
+    upd = tape.apply(_FIXTURES["coinbase_market_trades_update"][0])
+    assert [r[2] for r in upd] == ["1049465697"]
+    assert upd[0][6] is False  # side=BUY -> maker bought -> SELL aggressor
+    # Replaying the same update: deduped by monotonic trade_id.
+    assert tape.apply(_FIXTURES["coinbase_market_trades_update"][0]) == []
+    # Heartbeats are liveness, not rows.
+    assert tape.apply(_FIXTURES["coinbase_heartbeats"][0]) == []
+
+
+# --------------------------------------------------------------------------- #
+# 13. Binance aggTrades REST (§3c) — m-flag inversion + gapless fromId cursor  #
+# --------------------------------------------------------------------------- #
+def test_normalize_binance_aggtrades_m_flag_and_cursor():
+    payload = _FIXTURES["binancef_rest_aggtrades"]
+    rows, next_from_id = collector.normalize_binance_aggtrades(payload, "BTCUSDT")
+    assert rows == [
+        # m=false: buyer was the TAKER -> aggressor_buy True.
+        ("binancef", "BTCUSDT", "3371157745", 1783235902382, 62746.70, 0.026, True),
+        # m=true: buyer was the MAKER -> the aggressor SOLD (§0.6).
+        ("binancef", "BTCUSDT", "3371157746", 1783235902536, 62746.60, 0.002, False),
+        ("binancef", "BTCUSDT", "3371157747", 1783235902803, 62746.70, 0.012, True),
+    ]
+    # Cursor arithmetic: next fromId = last `a` + 1 (gapless by aggTradeId).
+    assert next_from_id == 3371157747 + 1
+    # An empty poll advances NOTHING — the caller keeps its cursor (never skip ahead).
+    assert collector.normalize_binance_aggtrades([], "BTCUSDT") == ([], None)
+
+
+def test_aggtrades_loop_dedupes_overlap_logs_gap_keeps_cursor(monkeypatch):
+    """_aggtrades_loop honesty guards (§3c/§0.6/§0.7), driven with canned polls:
+
+    * a failed poll keeps the cursor — the next fetch retries the SAME fromId;
+    * re-served ids (retried seed / misbehaving server) are DEDUPED and the
+      dedupe is logged — duplicate prints would silently inflate CVD/volume;
+    * ids resuming ahead of the cursor are LOGGED as a gap, never papered over.
+    """
+
+    def _agg(a, ts):
+        return {"a": a, "p": "60000.0", "q": "0.01", "T": ts, "m": False}
+
+    responses = [
+        [_agg(100, 1_000), _agg(101, 2_000)],  # seed -> cursor 102
+        RuntimeError("net down"),  # failure: cursor must NOT advance
+        [_agg(101, 2_000), _agg(102, 3_000)],  # id 101 re-served -> dedupe, keep 102
+        [_agg(110, 9_000)],  # 103..109 never arrived -> honest GAP log
+    ]
+    calls: list = []
+    stop = asyncio.Event()
+
+    def fake_fetch(symbol, from_id):
+        calls.append(from_id)
+        if not responses:
+            stop.set()  # canned polls drained — end the loop
+            raise RuntimeError("drained")
+        item = responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    async def fast_sleep(event, seconds):  # noqa: ARG001 — signature parity
+        await asyncio.sleep(0)  # no real 5 s waits in a unit test
+
+    monkeypatch.setattr(collector, "_fetch_binance_aggtrades", fake_fetch)
+    monkeypatch.setattr(collector, "_sleep_or_stop", fast_sleep)
+
+    class _Writer:
+        def __init__(self):
+            self.rows: list[tuple] = []
+
+        def add(self, table, rows):
+            assert table == "trades"
+            self.rows.extend(rows)
+
+    writer = _Writer()
+    logs: list[str] = []
+    asyncio.run(collector._aggtrades_loop("BTCUSDT", writer, stop, log=logs.append))
+
+    # Each aggTradeId written exactly ONCE, in id order — 101 was not re-printed.
+    assert [r[2] for r in writer.rows] == ["100", "101", "102", "110"]
+    # The failed poll retried the SAME fromId (102) — never skipped ahead.
+    assert calls[:4] == [None, 102, 102, 103]
+    assert any("GAP" in ln and "7 aggTrade id(s) missing" in ln for ln in logs)
+    assert any("deduped 1 re-served row(s)" in ln for ln in logs)
+
+
+# --------------------------------------------------------------------------- #
+# 14. Crowding endpoints (§3c) — long format, the five pinned metric names     #
+# --------------------------------------------------------------------------- #
+def test_normalize_crowding_long_format_five_metrics():
+    taker = collector.normalize_binance_taker_ls(_FIXTURES["binancef_rest_taker_ls"], "BTCUSDT")
+    assert taker[0] == ("binancef", "BTCUSDT", 1783235100000, "taker_buy_sell_ratio", 1.6465)
+    assert taker[1][4] == 1.7040
+
+    top = collector.normalize_binance_top_pos_ls(_FIXTURES["binancef_rest_top_pos_ls"], "BTCUSDT")
+    assert top[0] == ("binancef", "BTCUSDT", 1783235400000, "top_position_ls_ratio", 1.2438)
+
+    glob = collector.normalize_binance_global_ls(_FIXTURES["binancef_rest_global_ls"], "BTCUSDT")
+    assert glob[0] == ("binancef", "BTCUSDT", 1783235400000, "global_account_ls_ratio", 1.4752)
+
+    # oi_hist produces BOTH rows per entry — coin AND usd (§3c: deriving one
+    # from the other needs a price we did not observe at that ts).
+    oi = collector.normalize_binance_oi_hist(_FIXTURES["binancef_rest_oi_hist"][:1], "BTCUSDT")
+    assert oi == [
+        ("binancef", "BTCUSDT", 1783235400000, "oi_sum_coin", 105698.762),
+        ("binancef", "BTCUSDT", 1783235400000, "oi_sum_usd", 6631445198.9942),
+    ]
+
+    metrics = {r[3] for r in taker + top + glob + oi}
+    assert metrics == {  # exactly the five §3c metric names
+        "taker_buy_sell_ratio",
+        "top_position_ls_ratio",
+        "global_account_ls_ratio",
+        "oi_sum_coin",
+        "oi_sum_usd",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 15. Deribit (§3c) — DVOL number; chain name-parse + iv DECIMAL rail          #
+# --------------------------------------------------------------------------- #
+def test_normalize_deribit_dvol_exact_row():
+    rows = collector.normalize_deribit_dvol(_FIXTURES["deribit_rest_dvol"])
+    # usIn is MICROseconds -> ms; DVOL stays in vol points (38.68 == 38.68% ann).
+    assert rows == [(1783186480233, 38.68)]
+    assert collector.normalize_deribit_dvol({"error": {"code": 1}}) == []
+
+
+def test_parse_deribit_option_name_conventions():
+    # DDMMMYY -> 08:00 UTC expiry (Deribit European cash settlement).
+    assert collector.parse_deribit_option_name("BTC-28AUG26-105000-C") == (
+        1787904000000,  # 2026-08-28T08:00:00Z
+        105000.0,
+        "C",
+    )
+    # Single-digit days parse too (JS-parity: 'BTC-6JUL26-54000-P').
+    assert collector.parse_deribit_option_name("BTC-6JUL26-54000-P") == (
+        1783324800000,  # 2026-07-06T08:00:00Z
+        54000.0,
+        "P",
+    )
+    # Futures / spot / garbage fall out as None — counted by the caller.
+    assert collector.parse_deribit_option_name("BTC-25SEP26") is None
+    assert collector.parse_deribit_option_name("BTC_USDC") is None
+    assert collector.parse_deribit_option_name("BTC-28XXX26-1000-C") is None
+
+
+def test_normalize_deribit_chain_exact_row_and_skip_count():
+    rows, skipped = collector.normalize_deribit_chain(_FIXTURES["deribit_rest_book_summary"])
+    assert skipped == 0 and len(rows) == 10
+    ts = _FIXTURES["deribit_rest_book_summary"]["usIn"] // 1000  # one snapshot ts
+    by_name = {r[1]: r for r in rows}
+    # The §3c pin: mark_iv 48.58 PERCENT -> 0.4858 DECIMAL (the /100 rail).
+    assert by_name["BTC-28AUG26-105000-C"] == (
+        ts, "BTC-28AUG26-105000-C", 1787904000000, 105000.0, "C",
+        0.4858, 161.3, 0.0, 0.00026511, 63358.41,
+    )
+
+    # An unparseable name is skipped AND counted — never silently dropped (§0).
+    doctored = _copy(_FIXTURES["deribit_rest_book_summary"])
+    doctored["result"].append({"instrument_name": "BTC-25SEP26", "mark_iv": 50.0})
+    rows2, skipped2 = collector.normalize_deribit_chain(doctored)
+    assert skipped2 == 1 and len(rows2) == 10
+
+
+# --------------------------------------------------------------------------- #
+# 16. §3c rotation — event-time day routing, grace window, closed == immutable #
+# --------------------------------------------------------------------------- #
+_MIDNIGHT = 1783209600000  # 2026-07-05T00:00:00Z — a UTC day boundary
+_D_TODAY = "2026-07-05"
+_D_YDAY = "2026-07-04"
+
+
+def _trade_at(ts_ms: int) -> tuple:
+    return ("bybit", "BTCUSDT", f"t-{ts_ms}", ts_ms, 61000.0, 0.001, True)
+
+
+def _count(path, table="trades") -> int:
+    con = duckdb.connect(str(path), read_only=True)
+    try:
+        return con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    finally:
+        con.close()
+
+
+def test_utc_day_is_event_time_pure():
+    assert collector.utc_day(_MIDNIGHT - 1) == _D_YDAY
+    assert collector.utc_day(_MIDNIGHT) == _D_TODAY
+    assert collector.utc_day(0) == "1970-01-01"
+
+
+def test_rotation_routes_batch_straddling_midnight(tmp_path):
+    """One add() with rows on both sides of UTC midnight -> two day files."""
+    root = tmp_path / "ticks"
+    manager = collector.DayFileManager(root)
+    clock = {"now": _MIDNIGHT + 60_000}  # 00:01 — inside the 5-min grace window
+    writer = collector.RotatingWriter(
+        manager, threading.Lock(), now_ms=lambda: clock["now"], log=lambda *_: None
+    )
+
+    writer.add(
+        "trades",
+        [_trade_at(_MIDNIGHT - 5_000), _trade_at(_MIDNIGHT + 5_000), _trade_at(_MIDNIGHT - 1)],
+    )
+    assert writer.flush() == 3
+    assert manager.open_days() == [_D_YDAY, _D_TODAY]  # yesterday held open (grace)
+    assert writer.rows_written["trades"] == 3
+
+    manager.close_all()
+    # Event-time routing: each row sits in the file of ITS OWN ts_ms day.
+    assert _count(root / f"{_D_YDAY}.duckdb") == 2
+    assert _count(root / f"{_D_TODAY}.duckdb") == 1
+
+
+def test_rotation_grace_window_close_and_immutability(tmp_path):
+    """Yesterday: writable in grace -> final-flushed + closed after -> immutable."""
+    root = tmp_path / "ticks"
+    manager = collector.DayFileManager(root)
+    clock = {"now": _MIDNIGHT + 60_000}
+    logs: list[str] = []
+    writer = collector.RotatingWriter(
+        manager, threading.Lock(), now_ms=lambda: clock["now"], log=logs.append
+    )
+
+    writer.add("trades", [_trade_at(_MIDNIGHT - 5_000)])  # yesterday, inside grace
+    writer.flush()
+    assert manager.open_days() == [_D_YDAY]
+
+    # Grace lapses. A row buffered before the close still makes the FINAL flush,
+    # after which the day is sealed (flush-then-close, §3c).
+    clock["now"] = _MIDNIGHT + collector.GRACE_WINDOW_MS + 1_000
+    writer.add("trades", [_trade_at(_MIDNIGHT - 4_000)])
+    writer.flush()
+    assert manager.open_days() == []  # yesterday closed
+    assert any("closed" in line for line in logs)
+    assert _count(root / f"{_D_YDAY}.duckdb") == 2
+
+    # Closed == immutable: a straggler for yesterday is DROPPED and counted.
+    writer.add("trades", [_trade_at(_MIDNIGHT - 3_000), _trade_at(_MIDNIGHT + 5_000)])
+    writer.flush()
+    assert writer.rows_dropped_closed == 1
+    assert any("DROPPED" in line for line in logs)
+    assert _count(root / f"{_D_YDAY}.duckdb") == 2  # unchanged — that is the point
+    manager.close_all()
+    assert _count(root / f"{_D_TODAY}.duckdb") == 1  # today's row still landed
+
+
+def test_migrate_legacy_count_conservation(tmp_path):
+    """--migrate-legacy: split by event day, counts conserved, original untouched."""
+    legacy = tmp_path / "ticks.duckdb"
+    con = collector.open_db(legacy)
+    trades = [
+        _trade_at(_MIDNIGHT - 10_000),  # 2026-07-04
+        _trade_at(_MIDNIGHT - 5_000),  # 2026-07-04
+        _trade_at(_MIDNIGHT + 5_000),  # 2026-07-05
+    ]
+    # A second table proves the split walks EVERY table, not just trades.
+    funding = [
+        ("okx", "BTC-USDT-SWAP", _MIDNIGHT - 7_000, None, None, 3.9e-05, _MIDNIGHT + 3_600_000)
+    ]
+    con.executemany(collector._INSERT_SQL["trades"], trades)
+    con.executemany(collector._INSERT_SQL["funding_mark"], funding)
+    con.close()
+
+    logs: list[str] = []
+    dest = tmp_path / "ticks"
+    per_day = collector.migrate_legacy(legacy, dest, log=logs.append)
+
+    assert per_day[_D_YDAY]["trades"] == 2 and per_day[_D_TODAY]["trades"] == 1
+    assert per_day[_D_YDAY]["funding_mark"] == 1
+    assert _count(dest / f"{_D_YDAY}.duckdb") == 2
+    assert _count(dest / f"{_D_TODAY}.duckdb") == 1
+    assert _count(dest / f"{_D_YDAY}.duckdb", "funding_mark") == 1
+    # Never auto-delete: the original is intact and the rm hint was printed.
+    assert legacy.exists() and _count(legacy) == 3
+    assert any("rm '" in line for line in logs)
+    # One-shot: a re-run would double every row — refused on existing day files.
+    with pytest.raises(ValueError, match="one-shot"):
+        collector.migrate_legacy(legacy, dest)
+    # And a .duckdb destination is a usage error, not a mangled store.
+    with pytest.raises(ValueError, match="DIRECTORY"):
+        collector.migrate_legacy(legacy, tmp_path / "other.duckdb")
+
+
+# --------------------------------------------------------------------------- #
+# 17. BYOD API in rotation mode (§3c) — same contract, day-file union, 410     #
+# --------------------------------------------------------------------------- #
+def test_api_rotation_aggregates_and_answers_410(tmp_path):
+    root = tmp_path / "ticks"
+    # Two synthetic CLOSED day files, seeded through the canonical schema.
+    for day, ts in ((_D_YDAY, _MIDNIGHT - 5_000), (_D_TODAY, _MIDNIGHT + 5_000)):
+        con = collector.open_db(root / f"{day}.duckdb")
+        con.executemany(collector._INSERT_SQL["trades"], [_trade_at(ts)])
+        con.close()
+
+    manager = collector.DayFileManager(root)
+    lock = threading.Lock()
+    info = {"symbol": "BTCUSDT", "exchanges": ["bybit"], "db": str(root), "started_ms": 0}
+    server = collector.make_api_server(manager, lock, info, port=0)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        # /v1/info aggregates row_counts ACROSS the local day files.
+        status, body = _get_json(port, "/v1/info")
+        assert status == 200
+        assert body["mode"] == "rotation"
+        assert body["days"] == [_D_YDAY, _D_TODAY]
+        assert body["row_counts"]["trades"] == 2
+        assert body["row_counts"]["liquidations"] == 0
+
+        # A range spanning midnight unions both day files, ts-ascending.
+        status, body = _get_json(
+            port,
+            f"/v1/trades?start_ms={_MIDNIGHT - 10_000}&end_ms={_MIDNIGHT + 10_000}",
+        )
+        assert status == 200 and body["n"] == 2
+        assert [r["ts_ms"] for r in body["rows"]] == [_MIDNIGHT - 5_000, _MIDNIGHT + 5_000]
+
+        # limit still bounds the union (contract UNCHANGED vs legacy mode).
+        status, body = _get_json(
+            port, f"/v1/trades?start_ms={_MIDNIGHT - 10_000}&limit=1"
+        )
+        assert status == 200 and body["n"] == 1
+        assert body["rows"][0]["ts_ms"] == _MIDNIGHT - 5_000
+
+        # A range starting BEFORE the oldest local day -> 410 + the HF hint
+        # (that data was uploaded and pruned; an empty 200 would be a lie).
+        old_ms = _MIDNIGHT - 30 * 86_400_000  # 2026-06-05
+        status, body = _get_json(port, f"/v1/trades?start_ms={old_ms}")
+        assert status == 410
+        assert body["error"] == "archived"
+        assert body["hint"] == (
+            "hf://datasets/azulcoder/btc-quant-ticks/data/date=2026-06-05/trades.parquet"
+        )
+
+        # Health + 404 behave exactly as in legacy mode.
+        status, body = _get_json(port, "/health")
+        assert status == 200 and body["ok"] is True
+        status, body = _get_json(port, "/v1/nope")
+        assert status == 404
+    finally:
+        server.shutdown()
+        server.server_close()

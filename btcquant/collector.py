@@ -1,10 +1,12 @@
-"""collector.py — O-0 tick collector daemon (DESIGN-orderflow-terminal.md §3).
+"""collector.py — tick collector daemon (DESIGN-orderflow-terminal.md §3 + §3c).
 
 Keyless, research-only accumulation of BTC perp microstructure into a local DuckDB
-file (``data/ticks.duckdb``, gitignored). **No API keys, no authenticated endpoints,
-no orders** — every stream below is a public WS/REST feed, verified live from this
-machine on 2026-07-03 (frames captured to ``scripts/fixtures_ws.json``; the
-normalizers here are written against those *actual wire shapes*, not remembered docs).
+store (default: a **directory of per-UTC-day files** ``data/ticks/YYYY-MM-DD.duckdb``
+— §3c daily rotation; a ``.duckdb`` FILE path selects the legacy single-file mode).
+**No API keys, no authenticated endpoints, no orders** — every stream below is a
+public WS/REST feed, verified live from this machine on 2026-07-03/05 (frames
+captured to ``scripts/fixtures_ws.json``; the normalizers here are written against
+those *actual wire shapes*, not remembered docs).
 
 Honesty rails (DESIGN §0, binding)
 ----------------------------------
@@ -24,9 +26,16 @@ Honesty rails (DESIGN §0, binding)
   — only ``depth20@100ms`` flows; trades/mark on the same socket deliver sub-acks and
   nothing else. So Bybit v5 is the primary WS feed and Binance contributes depth WS
   plus REST polls (``premiumIndex`` 5 s, ``openInterest`` 60 s). We collect what the
-  wire actually delivers. Binance futures *trades* are NOT collected — documented,
-  not proxied. The Coinbase spot tape leg (DESIGN §3) is terminal-only for now and
-  deliberately not wired here yet; asking for it raises instead of silently no-oping.
+  wire actually delivers. Binance futures *trades* arrive via the REST ``aggTrades``
+  poll (§3c — the WS topic-filter does not apply to REST; a ``fromId`` cursor keeps
+  the tape gapless by aggTradeId).
+* **Rotation immutability** (§3c): day files are dataset partitions and partitions
+  mean EVENT time — every row is routed by the UTC day of its own ``ts_ms``, never
+  by arrival time. Yesterday's file stays open for a 5-minute grace window after UTC
+  midnight (late/out-of-order rows still land correctly), then it is final-flushed
+  and closed. A closed day file is **immutable** — that is what makes the HF upload
+  gap-free; a row arriving for an already-closed day is DROPPED and counted, never
+  written (an honest loss beats a corrupted partition).
 
 Dependencies (opt-in, like MLflow/DVC — requirements-collector.txt)
 -------------------------------------------------------------------
@@ -37,16 +46,21 @@ paths). Only actually *running* the daemon (or opening a DB) raises a clear
 (btcquant/data.py) and is used for the Binance REST polls via ``asyncio.to_thread``
 so the event loop never blocks on HTTP.
 
-Storage contract (DESIGN §3 schema — all timestamps epoch **ms**, UTC)
-----------------------------------------------------------------------
+Storage contract (DESIGN §3 + §3c schema — all timestamps epoch **ms**, UTC)
+-----------------------------------------------------------------------------
 Single writer process, batched inserts (flush every 500 ms or 500 rows, whichever
 first), graceful final flush on SIGINT. Keep-all retention by default — the whole
-point is accumulating research history; ``retention_days`` opts into a daily DELETE.
-Honest sizing note (§3): BTC perp trades ≈ 0.5–1.5 M rows/day → order-of ~0.5–1
-GB/month; depth@1s adds ~0.1 GB/month. Disk is the user's budget — documented, not
-hidden. The optional BYOD HTTP API (stdlib, OFF unless an api_port is given) serves
-the same file for later replay; all DuckDB access (reads AND writes) is serialized
-through one ``threading.Lock`` because the API threads share the writer's connection.
+point is accumulating research history; ``retention_days`` opts into a daily DELETE
+(legacy single-file mode only — in rotation mode pruning belongs to the HF
+lifecycle's verify-then-delete flow). Honest sizing note (§3): BTC perp trades ≈
+0.5–1.5 M rows/day → order-of ~0.5–1 GB/month; depth@1s adds ~0.1 GB/month. Disk
+is the user's budget — documented, not hidden. The optional BYOD HTTP API (stdlib,
+OFF unless an api_port is given) serves the same store for later replay — its
+paths/params/shapes are IDENTICAL in both modes (§3c: the contract is UNCHANGED);
+in rotation mode it unions the local day files covering the requested range and
+answers 410 + an ``hf://`` hint for ranges older than the oldest local day. All
+DuckDB access (reads AND writes) is serialized through one ``threading.Lock``
+because the API threads share the writer's connections.
 """
 
 from __future__ import annotations
@@ -54,9 +68,11 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import signal
 import threading
 import time
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
@@ -83,29 +99,58 @@ _INSTALL_HINT = "pip install -r requirements-collector.txt"
 
 __all__ = [
     "DEFAULT_DB",
+    "GRACE_WINDOW_MS",
+    "OKX_CTVAL",
     "BatchWriter",
     "BybitBook",
+    "CoinbaseTape",
+    "DayFileManager",
     "Downsampler",
+    "OkxBook",
+    "RotatingWriter",
     "make_api_server",
+    "migrate_legacy",
+    "normalize_binance_aggtrades",
     "normalize_binance_depth",
+    "normalize_binance_global_ls",
+    "normalize_binance_oi_hist",
     "normalize_binance_open_interest",
     "normalize_binance_premium_index",
+    "normalize_binance_taker_ls",
+    "normalize_binance_top_pos_ls",
     "normalize_bybit_liq",
     "normalize_bybit_ticker",
     "normalize_bybit_trade",
+    "normalize_coinbase_trades",
+    "normalize_deribit_chain",
+    "normalize_deribit_dvol",
+    "normalize_okx_funding",
+    "normalize_okx_oi",
+    "normalize_okx_trade",
     "open_db",
+    "parse_deribit_option_name",
     "run",
+    "utc_day",
 ]
 
-# Default store location — ``data/`` is gitignored (and data/ticks.duckdb explicitly).
-DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "ticks.duckdb"
+# Default store location (§3c): a DIRECTORY of per-UTC-day files — data/ticks/ is
+# gitignored. A ``.duckdb`` FILE path selects the legacy single-file mode instead.
+DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "ticks"
 
-# Public endpoints (keyless — DESIGN §2 data matrix, all verified 2026-07-03).
+# Public endpoints (keyless — DESIGN §2 data matrix, all verified 2026-07-03/05).
 _BYBIT_WS = "wss://stream.bybit.com/v5/public/linear"
 # Combined-stream endpoint: frames arrive WRAPPED as {"stream": ..., "data": {...}}
 # (fixture ``binancef_depth20`` — normalize_binance_depth unwraps this).
 _BINANCEF_WS = "wss://fstream.binance.com/stream?streams={streams}"
 _BINANCE_FAPI = "https://fapi.binance.com"
+_OKX_WS = "wss://ws.okx.com:8443/ws/v5/public"
+_OKX_REST = "https://www.okx.com"
+_COINBASE_WS = "wss://advanced-trade-ws.coinbase.com"
+_DERIBIT_REST = "https://www.deribit.com/api/v2"
+
+# HF dataset the lifecycle uploads closed day files to (§3c) — used only for the
+# BYOD API's honest 410 hint; this module never touches the network for HF.
+_HF_DATASET = "azulcoder/btc-quant-ticks"
 
 # A polite, identifiable UA so public endpoints don't 403 a bare client (data.py idiom).
 _USER_AGENT = "btc-quant/0.1 (research collector; keyless; no-trading)"
@@ -123,18 +168,32 @@ _BACKOFF_CAP_S = 30.0
 # (protocol-level pings are not enough to keep the v5 session alive).
 _APP_PING_S = 20.0
 
-# REST poll cadence (DESIGN §3): premiumIndex 5 s, openInterest 60 s.
+# REST poll cadence (DESIGN §3 + §3c): premiumIndex 5 s, openInterest 60 s,
+# aggTrades 5 s, OKX funding/OI 60 s, crowding 5 m, DVOL 60 s, chain hourly.
 _PREMIUM_POLL_S = 5.0
 _OI_POLL_S = 60.0
+_AGGTRADES_POLL_S = 5.0
+_OKX_REST_POLL_S = 60.0
+_CROWDING_POLL_S = 300.0
+_DVOL_POLL_S = 60.0
+_CHAIN_POLL_S = 3600.0
 
 # Depth/funding downsample: store at most one row per second per (source, kind).
 # The 100 ms depth firehose is a UI concern, not a storage one (DESIGN §3).
 DOWNSAMPLE_MS = 1000
 
-# Exchange codes accepted by run() — short codes per DESIGN §3 schema note.
-# 'coinbase' is in the §3 stream list but deliberately NOT wired yet (spot tape is
-# terminal-only for now); rejecting it loudly beats silently recording nothing.
-_ACCEPTED_EXCHANGES = ("binancef", "bybit")
+# Daily rotation (§3c): yesterday's day file stays writable for 5 minutes after
+# UTC midnight (late/out-of-order rows land correctly), then it is closed for good.
+GRACE_WINDOW_MS = 5 * 60 * 1000
+_DAY_MS = 86_400_000
+
+# OKX SWAP sizes are in CONTRACTS — BTC-USDT-SWAP ctVal = 0.01 BTC (verified via
+# /api/v5/public/instruments, pinned in fixtures ``_okx_ctval_note``). Skipping the
+# multiply would overstate OKX flow 100x against the BTC-denominated legs (§4b rail).
+OKX_CTVAL = 0.01
+
+# Exchange codes accepted by run() — short codes per DESIGN §3/§3c schema note.
+_ACCEPTED_EXCHANGES = ("binancef", "bybit", "okx", "coinbase", "deribit")
 
 
 # --------------------------------------------------------------------------- #
@@ -156,11 +215,24 @@ _SCHEMA_DDL = (
         "index" DOUBLE, funding_rate DOUBLE, next_funding_ts BIGINT)""",
     """CREATE TABLE IF NOT EXISTS open_interest (
         exchange VARCHAR, symbol VARCHAR, ts_ms BIGINT, oi DOUBLE)""",
+    # §3c NEW tables. crowding is LONG format — one row per metric name — so new
+    # binance futures/data endpoints never need a schema migration.
+    """CREATE TABLE IF NOT EXISTS crowding (
+        exchange VARCHAR, symbol VARCHAR, ts_ms BIGINT, metric VARCHAR, value DOUBLE)""",
+    # dvol/options_chain are Deribit-only, single-instrument feeds — no exchange/
+    # symbol columns by design (§3c schema, verbatim).
+    "CREATE TABLE IF NOT EXISTS dvol (ts_ms BIGINT, index_price DOUBLE)",
+    """CREATE TABLE IF NOT EXISTS options_chain (
+        ts_ms BIGINT, name VARCHAR, expiry_ts BIGINT, strike DOUBLE, cp VARCHAR,
+        iv DOUBLE, oi DOUBLE, volume DOUBLE, mark_price DOUBLE, underlying DOUBLE)""",
     "CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades (symbol, ts_ms)",
     "CREATE INDEX IF NOT EXISTS idx_liquidations_symbol_ts ON liquidations (symbol, ts_ms)",
     "CREATE INDEX IF NOT EXISTS idx_depth_symbol_ts ON depth_snapshots (symbol, ts_ms)",
     "CREATE INDEX IF NOT EXISTS idx_funding_symbol_ts ON funding_mark (symbol, ts_ms)",
     "CREATE INDEX IF NOT EXISTS idx_oi_symbol_ts ON open_interest (symbol, ts_ms)",
+    "CREATE INDEX IF NOT EXISTS idx_crowding_symbol_ts ON crowding (symbol, ts_ms)",
+    "CREATE INDEX IF NOT EXISTS idx_dvol_ts ON dvol (ts_ms)",
+    "CREATE INDEX IF NOT EXISTS idx_options_chain_ts ON options_chain (ts_ms)",
 )
 
 # Column order is the row-tuple contract every normalize_* function follows.
@@ -170,12 +242,22 @@ _TABLE_COLUMNS = {
     "depth_snapshots": ("exchange", "symbol", "ts_ms", "bids", "asks"),
     "funding_mark": ("exchange", "symbol", "ts_ms", "mark", "index", "funding_rate", "next_funding_ts"),
     "open_interest": ("exchange", "symbol", "ts_ms", "oi"),
+    "crowding": ("exchange", "symbol", "ts_ms", "metric", "value"),
+    "dvol": ("ts_ms", "index_price"),
+    "options_chain": (
+        "ts_ms", "name", "expiry_ts", "strike", "cp",
+        "iv", "oi", "volume", "mark_price", "underlying",
+    ),
 }
 
 _INSERT_SQL = {
     table: "INSERT INTO {t} VALUES ({q})".format(t=table, q=", ".join("?" * len(cols)))
     for table, cols in _TABLE_COLUMNS.items()
 }
+
+# Rotation routing (§3c): the writer routes every row by the UTC day of the row's
+# OWN ts_ms — this maps each table to where that ts_ms sits in the row tuple.
+_TS_INDEX = {table: cols.index("ts_ms") for table, cols in _TABLE_COLUMNS.items()}
 
 
 def _require_deps(*, need_ws: bool) -> None:
@@ -336,11 +418,12 @@ class BybitBook:
                 else:
                     book[price] = qty
 
-    def depth_row(self, ts_ms: int, n_levels: int = 20) -> Optional[tuple]:
+    def depth_row(self, ts_ms: int, n_levels: int = 50) -> Optional[tuple]:
         """Current book -> one ``depth_snapshots`` row (top-N, JSON, best-first).
 
-        Top-20 to match the Binance leg and keep storage bounded (DESIGN §3
-        stores top-20 even though the stream carries 50 levels). Returns None
+        Top-50 (§3c): the stream IS ``orderbook.50`` — store all of it; truncating
+        to 20 was throwing away levels the wire already delivered. The binancef
+        leg stays top-20 because ``depth20`` is the whole wire there. Returns None
         until a snapshot has populated the book — never emit an empty book as if
         it were an observation.
         """
@@ -420,6 +503,411 @@ def normalize_binance_open_interest(payload: dict) -> list[tuple]:
             float(payload["openInterest"]),
         )
     ]
+
+
+def normalize_binance_aggtrades(payload: list, symbol: str) -> tuple[list[tuple], Optional[int]]:
+    """Binance ``/fapi/v1/aggTrades`` REST payload -> (``trades`` rows, next fromId).
+
+    Wire shape (fixture ``binancef_rest_aggtrades``): list of dicts with ``a``
+    (aggTradeId — increments gaplessly per symbol), ``p``/``q`` string decimals,
+    ``T`` epoch ms, ``m`` isBuyerMaker. The REST path exists because the WS trade
+    topics are filtered on this network (§0.2) — REST is not.
+
+    Convention (§0.6): ``m`` true means the BUYER was the maker, i.e. the
+    aggressor SOLD -> ``aggressor_buy = not m``. ``trade_id = str(a)``.
+
+    Cursor contract (§3c): the second return value is ``last a + 1`` — the next
+    poll's ``fromId``. The tape stays gapless by aggTradeId as long as the caller
+    only advances the cursor on a successful poll (on failure: keep it, retry the
+    SAME fromId, never skip ahead). An empty payload returns ``None`` (no advance).
+    """
+    rows: list[tuple] = []
+    for t in payload or []:
+        rows.append(
+            (
+                "binancef",
+                symbol,
+                str(t["a"]),
+                int(t["T"]),
+                float(t["p"]),
+                float(t["q"]),
+                not t["m"],  # buyer-is-maker -> SELL aggressor (§0.6)
+            )
+        )
+    next_from_id = int(payload[-1]["a"]) + 1 if payload else None
+    return rows, next_from_id
+
+
+# ---- binance futures/data crowding endpoints (§3c) — long format, one row per
+# metric, exchange-stated denominations preserved (coin AND usd for OI hist). ----
+def normalize_binance_taker_ls(payload: list, symbol: str) -> list[tuple]:
+    """``/futures/data/takerlongshortRatio`` -> ``crowding`` rows.
+
+    Wire shape (fixture ``binancef_rest_taker_ls``): ``buySellRatio`` string
+    decimal + epoch-ms ``timestamp`` (5 m buckets; NO symbol field — the caller's
+    symbol is trusted, it is the query param that produced the payload).
+    Metric name per §3c: ``taker_buy_sell_ratio``.
+    """
+    return [
+        ("binancef", symbol, int(r["timestamp"]), "taker_buy_sell_ratio", float(r["buySellRatio"]))
+        for r in payload or []
+    ]
+
+
+def normalize_binance_top_pos_ls(payload: list, symbol: str) -> list[tuple]:
+    """``/futures/data/topLongShortPositionRatio`` -> ``crowding`` rows.
+
+    Wire shape (fixture ``binancef_rest_top_pos_ls``): ``longShortRatio`` string
+    decimal, ``symbol`` echoed in each row (used when present — provenance from
+    the wire beats the caller's argument). Metric: ``top_position_ls_ratio``.
+    """
+    return [
+        (
+            "binancef",
+            r.get("symbol") or symbol,
+            int(r["timestamp"]),
+            "top_position_ls_ratio",
+            float(r["longShortRatio"]),
+        )
+        for r in payload or []
+    ]
+
+
+def normalize_binance_global_ls(payload: list, symbol: str) -> list[tuple]:
+    """``/futures/data/globalLongShortAccountRatio`` -> ``crowding`` rows.
+
+    Same shape as the top-trader endpoint (fixture ``binancef_rest_global_ls``);
+    metric per §3c: ``global_account_ls_ratio``.
+    """
+    return [
+        (
+            "binancef",
+            r.get("symbol") or symbol,
+            int(r["timestamp"]),
+            "global_account_ls_ratio",
+            float(r["longShortRatio"]),
+        )
+        for r in payload or []
+    ]
+
+
+def normalize_binance_oi_hist(payload: list, symbol: str) -> list[tuple]:
+    """``/futures/data/openInterestHist`` -> ``crowding`` rows (TWO per entry).
+
+    Wire shape (fixture ``binancef_rest_oi_hist``): ``sumOpenInterest`` (COIN) and
+    ``sumOpenInterestValue`` (USD). §3c stores BOTH — ``oi_sum_coin`` and
+    ``oi_sum_usd`` — because deriving one from the other needs a price we did not
+    observe at that timestamp (the no-silent-conversion rule, same as the OI legs).
+    """
+    rows: list[tuple] = []
+    for r in payload or []:
+        sym = r.get("symbol") or symbol
+        ts = int(r["timestamp"])
+        rows.append(("binancef", sym, ts, "oi_sum_coin", float(r["sumOpenInterest"])))
+        rows.append(("binancef", sym, ts, "oi_sum_usd", float(r["sumOpenInterestValue"])))
+    return rows
+
+
+def normalize_okx_trade(frame: dict, ct_val: float = OKX_CTVAL) -> list[tuple]:
+    """OKX v5 ``trades`` frame -> ``trades`` rows.
+
+    Wire shape (fixture ``okx_trades`` — the SAME frames the JS adapter was
+    proven against): ``data`` list with ``px``/``sz``/``side``/``ts`` (numeric
+    strings) and ``tradeId``.
+
+    UNIT RAIL (§4b/§3c, honesty-critical): ``sz`` is in CONTRACTS —
+    ``qty = sz * ct_val`` (BTC-USDT-SWAP ctVal = 0.01 BTC, fixtures
+    ``_okx_ctval_note``; fixture pin: sz 200 -> 2.00 BTC).
+
+    Convention (§0.6 family): OKX ``side`` ('buy'/'sell') is the TAKER
+    (aggressor) side — used as-is, NO inversion (Bybit convention, NOT the
+    Coinbase maker-side gotcha).
+    """
+    rows: list[tuple] = []
+    for t in frame.get("data") or []:
+        rows.append(
+            (
+                "okx",
+                t["instId"],
+                str(t["tradeId"]),
+                int(t["ts"]),
+                float(t["px"]),
+                float(t["sz"]) * ct_val,  # CONTRACTS -> coin (§4b unit rail)
+                t["side"] == "buy",
+            )
+        )
+    return rows
+
+
+class OkxBook:
+    """Stateful OKX ``books`` book: ``action`` 'snapshot' then 'update' frames.
+
+    Same store-side semantics as :class:`BybitBook` (fixtures ``okx_books_snapshot``
+    / ``_update``): an update lists only touched levels, sz ``"0"`` DELETES a level.
+    Level tuples are ``[px, sz, deprecated, nOrders]`` — only px/sz are consumed.
+    ``checksum``/``seqId`` are deliberately ignored: the only remedy for a checksum
+    miss is a resubscribe, and the WS leg already re-subscribes on every reconnect
+    (after which OKX resends a full snapshot) — same choice as the JS adapter.
+
+    UNIT RAIL: level ``sz`` is in CONTRACTS -> stored qty = sz * ct_val (0 * ct_val
+    is still 0, so tombstones survive the scaling).
+    """
+
+    def __init__(self, ct_val: float = OKX_CTVAL) -> None:
+        self.ct_val = float(ct_val)
+        self.symbol: Optional[str] = None
+        self.bids: dict[float, float] = {}
+        self.asks: dict[float, float] = {}
+
+    def apply(self, frame: dict) -> Optional[int]:
+        """Apply one ``books`` frame; return the frame's row ts_ms (or None)."""
+        arg = frame.get("arg") or {}
+        self.symbol = arg.get("instId") or self.symbol
+        if frame.get("action") == "snapshot":
+            self.bids.clear()  # snapshot replaces outright (stale levels must not survive)
+            self.asks.clear()
+        last_ts: Optional[int] = None
+        for row in frame.get("data") or []:
+            for key, book in (("bids", self.bids), ("asks", self.asks)):
+                for level in row.get(key) or []:
+                    price = float(level[0])
+                    qty = float(level[1])
+                    if qty == 0.0:
+                        book.pop(price, None)  # sz "0" deletes the level (fixture-verified)
+                    else:
+                        book[price] = qty * self.ct_val  # CONTRACTS -> coin
+            if row.get("ts") is not None:
+                last_ts = int(row["ts"])
+        return last_ts
+
+    def depth_row(self, ts_ms: int, n_levels: int = 50) -> Optional[tuple]:
+        """Current book -> one ``depth_snapshots`` row (ex='okx', top-50, §3c)."""
+        if self.symbol is None or (not self.bids and not self.asks):
+            return None  # never emit an empty book as if it were an observation
+        bids = sorted(self.bids.items(), key=lambda kv: -kv[0])[:n_levels]
+        asks = sorted(self.asks.items(), key=lambda kv: kv[0])[:n_levels]
+        return (
+            "okx",
+            self.symbol,
+            int(ts_ms),
+            json.dumps([[p, q] for p, q in bids], separators=(",", ":")),
+            json.dumps([[p, q] for p, q in asks], separators=(",", ":")),
+        )
+
+
+def normalize_okx_funding(payload: dict) -> list[tuple]:
+    """OKX ``/api/v5/public/funding-rate`` REST payload -> ``funding_mark`` rows.
+
+    Wire shape (fixture ``okx_rest_funding``): status ``code`` is a STRING '0';
+    one data row with string decimals. OKX gotcha (proven in terminal-hist.js
+    normalizeOkxFunding): ``fundingTime`` is the UPCOMING settlement of the
+    displayed rate — that is our ``next_funding_ts``; ``nextFundingTime`` is the
+    settlement AFTER that.
+
+    Honesty (§0.7): this endpoint carries NO mark/index price, so those columns
+    are stored as NULL — never proxied from another feed into the same row.
+    """
+    if not payload or payload.get("code") != "0":
+        return []
+    rows: list[tuple] = []
+    for r in payload.get("data") or []:
+        rows.append(
+            (
+                "okx",
+                r["instId"],
+                int(r["ts"]),
+                None,  # mark: not on this endpoint — NULL, never invented (§0.7)
+                None,  # index: same
+                float(r["fundingRate"]),
+                int(r["fundingTime"]),  # the UPCOMING settlement (gotcha above)
+            )
+        )
+    return rows
+
+
+def normalize_okx_oi(payload: dict) -> list[tuple]:
+    """OKX ``/api/v5/public/open-interest`` REST payload -> ``open_interest`` rows.
+
+    UNIT RAIL (§3c, same gotcha as the WS leg): the raw ``oi`` field is in
+    CONTRACTS; ``oiCcy`` is the COIN amount — we store oiCcy so OKX OI is
+    denominated like every other venue's (contracts would overstate it 100x).
+    """
+    if not payload or payload.get("code") != "0":
+        return []
+    return [
+        ("okx", r["instId"], int(r["ts"]), float(r["oiCcy"]))  # COIN, not contracts
+        for r in payload.get("data") or []
+    ]
+
+
+def _iso_to_ms(iso: str) -> int:
+    """Coinbase ISO-8601 UTC timestamp -> epoch ms ('Z' normalized for fromisoformat)."""
+    return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() * 1000)
+
+
+def normalize_coinbase_trades(trades: list) -> list[tuple]:
+    """Coinbase ``market_trades`` trade list -> ``trades`` rows, oldest-first.
+
+    Wire shape (fixtures ``coinbase_market_trades_snapshot`` / ``_update`` — the
+    SAME frames the JS adapter was proven against): batches arrive NEWEST-first;
+    rows are emitted sorted by monotonic numeric trade_id so downstream
+    accumulators see time order (the proven JS rule).
+
+    Convention (§0.6, THE Coinbase gotcha): ``side`` is the **MAKER**'s side, not
+    the aggressor (verified live: side=BUY prints tick DOWN). Aggressor is the
+    INVERSE — ``side == "SELL"`` means a resting ask was lifted by an aggressive
+    BUYER -> ``aggressor_buy = True``. Reading ``side`` as the aggressor flips
+    the tape and negates CVD.
+    """
+    parsed = []
+    for t in trades or []:
+        parsed.append(
+            (
+                int(t["trade_id"]),  # numeric + monotonic on this feed — sort key
+                (
+                    "coinbase",
+                    t["product_id"],
+                    str(t["trade_id"]),
+                    _iso_to_ms(t["time"]),
+                    float(t["price"]),
+                    float(t["size"]),
+                    t["side"] == "SELL",  # MAKER side inverted -> aggressor (§0.6)
+                ),
+            )
+        )
+    parsed.sort(key=lambda p: p[0])  # oldest -> newest
+    return [row for _, row in parsed]
+
+
+class CoinbaseTape:
+    """Stateful Coinbase ``market_trades`` handler (port of the proven JS rules).
+
+    Coinbase re-fires the FULL snapshot on every re-subscribe/reconnect. Seed from
+    the FIRST snapshot only; skip later ones so a reconnect never re-dumps the
+    whole batch into the store; updates before the seed are ignored (JS rule).
+    Updates are deduped by monotonic numeric trade_id across overlapping batches.
+    """
+
+    def __init__(self) -> None:
+        self.seeded = False
+        self.last_trade_id = -1
+
+    def apply(self, frame: dict) -> list[tuple]:
+        """One ``market_trades`` frame -> deduped ``trades`` rows (may be [])."""
+        if frame.get("channel") != "market_trades":
+            return []  # heartbeats/acks: liveness concerns, not rows
+        out: list[tuple] = []
+        for ev in frame.get("events") or []:
+            if ev.get("type") == "snapshot":
+                if self.seeded:
+                    continue  # reconnect snapshot — already seeded, skip (JS rule)
+                self.seeded = True
+            elif not self.seeded:
+                continue  # wait for the seed snapshot first (JS rule)
+            for row in normalize_coinbase_trades(ev.get("trades")):
+                trade_id = int(row[2])
+                if trade_id <= self.last_trade_id:
+                    continue  # dedupe across overlapping batches
+                self.last_trade_id = trade_id
+                out.append(row)
+        return out
+
+
+def normalize_deribit_dvol(payload: dict) -> list[tuple]:
+    """Deribit ``get_index_price?index_name=btcdvol_usdc`` -> ``dvol`` rows.
+
+    Wire shape (fixture ``deribit_rest_dvol``): JSON-RPC envelope; ``usIn`` is
+    the server receive time in MICROseconds -> //1000 to epoch ms. DVOL is the
+    30-day BTC implied-vol index in VOL POINTS (38.68 == 38.68% annualized) —
+    stored as delivered, never /100'd (it is an index level, not a per-strike iv).
+    """
+    result = (payload or {}).get("result") or {}
+    if "index_price" not in result or "usIn" not in (payload or {}):
+        return []  # JSON-RPC errors carry no result — no invented row
+    return [(int(payload["usIn"]) // 1000, float(result["index_price"]))]
+
+
+# Deribit option-name month tokens (mirrors terminal-hist.js parseDeribitOptionName
+# — the collector must parse names identically to the terminal or the stored chain
+# and the rendered chain would disagree about expiries).
+_DERIBIT_MONTHS = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def parse_deribit_option_name(name: Any) -> Optional[tuple[int, float, str]]:
+    """Parse ``CCY-DDMMMYY-STRIKE-C|P`` -> (expiry_ts_ms, strike, cp) | None.
+
+    expiry = 08:00 UTC on the contract date — the Deribit convention (European
+    cash-settled options; same rule as the JS parser, incl. single-digit days
+    like 'BTC-6JUL26-54000-P'). Futures ('BTC-25SEP26') and spot pairs fall out
+    at the 4-part check and are counted by the caller, never guessed at.
+    """
+    parts = str(name).split("-")
+    if len(parts) != 4:
+        return None
+    date_tok, cp = parts[1], parts[3].upper()
+    if cp not in ("C", "P") or len(date_tok) < 6:  # D MMM YY needs >= 6 chars
+        return None
+    month = _DERIBIT_MONTHS.get(date_tok[-5:-2].upper())
+    if month is None:
+        return None
+    try:
+        day = int(date_tok[:-5])
+        year = 2000 + int(date_tok[-2:])
+        strike = float(parts[2])
+        expiry = datetime(year, month, day, 8, 0, 0, tzinfo=timezone.utc)  # 08:00 UTC
+    except ValueError:
+        return None
+    return int(expiry.timestamp() * 1000), strike, cp
+
+
+def normalize_deribit_chain(payload: dict) -> tuple[list[tuple], int]:
+    """Deribit ``get_book_summary_by_currency`` (kind=option) -> (``options_chain`` rows, skipped).
+
+    IV PERCENT TRAP (DEVELOPMENT.md §5 / §3c DECIMAL rail): ``mark_iv`` arrives
+    in PERCENT (fixture: 48.58 for BTC-28AUG26-105000-C) -> stored as the
+    DECIMAL ``mark_iv / 100`` (0.4858). A missing/non-numeric mark_iv stores
+    NULL but the row is KEPT — PCR/max-pain research consumes oi/volume and
+    needs no iv; dropping the row would silently bias those.
+
+    Rows with UNPARSEABLE names are skipped and COUNTED (returned ``skipped``)
+    — state what the wire delivered, including what we could not read (§0).
+    ``ts_ms`` is the envelope ``usIn`` (µs -> ms): ONE snapshot timestamp for
+    the whole chain, so an hourly snapshot groups cleanly by ts_ms.
+    """
+    result = (payload or {}).get("result")
+    if not isinstance(result, list):
+        return [], 0
+    ts_ms = int(payload["usIn"]) // 1000 if "usIn" in payload else None
+    rows: list[tuple] = []
+    skipped = 0
+    for r in result:
+        parsed = parse_deribit_option_name(r.get("instrument_name")) if r else None
+        if parsed is None:
+            skipped += 1
+            continue
+        expiry_ts, strike, cp = parsed
+        try:
+            iv = float(r["mark_iv"]) / 100.0  # PERCENT -> decimal (the /100 rail)
+        except (KeyError, TypeError, ValueError):
+            iv = None  # kept as NULL — see docstring
+        rows.append(
+            (
+                ts_ms if ts_ms is not None else int(r.get("creation_timestamp") or 0),
+                r["instrument_name"],
+                expiry_ts,
+                strike,
+                cp,
+                iv,
+                float(r.get("open_interest") or 0.0),  # contracts (BTC)
+                float(r.get("volume") or 0.0),  # 24h contracts
+                float(r.get("mark_price") or 0.0),  # in BTC (Deribit coin-quotes options)
+                float(r.get("underlying_price") or 0.0),  # per-expiry synthetic future
+            )
+        )
+    return rows, skipped
 
 
 # --------------------------------------------------------------------------- #
@@ -521,6 +1009,275 @@ class Downsampler:
 
 
 # --------------------------------------------------------------------------- #
+# Daily rotation (§3c): a directory of per-UTC-day files, routed by EVENT time. #
+# --------------------------------------------------------------------------- #
+def utc_day(ts_ms: int) -> str:
+    """UTC calendar day ('YYYY-MM-DD') of an epoch-ms timestamp.
+
+    Pure integer arithmetic from the epoch — no local timezone can leak in
+    (day files are dataset partitions; a partition boundary that moved with the
+    host's tz would silently mis-shard rows).
+    """
+    return (date(1970, 1, 1) + timedelta(days=int(ts_ms) // _DAY_MS)).isoformat()
+
+
+_DAY_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")  # day-file stems, nothing else
+
+
+class DayFileManager:
+    """Owns the open per-day DuckDB connections under a rotation root (§3c).
+
+    Policy, verbatim from the design: a day file is writable while its day is
+    today (or later — event timestamps may sit marginally ahead of our clock),
+    or while it is yesterday within the 5-minute grace window after UTC
+    midnight. Once :meth:`close_expired` closes a day it is IMMUTABLE for the
+    rest of this process — it is never reopened for writing, so the HF lifecycle
+    can trust that a closed file no longer changes underneath an upload.
+
+    All ``now_ms`` values are passed IN (no hidden ``time.time()``) so rotation
+    behavior is deterministic under test.
+    """
+
+    def __init__(self, root: Any, grace_ms: int = GRACE_WINDOW_MS) -> None:
+        _require_deps(need_ws=False)
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.grace_ms = int(grace_ms)
+        self._cons: dict[str, Any] = {}  # day -> open RW connection
+        self._closed: set[str] = set()  # days closed THIS session — immutable
+
+    def path_for(self, day: str) -> Path:
+        return self.root / f"{day}.duckdb"
+
+    def writable(self, day: str, now_ms: int) -> bool:
+        """Is ``day`` a legal write target at wall-clock ``now_ms``? (§3c policy)"""
+        if day in self._closed:
+            return False  # closed == immutable, even if the clock says otherwise
+        today = utc_day(now_ms)
+        if day >= today:
+            return True  # today, or event-time marginally ahead of our clock
+        in_grace = (int(now_ms) % _DAY_MS) < self.grace_ms
+        return in_grace and day == utc_day(int(now_ms) - _DAY_MS)  # yesterday, in grace
+
+    def con_for(self, day: str, now_ms: int) -> Optional[Any]:
+        """Open (or return the open) connection for ``day``; None if not writable.
+
+        An already-open connection is returned even if the grace window lapsed a
+        moment ago — the caller flushes THROUGH it and then ``close_expired``
+        seals the day, which is exactly the 'final flush then close' contract.
+        """
+        con = self._cons.get(day)
+        if con is not None:
+            return con
+        if not self.writable(day, now_ms):
+            return None
+        con = open_db(self.path_for(day))  # SAME schema as every store (§3c)
+        self._cons[day] = con
+        return con
+
+    def close_expired(self, now_ms: int, log=print) -> list[str]:
+        """Close every open day whose write window has lapsed; return them."""
+        closed: list[str] = []
+        for day in sorted(self._cons):
+            if not self.writable(day, now_ms):
+                self._cons.pop(day).close()
+                self._closed.add(day)
+                closed.append(day)
+                log(f"[collector] day file {day} closed — immutable from here (§3c)")
+        return closed
+
+    def open_days(self) -> list[str]:
+        return sorted(self._cons)
+
+    def local_days(self) -> list[str]:
+        """Every day file present on disk (open or closed), sorted ascending."""
+        return sorted(
+            p.stem for p in self.root.glob("*.duckdb") if _DAY_FILE_RE.match(p.stem)
+        )
+
+    def close_all(self) -> None:
+        """Shutdown: close every open connection (final flush is the caller's job)."""
+        for day in sorted(self._cons):
+            self._cons.pop(day).close()
+
+
+class RotatingWriter:
+    """Day-routing batched writer (§3c) — same interface as :class:`BatchWriter`.
+
+    ``add`` splits every batch by the UTC day of each row's OWN ``ts_ms`` (a
+    batch straddling midnight lands in two files); ``flush`` writes per (day,
+    table) and then lets the manager close lapsed days — so 'final flush, then
+    close' holds by construction. Rows for an already-closed day are DROPPED and
+    counted (``rows_dropped_closed``), never written: immutability outranks
+    completeness for a partition that may already be uploaded.
+
+    ``now_ms`` is injectable for deterministic rotation tests; production uses
+    the wall clock (the GRACE decision is about our clock, not event time).
+    """
+
+    def __init__(
+        self,
+        manager: DayFileManager,
+        lock: threading.Lock,
+        max_rows: int = FLUSH_MAX_ROWS,
+        now_ms=None,
+        log=print,
+    ) -> None:
+        self._manager = manager
+        self._lock = lock
+        self._max_rows = max_rows
+        self._now_ms = now_ms or (lambda: int(time.time() * 1000))
+        self._log = log
+        self._buffers: dict[tuple[str, str], list[tuple]] = {}  # (day, table) -> rows
+        self._pending = 0
+        self.rows_written: dict[str, int] = {t: 0 for t in _INSERT_SQL}
+        self.rows_dropped_closed = 0
+
+    def add(self, table: str, rows: list[tuple]) -> None:
+        """Buffer rows routed by EVENT day; auto-flush once >= max_rows pending."""
+        if not rows:
+            return
+        ts_i = _TS_INDEX[table]
+        for row in rows:
+            self._buffers.setdefault((utc_day(row[ts_i]), table), []).append(row)
+        self._pending += len(rows)
+        if self._pending >= self._max_rows:
+            self.flush()
+
+    def flush(self) -> int:
+        """Write every buffered row into its day file; then close lapsed days."""
+        now = self._now_ms()
+        written = 0
+        with self._lock:
+            for (day, table) in sorted(self._buffers):
+                buf = self._buffers[(day, table)]
+                if not buf:
+                    continue
+                con = self._manager.con_for(day, now)
+                if con is None:  # day already closed — immutable (§3c)
+                    self.rows_dropped_closed += len(buf)
+                    self._log(
+                        f"[collector] DROPPED {len(buf)} {table} row(s) for closed day "
+                        f"{day} — arrived after the grace window; the gap stays a gap"
+                    )
+                else:
+                    con.executemany(_INSERT_SQL[table], buf)
+                    self.rows_written[table] += len(buf)
+                    written += len(buf)
+            self._buffers.clear()
+            self._pending = 0
+            # Even an idle flush tick must seal lapsed days (a quiet overnight
+            # stream would otherwise hold yesterday open past the grace window).
+            self._manager.close_expired(now, log=self._log)
+        return written
+
+    async def run(self, stop_event: asyncio.Event, interval_s: float = FLUSH_INTERVAL_S) -> None:
+        """Periodic-flush task (the 500 ms half of the flush contract)."""
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+            except asyncio.TimeoutError:
+                pass
+            self.flush()
+
+
+def migrate_legacy(src: Any, dest_root: Any, log=print) -> dict[str, dict[str, int]]:
+    """One-shot split of a legacy single-file store into per-day files (§3c).
+
+    Prune-safety creed applied to migration: rows are COPIED per UTC day (via a
+    read-only ATTACH), per-table day counts are verified to sum EXACTLY to the
+    original's, and the original file is left untouched with a printed ``rm``
+    hint — this function never deletes anything.
+
+    Returns ``{day: {table: rows_copied}}``. Raises ``ValueError`` on a missing
+    source / a ``.duckdb`` destination / pre-existing target day files (a second
+    run would silently double every row — refused, same rule as the archive
+    overlap check), and ``RuntimeError`` if the count conservation check fails.
+    """
+    _require_deps(need_ws=False)
+    src = Path(src)
+    if not src.is_file():
+        raise ValueError(f"legacy store not found (need an existing .duckdb FILE): {src}")
+    dest = Path(dest_root)
+    if dest.suffix == ".duckdb":
+        raise ValueError(f"destination must be a rotation DIRECTORY, not a .duckdb file: {dest}")
+
+    # Pass 1 (read-only): which tables exist, their totals, and which days occur.
+    src_con = duckdb.connect(str(src), read_only=True)
+    try:
+        present = {
+            r[0] for r in src_con.execute("SELECT table_name FROM duckdb_tables()").fetchall()
+        } & set(_TABLE_COLUMNS)
+        totals = {
+            t: src_con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]  # noqa: S608 — whitelist
+            for t in sorted(present)
+        }
+        day_indexes: set[int] = set()
+        for t in sorted(present):
+            day_indexes |= {
+                int(r[0])
+                for r in src_con.execute(
+                    f"SELECT DISTINCT ts_ms // {_DAY_MS} FROM {t}"  # noqa: S608 — whitelist
+                ).fetchall()
+                if r[0] is not None
+            }
+    finally:
+        src_con.close()
+
+    days = [utc_day(idx * _DAY_MS) for idx in sorted(day_indexes)]
+    conflicts = [d for d in days if (dest / f"{d}.duckdb").exists()]
+    if conflicts:
+        raise ValueError(
+            f"target day file(s) already exist under {dest}: {conflicts} — "
+            "migrate-legacy is one-shot; a re-run would double-count rows (refused)"
+        )
+
+    # Pass 2: copy day by day INSIDE DuckDB (ATTACH read-only — no fetchall of a
+    # multi-GB store through Python), counting as we go.
+    src_sql = str(src).replace("'", "''")
+    per_day: dict[str, dict[str, int]] = {}
+    migrated = {t: 0 for t in sorted(present)}
+    for idx in sorted(day_indexes):
+        day = utc_day(idx * _DAY_MS)
+        lo, hi = idx * _DAY_MS, (idx + 1) * _DAY_MS
+        con = open_db(dest / f"{day}.duckdb")  # canonical schema + indexes
+        try:
+            con.execute(f"ATTACH '{src_sql}' AS legacy (READ_ONLY)")
+            counts: dict[str, int] = {}
+            for t in sorted(present):
+                cols = ", ".join(f'"{c}"' for c in _TABLE_COLUMNS[t])
+                con.execute(
+                    f"INSERT INTO {t} SELECT {cols} FROM legacy.{t} "  # noqa: S608 — whitelist
+                    "WHERE ts_ms >= ? AND ts_ms < ?",
+                    [lo, hi],
+                )
+                n = con.execute(
+                    f"SELECT COUNT(*) FROM {t} WHERE ts_ms >= ? AND ts_ms < ?",  # noqa: S608
+                    [lo, hi],
+                ).fetchone()[0]
+                counts[t] = n
+                migrated[t] += n
+            con.execute("DETACH legacy")
+        finally:
+            con.close()
+        per_day[day] = counts
+        log(f"[migrate] {day}: " + ", ".join(f"{t}={n}" for t, n in counts.items() if n))
+
+    # Count conservation — the verification that makes the rm hint safe to print.
+    if migrated != totals:
+        raise RuntimeError(
+            f"migration count mismatch — original {totals} vs day files {migrated}; "
+            f"the original at {src} is UNTOUCHED, day files under {dest} are suspect"
+        )
+    log(
+        f"[migrate] verified: per-day counts sum to the original for every table "
+        f"({totals}). The original is untouched — remove it yourself when satisfied:\n"
+        f"[migrate]   rm '{src}'"
+    )
+    return per_day
+
+
+# --------------------------------------------------------------------------- #
 # Resilient stream plumbing: reconnect w/ capped exp backoff + jitter, and a   #
 # stalled-stream watchdog (no frame > 60 s -> force reconnect). Mirror of the  #
 # dashboard makeSocket semantics (DESIGN §3).                                  #
@@ -539,11 +1296,17 @@ async def _ws_stream(
     on_frame,
     *,
     stop_event: asyncio.Event,
-    subscribe: Optional[dict] = None,
-    app_ping: Optional[dict] = None,
+    subscribe: Any = None,
+    app_ping: Any = None,
     log=print,
 ) -> None:
     """One resilient WS leg: connect, subscribe, pump frames into ``on_frame``.
+
+    ``subscribe`` may be one dict or a list of dicts (Coinbase wants two channel
+    subscriptions). ``app_ping`` may be a dict (JSON-encoded — Bybit's
+    ``{"op":"ping"}``) or a plain string sent raw (OKX prescribes literal
+    ``'ping'``; its ``'pong'`` reply fails json.loads below and is skipped —
+    ignored BY CONSTRUCTION, same as the JS adapter).
 
     Honesty rail (DESIGN §3): every disconnect/backoff window is a HOLE in the
     recorded series. We log it and move on — no interpolation, no replay-fill.
@@ -554,8 +1317,9 @@ async def _ws_stream(
             async with websockets.connect(
                 url, open_timeout=15, close_timeout=5, user_agent_header=_USER_AGENT
             ) as ws:
-                if subscribe is not None:
-                    await ws.send(json.dumps(subscribe))
+                for sub in subscribe if isinstance(subscribe, list) else [subscribe]:
+                    if sub is not None:
+                        await ws.send(json.dumps(sub))
                 attempt = 0  # a successful connect resets the backoff ladder
                 last_frame = time.monotonic()
                 while not stop_event.is_set():
@@ -568,8 +1332,10 @@ async def _ws_stream(
                             raise TimeoutError(
                                 f"no frame in {WATCHDOG_S:.0f}s — watchdog reconnect"
                             )
-                        if app_ping is not None:  # Bybit v5 app-level heartbeat
-                            await ws.send(json.dumps(app_ping))
+                        if app_ping is not None:  # app-level heartbeat (Bybit/OKX)
+                            await ws.send(
+                                app_ping if isinstance(app_ping, str) else json.dumps(app_ping)
+                            )
                         continue
                     last_frame = time.monotonic()
                     try:
@@ -644,6 +1410,119 @@ def _fetch_binance_open_interest(symbol: str) -> dict:
     return resp.json()
 
 
+def _http_get_json(url: str, params: Optional[dict] = None) -> Any:
+    """Blocking GET returning parsed JSON (data.py idiom: polite UA, 10 s timeout)."""
+    resp = requests.get(url, params=params, timeout=10.0, headers={"User-Agent": _USER_AGENT})
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _fetch_binance_aggtrades(symbol: str, from_id: Optional[int]) -> list:
+    """Blocking GET ``/fapi/v1/aggTrades``; the first poll (no cursor) seeds from
+    the most recent trades, every later poll resumes gaplessly at ``fromId``."""
+    params: dict[str, Any] = {"symbol": symbol, "limit": 1000}
+    if from_id is not None:
+        params["fromId"] = from_id
+    return _http_get_json(f"{_BINANCE_FAPI}/fapi/v1/aggTrades", params)
+
+
+# The four §3c crowding endpoints share one shape family; limit=2 gives one bucket
+# of overlap so a slow poll never loses the boundary sample (the exact-ts
+# downsampler gate in the daemon dedupes the overlap).
+_CROWDING_ENDPOINTS = (
+    ("takerlongshortRatio", normalize_binance_taker_ls),
+    ("topLongShortPositionRatio", normalize_binance_top_pos_ls),
+    ("globalLongShortAccountRatio", normalize_binance_global_ls),
+    ("openInterestHist", normalize_binance_oi_hist),
+)
+
+
+def _fetch_binance_crowding(endpoint: str, symbol: str) -> list:
+    """Blocking GET one ``/futures/data/<endpoint>`` crowding payload (5 m buckets)."""
+    return _http_get_json(
+        f"{_BINANCE_FAPI}/futures/data/{endpoint}",
+        {"symbol": symbol, "period": "5m", "limit": 2},
+    )
+
+
+def _fetch_okx_funding(inst_id: str) -> dict:
+    """Blocking GET OKX ``/api/v5/public/funding-rate``."""
+    return _http_get_json(f"{_OKX_REST}/api/v5/public/funding-rate", {"instId": inst_id})
+
+
+def _fetch_okx_oi(inst_id: str) -> dict:
+    """Blocking GET OKX ``/api/v5/public/open-interest``."""
+    return _http_get_json(f"{_OKX_REST}/api/v5/public/open-interest", {"instId": inst_id})
+
+
+def _fetch_deribit_dvol() -> dict:
+    """Blocking GET Deribit DVOL index (keyless, CORS-open — §4d empirical)."""
+    return _http_get_json(
+        f"{_DERIBIT_REST}/public/get_index_price", {"index_name": "btcdvol_usdc"}
+    )
+
+
+def _fetch_deribit_chain(currency: str) -> dict:
+    """Blocking GET the full Deribit option book summary (hourly snapshot, §3c)."""
+    return _http_get_json(
+        f"{_DERIBIT_REST}/public/get_book_summary_by_currency",
+        {"currency": currency, "kind": "option"},
+    )
+
+
+async def _aggtrades_loop(symbol: str, writer, stop_event: asyncio.Event, log=print) -> None:
+    """Binance ``aggTrades`` REST poll (5 s) with a gapless ``fromId`` cursor (§3c).
+
+    The cursor advances to ``last a + 1`` ONLY after a successful poll+normalize;
+    any failure keeps it where it was so the next attempt re-fetches the same
+    range — the tape never skips ahead over an error. Two honesty guards sit on
+    the wire's id sequence (§0.6/§0.7 — record what actually arrived, once):
+
+    * **Dedupe**: ids at-or-below the highest id already handed to the writer
+      are dropped (and the drop is logged). A retried seed poll (cursor still
+      None after a flush error), or a server re-serving a range, would otherwise
+      double-print the tape — duplicate trades silently inflate CVD/volume.
+      ``last_id`` is marked BEFORE ``writer.add`` because BatchWriter buffers
+      rows before its flush can raise: buffered rows ARE handed over.
+    * **Gap**: ids resuming AHEAD of the cursor are LOGGED as a gap, never
+      papered over — the missing prints stay missing (no second source
+      back-fills them; §0.7). The cursor also never moves backwards, so a
+      stale/re-served batch cannot regress it into a refetch loop.
+    """
+    cursor: Optional[int] = None
+    last_id: Optional[int] = None  # highest aggTradeId ever handed to the writer
+    while not stop_event.is_set():
+        try:
+            payload = await asyncio.to_thread(_fetch_binance_aggtrades, symbol, cursor)
+            rows, next_from_id = normalize_binance_aggtrades(payload, symbol)
+            if rows:
+                first_id = min(int(r[2]) for r in rows)
+                if cursor is not None and first_id > cursor:
+                    log(
+                        f"[collector] binancef-aggTrades: id GAP — expected {cursor}, "
+                        f"wire resumed at {first_id} ({first_id - cursor} aggTrade "
+                        "id(s) missing; the gap stays a gap)"
+                    )
+                if last_id is not None:
+                    fresh = [r for r in rows if int(r[2]) > last_id]
+                    if len(fresh) != len(rows):
+                        log(
+                            f"[collector] binancef-aggTrades: deduped "
+                            f"{len(rows) - len(fresh)} re-served row(s) <= id {last_id}"
+                        )
+                    rows = fresh
+            if rows:
+                last_id = max(int(r[2]) for r in rows)  # mark BEFORE add (docstring)
+                writer.add("trades", rows)
+            if next_from_id is not None and (cursor is None or next_from_id > cursor):
+                cursor = next_from_id  # advance ONLY on success — never skip ahead
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — a failed poll must not kill the leg
+            log(f"[collector] binancef-aggTrades: poll failed: {exc!r} (cursor kept)")
+        await _sleep_or_stop(stop_event, _AGGTRADES_POLL_S)
+
+
 async def _retention_loop(
     con: "duckdb.DuckDBPyConnection",
     lock: threading.Lock,
@@ -682,25 +1561,42 @@ _API_DEFAULT_LIMIT = 1000
 _API_MAX_LIMIT = 10_000
 
 
-def _query_table(
-    con: "duckdb.DuckDBPyConnection",
-    lock: threading.Lock,
-    table: str,
-    qs: dict[str, str],
-) -> dict:
-    """Build + run one bounded, parameterized read; return a JSON-able dict.
+class _Archived(Exception):
+    """A requested range predates the oldest LOCAL day file (§3c) — HTTP 410.
 
-    Params: ``symbol``, ``start_ms``, ``end_ms`` (inclusive bounds), ``limit``
-    (default 1000, hard cap 10000 — a replay client pages by ts_ms, it does not
-    slurp the file). All values go through ``?`` placeholders; table/column names
-    come only from our own whitelists.
+    Carries the honest redirect: the data is not gone, it lives on HF; the hint
+    is the exact hive-style partition path the lifecycle uploads to.
+    """
+
+    def __init__(self, day: str, table: str) -> None:
+        self.day = day
+        self.table = table
+        super().__init__(f"day {day} archived")
+
+    def body(self) -> dict:
+        return {
+            "error": "archived",
+            "hint": f"hf://datasets/{_HF_DATASET}/data/date={self.day}/{self.table}.parquet",
+        }
+
+
+def _bounded_limit(qs: dict[str, str]) -> int:
+    """The shared limit contract: default 1000, hard cap 10000 (paged replay)."""
+    return max(1, min(int(qs.get("limit", _API_DEFAULT_LIMIT)), _API_MAX_LIMIT))
+
+
+def _run_bounded_select(con: "duckdb.DuckDBPyConnection", table: str, qs: dict, limit: int) -> list:
+    """One bounded, parameterized read on one connection (caller holds any lock).
+
+    Params: ``symbol``, ``start_ms``, ``end_ms`` (inclusive bounds). All values
+    go through ``?`` placeholders; table/column names come only from whitelists.
     """
     cols = _TABLE_COLUMNS[table]
     select_cols = ", ".join(f'"{c}"' for c in cols)  # "index" needs the quotes
     sql = f"SELECT {select_cols} FROM {table}"  # noqa: S608 — table from whitelist
     clauses: list[str] = []
     params: list[Any] = []
-    if "symbol" in qs:
+    if "symbol" in qs and "symbol" in cols:
         clauses.append("symbol = ?")
         params.append(qs["symbol"])
     if "start_ms" in qs:
@@ -711,17 +1607,99 @@ def _query_table(
         params.append(int(qs["end_ms"]))
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
-    limit = max(1, min(int(qs.get("limit", _API_DEFAULT_LIMIT)), _API_MAX_LIMIT))
     sql += " ORDER BY ts_ms ASC LIMIT ?"
     params.append(limit)
+    return con.execute(sql, params).fetchall()
+
+
+def _query_table(
+    con: "duckdb.DuckDBPyConnection",
+    lock: threading.Lock,
+    table: str,
+    qs: dict[str, str],
+) -> dict:
+    """Legacy single-file read — the original BYOD contract, unchanged."""
+    cols = _TABLE_COLUMNS[table]
+    limit = _bounded_limit(qs)
     with lock:
-        rows = con.execute(sql, params).fetchall()
+        rows = _run_bounded_select(con, table, qs, limit)
     # depth bids/asks stay JSON *strings* here (stored form) — the client parses.
     return {"table": table, "n": len(rows), "rows": [dict(zip(cols, r)) for r in rows]}
 
 
+def _rotation_day_cons(manager: DayFileManager, days: list[str]):
+    """Yield ``(day, con, borrowed)`` for local days — the manager's own RW
+    connection where one is open (today/yesterday), else a fresh READ-ONLY
+    handle (closed days are immutable, so a read-only open is always safe).
+    The caller holds the shared lock for the whole walk: manager connections are
+    the writer's, and DuckDB refuses a second same-process handle on a file the
+    manager still has open — borrowing under the lock is the only correct path.
+    """
+    for day in days:
+        con = manager._cons.get(day)  # noqa: SLF001 — manager and API are one module
+        if con is not None:
+            yield day, con, True
+        else:
+            ro = duckdb.connect(str(manager.path_for(day)), read_only=True)
+            try:
+                yield day, ro, False
+            finally:
+                ro.close()
+
+
+def _query_rotation(
+    manager: DayFileManager,
+    lock: threading.Lock,
+    table: str,
+    qs: dict[str, str],
+) -> dict:
+    """Rotation-mode read: ATTACH-free union over the LOCAL day files covering
+    [start_ms, end_ms] (§3c). Same params/shapes as the legacy read — the BYOD
+    contract is UNCHANGED; only the storage behind it moved.
+
+    A range starting before the oldest local day answers 410 via ``_Archived``
+    (that data was uploaded + pruned by the HF lifecycle) — an empty 200 there
+    would be a lie, the rows exist, just not here.
+    """
+    cols = _TABLE_COLUMNS[table]
+    limit = _bounded_limit(qs)
+    start_ms = int(qs["start_ms"]) if "start_ms" in qs else None
+    end_ms = int(qs["end_ms"]) if "end_ms" in qs else None
+    days = manager.local_days()
+    if start_ms is not None and days and utc_day(start_ms) < days[0]:
+        raise _Archived(utc_day(start_ms), table)
+    lo_day = utc_day(start_ms) if start_ms is not None else None
+    hi_day = utc_day(end_ms) if end_ms is not None else None
+    wanted = [
+        d for d in days
+        if (lo_day is None or d >= lo_day) and (hi_day is None or d <= hi_day)
+    ]
+    rows: list = []
+    with lock:
+        # Day files partition by ts_ms, so walking days ascending and appending
+        # per-file ts-ordered rows keeps the global ORDER BY ts_ms contract.
+        for _day, con, _borrowed in _rotation_day_cons(manager, wanted):
+            remaining = limit - len(rows)
+            if remaining <= 0:
+                break
+            rows.extend(_run_bounded_select(con, table, qs, remaining))
+    return {"table": table, "n": len(rows), "rows": [dict(zip(cols, r)) for r in rows]}
+
+
+def _rotation_row_counts(manager: DayFileManager, lock: threading.Lock) -> dict[str, int]:
+    """/v1/info row_counts aggregated across every LOCAL day file (§3c)."""
+    counts = {t: 0 for t in _TABLE_COLUMNS}
+    with lock:
+        for _day, con, _borrowed in _rotation_day_cons(manager, manager.local_days()):
+            for table in _TABLE_COLUMNS:
+                counts[table] += con.execute(
+                    f"SELECT COUNT(*) FROM {table}"  # noqa: S608 — whitelist
+                ).fetchone()[0]
+    return counts
+
+
 def make_api_server(
-    con: "duckdb.DuckDBPyConnection",
+    store: Any,
     lock: threading.Lock,
     info: dict,
     port: int,
@@ -731,7 +1709,14 @@ def make_api_server(
     (tests read the bound port off ``server.server_address``). Caller runs
     ``serve_forever`` in a daemon thread and ``shutdown()``s it on exit.
     Binds loopback by default — this is a local research store, not a service.
+
+    ``store`` is either one DuckDB connection (legacy single-file mode) or a
+    :class:`DayFileManager` (rotation, §3c). The HTTP contract — paths, params,
+    row shapes — is IDENTICAL in both modes; rotation additionally answers 410
+    (``{'error':'archived','hint':'hf://…'}``) for ranges older than the oldest
+    local day, and /v1/info aggregates row_counts across the local day files.
     """
+    rotation = isinstance(store, DayFileManager)
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "btcq-collector/0.1"
@@ -759,20 +1744,34 @@ def make_api_server(
                 if path == "/health":
                     self._send_json({"ok": True, "ts_ms": int(time.time() * 1000)})
                 elif path == "/v1/info":
-                    counts = {}
-                    with lock:
-                        for table in _TABLE_COLUMNS:
-                            counts[table] = con.execute(
-                                f"SELECT COUNT(*) FROM {table}"  # noqa: S608 — whitelist
-                            ).fetchone()[0]
-                    self._send_json({**info, "row_counts": counts})
+                    if rotation:
+                        counts = _rotation_row_counts(store, lock)
+                        self._send_json(
+                            {
+                                **info,
+                                "row_counts": counts,
+                                "mode": "rotation",
+                                "days": store.local_days(),  # what is answerable locally
+                            }
+                        )
+                    else:
+                        counts = {}
+                        with lock:
+                            for table in _TABLE_COLUMNS:
+                                counts[table] = store.execute(
+                                    f"SELECT COUNT(*) FROM {table}"  # noqa: S608 — whitelist
+                                ).fetchone()[0]
+                        self._send_json({**info, "row_counts": counts})
                 elif path in _API_ROUTES:
-                    self._send_json(_query_table(con, lock, _API_ROUTES[path], qs))
+                    query = _query_rotation if rotation else _query_table
+                    self._send_json(query(store, lock, _API_ROUTES[path], qs))
                 else:
                     self._send_json(
                         {"error": "not found", "routes": ["/health", "/v1/info", *_API_ROUTES]},
                         status=404,
                     )
+            except _Archived as exc:  # range predates local day files -> HF (§3c)
+                self._send_json(exc.body(), status=410)
             except ValueError as exc:  # bad start_ms/end_ms/limit -> client error
                 self._send_json({"error": f"bad parameter: {exc}"}, status=400)
             except Exception as exc:  # noqa: BLE001 — never let a read kill the thread
@@ -784,6 +1783,32 @@ def make_api_server(
 # --------------------------------------------------------------------------- #
 # Daemon orchestration.                                                        #
 # --------------------------------------------------------------------------- #
+def _is_rotation_path(db: Any) -> bool:
+    """Directory (or directory-to-be) -> rotation mode (§3c); ``.duckdb`` FILE ->
+    legacy single-file mode (back-compat: tests + the GH-release archive path)."""
+    p = Path(db)
+    if p.is_dir():
+        return True
+    if p.is_file():
+        return False
+    return p.suffix != ".duckdb"  # neither exists yet: the name decides
+
+
+def _symbol_legs(symbol: str) -> dict[str, str]:
+    """Map the CLI's exchange-style perp symbol to each venue's identifier.
+
+    'BTCUSDT' -> okx 'BTC-USDT-SWAP', coinbase 'BTC-USD' (spot), deribit 'BTC'.
+    Non-USDT symbols keep the raw base heuristically — every derived id is
+    logged at startup so a wrong mapping is visible, not silent.
+    """
+    base = symbol[:-4] if symbol.upper().endswith("USDT") else symbol
+    return {
+        "okx": f"{base}-USDT-SWAP",
+        "coinbase": f"{base}-USD",
+        "deribit": base,
+    }
+
+
 async def _run_async(
     symbol: str,
     exchanges: tuple[str, ...],
@@ -793,11 +1818,21 @@ async def _run_async(
     log=print,
 ) -> None:
     """Wire streams -> normalizers -> batched writer; run until SIGINT/SIGTERM."""
-    con = open_db(db)
     lock = threading.Lock()
-    writer = BatchWriter(con, lock)
+    rotation = _is_rotation_path(db)
+    if rotation:
+        manager = DayFileManager(db)
+        writer: Any = RotatingWriter(manager, lock, log=log)
+        store: Any = manager
+    else:
+        con = open_db(db)
+        writer = BatchWriter(con, lock)
+        store = con
     down = Downsampler()
     book = BybitBook()
+    okx_book = OkxBook(ct_val=OKX_CTVAL)
+    tape = CoinbaseTape()
+    legs = _symbol_legs(symbol)
     ticker_state: dict[str, Optional[dict]] = {"snap": None}  # bybit tickers merge state
 
     stop_event = asyncio.Event()
@@ -841,6 +1876,41 @@ async def _run_async(
             # row[2] is ts_ms — 100 ms firehose stored at 1/s (DESIGN §3).
             if down.ready(("binancef", "depth"), row[2]):
                 writer.add("depth_snapshots", [row])
+
+    def on_okx(frame: dict) -> None:
+        if frame.get("event"):
+            return  # sub acks ({"event":"subscribe",...}) and error frames
+        channel = (frame.get("arg") or {}).get("channel")
+        if channel == "trades":
+            writer.add("trades", normalize_okx_trade(frame, ct_val=OKX_CTVAL))
+        elif channel == "books":
+            ts = okx_book.apply(frame)
+            # Same 1/s storage cap as the other depth legs (DESIGN §3).
+            if ts and down.ready(("okx", "depth"), ts):
+                row = okx_book.depth_row(ts)
+                if row is not None:
+                    writer.add("depth_snapshots", [row])
+
+    def on_coinbase(frame: dict) -> None:
+        # CoinbaseTape enforces the proven JS rules (first-snapshot seed only,
+        # monotonic trade_id dedupe, maker-side inversion inside the normalizer).
+        writer.add("trades", tape.apply(frame))
+
+    def on_crowding_payload(normalize, payload: list) -> None:
+        # 5 m buckets re-served until the next bucket closes: the exact-ts
+        # downsampler gate (per metric) dedupes the poll overlap. oi_hist emits
+        # coin+usd rows sharing one ts — the per-METRIC key lets both through.
+        rows = normalize(payload, symbol)
+        fresh = [r for r in rows if down.ready(("binancef", "crowding", r[3]), r[2])]
+        writer.add("crowding", fresh)
+
+    def on_chain_payload(payload: dict) -> None:
+        rows, skipped = normalize_deribit_chain(payload)
+        writer.add("options_chain", rows)
+        if skipped:
+            # Counted, not silently dropped (§0) — futures/spot names in the
+            # option summary, or shapes we could not parse.
+            log(f"[collector] deribit-chain: {len(rows)} rows, {skipped} unparseable skipped")
 
     # --- tasks ---
     tasks: list[asyncio.Task] = [
@@ -906,7 +1976,135 @@ async def _run_async(
                 name="binancef-openInterest",
             )
         )
-    if retention_days is not None:
+        # §3c: futures trades via REST aggTrades (the WS topic-filter does not
+        # apply to REST) — dedicated loop because it carries the fromId cursor.
+        tasks.append(
+            asyncio.create_task(
+                _aggtrades_loop(symbol, writer, stop_event, log=log),
+                name="binancef-aggTrades",
+            )
+        )
+        # §3c crowding endpoints @ 5 m -> long-format crowding table.
+        for endpoint, normalize in _CROWDING_ENDPOINTS:
+            tasks.append(
+                asyncio.create_task(
+                    _rest_poll(
+                        f"binancef-{endpoint}",
+                        lambda ep=endpoint: _fetch_binance_crowding(ep, symbol),
+                        lambda p, nz=normalize: on_crowding_payload(nz, p),
+                        _CROWDING_POLL_S,
+                        stop_event,
+                        log=log,
+                    ),
+                    name=f"binancef-{endpoint}",
+                )
+            )
+    if "okx" in exchanges:
+        # §3c OKX leg: WS trades (ctVal-scaled) + books top-50; funding/OI via
+        # REST 60 s (the WS tickers channel is not needed for these two rows).
+        subscribe = [
+            {
+                "op": "subscribe",
+                "args": [
+                    {"channel": "trades", "instId": legs["okx"]},
+                    {"channel": "books", "instId": legs["okx"]},
+                ],
+            }
+        ]
+        tasks.append(
+            asyncio.create_task(
+                _ws_stream(
+                    "okx-ws",
+                    _OKX_WS,
+                    on_okx,
+                    stop_event=stop_event,
+                    subscribe=subscribe,
+                    app_ping="ping",  # OKX prescribes the PLAIN-TEXT ping (§4b)
+                    log=log,
+                ),
+                name="okx-ws",
+            )
+        )
+        tasks.append(
+            asyncio.create_task(
+                _rest_poll(
+                    "okx-funding",
+                    lambda: _fetch_okx_funding(legs["okx"]),
+                    lambda p: writer.add("funding_mark", normalize_okx_funding(p)),
+                    _OKX_REST_POLL_S,
+                    stop_event,
+                    log=log,
+                ),
+                name="okx-funding",
+            )
+        )
+        tasks.append(
+            asyncio.create_task(
+                _rest_poll(
+                    "okx-oi",
+                    lambda: _fetch_okx_oi(legs["okx"]),
+                    lambda p: writer.add("open_interest", normalize_okx_oi(p)),
+                    _OKX_REST_POLL_S,
+                    stop_event,
+                    log=log,
+                ),
+                name="okx-oi",
+            )
+        )
+    if "coinbase" in exchanges:
+        # §3c Coinbase spot tape leg — market_trades + heartbeats (the liveness
+        # channel; ANY frame feeds the _ws_stream watchdog, so heartbeats keep a
+        # quiet tape from tripping a false reconnect).
+        subscribe = [
+            {"type": "subscribe", "product_ids": [legs["coinbase"]], "channel": "market_trades"},
+            {"type": "subscribe", "product_ids": [legs["coinbase"]], "channel": "heartbeats"},
+        ]
+        tasks.append(
+            asyncio.create_task(
+                _ws_stream(
+                    "coinbase-ws",
+                    _COINBASE_WS,
+                    on_coinbase,
+                    stop_event=stop_event,
+                    subscribe=subscribe,
+                    log=log,
+                ),
+                name="coinbase-ws",
+            )
+        )
+    if "deribit" in exchanges:
+        # §3c Deribit legs: DVOL @ 60 s; option chain snapshot HOURLY (this is
+        # what starts the VRP/skew research clock — time-gated, not validated).
+        tasks.append(
+            asyncio.create_task(
+                _rest_poll(
+                    "deribit-dvol",
+                    _fetch_deribit_dvol,
+                    lambda p: writer.add("dvol", normalize_deribit_dvol(p)),
+                    _DVOL_POLL_S,
+                    stop_event,
+                    log=log,
+                ),
+                name="deribit-dvol",
+            )
+        )
+        tasks.append(
+            asyncio.create_task(
+                _rest_poll(
+                    "deribit-chain",
+                    lambda: _fetch_deribit_chain(legs["deribit"]),
+                    on_chain_payload,
+                    _CHAIN_POLL_S,
+                    stop_event,
+                    log=log,
+                ),
+                name="deribit-chain",
+            )
+        )
+    if retention_days is not None and not rotation:
+        # Legacy mode only — run() refuses the combination with rotation (§3c:
+        # pruning closed days is the HF lifecycle's job, verify-then-delete);
+        # the `not rotation` guard keeps a direct _run_async caller honest too.
         tasks.append(
             asyncio.create_task(
                 _retention_loop(con, lock, retention_days, stop_event, log=log),
@@ -923,14 +2121,17 @@ async def _run_async(
             "started_ms": int(time.time() * 1000),
             "retention_days": retention_days,  # None == keep-all (the default)
         }
-        server = make_api_server(con, lock, info, port=api_port)
+        server = make_api_server(store, lock, info, port=api_port)
         threading.Thread(target=server.serve_forever, name="byod-api", daemon=True).start()
         log(f"[collector] BYOD API on http://127.0.0.1:{server.server_address[1]}")
 
+    leg_note = ", ".join(f"{ex}={legs[ex]}" for ex in exchanges if ex in legs)
     log(
         f"[collector] recording {symbol} from {', '.join(exchanges)} -> {db} "
-        f"(retention: {'keep-all' if retention_days is None else f'{retention_days}d'}; "
+        f"({'daily rotation (§3c)' if rotation else 'legacy single file'}; "
+        f"retention: {'keep-all' if retention_days is None else f'{retention_days}d'}; "
         f"Ctrl-C flushes and exits cleanly)"
+        + (f" [venue ids: {leg_note}]" if leg_note else "")
     )
 
     await stop_event.wait()
@@ -945,13 +2146,22 @@ async def _run_async(
         server.shutdown()
         server.server_close()
     with lock:
-        con.close()
-    log(f"[collector] closed. rows this session: {writer.rows_written}")
+        if rotation:
+            manager.close_all()
+        else:
+            con.close()
+    # Closed-day drops are logged per event during the run; the session total is
+    # restated here so a long run's honest losses are visible at a glance (§3c).
+    dropped = getattr(writer, "rows_dropped_closed", 0)
+    log(
+        f"[collector] closed. rows this session: {writer.rows_written}"
+        + (f"; rows DROPPED for closed days: {dropped}" if dropped else "")
+    )
 
 
 def run(
     symbol: str = "BTCUSDT",
-    exchanges: tuple[str, ...] = ("binancef", "bybit"),
+    exchanges: tuple[str, ...] = ("binancef", "bybit", "okx", "coinbase", "deribit"),
     db: Any = DEFAULT_DB,
     api_port: Optional[int] = None,
     retention_days: Optional[int] = None,
@@ -959,25 +2169,34 @@ def run(
 ) -> None:
     """Run the collector daemon until SIGINT/SIGTERM (blocking entry point).
 
+    ``db``: a DIRECTORY (the default, ``data/ticks``) selects §3c daily rotation
+    — one file per UTC day, routed by event time; a ``.duckdb`` FILE selects the
+    legacy single-file mode (back-compat for tests + the GH-release archive path).
+
     Raises
     ------
     RuntimeError
         If the opt-in deps (duckdb/websockets) are missing — with the exact
         install command. Raised HERE, at run time, never at import time.
     ValueError
-        On an unknown exchange code. ``coinbase`` is rejected explicitly (spot
-        tape leg is terminal-only for now — DESIGN §3 deviation, documented in
-        the module docstring) rather than silently recording nothing.
+        On an unknown exchange code, a bad retention value, or retention_days
+        combined with rotation mode (closed-day pruning belongs to the HF
+        lifecycle's verify-then-delete flow, §3c — an in-place DELETE would
+        break day-file immutability).
     """
     _require_deps(need_ws=True)
     bad = [e for e in exchanges if e not in _ACCEPTED_EXCHANGES]
     if bad:
         raise ValueError(
-            f"unknown exchange code(s) {bad!r}; accepted: {list(_ACCEPTED_EXCHANGES)} "
-            "(coinbase spot tape is terminal-only for now — not collected)"
+            f"unknown exchange code(s) {bad!r}; accepted: {list(_ACCEPTED_EXCHANGES)}"
         )
     if retention_days is not None and retention_days < 1:
         raise ValueError("retention_days must be >= 1 (omit it for keep-all, the default)")
+    if retention_days is not None and _is_rotation_path(db):
+        raise ValueError(
+            "retention_days applies to legacy single-file mode only — in rotation "
+            "mode pruning is the HF lifecycle's job (verify offsite, then delete; §3c)"
+        )
     try:
         asyncio.run(_run_async(symbol, exchanges, db, api_port, retention_days, log=log))
     except KeyboardInterrupt:

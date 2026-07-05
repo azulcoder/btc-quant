@@ -36,6 +36,8 @@ Usage
 -----
     python3 scripts/check_ticks.py                       # data/ticks.duckdb, 24 h
     python3 scripts/check_ticks.py --db /path/copy.duckdb --hours 6
+    python3 scripts/check_ticks.py --db data/ticks       # DIRECTORY of day files (§3c
+                                                         # rotation) — read-only union
     python3 scripts/check_ticks.py --json | jq .overall  # machine output
 
 Requires the opt-in collector deps:  pip install -r requirements-collector.txt
@@ -46,6 +48,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -156,6 +159,71 @@ class StoreLocked(Exception):
     """Raised when the collector daemon holds the DuckDB write lock."""
 
 
+# Day-rotation file names (DESIGN §3c: data/ticks/YYYY-MM-DD.duckdb).
+_DAY_FILE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _store_size_bytes(path: Path) -> int:
+    """Store size on disk: the file itself, or (dir mode) every day file summed."""
+    if path.is_dir():
+        return sum(f.stat().st_size for f in path.glob("*.duckdb"))
+    return path.stat().st_size
+
+
+def connect_dir_readonly(
+    day_files: list[Path],
+) -> tuple["duckdb.DuckDBPyConnection", list[Path], list[Path]]:
+    """Read-only UNION over per-day stores (DESIGN §3c rotation) so the whole
+    existing report runs unchanged over the dataset the day files jointly hold.
+
+    ATTACHes each day file READ_ONLY into an in-memory db, then CREATE VIEW
+    <table> AS UNION ALL over every attached catalog that has that table
+    (v1-migrated days may lack the v2 tables — a view unions what exists).
+    Each view exposes a synthetic "rowid" column (day_index * 2^40 + rowid):
+    sec_integrity orders by insertion via rowid, per-file rowid restarts at 0,
+    and the offset preserves arrival order across day files. A day file locked
+    by the live writer (today's open file) is SKIPPED, not fought over — dir
+    mode's whole point is grading closed days WITHOUT stopping the collector.
+    Returns (con, attached_files, skipped_locked_files).
+    """
+    con = duckdb.connect()  # in-memory shell; the day files stay read-only
+    attached: list[tuple[str, Path]] = []
+    skipped: list[Path] = []
+    for i, f in enumerate(sorted(day_files)):
+        alias = f"d{i}"
+        try:
+            con.execute(
+                f"ATTACH '{str(f).replace(chr(39), chr(39) * 2)}' AS {alias} (READ_ONLY)"
+            )
+        except duckdb.Error as exc:
+            if "lock" in str(exc).lower():
+                skipped.append(f)  # the writer owns it — honest skip, not a fight
+                continue
+            raise
+        attached.append((alias, f))
+
+    # Which attached catalog has which table (information_schema spans catalogs).
+    by_table: dict[str, list[str]] = {}
+    for catalog, name in con.execute(
+        "SELECT table_catalog, table_name FROM information_schema.tables "
+        "WHERE table_schema = 'main'"
+    ).fetchall():
+        if catalog in {a for a, _ in attached}:
+            by_table.setdefault(name, []).append(catalog)
+    for name, catalogs in by_table.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            continue  # never interpolate a weird identifier from a foreign file
+        union = " UNION ALL ".join(
+            # Offset = the catalog's attach index (dN == Nth day, files sorted by
+            # date) so arrival order is day-then-rowid; 2^40 rows/day is
+            # unreachable (~10^12 vs the store's ~10^6/day) — no collisions.
+            f'SELECT *, {int(c[1:])}::BIGINT * 1099511627776 + rowid AS "rowid" FROM {c}.{name}'
+            for c in sorted(catalogs, key=lambda a: int(a[1:]))
+        )
+        con.execute(f"CREATE VIEW {name} AS {union}")  # noqa: S608 — validated names
+    return con, [f for _, f in attached], skipped
+
+
 def connect_readonly(path: Path) -> "duckdb.DuckDBPyConnection":
     """Open the store read_only=True, retrying ONCE on a lock conflict.
 
@@ -180,7 +248,13 @@ def connect_readonly(path: Path) -> "duckdb.DuckDBPyConnection":
 # Section 1 — Inventory: what is in the file, and how fast is it growing?      #
 # --------------------------------------------------------------------------- #
 def sec_inventory(
-    con, present: set, db_path: Path, hours: float, wall_ms: int
+    con,
+    present: set,
+    db_path: Path,
+    hours: float,
+    wall_ms: int,
+    day_files: Optional[list[Path]] = None,
+    skipped_locked: Optional[list[Path]] = None,
 ) -> tuple[dict, Optional[int]]:
     """Rows / exchanges / ts span per table, file size, projected GB/30d.
 
@@ -228,7 +302,7 @@ def sec_inventory(
     # ESTIMATE (DuckDB compression + block overhead vary with table mix) — the
     # point is a sanity order-of-magnitude against DESIGN §3's honest sizing note
     # (~0.5–1 GB/month trades + ~0.1 GB/month depth), not an accounting number.
-    size_b = db_path.stat().st_size
+    size_b = _store_size_bytes(db_path)
     window_start = (anchor if anchor is not None else wall_ms) - int(hours * 3_600_000)
     win_rows = 0
     for table in TABLES:
@@ -249,6 +323,19 @@ def sec_inventory(
     else:
         lines.append("store is empty — schema present, no rows yet (young store: OK)")
 
+    # Dir mode (§3c day rotation): one honest inventory line per day file, plus
+    # the ones the live writer still holds — skipped, never fought over.
+    day_data: Optional[dict] = None
+    if day_files is not None:
+        day_data = {"attached": [str(f) for f in day_files],
+                    "skipped_locked": [str(f) for f in (skipped_locked or [])]}
+        for f in day_files:
+            lines.append(f"day {f.name:<20} {_fmt_bytes(f.stat().st_size)}")
+        for f in skipped_locked or []:
+            lines.append(
+                f"day {f.name:<20} SKIPPED — locked by the live writer (not graded this run)"
+            )
+
     return (
         {
             "name": "inventory",
@@ -258,6 +345,7 @@ def sec_inventory(
                 "tables": per_table, "file_bytes": size_b, "total_rows": total_rows,
                 "window_rows": win_rows, "rows_per_hour": rows_per_h,
                 "projected_gb_30d": proj_gb_30d, "anchor_ms": anchor,
+                "day_files": day_data,
             },
         },
         anchor,
@@ -544,7 +632,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--db",
         default="data/ticks.duckdb",
-        help="DuckDB store path (the collector's output, or a copy of it).",
+        help="DuckDB store path (the collector's output, or a copy of it) — or a "
+        "DIRECTORY of day files (data/ticks/YYYY-MM-DD.duckdb, DESIGN §3c "
+        "rotation), unioned read-only; locked day files are skipped honestly.",
     )
     parser.add_argument(
         "--hours",
@@ -560,7 +650,13 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_report(con, db_path: Path, hours: float) -> dict:
+def build_report(
+    con,
+    db_path: Path,
+    hours: float,
+    day_files: Optional[list[Path]] = None,
+    skipped_locked: Optional[list[Path]] = None,
+) -> dict:
     """Run every section against an open read-only connection -> report dict."""
     wall_ms = int(time.time() * 1000)
     present = {
@@ -570,7 +666,9 @@ def build_report(con, db_path: Path, hours: float) -> dict:
         ).fetchall()
     }
 
-    inventory, anchor = sec_inventory(con, present, db_path, hours, wall_ms)
+    inventory, anchor = sec_inventory(
+        con, present, db_path, hours, wall_ms, day_files, skipped_locked
+    )
     # Window anchored at the newest observation (see sec_inventory WHY); empty
     # store falls back to wall clock, which leaves every window trivially empty
     # — and empty is graded OK throughout (young store, not corruption).
@@ -635,22 +733,51 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"no store yet at {db_path} — run `make collector` to start recording. (exit 0)")
         return 0
 
-    try:
-        con = connect_readonly(db_path)
-    except StoreLocked:
-        print(
-            "ERROR: locked — run while collector is stopped, or copy the file "
-            f"(cp {db_path} /tmp/ticks-copy.duckdb && check --db it).",
-            file=sys.stderr,
+    day_files: Optional[list[Path]] = None
+    skipped: list[Path] = []
+    if db_path.is_dir():
+        # Dir mode (§3c day rotation): union every day file read-only. Locked
+        # files (today's, while the collector writes) are skipped — the closed
+        # days get graded WITHOUT a collector stop.
+        candidates = sorted(
+            f for f in db_path.glob("*.duckdb") if _DAY_FILE_RE.fullmatch(f.stem)
         )
-        return 2
-    except duckdb.Error as exc:
-        # File exists but will not open read-only: that IS a failing report card.
-        print(f"ERROR: cannot open store: {exc}", file=sys.stderr)
-        return 1
+        if not candidates:
+            print(
+                f"no day files yet in {db_path} — run `make collector` to start "
+                "recording. (exit 0)"
+            )
+            return 0
+        try:
+            con, day_files, skipped = connect_dir_readonly(candidates)
+        except duckdb.Error as exc:
+            print(f"ERROR: cannot open store: {exc}", file=sys.stderr)
+            return 1
+        if not day_files:
+            con.close()
+            print(
+                f"ERROR: every day file in {db_path} is locked by the running "
+                "collector — nothing readable yet (try again once a day has closed).",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        try:
+            con = connect_readonly(db_path)
+        except StoreLocked:
+            print(
+                "ERROR: locked — run while collector is stopped, or copy the file "
+                f"(cp {db_path} /tmp/ticks-copy.duckdb && check --db it).",
+                file=sys.stderr,
+            )
+            return 2
+        except duckdb.Error as exc:
+            # File exists but will not open read-only: that IS a failing report card.
+            print(f"ERROR: cannot open store: {exc}", file=sys.stderr)
+            return 1
 
     try:
-        report = build_report(con, db_path, args.hours)
+        report = build_report(con, db_path, args.hours, day_files, skipped)
     finally:
         con.close()
 

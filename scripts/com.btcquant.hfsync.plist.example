@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- btc-quant DAILY Hugging Face tick sync as a macOS launchd user agent
+     (DESIGN-orderflow-terminal.md §3c HF lifecycle).
+
+     Runs `make hf-sync` once a day: every CLOSED UTC day file under data/ticks/
+     is exported to parquet, uploaded to the HF dataset, byte-verified on the Hub,
+     and ONLY THEN deleted locally (today + yesterday always stay local for the
+     BYOD replay API). It needs NO collector stop — the writer only ever holds
+     today (+ yesterday during the 5-minute midnight grace window), and the sync
+     touches only days the writer has already closed.
+
+     TIMEZONE HONESTY — StartCalendarInterval fires in the machine's LOCAL time,
+     not UTC. The target is ~00:20 UTC (safely past the collector's midnight
+     rotation grace window). The Hour below is computed for UTC+7 (WIB /
+     Asia/Jakarta, which has no DST): 00:20 UTC = 07:20 local. If your machine
+     runs another timezone, recompute: local_hour = (0 + your_UTC_offset) mod 24
+     — and note that zones WITH daylight saving drift by an hour twice a year;
+     launchd will not compensate. That drift is harmless here: upload_hf.py's
+     closed-day rule only ever uploads a day whose file is verifiably closed, so
+     a job that fires an hour early simply skips yesterday and catches it on the
+     next run (an hour late just uploads an hour later).
+
+     ARGS=--yes: launchd jobs have no tty, and without --yes upload_hf.py
+     uploads + verifies but SKIPS the local deletes (its honest no-tty
+     degradation). --yes is the explicit authorization to free the disk after
+     each day is Hub-verified — nothing is ever deleted before that.
+
+     NO KeepAlive: this is a BATCH job — it runs, exits, and launchd re-fires
+     it on schedule. (KeepAlive would restart it in a loop; that is for the
+     collector daemon's plist, not for this one.) If the Mac is asleep at the
+     scheduled minute, launchd runs the job on the next wake instead.
+
+     Install:
+       1. cp scripts/com.btcquant.hfsync.plist.example \
+            ~/Library/LaunchAgents/com.btcquant.hfsync.plist
+       2. Edit WorkingDirectory if the repo lives elsewhere, the make path
+          (`which make`) if needed, and Hour for your UTC offset (see above).
+          One-time on this machine: `hf auth login` (the upload uses your own
+          HF login; every recorded feed itself is keyless).
+       3. launchctl load ~/Library/LaunchAgents/com.btcquant.hfsync.plist
+     Status:   launchctl list | grep btcquant
+     Run now:  launchctl start com.btcquant.hfsync
+     Stop:     launchctl unload ~/Library/LaunchAgents/com.btcquant.hfsync.plist
+     Logs:     /tmp/btcquant-hfsync.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.btcquant.hfsync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/make</string>
+    <string>hf-sync</string>
+    <string>ARGS=--yes</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/azul/Code/btc-quant</string>
+
+  <!-- LOCAL time (see the timezone note above): 07:20 UTC+7 == 00:20 UTC. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>7</integer>
+    <key>Minute</key>
+    <integer>20</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/btcquant-hfsync.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/btcquant-hfsync.log</string>
+</dict>
+</plist>

@@ -242,6 +242,53 @@ Load order: `vendor/lightweight-charts.js` → `livewire.js` → `terminal-adapt
   maker-inversion), book best-bid/ask after snapshot+delta, footprint bar delta = Σsigned,
   CVD bucket sums = total, VP value-area ∈ [session low, high], agg book merge math.
 
+## 3c. Collector v2 — daily rotation + full keyless coverage + Hugging Face lifecycle (binding)
+
+Decisions (user, 2026-07-05): Tier-1..4 completeness · daily-rotation architecture (zero
+maintenance gap) · **HF Datasets primary** (GH Release `ticks-2026-07` stays as a frozen
+artifact; archive_ticks.py remains functional but is no longer the scheduled path).
+
+**Rotation.** Store becomes per-UTC-day files `data/ticks/YYYY-MM-DD.duckdb` (same schema
+per file). The writer routes every row by **UTC day of its `ts_ms`** (event time, not
+arrival time — day files are dataset partitions, and partitions must mean event time).
+Around midnight both day files stay open during a **5-minute grace window** (late/out-of-
+order rows land in yesterday correctly), then yesterday is flushed + closed. A closed day
+file is immutable — that is what makes gap-free upload possible. `--migrate-legacy` splits
+an existing single `ticks.duckdb` into day files (one-shot). BYOD API serves any range
+covered by LOCAL day files (today + yesterday always kept; older days answer 410 with an
+'archived to HF' hint). The API contract (paths/params/shapes) is UNCHANGED — terminal
+BYOD replay and L1 must stay green.
+
+**New coverage (fixtures `_v2_notes` + reuse of the JS-proven frames):**
+- trades: + **OKX** WS (`sz×ctVal` → coin, taker side as-is), + **Coinbase spot** WS
+  (maker-side INVERSION — same §0.6 rail as the JS adapter), + **binancef via REST
+  `aggTrades` poll** (5 s, cursor `fromId` = last `a`+1 — gapless by aggTradeId; `m`
+  true → SELL aggressor; the WS topic-filter (§0.2) does not apply to REST).
+- depth: store **top-50** (bybit `orderbook.50` full; **OKX `books`** top-50 ctVal-scaled);
+  binancef stays top-20 (that is the whole wire).
+- funding_mark + open_interest: + OKX REST 60 s (fundingRate/oiCcy — oiCcy is COIN).
+- NEW `crowding(exchange, symbol, ts_ms, metric VARCHAR, value DOUBLE)` — binancef
+  `futures/data` endpoints @ 5 m: `taker_buy_sell_ratio`, `top_position_ls_ratio`,
+  `global_account_ls_ratio`, `oi_sum_coin`, `oi_sum_usd` (long format: one row per metric).
+- NEW `dvol(ts_ms, index_price)` — Deribit 60 s.
+- NEW `options_chain(ts_ms, name, expiry_ts, strike, cp, iv, oi, volume, mark_price,
+  underlying)` — Deribit book summary snapshot **hourly** (iv stored as DECIMAL — the
+  /100 rail; this starts the VRP/skew research clock).
+
+**HF lifecycle** (`scripts/upload_hf.py`, `make hf-sync`, launchd
+`com.btcquant.hfsync.plist.example` daily ~00:20 UTC — needs NO collector stop):
+dataset repo `azulcoder/btc-quant-ticks` (create_repo exist_ok; token from the user's own
+HF login — an account credential, not market-data access); layout
+`data/date=YYYY-MM-DD/{table}.parquet` (hive-style) + `manifests/MANIFEST-<date>.json`
+(sha256, rows, ranges, provenance) + an auto-generated dataset card (schema, honesty
+rails, keyless provenance, 'gaps stay gaps'). Flow per closed local day: export → re-read
+verify → sha256 → upload → **verify on HF (size + LFS sha when available)** → only then
+delete the local day file (today + yesterday never deleted). Query-back:
+`read_parquet('hf://datasets/azulcoder/btc-quant-ticks/data/date=YYYY-MM-DD/trades.parquet')`
+and `load_dataset` streaming for ML. `check_ticks.py` learns dir/glob mode (union view
+across day files). Same prune-safety creed as the §3 lifecycle: no offsite verification,
+no local delete.
+
 ## 4b. O-2 contracts — heatmaps + OKX leg (binding, same style as §4)
 
 Rails first: spoof/iceberg detection is a **heuristic** (labeled on every emitted event and

@@ -5,3 +5,4 @@
 # Install with:  pip install -r requirements-collector.txt
 duckdb>=1.0        # single-file column store for data/ticks.duckdb (gitignored)
 websockets>=12     # asyncio WS client for Bybit v5 / Binance fstream public feeds
+huggingface_hub>=1.0  # HF dataset lifecycle (scripts/upload_hf.py: closed day files -> hf://datasets, DESIGN §3c)

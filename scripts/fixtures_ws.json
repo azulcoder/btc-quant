@@ -6756,5 +6756,100 @@
     }
    ]
   }
- ]
+ ],
+ "binancef_rest_taker_ls": [
+  {
+   "buySellRatio": "1.6465",
+   "sellVol": "63.3710",
+   "buyVol": "104.3410",
+   "timestamp": 1783235100000
+  },
+  {
+   "buySellRatio": "1.7040",
+   "sellVol": "35.7860",
+   "buyVol": "60.9780",
+   "timestamp": 1783235400000
+  }
+ ],
+ "binancef_rest_top_pos_ls": [
+  {
+   "symbol": "BTCUSDT",
+   "longAccount": "0.5543",
+   "longShortRatio": "1.2438",
+   "shortAccount": "0.4457",
+   "timestamp": 1783235400000
+  },
+  {
+   "symbol": "BTCUSDT",
+   "longAccount": "0.5542",
+   "longShortRatio": "1.2433",
+   "shortAccount": "0.4458",
+   "timestamp": 1783235700000
+  }
+ ],
+ "binancef_rest_global_ls": [
+  {
+   "symbol": "BTCUSDT",
+   "longAccount": "0.5960",
+   "longShortRatio": "1.4752",
+   "shortAccount": "0.4040",
+   "timestamp": 1783235400000
+  },
+  {
+   "symbol": "BTCUSDT",
+   "longAccount": "0.5957",
+   "longShortRatio": "1.4734",
+   "shortAccount": "0.4043",
+   "timestamp": 1783235700000
+  }
+ ],
+ "binancef_rest_oi_hist": [
+  {
+   "symbol": "BTCUSDT",
+   "sumOpenInterest": "105698.76200000",
+   "sumOpenInterestValue": "6631445198.99420000",
+   "CMCCirculatingSupply": "20052225.00000000",
+   "timestamp": 1783235400000
+  },
+  {
+   "symbol": "BTCUSDT",
+   "sumOpenInterest": "105690.62300000",
+   "sumOpenInterestValue": "6630497001.52611500",
+   "CMCCirculatingSupply": "20052225.00000000",
+   "timestamp": 1783235700000
+  }
+ ],
+ "binancef_rest_aggtrades": [
+  {
+   "a": 3371157745,
+   "p": "62746.70",
+   "q": "0.026",
+   "nq": "0.026",
+   "f": 7868422572,
+   "l": 7868422572,
+   "T": 1783235902382,
+   "m": false
+  },
+  {
+   "a": 3371157746,
+   "p": "62746.60",
+   "q": "0.002",
+   "nq": "0.002",
+   "f": 7868422573,
+   "l": 7868422573,
+   "T": 1783235902536,
+   "m": true
+  },
+  {
+   "a": 3371157747,
+   "p": "62746.70",
+   "q": "0.012",
+   "nq": "0.012",
+   "f": 7868422574,
+   "l": 7868422574,
+   "T": 1783235902803,
+   "m": false
+  }
+ ],
+ "_v2_notes": "Collector v2 fixtures 2026-07-05. Binance futures/data crowding endpoints (5m): taker buySellRatio, top-trader position L/S, global account L/S, OI hist (sumOpenInterest coin + Value USD). aggTrades REST: cursor = fromId (field a, aggTradeId, gapless increment); m=true means buyer-is-maker -> SELL aggressor (DESIGN 0.6). Python collector reuses the SAME JS-proven fixture frames for okx/coinbase trade normalizers."
 }
