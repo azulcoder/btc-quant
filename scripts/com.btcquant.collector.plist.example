@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- btc-quant tick collector as a macOS launchd user agent (DESIGN §3 / §6).
+
+     The collector's research value is CONTINUITY: every hour the Mac sleeps is an
+     honest gap in data/ticks.duckdb (gaps stay gaps — they are never interpolated),
+     and MinBTL clearance for the order-flow research families is gated on accumulated
+     history. This agent keeps the daemon alive across logins/crashes; pair it with
+     `caffeinate -s` (or Energy Saver → prevent sleep on power) so the machine itself
+     stays awake while on AC power.
+
+     Install:
+       1. cp scripts/com.btcquant.collector.plist.example \
+            ~/Library/LaunchAgents/com.btcquant.collector.plist
+       2. Edit BOTH occurrences of /Users/azul/Code/btc-quant if the repo lives
+          elsewhere, and the python3 path (`which python3`).
+       3. launchctl load ~/Library/LaunchAgents/com.btcquant.collector.plist
+     Status:  launchctl list | grep btcquant
+     Stop:    launchctl unload ~/Library/LaunchAgents/com.btcquant.collector.plist
+     Logs:    /tmp/btcquant-collector.log (KeepAlive restarts on crash; SIGTERM on
+              unload triggers the collector's clean final flush).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.btcquant.collector</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Frameworks/Python.framework/Versions/3.13/bin/python3</string>
+    <string>scripts/run_collector.py</string>
+    <string>--symbol</string><string>BTCUSDT</string>
+    <string>--exchanges</string><string>binancef,bybit</string>
+    <string>--db</string><string>data/ticks.duckdb</string>
+    <string>--api-port</string><string>8788</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/azul/Code/btc-quant</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/btcquant-collector.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/btcquant-collector.log</string>
+</dict>
+</plist>

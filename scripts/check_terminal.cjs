@@ -110,6 +110,54 @@
 //                           math source), PCR-by-OI exact on constructed
 //                           rows AND vs hand-summed raw fixture OI
 //
+// O-5 additions (DESIGN §4e "check_terminal.cjs additions", binding list):
+//  31. Polymarket normalizer → the §4e STRING trap: `outcomePrices` is a
+//                           STRING holding a JSON array of STRINGS —
+//                           yesPct = Number(JSON.parse(s)[0])·100, a plain
+//                           0–100 NUMBER; event titles/volumes EXACT vs the
+//                           /events?tag_slug=bitcoin fixture; closed and
+//                           undecodable markets SKIPPED (never a guessed
+//                           50%); non-array → null
+//  32. ToA news normalizer → ts/title/source/url exact vs fixture, missing
+//                           `symbols` → [] (two real fixture rows lack it),
+//                           newest-first ordering imposed (input order must
+//                           not matter), undatable/untitled rows dropped
+//  33. econ local-file normalizer → SYNTHETIC file object (fetchedTs +
+//                           fixture events — the §4e no-CORS design means
+//                           the input is scripts/fetch_econ.py's output):
+//                           fetchedTs passthrough UNCHANGED, ts =
+//                           Date.parse of the offset-carrying date
+//                           (08:15-04:00 ≡ 12:15Z, hand-checked), ascending
+//                           ts sort imposed, forecast/previous stay strings
+//                           ('' stays '', never a fake 0), undatable dropped
+//  34. journalStats        → 3-trade HAND-COMPUTED exactness (the full hand
+//                           math is in the group's comments): R = [2, −0.5,
+//                           +0.5] → winRate 2/3, expectancy 2/3, avgWin
+//                           1.25, avgLoss −0.5, PF 5, SQN 4/√19 (ddof=1),
+//                           maxDrawR 0.5, byTag split — Tharp definitions
+//                           mirrored from quant.js/risk.py, R = pnl/declared
+//                           riskUsd (§4e)
+//  35. riskUsd ≤ 0 exclusion → rows with riskUsd 0 / negative / NaN are
+//                           EXCLUDED AND COUNTED (`excluded`), the R stats
+//                           are bit-identical to group 34's (bad rows can't
+//                           tilt them), and the mandatory §4e label rides
+//                           the output VERBATIM
+//  36. calendarReturns     → UTC close-ts bucketing (day key + hour key from
+//                           the SAME trade, hand-checked), same-day trades
+//                           SUM, and the ISO-week edges: Mon 2024-12-30 →
+//                           2025-W01, Fri 2027-01-01 → 2026-W53 (the
+//                           Thursday rule — raw-year keys would split both
+//                           weeks); unstatable rows never touch a bucket
+//  37. journal CSV round-trip → export→import IDENTITY (deepStrictEqual)
+//                           through a note carrying comma + quotes + a
+//                           NEWLINE and a ctx JSON column (RFC-4180 quoting
+//                           is the whole point); numbers reproduce exactly
+//                           (String↔Number shortest-round-trip); bad rows
+//                           (side, non-numeric riskUsd, column count, ctx
+//                           non-JSON) land in `errors` with 1-based line
+//                           numbers while good rows still import — §4e:
+//                           import NEVER silently coerces
+//
 // Exit: 0 with one PASS line per group; non-zero with a clear FAIL message
 // (plus stack) if any group breaks. Run: node scripts/check_terminal.cjs
 
@@ -1698,6 +1746,333 @@ group('unsigned GEX (black76 Γ>0, Σ|Γ|·OI hand sum) + PCR by OI', () => {
   assert.ok(cOi > 0 && pOi > 0, 'fixture precondition: both calls and puts carry OI');
   const mpAll = Q.maxPain(ch.rows.map((x) => ({ strike: x.strike, type: x.cp, oi: x.oi, underlying: x.underlying })));
   assert.ok(approx(mpAll.pcRatio, pOi / cOi, 1e-12), 'chain PCR by OI ' + mpAll.pcRatio + ' != raw-wire hand sum ' + (pOi / cOi));
+});
+
+// ─── 31. Polymarket /events normalizer — the §4e STRING-outcomePrices trap ───
+group('polymarket events normalizer (STRING outcomePrices → yesPct number)', () => {
+  const raw = FX.polymarket_events;
+  const out = H.normalizePolymarketEvents(raw);
+  assert.ok(Array.isArray(out), 'normalizer must return an array for the fixture');
+  assert.strictEqual(out.length, 3, 'all 3 fixture events survive (every one has readable open markets)');
+
+  // Event titles EXACT vs the captured /events?tag_slug=bitcoin payload.
+  assert.strictEqual(out[0].title, 'Bitcoin above ___ on July 5?');
+  assert.strictEqual(out[1].title, 'What price will Bitcoin hit in July?');
+  assert.strictEqual(out[2].title, 'What price will Bitcoin hit June 29-July 5?');
+
+  // THE §4e TRAP: outcomePrices arrives as a STRING containing a JSON array
+  // of STRINGS ("[\"0.9995\", \"0.0005\"]"). Assert the fixture really is
+  // that shape (the trap stays pinned), then that the normalizer decoded it
+  // into a PLAIN 0–100 NUMBER: yesPct = Number(JSON.parse(s)[0]) × 100.
+  assert.strictEqual(typeof raw[0].markets[0].outcomePrices, 'string',
+    'fixture precondition: outcomePrices is a STRING (the wire shape)');
+  const m0 = out[0].markets[0];
+  assert.strictEqual(typeof m0.yesPct, 'number', 'yesPct must be a Number, not a string');
+  assert.ok(approx(m0.yesPct, 99.95, 1e-9), '"0.9995" → 99.95, got ' + m0.yesPct);
+  assert.ok(approx(out[1].markets[0].yesPct, 0.15, 1e-9), '"0.0015" → 0.15, got ' + out[1].markets[0].yesPct);
+  for (const ev of out) {
+    for (const m of ev.markets) {
+      assert.ok(Number.isFinite(m.yesPct) && m.yesPct >= 0 && m.yesPct <= 100,
+        'yesPct in [0,100]: ' + m.yesPct);
+    }
+  }
+
+  // Field passthrough exact: event vol24h / market vol24h / question / endTs.
+  assert.strictEqual(out[0].vol24h, 864130.3836839998);
+  assert.strictEqual(m0.vol24h, 68312.595);
+  assert.strictEqual(m0.question, 'Will the price of Bitcoin be above $50,000 on July 5?');
+  assert.strictEqual(out[0].endTs, Date.parse('2026-07-05T16:00:00Z'));
+  assert.strictEqual(out[0].markets.length, 4, 'all 4 open markets kept');
+
+  // Skip rails (§4e: a market that can't be read is SKIPPED, never guessed):
+  // closed market, non-JSON prices, non-numeric price — only the good one
+  // survives; an event with NO readable market renders nothing at all.
+  const synth = [{
+    title: 'synthetic', endDate: '2026-08-01T00:00:00Z', volume24hr: 1,
+    markets: [
+      { question: 'closed', outcomePrices: '["0.5", "0.5"]', closed: true, volume24hr: 1 },
+      { question: 'not json', outcomePrices: 'oops', closed: false, volume24hr: 1 },
+      { question: 'not a number', outcomePrices: '["x", "y"]', closed: false, volume24hr: 1 },
+      { question: 'good', outcomePrices: '["0.25", "0.75"]', closed: false, volume24hr: 2 },
+    ],
+  }, {
+    title: 'all unreadable', endDate: '2026-08-01T00:00:00Z', volume24hr: 1,
+    markets: [{ question: 'bad', outcomePrices: 'nope', closed: false }],
+  }];
+  const sOut = H.normalizePolymarketEvents(synth);
+  assert.strictEqual(sOut.length, 1, 'the no-readable-market event is dropped entirely');
+  assert.strictEqual(sOut[0].markets.length, 1, 'closed + undecodable markets skipped, never guessed');
+  assert.strictEqual(sOut[0].markets[0].question, 'good');
+  assert.ok(approx(sOut[0].markets[0].yesPct, 25, 1e-9));
+
+  // Non-array (error body / null) → null, the caller's 'awaiting' state.
+  assert.strictEqual(H.normalizePolymarketEvents(null), null);
+  assert.strictEqual(H.normalizePolymarketEvents({ error: 'x' }), null);
+});
+
+// ─── 32. Tree of Alpha news normalizer (ts/title/source + ordering) ─────────
+group('toa news normalizer (ts/title/source exact, newest-first, symbols default)', () => {
+  const raw = FX.toa_news;
+  const out = H.normalizeToaNews(raw);
+  assert.strictEqual(out.length, 3, 'all 3 fixture rows have a title and a finite time');
+
+  // Exact fields vs the captured /api/news rows; fixture is newest-first
+  // already, so out[0] is the newest row.
+  assert.strictEqual(out[0].ts, 1783206550597);
+  assert.strictEqual(out[0].title, 'WHITEHOUSE: Saving Americas Story');
+  assert.strictEqual(out[0].source, 'Blogs');
+  assert.strictEqual(out[0].url, 'https://www.whitehouse.gov/releases/2026/07/saving-americas-story');
+  assert.deepStrictEqual(out[0].symbols, [], 'explicit empty symbols passes through');
+  // Two REAL fixture rows carry NO `symbols` key at all → [] (never undefined
+  // — the view maps over it unconditionally).
+  assert.ok(!('symbols' in raw[1]), 'fixture precondition: row 1 has no symbols key');
+  assert.deepStrictEqual(out[1].symbols, []);
+  assert.deepStrictEqual(out[2].symbols, []);
+
+  // Ordering is IMPOSED, not inherited: reversed input → identical output.
+  const rev = H.normalizeToaNews(raw.slice().reverse());
+  assert.deepStrictEqual(rev, out, 'newest-first must not depend on wire order');
+  for (let i = 1; i < out.length; i++) assert.ok(out[i - 1].ts >= out[i].ts, 'descending ts');
+
+  // Drop rails: undatable / untitled rows vanish; non-string symbols filtered.
+  const synth = H.normalizeToaNews([
+    { title: 'ok', time: 5, source: 'Twitter', url: '', symbols: ['BTCUSDT', 7, null, 'ETH'] },
+    { title: 'no time', source: 'Twitter' },
+    { time: 6, source: 'Twitter' },                       // no title
+    { title: '', time: 7 },                                // empty title
+  ]);
+  assert.strictEqual(synth.length, 1);
+  assert.deepStrictEqual(synth[0].symbols, ['BTCUSDT', 'ETH'], 'non-string symbol entries filtered');
+  assert.strictEqual(H.normalizeToaNews(null), null);
+  assert.strictEqual(H.normalizeToaNews({}), null);
+});
+
+// ─── 33. econ local-file normalizer (fetchedTs passthrough + ts sort) ────────
+group('econ local-file normalizer (synthetic file object: fetchedTs passthrough, ts sort)', () => {
+  // §4e design: faireconomy has NO CORS → the browser reads the LOCAL file
+  // scripts/fetch_econ.py writes ({fetchedTs, events}). The normalizer's
+  // input is therefore a SYNTHETIC file object built from the pinned week
+  // rows — exactly what fetchEconLocal() would hand it.
+  const FETCHED = 1751791234567;
+  const file = { fetchedTs: FETCHED, events: FX.ff_econ_sample };
+  const out = H.normalizeEconLocal(file);
+  assert.ok(out, 'valid file object must normalize');
+
+  // fetchedTs passes through UNCHANGED — it is the §4e fetch-age stamp the
+  // EconView must display; touching it would forge the mirror's age.
+  assert.strictEqual(out.fetchedTs, FETCHED);
+
+  assert.strictEqual(out.events.length, 5, 'all 5 fixture rows carry a parseable date');
+  // Hand-checked offset math: '2026-06-28T08:15:00-04:00' ≡ 12:15 UTC.
+  assert.strictEqual(out.events[0].ts, Date.UTC(2026, 5, 28, 12, 15, 0));
+  assert.strictEqual(out.events[0].title, 'RBA Gov Bullock Speaks');
+  assert.strictEqual(out.events[0].country, 'AUD');
+  assert.strictEqual(out.events[0].impact, 'Medium');
+  // forecast/previous STAY STRINGS: '' when the source had none (speeches) —
+  // rendered '—', never a fake 0; real values pass through verbatim.
+  assert.strictEqual(out.events[0].forecast, '');
+  const retail = out.events.find((e) => e.title === 'Retail Sales y/y');
+  assert.strictEqual(retail.forecast, '3.1%');
+  assert.strictEqual(retail.previous, '2.1%');
+  for (let i = 1; i < out.events.length; i++) {
+    assert.ok(out.events[i - 1].ts <= out.events[i].ts, 'ascending ts (upcoming-events order)');
+  }
+
+  // Sort is IMPOSED: reversed input rows → identical ascending output.
+  const rev = H.normalizeEconLocal({ fetchedTs: FETCHED, events: FX.ff_econ_sample.slice().reverse() });
+  assert.deepStrictEqual(rev, out, 'ascending sort must not depend on file order');
+
+  // Drop rails: undatable / untitled rows vanish; garbage input → null.
+  const synth = H.normalizeEconLocal({
+    fetchedTs: 1,
+    events: [
+      { title: 'ok', date: '2026-07-06T08:00:00-04:00', country: 'USD', impact: 'High', forecast: '', previous: '' },
+      { title: 'undatable', date: 'not-a-date' },
+      { date: '2026-07-06T09:00:00-04:00' },              // no title
+    ],
+  });
+  assert.strictEqual(synth.events.length, 1);
+  assert.strictEqual(synth.events[0].impact, 'High');
+  assert.strictEqual(H.normalizeEconLocal(null), null);
+  assert.strictEqual(H.normalizeEconLocal({ events: 'nope' }), null);
+});
+
+// ─── 34. journalStats — 3-trade hand-computed exactness (§4e Tharp block) ────
+//
+// The 3 trades and the FULL hand math (R = pnl / user-declared riskUsd, §4e):
+//   t1 long  100 → 110, size 1, risk  $5 → pnl = (110−100)·1      = +$10 → R = +2.0
+//   t2 short 100 → 105, size 2, risk $20 → pnl = (105−100)·2·(−1) = −$10 → R = −0.5
+//   t3 long   50 →  53, size 5, risk $30 → pnl = (53−50)·5        = +$15 → R = +0.5
+// R sequence (tsClose order) = [+2, −0.5, +0.5]:
+//   n = 3;  wins {2, 0.5} → winRate = 2/3
+//   expectancyR = (2 − 0.5 + 0.5)/3 = 2/3
+//   avgWinR = (2 + 0.5)/2 = 1.25;  avgLossR = −0.5
+//   profitFactor = ΣwinR/|ΣlossR| = 2.5/0.5 = 5
+//   sample stdev (ddof=1): deviations {4/3, −7/6, −1/6} → Σsq = 16/9 + 49/36
+//     + 1/36 = 114/36 = 19/6 → var = (19/6)/2 = 19/12 → sd = √(19/12)
+//   SQN = mean/sd·√n = (2/3)/√(19/12)·√3 = (2/3)·√(36/19) = 4/√19 ≈ 0.917663
+//   equity walk 2 → 1.5 → 2.0: peak 2, trough 1.5 → maxDrawR = 0.5
+//   byTag: 'break' = {n:2, exp (2−0.5)/2 = 0.75}; untagged = {n:1, exp 0.5}
+group('journalStats 3-trade hand-computed exactness (Tharp block, §4e)', () => {
+  const trades = [
+    { id: 't1', tsOpen: 900, tsClose: 1000, side: 'long', entry: 100, exit: 110, size: 1, riskUsd: 5, tag: 'break', note: '' },
+    { id: 't2', tsOpen: 1900, tsClose: 2000, side: 'short', entry: 100, exit: 105, size: 2, riskUsd: 20, tag: 'break', note: '' },
+    { id: 't3', tsOpen: 2900, tsClose: 3000, side: 'long', entry: 50, exit: 53, size: 5, riskUsd: 30, tag: '', note: '' },
+  ];
+  // Feed them OUT of close order — the stats must sort by tsClose themselves
+  // (the drawdown walk depends on it).
+  const st = S.journalStats([trades[2], trades[0], trades[1]]);
+  assert.strictEqual(st.n, 3);
+  assert.strictEqual(st.excluded, 0);
+  assert.ok(approx(st.winRate, 2 / 3), 'winRate 2/3, got ' + st.winRate);
+  assert.ok(approx(st.expectancyR, 2 / 3), 'expectancyR 2/3, got ' + st.expectancyR);
+  assert.ok(approx(st.avgWinR, 1.25), 'avgWinR 1.25, got ' + st.avgWinR);
+  assert.ok(approx(st.avgLossR, -0.5), 'avgLossR −0.5, got ' + st.avgLossR);
+  assert.ok(approx(st.profitFactor, 5), 'PF 5, got ' + st.profitFactor);
+  assert.ok(approx(st.sqn, 4 / Math.sqrt(19)), 'SQN 4/√19 ≈ 0.917663, got ' + st.sqn);
+  assert.ok(approx(st.maxDrawR, 0.5), 'maxDrawR 0.5 (2 → 1.5 walk), got ' + st.maxDrawR);
+  assert.strictEqual(st.byTag.break.n, 2);
+  assert.ok(approx(st.byTag.break.expectancyR, 0.75), 'break-tag expectancy 0.75');
+  assert.strictEqual(st.byTag.untagged.n, 1);
+  assert.ok(approx(st.byTag.untagged.expectancyR, 0.5), 'untagged expectancy 0.5');
+});
+
+// ─── 35. riskUsd ≤ 0 exclusion — counted, and the stats stay untilted ────────
+group('journalStats riskUsd<=0 exclusion counted + mandatory §4e label verbatim', () => {
+  const good = [
+    { id: 't1', tsOpen: 900, tsClose: 1000, side: 'long', entry: 100, exit: 110, size: 1, riskUsd: 5, tag: 'break', note: '' },
+    { id: 't2', tsOpen: 1900, tsClose: 2000, side: 'short', entry: 100, exit: 105, size: 2, riskUsd: 20, tag: 'break', note: '' },
+    { id: 't3', tsOpen: 2900, tsClose: 3000, side: 'long', entry: 50, exit: 53, size: 5, riskUsd: 30, tag: '', note: '' },
+  ];
+  // Three unstatable rows: R = pnl/riskUsd is undefined at 0, sign-flipped
+  // below it, and meaningless at NaN — §4e says EXCLUDE AND COUNT, never
+  // silently coerce (a riskUsd-0 row folded in as R=∞ or R=0 would both lie).
+  const bad = [
+    { id: 'x1', tsOpen: 3900, tsClose: 4000, side: 'long', entry: 100, exit: 200, size: 1, riskUsd: 0, tag: '', note: '' },
+    { id: 'x2', tsOpen: 4900, tsClose: 5000, side: 'long', entry: 100, exit: 200, size: 1, riskUsd: -5, tag: '', note: '' },
+    { id: 'x3', tsOpen: 5900, tsClose: 6000, side: 'long', entry: 100, exit: 200, size: 1, riskUsd: NaN, tag: '', note: '' },
+  ];
+  const st = S.journalStats(good.concat(bad));
+  assert.strictEqual(st.excluded, 3, 'all three unstatable rows counted');
+  assert.strictEqual(st.n, 3, 'n counts statable rows only');
+  // Bit-identical to group 34's hand numbers — the excluded rows (each a
+  // huge fake "win") must not tilt a single stat.
+  assert.ok(approx(st.expectancyR, 2 / 3) && approx(st.winRate, 2 / 3)
+    && approx(st.profitFactor, 5) && approx(st.sqn, 4 / Math.sqrt(19))
+    && approx(st.maxDrawR, 0.5), 'stats must equal the 3-trade hand math exactly');
+  // Mandatory §4e rail label rides the output VERBATIM (the view renders it;
+  // pinning it here keeps the wording from drifting).
+  assert.strictEqual(st.label, 'your logged trades — descriptive record, NOT a backtest');
+  // Empty-journal shape: NaN stats (never fake zeros), label still present.
+  const empty = S.journalStats([]);
+  assert.strictEqual(empty.n, 0);
+  assert.ok(Number.isNaN(empty.expectancyR) && Number.isNaN(empty.sqn), 'no trades → NaN stats, not 0s');
+  assert.strictEqual(empty.label, st.label);
+});
+
+// ─── 36. calendarReturns — UTC day/hour bucketing + the ISO-week edge ────────
+group('calendarReturns UTC day/hour bucketing + ISO-week edge (Thursday rule)', () => {
+  // All keys derive from tsClose in UTC (§4e). Hand-picked closes:
+  //   a: Mon 2024-12-30 23:30 UTC — LATE-YEAR ISO EDGE: the week's Thursday
+  //      is 2025-01-02, so the ISO week is 2025-W01 even though the DAY key
+  //      says 2024. R = +2  (long 100→110, size 1, risk 5)
+  //   b: Mon 2024-12-30 07:05 UTC — same UTC day, different hour.
+  //      R = −0.5 (short 100→105, size 2, risk 20)
+  //   c: Fri 2027-01-01 12:00 UTC — EARLY-YEAR ISO EDGE mirrored: the week's
+  //      Thursday is 2026-12-31, so the ISO week is 2026-W53 (2026 starts on
+  //      a Thursday → a 53-week ISO year) even though the DAY key says 2027.
+  //      R = +0.5 (long 50→53, size 5, risk 30)
+  const A = Date.UTC(2024, 11, 30, 23, 30);
+  const B = Date.UTC(2024, 11, 30, 7, 5);
+  const C = Date.UTC(2027, 0, 1, 12, 0);
+  const trades = [
+    { id: 'a', tsOpen: A - 1, tsClose: A, side: 'long', entry: 100, exit: 110, size: 1, riskUsd: 5, tag: '', note: '' },
+    { id: 'b', tsOpen: B - 1, tsClose: B, side: 'short', entry: 100, exit: 105, size: 2, riskUsd: 20, tag: '', note: '' },
+    { id: 'c', tsOpen: C - 1, tsClose: C, side: 'long', entry: 50, exit: 53, size: 5, riskUsd: 30, tag: '', note: '' },
+    // Unstatable (riskUsd 0) and undatable (NaN tsClose) rows must never
+    // touch a bucket — a calendar cell must mean the same R the stats mean.
+    { id: 'x', tsOpen: 1, tsClose: A, side: 'long', entry: 1, exit: 2, size: 1, riskUsd: 0, tag: '', note: '' },
+    { id: 'y', tsOpen: 1, tsClose: NaN, side: 'long', entry: 1, exit: 2, size: 1, riskUsd: 5, tag: '', note: '' },
+  ];
+  const cal = S.calendarReturns(trades);
+
+  // Daily: same-UTC-day trades SUM (+2 − 0.5 = +1.5); day keys are UTC dates.
+  assert.deepStrictEqual(Object.keys(cal.daily).sort(), ['2024-12-30', '2027-01-01']);
+  assert.ok(approx(cal.daily['2024-12-30'], 1.5), 'same-day sum 1.5, got ' + cal.daily['2024-12-30']);
+  assert.ok(approx(cal.daily['2027-01-01'], 0.5));
+
+  // Hourly: the SAME two trades split into their UTC close hours.
+  assert.ok(approx(cal.hourly[23], 2), 'hour 23 ← trade a');
+  assert.ok(approx(cal.hourly[7], -0.5), 'hour 7 ← trade b');
+  assert.ok(approx(cal.hourly[12], 0.5), 'hour 12 ← trade c');
+  assert.strictEqual(Object.keys(cal.hourly).length, 3, 'untouched hours ABSENT, not 0R (no fabricated flats)');
+
+  // Monthly: plain calendar months of the close date.
+  assert.ok(approx(cal.monthly['2024-12'], 1.5));
+  assert.ok(approx(cal.monthly['2027-01'], 0.5));
+
+  // THE ISO-WEEK EDGES (the whole reason weekly keys aren't 'YYYY-Www' off
+  // the raw calendar year): Mon 2024-12-30 belongs to 2025-W01 and Fri
+  // 2027-01-01 belongs to 2026-W53 — keying by each date's own year would
+  // split both weeks in two.
+  assert.deepStrictEqual(Object.keys(cal.weekly).sort(), ['2025-W01', '2026-W53']);
+  assert.ok(approx(cal.weekly['2025-W01'], 1.5), '2024-12-30 lands in 2025-W01 (Thursday rule)');
+  assert.ok(approx(cal.weekly['2026-W53'], 0.5), '2027-01-01 lands in 2026-W53 (Thursday rule)');
+});
+
+// ─── 37. journal CSV round-trip identity + bad rows land in errors ───────────
+group('journal CSV round-trip identity (comma+quote+newline note, ctx JSON) + bad rows → errors', () => {
+  // t1's note carries a comma, doubled-quote bait AND a raw newline; its ctx
+  // is the §4e auto-snapshot object serialized into ONE CSV column — commas
+  // and quotes inside JSON are exactly why the writer must RFC-4180-quote
+  // and the reader must be a real parser, not a split(',').
+  const t1 = {
+    id: 'a1', tsOpen: 1751700000000, tsClose: 1751703600000, side: 'long',
+    entry: 108250.5, exit: 109001.25, size: 0.042, riskUsd: 150,
+    tag: 'breakout', note: 'note with, comma and "quotes" and\na newline',
+    ctx: { mark: 108251.5, fundingRate: 0.0001, oi: 52341.25, cvdSlope: -1234.5,
+           confluenceTally: { bullish: 3, bearish: 2, neutral: 3, na: 1 } },
+  };
+  const t2 = { id: 'a2', tsOpen: 1, tsClose: 2, side: 'short', entry: 100, exit: 99.5, size: 1, riskUsd: 10, tag: '', note: '' };   // no ctx — column stays ''
+
+  const csv = S.journalToCsv([t1, t2]);
+  const back = S.validateJournalCsv(csv);
+  assert.strictEqual(back.errors.length, 0, 'clean export re-imports with zero errors: ' + JSON.stringify(back.errors));
+  // IDENTITY: every field — floats via String()↔Number() shortest-round-trip,
+  // the newline note byte-for-byte, ctx deep-equal, and NO ctx key on t2.
+  assert.deepStrictEqual(back.trades, [t1, t2]);
+  assert.ok(!('ctx' in back.trades[1]), 'empty ctx column → no ctx key (not ctx:undefined)');
+
+  // Bad rows: each lands in errors with its 1-BASED line number (header =
+  // line 1) and imports NOTHING, while the good rows around them still
+  // import — §4e: import never silently coerces.
+  const lines = csv.split('\n');
+  const header = lines[0];
+  const goodRow = lines.slice(1).find((l) => l.startsWith('a2,'));
+  const badCsv = [
+    header,
+    goodRow,                                                    // line 2 — good
+    'b1,1,2,LONG,100,101,1,10,,,',                              // line 3 — side must be lowercase long|short
+    'b2,1,2,long,100,101,1,abc,,,',                             // line 4 — riskUsd not a number
+    'b3,1,2,long,100,101,1,10',                                 // line 5 — wrong column count
+    'b4,1,2,long,100,101,1,10,,,not-json',                      // line 6 — ctx column not valid JSON
+    'b5,1,2,long,100,101,1,-4,,,',                              // line 7 — riskUsd NEGATIVE: a VALID row (stats exclude it)
+  ].join('\n') + '\n';
+  const res = S.validateJournalCsv(badCsv);
+  assert.strictEqual(res.trades.length, 2, 'good row + the riskUsd<0 row import (stats-layer exclusion, not import rejection)');
+  assert.strictEqual(res.trades[0].id, 'a2');
+  assert.strictEqual(res.trades[1].id, 'b5');
+  assert.strictEqual(res.trades[1].riskUsd, -4);
+  assert.deepStrictEqual(res.errors.map((e) => e.line), [3, 4, 5, 6], '1-based line numbers, header = 1');
+  assert.ok(/side/.test(res.errors[0].reason), 'reason names the field: ' + res.errors[0].reason);
+  assert.ok(/riskUsd/.test(res.errors[1].reason));
+  assert.ok(/columns/.test(res.errors[2].reason));
+  assert.ok(/ctx/.test(res.errors[3].reason));
+
+  // Header mismatch / empty file: refused up front, nothing guessed.
+  assert.strictEqual(S.validateJournalCsv('id,side\n1,long\n').trades.length, 0);
+  assert.ok(/header/.test(S.validateJournalCsv('id,side\n').errors[0].reason));
+  assert.ok(/empty/.test(S.validateJournalCsv('').errors[0].reason));
 });
 
 // ─── Verdict ─────────────────────────────────────────────────────────────────

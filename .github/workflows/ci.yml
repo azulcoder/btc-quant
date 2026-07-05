@@ -34,11 +34,29 @@ jobs:
       - name: pytest (engine + honesty-rail teeth)
         run: python -m pytest -q
 
-      - name: node --check (dashboard mirror + app + charts)
+      - name: node --check (dashboard mirror + app + charts + terminal)
         run: |
           node --check dashboard/quant.js
           node --check dashboard/app.js
           node --check dashboard/charts.js
+          node --check dashboard/livewire.js
+          node --check dashboard/terminal-adapters.js
+          node --check dashboard/terminal-state.js
+          node --check dashboard/terminal-hist.js
+          node --check dashboard/terminal-views.js
+          node --check dashboard/terminal-replay.js
+          node --check dashboard/terminal.js
 
       - name: JS<->Python parity (the one rule)
         run: python scripts/check_parity.py
+
+      # Terminal fixture smoke (DESIGN-orderflow-terminal.md §4e.3): 37 assertion
+      # groups driving the REAL adapter/store/normalizer code against the REAL
+      # captured wire frames in scripts/fixtures_ws.json. Network-free by
+      # construction — its only I/O is reading that fixture file from the repo.
+      # The L1 browser harness (scripts/verify_terminal_browser.py) is
+      # deliberately NOT run here: it needs playwright + a Chromium download
+      # (a heavyweight browser dep this lean CI stays free of) — it remains a
+      # local ritual via `make verify-browser` (DESIGN §7).
+      - name: terminal fixture smoke (build gate, network-free)
+        run: node scripts/check_terminal.cjs

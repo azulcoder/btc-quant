@@ -7,7 +7,13 @@ replay, **BYOD tick replay from the collector store (verified end-to-end against
 8 h recording)**, cross-venue funding, macro proxies). **O-4 shipped 2026-07-05** (§4d
 intelligence — VWAP/RSI screeners, Deribit options widget w/ unsigned GEX, HL whale
 watchlist, 9-rule alert engine, 9-read descriptive confluence — every read labeled
-un-validated). O-5 specced and deferred — same greenlight discipline as DEVELOPMENT.md §6.
+un-validated). **O-5 shipped 2026-07-05** (§4e portfolio & research — trade journal
+(localStorage, Tharp stats on the user's OWN trades, 'NOT a backtest' label), calendar
+returns, Polymarket crowd-implied panel, ToA news feed, local-mirror econ calendar
+(`make econ` — faireconomy has no CORS), + the elite pass: sticky section nav w/
+persisted collapse, hidden-tab/offscreen paint gating (ingestion never pauses), and
+`check_terminal.cjs` (37 groups) promoted to a CI build gate). **The terminal feature
+plan (§5) is complete** — further work follows the DEVELOPMENT.md §6 greenlight ritual.
 
 Provenance: feature surface adapted from [Cryexc](https://cryexc.josedonato.com/) (José
 Donato's free orderflow terminal — footprint, DOM, heatmaps, TPO, whale/options flow;
@@ -397,6 +403,69 @@ VWAP proxy = `turnover24h/volume24h` (labeled `24h VWAP`).
   mandatory label, `AlertEngine` fire/cooldown/divergence-label per rule kind,
   unsigned-GEX sanity (Γ > 0, Σ matches a hand-computed strike), PCR math.
 
+## 4e. O-5 contracts — portfolio & research views + elite pass (binding; fixtures `_o5_notes`)
+
+Empirical (2026-07-05): **Polymarket gamma CORS `*`** — route is `/events?tag_slug=bitcoin`
+(nested `markets[]`; `outcomePrices` are STRINGS in a JSON-encoded array; `markets?search`
+and `markets?tag_slug` both IGNORE their filters — verified, they return FIFA/Rihanna).
+**Tree of Alpha REST CORS `*`** (`/api/news?limit=N`). **faireconomy econ JSON has NO CORS**
+→ browser cannot fetch it; design = `scripts/fetch_econ.py` (stdlib) writes
+`dashboard/econ_calendar.json` (gitignored, same-origin) via `make econ`; the panel shows a
+fetch-age stamp and a friendly "run `make econ`" note when the file is absent/stale.
+
+Rails: the journal records **the user's own trades** (manual log; localStorage; export/
+import CSV — data portability). Its stats reuse the repo's Tharp conventions (R-multiple,
+expectancy, SQN, PF — same definitions as risk.py/quant.js; cite them) on **journaled, not
+backtested** trades — panel label `your logged trades — descriptive record, NOT a backtest`.
+Polymarket prices are **crowd-implied probabilities** (labeled). News/econ are **context
+feeds** (labeled sources).
+
+- **terminal-hist.js additions:** `fetchPolymarketBtc()` → normalized
+  `[{title, endTs, vol24h, markets:[{question, yesPct (Number(outcomePrices[0])·100), vol24h}]}]`;
+  `fetchToaNews(limit)` → `[{ts, title, source, url, symbols}]`; `fetchEconLocal()` →
+  same-origin `./econ_calendar.json` `{fetchedTs, events:[{ts, title, country, impact,
+  forecast, previous}]}` | null. Pure normalizers each, fixture-tested
+  (`polymarket_events` / `toa_news` / `ff_econ_sample`).
+- **`scripts/fetch_econ.py`** (stdlib only): pulls faireconomy `thisweek` + `nextweek`,
+  merges/sorts/annotates `{fetchedTs}`, writes `dashboard/econ_calendar.json`;
+  `make econ` target; idempotent; exits nonzero on network failure with a clear message.
+- **terminal-state.js additions (pure):** `journalStats(trades)` → Tharp block
+  `{n, winRate, expectancyR, sqn, profitFactor, avgWinR, avgLossR, maxDrawR, byTag:{tag→{n,
+  expectancyR}}}` — R = pnl/riskUsd per trade (user-declared 1R; same convention family as
+  the repo's vol-notional R, comment the difference honestly); `calendarReturns(trades)` →
+  `{daily:{'YYYY-MM-DD'→R}, weekly, monthly, hourly:{0..23→R}}` (close-ts bucketing, UTC);
+  `validateJournalCsv(text)` → `{trades, errors}` (import NEVER silently coerces — bad rows
+  land in errors). Trade shape: `{id, tsOpen, tsClose, side, entry, exit, size, riskUsd,
+  tag, note, ctx?}` — `ctx` = auto-captured `{mark, fundingRate, oi, cvdSlope,
+  confluenceTally}` at log time (descriptive record of conditions).
+- **Views** (+ layout: new PORTFOLIO section after INTELLIGENCE):
+  `JournalView` — log form (side/entry/exit/size/1R/tag/note; auto-ctx snapshot from live
+  stores), trades table (R colored, tag chips, ctx popover), Tharp stats strip (n, win%,
+  Exp R, SQN, PF, by-tag), CSV export/import (import shows per-row errors honestly);
+  label per rail. `CalendarView` — month grid heatmap of daily R + weekly/monthly bars +
+  hour-of-day histogram; empty state honest. `PolymarketView` — BTC events list (title,
+  countdown, per-market yes% bars, 24 h vol), 60 s poll; label `crowd-implied
+  probabilities (Polymarket) — not a forecast endorsement`. `NewsView` — ToA feed 30 s
+  poll (source chip, symbols, age, link), whale-emphasis on BTC-symbol items; label
+  `Tree of Alpha — context feed`. `EconView` — reads the local JSON: upcoming events
+  (country flag text, impact badge High/Medium, countdown, forecast/prev), fetch-age
+  stamp + `make econ` hint; label `ForexFactory mirror · fetched locally (no CORS)`.
+- **Elite pass (this phase, binding):**
+  1. **Section nav**: sticky mini-nav in the terminal header — ORDERFLOW · STRUCTURE ·
+     INTELLIGENCE · PORTFOLIO anchors + per-section collapse toggles (persisted in the
+     settings object; collapsed sections skip rendering entirely — dirty flags intact).
+  2. **Visibility performance**: rAF loop pauses on `document.hidden` (ingestion
+     continues — pause is presentation-only, same honesty rule as the pause button);
+     each canvas view render-gated by an IntersectionObserver (offscreen = skip paint,
+     state keeps accumulating; comment the honesty: skipping paint ≠ skipping data).
+  3. **CI enforcement**: `.github/workflows/ci.yml` gains `node scripts/check_terminal.cjs`
+     (30+ groups, network-free) — the terminal smoke becomes a build gate like parity.
+- **check_terminal.cjs additions:** polymarket normalizer vs fixture (STRING
+  outcomePrices → yesPct number; nested events route), ToA normalizer, econ local-file
+  normalizer (synthetic file object), journalStats hand-computed exactness (3-trade set:
+  known expectancy/PF/SQN/winRate), calendarReturns bucketing (UTC day + hour), CSV
+  round-trip export→import identity + a bad-row lands-in-errors case.
+
 ## 5. CryExc → btc-quant feature map & phase plan
 
 | # | CryExc view | Phase | Rail notes |
@@ -439,12 +508,18 @@ VWAP proxy = `turnover24h/volume24h` (labeled `24h VWAP`).
 Everything in this table still requires the DEVELOPMENT.md §6 greenlight ritual. Building
 the collector buys *optionality*, not conclusions.
 
+**Continuity is the budget** (first real-store L3 finding: one slept-Mac night = 23 gaps
+>30 s, ~6 h lost — reported, not filled). For 24/7 accumulation: `caffeinate -s make
+collector` while on AC, or install the launchd agent
+(`scripts/com.btcquant.collector.plist.example` — KeepAlive, clean-flush on unload) and
+prevent AC sleep. `make check-ticks` weekly is the standing quality ritual.
+
 ## 7. Verification — the three-layer system
 
 Layer 0 (static, every commit): `python -m pytest` (incl. collector tests; network-free);
 `node --check` on every dashboard JS file; `node scripts/check_terminal.cjs` (fixture
 smoke: adapters + stores + O-3/O-4 normalizers/builders replayed over the REAL captured
-frames/responses, 30 assertion groups).
+frames/responses, 37 assertion groups — a CI build gate since O-5, §4e.3).
 
 - **L1 — deterministic browser harness** (`make verify-browser`,
   `scripts/verify_terminal_browser.py`): serves the repo, opens

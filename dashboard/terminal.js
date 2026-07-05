@@ -71,10 +71,16 @@
     { kind: 'basis-bp', enabled: true, threshold: 25 },
   ];
 
+  // O-5 (§4e.1): the four collapsible page sections — the section mini-nav's
+  // toggles persist through the settings object like every other control.
+  const SECTIONS = ['orderflow', 'structure', 'intelligence', 'portfolio'];
+
   const DEFAULTS = {
     tick: 10, barMs: 60000, tapeMin: 0, liqRange: 'pct6',
     // O-4 (§4d): screener slice, whale watchlist (+BTC filter), alert rules.
     screenerTop: '40', whaleBtcOnly: true, whaleAddrs: [], alertRules: DEFAULT_RULES,
+    // O-5 (§4e.1): per-section collapse state (all expanded by default).
+    collapsed: { orderflow: false, structure: false, intelligence: false, portfolio: false },
   };
 
   function loadSettings() {
@@ -83,6 +89,7 @@
     // never mutate DEFAULTS (a shared reference would corrupt the fallback).
     s.whaleAddrs = [];
     s.alertRules = DEFAULT_RULES.map((r) => Object.assign({ id: r.kind }, r));
+    s.collapsed = { orderflow: false, structure: false, intelligence: false, portfolio: false };
     try {
       const j = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
       if (TICKS.indexOf(j.tick) >= 0) s.tick = j.tick;
@@ -114,6 +121,13 @@
           dst.threshold = Number.isFinite(r.threshold) ? r.threshold : null;
         }
       }
+      // O-5 (§4e.1): only the four KNOWN section names, strict booleans —
+      // same validated-on-load rule as every other stored value above.
+      if (j.collapsed && typeof j.collapsed === 'object') {
+        for (const sec of SECTIONS) {
+          if (typeof j.collapsed[sec] === 'boolean') s.collapsed[sec] = j.collapsed[sec];
+        }
+      }
     } catch (_) { /* corrupt storage → defaults */ }
     return s;
   }
@@ -126,6 +140,7 @@
         screenerTop: settings.screenerTop, whaleBtcOnly: settings.whaleBtcOnly,
         whaleAddrs: settings.whaleAddrs,
         alertRules: settings.alertRules.map((r) => ({ kind: r.kind, enabled: r.enabled, threshold: r.threshold })),
+        collapsed: settings.collapsed,
       }));
     } catch (_) { /* private mode / quota — settings just don't persist */ }
   }
@@ -215,6 +230,7 @@
     heat: true, liqmap: true, det: true,   // O-2 panels (§4b)
     hist: true, tpo: true, vp: true, farb: true, macro: true,   // O-3 STRUCTURE panels (§4c)
     scr: true, rsi: true, opts: true, whale: true, alerts: true, conf: true,   // O-4 INTELLIGENCE panels (§4d)
+    jour: true, cal: true, poly: true, news: true, econ: true,   // O-5 PORTFOLIO panels (§4e)
   };
   function dirtyAll() { for (const k in dirty) dirty[k] = true; }
 
@@ -840,6 +856,155 @@
     setInterval(whaleTick, 2500);
   }
 
+  // ─── O-5 PORTFOLIO section (§4e): journal / calendar / polymarket / news /
+  // econ ────────────────────────────────────────────────────────────────────
+  //
+  // Two transport classes, same replay rules as O-3/O-4:
+  //   - Journal + calendar are localStorage-fed (the user's OWN trades — §4e
+  //     rail: a manual descriptive record, NOT a backtest) and run in BOTH
+  //     modes.
+  //   - Polymarket (60s) / ToA news (30s) / econ local-file read are DISABLED
+  //     in replay modes with the honest note — polymarket/news are real
+  //     network, and the econ file is machine-dependent local state (its
+  //     presence/absence would leak nondeterminism + 404 console noise into
+  //     the deterministic L1 harness).
+
+  // ── Journal storage: ONE localStorage key holding the SAME CSV the export
+  // button downloads — one format everywhere, and every load runs through
+  // validateJournalCsv (terminal-state.js), so a hand-edited or corrupt blob
+  // is rejected PER ROW instead of poisoning the stats (§4e: import — and by
+  // extension load — never silently coerces). ──
+  const LS_JOURNAL = 'btcq-terminal-journal';
+  let journalTrades = [];
+  let journalNote = '';        // one-line status under the form (load/import outcomes)
+  let importErrors = [];       // last import's per-row rejections (rendered honestly)
+  try {
+    const stored = localStorage.getItem(LS_JOURNAL);
+    if (stored) {
+      const res = S.validateJournalCsv(stored);   // validated on load — same path as import
+      journalTrades = res.trades;
+      if (res.errors.length) {
+        journalNote = res.errors.length + ' stored row(s) failed validation and were not loaded (storage is re-written clean on the next change)';
+      }
+    }
+  } catch (_) { /* private mode / quota — journal starts empty, nothing guessed */ }
+  function saveJournal() {
+    try { localStorage.setItem(LS_JOURNAL, S.journalToCsv(journalTrades)); }
+    catch (_) { journalNote = 'localStorage unavailable — journal will not survive a reload'; }
+  }
+
+  /** Descriptive context snapshot at log time (§4e trade shape `ctx`): plain
+   *  facts from the live stores — a record of CONDITIONS, never a judgment.
+   *  Missing feeds store null (JSON has no NaN; null renders '—'). */
+  function ctxSnapshot() {
+    const m = marks.bybit;
+    const slope = cvdSlope60s();
+    return {
+      mark: m && Number.isFinite(m.mark) ? m.mark : null,
+      fundingRate: m && Number.isFinite(m.fundingRate) ? m.fundingRate : null,
+      oi: ois.bybit && Number.isFinite(ois.bybit.oi) ? ois.bybit.oi : null,
+      cvdSlope: Number.isFinite(slope) ? slope : null,
+      confluenceTally: confData ? confData.tally : null,
+    };
+  }
+
+  const journalView = V.JournalView();
+  journalView.mount($('view-journal'), {
+    onAdd: (fields) => {
+      const now = Date.now();   // bootstrap layer — the user logged NOW (pure code stays wall-clock-free)
+      journalTrades.push({
+        id: 'j' + now.toString(36) + Math.random().toString(36).slice(2, 7),
+        tsOpen: now, tsClose: now,
+        side: fields.side, entry: fields.entry, exit: fields.exit,
+        size: fields.size, riskUsd: fields.riskUsd,
+        tag: fields.tag, note: fields.note,
+        ctx: ctxSnapshot(),
+      });
+      saveJournal();
+      journalNote = '';
+      dirty.jour = true; dirty.cal = true;
+    },
+    onRemove: (id) => {
+      const i = journalTrades.findIndex((t) => t.id === id);
+      if (i < 0) return;
+      journalTrades.splice(i, 1);
+      saveJournal();
+      dirty.jour = true; dirty.cal = true;
+    },
+    onExport: () => {
+      // Data portability (§4e): the download IS the storage format.
+      const blob = new Blob([S.journalToCsv(journalTrades)], { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'btcq-journal.csv';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    },
+    onImport: (text) => {
+      const res = S.validateJournalCsv(text);
+      let added = 0, dupes = 0;
+      for (const t of res.trades) {
+        // ids are the identity — re-importing your own export is a no-op,
+        // never a silent duplication of every trade.
+        if (journalTrades.some((x) => x.id === t.id)) { dupes++; continue; }
+        journalTrades.push(t);
+        added++;
+      }
+      importErrors = res.errors;   // rendered per-row by the view (§4e: never silently coerced)
+      journalNote = 'import: ' + added + ' added'
+        + (dupes ? ', ' + dupes + ' duplicate id(s) skipped' : '')
+        + (res.errors.length ? ', ' + res.errors.length + ' row(s) rejected below' : '');
+      if (added) saveJournal();
+      dirty.jour = true; dirty.cal = true;
+    },
+  });
+  const calView = V.CalendarView();
+  calView.mount($('view-calendar'));
+
+  // ── Context feeds: REST/local polls (non-replay only — section header). ──
+  let polyView = null, newsView = null, econView = null;
+  let polyEvents = null;   // normalizePolymarketEvents() result (null → 'awaiting')
+  let newsItems = null;    // normalizeToaNews() result
+  let econData = null;     // normalizeEconLocal() result (null → the make-econ note)
+  if (REPLAY) {
+    // Honest replay note (same text discipline as the O-3/O-4 notes): these
+    // panels stay empty in replay and SAY WHY (§0.7 — empty-but-honest).
+    const NOTE5 = '<div class="chart-na">awaiting REST data — REST polls (and the local econ file read) are '
+      + 'disabled in replay (deterministic L1 harness: no network / machine-local state beyond the fixture '
+      + 'file). Nothing is fabricated to fill this panel (§0.7).</div>';
+    for (const id of ['view-polymarket', 'view-news', 'view-econ']) {
+      $(id).innerHTML = NOTE5;
+    }
+  } else {
+    polyView = V.PolymarketView();
+    polyView.mount($('view-polymarket'));
+    newsView = V.NewsView();
+    newsView.mount($('view-news'));
+    econView = V.EconView();
+    econView.mount($('view-econ'));
+
+    // Polymarket 60s / ToA 30s (§4e cadences). null keeps the last good list
+    // on display — a transient REST miss must not blank a rendered panel.
+    function pollPolymarket() {
+      HIST.fetchPolymarketBtc().then((evs) => { if (evs) polyEvents = evs; dirty.poly = true; });
+    }
+    function pollNews() {
+      HIST.fetchToaNews(30).then((items) => { if (items) newsItems = items; dirty.news = true; });
+    }
+    // Econ local file: null is MEANINGFUL here (file absent → the view shows
+    // the make-econ how-to), so it is assigned through — and re-checked every
+    // 5min so running `make econ` in a shell shows up without a page reload.
+    function pollEcon() {
+      HIST.fetchEconLocal().then((d) => { econData = d; dirty.econ = true; });
+    }
+    pollPolymarket();
+    setInterval(pollPolymarket, 60000);
+    pollNews();
+    setInterval(pollNews, 30000);
+    pollEcon();
+    setInterval(pollEcon, 300000);
+  }
+
   // ── O-4 intel gate (§4d): confluence inputs + AlertEngine snapshot, both
   // assembled from EXISTING stores every ≥5s of EVENT time (lastBybitTs — the
   // same event-clock discipline as the liq-model gate: no fresh bybit events
@@ -1129,19 +1294,123 @@
     fp: 250, dom: 120, tape: 180, agg: 220, header: 400, liq: 300, heat: 500, liqmap: 600, det: 250,
     hist: 500, tpo: 800, vp: 800, farb: 500, macro: 800,
     scr: 800, rsi: 500, opts: 1000, whale: 600, alerts: 300, conf: 800,
+    // O-5 budgets: jour/cal move on user actions; poly/news/econ at their
+    // 30–60s poll cadence — budgets just cap redraw bursts.
+    jour: 400, cal: 600, poly: 1000, news: 800, econ: 1000,
   };
   const lastAt = {
     fp: 0, dom: 0, tape: 0, agg: 0, header: 0, liq: 0, heat: 0, liqmap: 0, det: 0,
     hist: 0, tpo: 0, vp: 0, farb: 0, macro: 0,
     scr: 0, rsi: 0, opts: 0, whale: 0, alerts: 0, conf: 0,
+    jour: 0, cal: 0, poly: 0, news: 0, econ: 0,
   };
 
+  // ─── O-5 elite pass (§4e.1 + §4e.2): section collapse + visibility-gated
+  // painting ────────────────────────────────────────────────────────────────
+  //
+  // HONESTY (comment mandated by §4e.2): skipping paint ≠ skipping data.
+  // Nothing below ever consults these gates for INGESTION — sink(),
+  // sampleDepth(), the liq-model gate and the intel gate all run regardless,
+  // so stores keep accumulating while a panel is collapsed, offscreen, or the
+  // tab is hidden. A skipped view keeps its dirty flag (due() below refuses
+  // BEFORE clearing it) and repaints the moment it is visible again.
+
+  // View key → its section (for the collapse gate) + its panel anchor (for
+  // the IntersectionObserver). 'header' appears in neither ON PURPOSE: the
+  // stats strip carries the connection chips and is exempt from every
+  // presentation gate except document.hidden (nobody is looking) — hiding
+  // connection health could mask a dead feed (same rule as the pause button).
+  const SEC_OF = {
+    fp: 'orderflow', dom: 'orderflow', tape: 'orderflow', agg: 'orderflow',
+    liq: 'orderflow', heat: 'orderflow', liqmap: 'orderflow', det: 'orderflow',
+    hist: 'structure', tpo: 'structure', vp: 'structure', farb: 'structure', macro: 'structure',
+    scr: 'intelligence', rsi: 'intelligence', opts: 'intelligence',
+    whale: 'intelligence', alerts: 'intelligence', conf: 'intelligence',
+    jour: 'portfolio', cal: 'portfolio', poly: 'portfolio', news: 'portfolio', econ: 'portfolio',
+  };
+  const VIEW_ANCHOR = {
+    fp: 'view-footprint', dom: 'view-dom', tape: 'view-tape', agg: 'view-aggbook',
+    liq: 'view-liq', heat: 'view-bookheat', liqmap: 'view-liqheat', det: 'view-detect',
+    hist: 'view-hist', tpo: 'view-tpo', vp: 'view-klinevp', farb: 'view-farb', macro: 'view-macro',
+    scr: 'view-screener', rsi: 'view-rsi', opts: 'view-options',
+    whale: 'view-whale', alerts: 'view-alerts', conf: 'view-conf',
+    jour: 'view-journal', cal: 'view-calendar', poly: 'view-polymarket', news: 'view-news', econ: 'view-econ',
+  };
+  // key → last IntersectionObserver verdict. Defaults TRUE (paint until told
+  // otherwise) so the page is never blank if IO is unavailable.
+  const onScreen = {};
+  for (const k in VIEW_ANCHOR) onScreen[k] = true;
+  if (typeof IntersectionObserver === 'function') {
+    const keyOfEl = new Map();
+    const io = new IntersectionObserver((entries) => {
+      for (const en of entries) {
+        const key = keyOfEl.get(en.target);
+        if (!key) continue;
+        onScreen[key] = en.isIntersecting;
+        // Re-entering the viewport repaints what moved while offscreen.
+        if (en.isIntersecting) dirty[key] = true;
+      }
+      // rootMargin pre-paints just-below-the-fold panels so scrolling never
+      // meets a blank flash (and the fp key also paints the CVD subchart —
+      // gating fp on the footprint anchor alone covers both).
+    }, { rootMargin: '600px 0px' });
+    for (const k in VIEW_ANCHOR) {
+      const el = $(VIEW_ANCHOR[k]);
+      if (el) { keyOfEl.set(el, k); io.observe(el); }
+    }
+  }
+
+  /** May `key` paint right now? (§4e.1 collapsed-section render skip +
+   *  §4e.2 offscreen paint skip.) A never-painted view (lastAt 0) always
+   *  gets its FIRST paint — a canvas that was never drawn would read as
+   *  broken the instant it scrolls into view faster than the IO callback,
+   *  and the L1 harness legitimately judges every canvas non-blank. */
+  function paintable(key) {
+    const sec = SEC_OF[key];
+    if (sec && settings.collapsed[sec]) return false;   // collapsed section: rendering skipped entirely (§4e.1)
+    if (onScreen[key] === false && lastAt[key] > 0) return false;   // offscreen: skip REpaints only (§4e.2)
+    return true;
+  }
+
   function due(key, now) {
+    if (!paintable(key)) return false;   // gate BEFORE clearing dirty — the flag survives the skip
     if (!dirty[key] || now - lastAt[key] < MIN_MS[key]) return false;
     dirty[key] = false;
     lastAt[key] = now;
     return true;
   }
+
+  // ── §4e.1 section mini-nav: collapse toggles (persisted; terminal.html
+  // carries the buttons). Collapse hides PRESENTATION only — [data-sec]
+  // elements get [hidden] (terminal.css forces display:none over any
+  // flex/grid rule) and paintable() skips their renders; stores keep
+  // accumulating either way. ──
+  function applyCollapse() {
+    document.querySelectorAll('[data-sec]').forEach((el) => {
+      el.hidden = settings.collapsed[el.getAttribute('data-sec')] === true;
+    });
+    document.querySelectorAll('.sec-toggle').forEach((btn) => {
+      const sec = btn.getAttribute('data-collapse');
+      const c = settings.collapsed[sec] === true;
+      btn.setAttribute('aria-pressed', String(c));
+      btn.textContent = c ? '+' : '–';
+    });
+  }
+  document.querySelectorAll('.sec-toggle').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const sec = btn.getAttribute('data-collapse');
+      if (SECTIONS.indexOf(sec) < 0) return;
+      settings.collapsed[sec] = !settings.collapsed[sec];
+      saveSettings();
+      applyCollapse();
+      if (!settings.collapsed[sec]) {
+        // Re-expanded: every view in the section repaints (its canvases were
+        // display:none-sized while hidden and its data moved meanwhile).
+        for (const k in SEC_OF) if (SEC_OF[k] === sec) dirty[k] = true;
+      }
+    });
+  });
+  applyCollapse();   // apply the PERSISTED state before the first frame
 
   const priceEl = $('last-price');
   let detLastEvt = null;   // newest detector event (identity) — repaint signal
@@ -1203,9 +1472,19 @@
 
   function frame() {
     const now = Date.now();
+    // INGESTION-SIDE work runs on every tick unconditionally — §4e.2 honesty:
+    // the visibility gates below skip PAINT only, never data. These three keep
+    // sampling/evaluating while the tab is hidden (frame() then ticks on the
+    // background timer in scheduleFrame instead of rAF).
     sampleDepth();
     maybeEstimateLiq();
     maybeIntel();   // O-4 (§4d): confluence + alert evaluation on the 5s event-ts gate
+
+    // §4e.2: document.hidden pauses ALL painting (nobody is looking; browser
+    // notifications from the alert engine cover the hidden-tab case) — the
+    // same presentation-only rule as the pause button, and dirtyAll() on
+    // visibilitychange repaints everything that moved the moment eyes return.
+    if (document.hidden) { scheduleFrame(); return; }
 
     // The header (with its conn chips) renders even while paused: pause
     // freezes the MARKET panels, never connection health — a paused page that
@@ -1330,16 +1609,63 @@
       if (due('alerts', now)) {
         alertsView.render({ events: alertEngine.events(), fresh: alertFresh.splice(0) });
       }
+      // O-5 PORTFOLIO panels (§4e). Journal + calendar run in both modes
+      // (localStorage-fed); poly/news/econ are null in replay (honest notes
+      // were rendered instead). Stats/calendar recompute on render — pure
+      // functions over ≤ a few hundred journal rows, gated by dirty.jour/cal
+      // which only user actions flip.
+      if (due('jour', now)) {
+        journalView.render({
+          trades: journalTrades,
+          stats: S.journalStats(journalTrades),
+          note: journalNote,
+          importErrors,
+        });
+      }
+      if (due('cal', now)) {
+        calView.render({ cal: S.calendarReturns(journalTrades), nowMs: now });
+      }
+      if (polyView && due('poly', now)) {
+        polyView.render({ events: polyEvents, nowMs: now });
+      }
+      if (newsView && due('news', now)) {
+        newsView.render({ items: newsItems, nowMs: now });
+      }
+      if (econView && due('econ', now)) {
+        econView.render({ data: econData, nowMs: now });
+      }
     }
 
-    requestAnimationFrame(frame);
+    scheduleFrame();
   }
-  requestAnimationFrame(frame);
+
+  // §4e.2 scheduling seam: rAF while visible (paint-synced), a coarse 500ms
+  // timer while document.hidden — browsers throttle/starve rAF in hidden
+  // tabs, and the ingestion-side work at the top of frame() (depth sampler /
+  // liq model / intel gate) must keep running so stores and event-time gates
+  // accumulate the true session. Paint is skipped while hidden either way.
+  function scheduleFrame() {
+    if (document.hidden) setTimeout(frame, 500);
+    else requestAnimationFrame(frame);
+  }
+  scheduleFrame();
+  document.addEventListener('visibilitychange', () => {
+    // Eyes back on the page: repaint everything that moved while hidden.
+    // (The pending 500ms timer tick reschedules itself onto rAF via
+    // scheduleFrame — no double-scheduling.)
+    if (!document.hidden) dirtyAll();
+  });
 
   // Time itself moves the funding countdowns and rolls liqs out of the 1m/5m
   // windows even when no event arrives — tick those panels once a second
-  // (farb joins in O-3: its 'next in' column is a countdown too, §4c).
-  setInterval(() => { dirty.header = true; dirty.liq = true; dirty.farb = true; }, 1000);
+  // (farb joins in O-3: its 'next in' column is a countdown too, §4c;
+  // O-5: polymarket/news/econ carry countdowns and age stamps — their
+  // MIN_MS budgets cap this to ~1s repaints, and paintable() still skips
+  // them offscreen/collapsed).
+  setInterval(() => {
+    dirty.header = true; dirty.liq = true; dirty.farb = true;
+    dirty.poly = true; dirty.news = true; dirty.econ = true;
+  }, 1000);
 
   // Canvas panels re-measure on their next draw; a resize makes them dirty.
   // (O-3: tpo/vp are canvases too; the hist chart resizes itself in-view.

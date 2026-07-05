@@ -1792,6 +1792,275 @@
     return { evaluate, events, setRules, cooldownMs };
   }
 
+  // ═══ O-5 (§4e): trade journal — pure stats/calendar/CSV over the USER'S OWN
+  // logged trades ═══════════════════════════════════════════════════════════
+  //
+  // RAIL (§4e): the journal records the user's own MANUAL trade log
+  // (localStorage; CSV export/import for portability). Every stat below is a
+  // DESCRIPTIVE RECORD of journaled trades — "your logged trades — descriptive
+  // record, NOT a backtest" is the mandatory panel label. Nothing here ever
+  // feeds the OOS harness (§0.1).
+  //
+  // Trade shape (§4e): { id, tsOpen, tsClose, side:'long'|'short', entry,
+  // exit, size, riskUsd, tag, note, ctx? } — ctx is the auto-captured
+  // descriptive context snapshot {mark, fundingRate, oi, cvdSlope,
+  // confluenceTally} at log time.
+  //
+  // R convention (§4e, honest difference stated): R = pnlUsd / riskUsd where
+  // riskUsd is the USER-DECLARED 1R for that trade (Tharp's own definition —
+  // "how much you decided to lose if wrong"). The repo's backtest ledger
+  // (risk.py expectancy_report / quant.js expectancyReport) instead derives R
+  // from a VOL-NOTIONAL proxy (k·vol·price) because a backtest has no declared
+  // stop. Same R-multiple statistics FAMILY (expectancy/SQN/PF definitions are
+  // identical and mirrored from those two files), different 1R denominator —
+  // declared risk here, volatility proxy there.
+
+  /** Signed trade P&L in USD from the journal fields. Sign convention: a
+   *  short profits when exit < entry. */
+  function journalPnlUsd(t) {
+    return (t.exit - t.entry) * t.size * (t.side === 'short' ? -1 : 1);
+  }
+
+  /** Is this journal trade usable for R statistics? riskUsd must be a
+   *  STRICTLY POSITIVE finite number: R = pnl/riskUsd is undefined at 0 and
+   *  sign-flipped below it — such rows are EXCLUDED AND COUNTED (§4e), never
+   *  silently coerced into the stats. */
+  function journalStatable(t) {
+    return !!t && (t.side === 'long' || t.side === 'short')
+      && Number.isFinite(t.entry) && Number.isFinite(t.exit) && Number.isFinite(t.size)
+      && Number.isFinite(t.riskUsd) && t.riskUsd > 0;
+  }
+
+  /**
+   * Tharp block over journaled trades (§4e): { n, excluded, winRate,
+   * expectancyR, sqn, profitFactor, avgWinR, avgLossR, maxDrawR, byTag,
+   * label }.
+   *
+   * Definitions mirror quant.js expectancyReport / risk.py expectancy_report
+   * EXACTLY (the house Tharp conventions — never reimplemented differently):
+   *   wins = R > 0; winRate = wins/n; expectancyR = mean(R);
+   *   avgWinR = mean(wins) (0 when none); avgLossR = mean(losses) (≤ 0);
+   *   SQN = mean(R)/std(R, ddof=1)·√n; PF = ΣwinR / |ΣlossR|.
+   * maxDrawR = deepest peak-to-trough drawdown of cumulative R in tsClose
+   * order (the journal's own equity curve, in R units).
+   * byTag: tag → {n, expectancyR} (untagged trades group under 'untagged').
+   */
+  function journalStats(trades) {
+    const label = 'your logged trades — descriptive record, NOT a backtest';
+    const list = Array.isArray(trades) ? trades : [];
+    const usable = [];
+    let excluded = 0;
+    for (const t of list) {
+      if (journalStatable(t)) usable.push(t);
+      else excluded++;                                 // counted, never silently dropped (§4e)
+    }
+    const out = {
+      n: usable.length, excluded, winRate: NaN, expectancyR: NaN, sqn: NaN,
+      profitFactor: NaN, avgWinR: NaN, avgLossR: NaN, maxDrawR: NaN, byTag: {}, label,
+    };
+    if (!usable.length) return out;
+
+    // R multiples in tsClose order (the drawdown walk needs the time order;
+    // the moment stats don't care).
+    const seq = usable.slice().sort((a, b) => (a.tsClose || 0) - (b.tsClose || 0));
+    const rms = seq.map((t) => journalPnlUsd(t) / t.riskUsd);
+
+    const n = rms.length;
+    const mean = rms.reduce((a, b) => a + b, 0) / n;
+    const wins = rms.filter((r) => r > 0), losses = rms.filter((r) => r < 0);
+    out.expectancyR = mean;
+    out.winRate = wins.length / n;
+    out.avgWinR = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
+    out.avgLossR = losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : 0;
+    if (n > 1) {
+      // Sample stdev (ddof=1) — the quant.js std() convention SQN mirrors.
+      let s = 0;
+      for (const r of rms) s += (r - mean) * (r - mean);
+      const sd = Math.sqrt(s / (n - 1));
+      out.sqn = sd > 0 ? (mean / sd) * Math.sqrt(n) : NaN;
+    }
+    const grossLoss = -losses.reduce((a, b) => a + b, 0);
+    out.profitFactor = grossLoss > 0 ? wins.reduce((a, b) => a + b, 0) / grossLoss : NaN;
+
+    // Equity walk in R units: maxDrawR = max(peak − cum) over the sequence.
+    let cum = 0, peak = 0, dd = 0;
+    for (const r of rms) {
+      cum += r;
+      if (cum > peak) peak = cum;
+      if (peak - cum > dd) dd = peak - cum;
+    }
+    out.maxDrawR = dd;
+
+    // Per-tag expectancy (same mean-of-R definition, per bucket).
+    const tagged = new Map();
+    seq.forEach((t, i) => {
+      const tag = typeof t.tag === 'string' && t.tag !== '' ? t.tag : 'untagged';
+      if (!tagged.has(tag)) tagged.set(tag, []);
+      tagged.get(tag).push(rms[i]);
+    });
+    for (const [tag, arr] of tagged) {
+      out.byTag[tag] = { n: arr.length, expectancyR: arr.reduce((a, b) => a + b, 0) / arr.length };
+    }
+    return out;
+  }
+
+  /** 'YYYY-MM-DD' UTC day key from epoch ms. */
+  function utcDayKey(ts) { return new Date(ts).toISOString().slice(0, 10); }
+
+  /** ISO-8601 week key 'YYYY-Www' (UTC). The Thursday trick: a date's ISO
+   *  week-year is the calendar year of ITS week's Thursday — that is the
+   *  whole edge case (e.g. Mon 2024-12-30 belongs to 2025-W01; Fri
+   *  2027-01-01 belongs to 2026-W53). Weekly buckets keyed by the raw
+   *  calendar year would split those weeks in two. */
+  function isoWeekKey(ts) {
+    const d = new Date(ts);
+    const day0 = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    const dow = (new Date(day0).getUTCDay() + 6) % 7;    // Mon=0 … Sun=6
+    const thu = day0 + (3 - dow) * 86400000;             // this ISO week's Thursday
+    const isoYear = new Date(thu).getUTCFullYear();
+    const week = Math.floor((thu - Date.UTC(isoYear, 0, 1)) / 604800000) + 1;
+    return isoYear + '-W' + String(week).padStart(2, '0');
+  }
+
+  /**
+   * Calendar aggregation of journal R (§4e): { daily:{'YYYY-MM-DD'→ΣR},
+   * weekly:{'YYYY-Www'→ΣR}, monthly:{'YYYY-MM'→ΣR}, hourly:{0..23→ΣR} } —
+   * all bucketed by CLOSE timestamp in UTC (§4e: close-ts bucketing; an
+   * exchange-less journal has no session timezone, UTC is the one honest
+   * grid). Only statable trades contribute (same riskUsd>0 rule as
+   * journalStats — a calendar cell must mean the same R the stats mean).
+   * Only touched buckets appear (absent day ≠ 0R day — no fabricated flats).
+   */
+  function calendarReturns(trades) {
+    const out = { daily: {}, weekly: {}, monthly: {}, hourly: {} };
+    for (const t of Array.isArray(trades) ? trades : []) {
+      if (!journalStatable(t) || !Number.isFinite(t.tsClose)) continue;
+      const r = journalPnlUsd(t) / t.riskUsd;
+      const dk = utcDayKey(t.tsClose);
+      const wk = isoWeekKey(t.tsClose);
+      const mk = dk.slice(0, 7);
+      const hk = new Date(t.tsClose).getUTCHours();
+      out.daily[dk] = (out.daily[dk] || 0) + r;
+      out.weekly[wk] = (out.weekly[wk] || 0) + r;
+      out.monthly[mk] = (out.monthly[mk] || 0) + r;
+      out.hourly[hk] = (out.hourly[hk] || 0) + r;
+    }
+    return out;
+  }
+
+  // ── Journal CSV (§4e data portability): export/import must round-trip ──
+  // Column order is the contract; `ctx` is a JSON column (the snapshot object
+  // serialized) — JSON commas/quotes are exactly why the writer must quote
+  // per RFC 4180 and the reader must be a real state-machine parser, not a
+  // split(',').
+  const JOURNAL_CSV_COLS = ['id', 'tsOpen', 'tsClose', 'side', 'entry', 'exit',
+    'size', 'riskUsd', 'tag', 'note', 'ctx'];
+
+  /** RFC-4180 field quoting: quote when the value carries a comma, a quote,
+   *  or a newline; inner quotes double. */
+  function csvField(v) {
+    const s = String(v == null ? '' : v);
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+
+  /** Journal trades → CSV text (header + one row per trade). Numbers are
+   *  serialized with String() — JS shortest-round-trip printing, so
+   *  Number(String(x)) === x and the import reproduces every float exactly
+   *  (the round-trip identity the fixture smoke pins). */
+  function journalToCsv(trades) {
+    const lines = [JOURNAL_CSV_COLS.join(',')];
+    for (const t of Array.isArray(trades) ? trades : []) {
+      if (!t) continue;
+      lines.push([
+        csvField(t.id), csvField(t.tsOpen), csvField(t.tsClose), csvField(t.side),
+        csvField(t.entry), csvField(t.exit), csvField(t.size), csvField(t.riskUsd),
+        csvField(t.tag), csvField(t.note),
+        csvField(t.ctx === undefined ? '' : JSON.stringify(t.ctx)),
+      ].join(','));
+    }
+    return lines.join('\n') + '\n';
+  }
+
+  /** Minimal RFC-4180 reader → array of rows (arrays of string fields).
+   *  Handles quoted fields, doubled inner quotes, and quoted newlines (a
+   *  journal note may legitimately contain all three). */
+  function parseCsv(text) {
+    const rows = [];
+    let row = [], field = '', inQ = false, i = 0;
+    const s = String(text);
+    while (i < s.length) {
+      const c = s[i];
+      if (inQ) {
+        if (c === '"') {
+          if (s[i + 1] === '"') { field += '"'; i += 2; continue; }   // doubled quote → literal
+          inQ = false; i++; continue;
+        }
+        field += c; i++; continue;
+      }
+      if (c === '"') { inQ = true; i++; continue; }
+      if (c === ',') { row.push(field); field = ''; i++; continue; }
+      if (c === '\n' || c === '\r') {
+        if (c === '\r' && s[i + 1] === '\n') i++;
+        row.push(field); rows.push(row); row = []; field = ''; i++; continue;
+      }
+      field += c; i++;
+    }
+    if (field !== '' || row.length) { row.push(field); rows.push(row); }
+    return rows;
+  }
+
+  /**
+   * CSV text → { trades, errors } (§4e). IMPORT NEVER SILENTLY COERCES: a
+   * row that fails ANY field check lands in `errors` as {line, reason} and
+   * imports nothing — half-guessed trades would poison every stat above.
+   * Accepted rows reproduce the §4e trade shape exactly (ctx present only
+   * when the column was non-empty valid JSON). riskUsd ≤ 0 rows ARE accepted
+   * (they are valid journal records — journalStats excludes and counts them);
+   * riskUsd must still be a NUMBER.
+   */
+  function validateJournalCsv(text) {
+    const out = { trades: [], errors: [] };
+    const rows = parseCsv(text);
+    if (!rows.length) { out.errors.push({ line: 1, reason: 'empty file' }); return out; }
+    if (rows[0].join(',') !== JOURNAL_CSV_COLS.join(',')) {
+      out.errors.push({ line: 1, reason: 'header mismatch — expected: ' + JOURNAL_CSV_COLS.join(',') });
+      return out;
+    }
+    for (let li = 1; li < rows.length; li++) {
+      const r = rows[li];
+      const line = li + 1;                             // 1-based, header = line 1
+      if (r.length === 1 && r[0] === '') continue;     // trailing blank line
+      if (r.length !== JOURNAL_CSV_COLS.length) {
+        out.errors.push({ line, reason: 'expected ' + JOURNAL_CSV_COLS.length + ' columns, got ' + r.length });
+        continue;
+      }
+      const [id, tsOpenS, tsCloseS, side, entryS, exitS, sizeS, riskS, tag, note, ctxS] = r;
+      const tsOpen = Number(tsOpenS), tsClose = Number(tsCloseS);
+      const entry = Number(entryS), exit = Number(exitS), size = Number(sizeS), riskUsd = Number(riskS);
+      let reason = null;
+      if (id === '') reason = 'empty id';
+      else if (tsOpenS === '' || !Number.isFinite(tsOpen)) reason = 'tsOpen not a finite number: ' + JSON.stringify(tsOpenS);
+      else if (tsCloseS === '' || !Number.isFinite(tsClose)) reason = 'tsClose not a finite number: ' + JSON.stringify(tsCloseS);
+      else if (side !== 'long' && side !== 'short') reason = "side must be 'long'|'short', got " + JSON.stringify(side);
+      else if (entryS === '' || !Number.isFinite(entry)) reason = 'entry not a finite number: ' + JSON.stringify(entryS);
+      else if (exitS === '' || !Number.isFinite(exit)) reason = 'exit not a finite number: ' + JSON.stringify(exitS);
+      else if (sizeS === '' || !Number.isFinite(size)) reason = 'size not a finite number: ' + JSON.stringify(sizeS);
+      else if (riskS === '' || !Number.isFinite(riskUsd)) reason = 'riskUsd not a finite number: ' + JSON.stringify(riskS);
+      let ctx;
+      if (!reason && ctxS !== '') {
+        try { ctx = JSON.parse(ctxS); } catch (_) { reason = 'ctx column is not valid JSON'; }
+        if (!reason && (ctx === null || typeof ctx !== 'object' || Array.isArray(ctx))) {
+          reason = 'ctx must be a JSON object';
+        }
+      }
+      if (reason) { out.errors.push({ line, reason }); continue; }
+      const t = { id, tsOpen, tsClose, side, entry, exit, size, riskUsd, tag, note };
+      if (ctx !== undefined) t.ctx = ctx;
+      out.trades.push(t);
+    }
+    return out;
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalState = {
@@ -1804,6 +2073,9 @@
     // O-4 (§4d): intelligence builders — descriptive reads/triggers, never
     // signals (IC-honesty label mandatory on the confluence output).
     buildScreener, confluenceReads, AlertEngine,
+    // O-5 (§4e): journal stats/calendar/CSV over the user's OWN logged trades
+    // — descriptive record, NOT a backtest (mandatory label rides the stats).
+    journalStats, calendarReturns, journalToCsv, validateJournalCsv,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalState;

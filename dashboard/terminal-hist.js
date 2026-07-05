@@ -424,6 +424,123 @@
     return out;
   }
 
+  // ─── O-5 pure normalizers (§4e — fixture-replayed like the O-3/O-4 sets) ────
+  //
+  // O-5 empirical data map (DESIGN §4e, probed 2026-07-05, fixtures _o5_notes):
+  //   - Polymarket gamma REST is CORS `*`. The WORKING route is
+  //     /events?tag_slug=bitcoin (events carry nested markets[]) —
+  //     `markets?search=` and `markets?tag_slug=` both IGNORE their filters
+  //     (verified: they return FIFA/Rihanna markets), so the markets routes
+  //     are unusable for a BTC panel. `outcomePrices` arrives as a STRING
+  //     containing a JSON-encoded array of STRINGS ("[\"0.9995\", \"0.0005\"]")
+  //     — decode twice or render garbage.
+  //   - Tree of Alpha REST is CORS `*` (/api/news?limit=N); rows carry
+  //     _id/title/source/time/symbols/url.
+  //   - faireconomy econ JSON has NO CORS header → the browser CANNOT fetch it
+  //     directly. Design: scripts/fetch_econ.py (stdlib) writes
+  //     dashboard/econ_calendar.json (gitignored, same-origin) via `make econ`;
+  //     fetchEconLocal() reads THAT local file and the panel shows a fetch-age
+  //     stamp + a "run `make econ`" note when it is absent/stale.
+
+  /**
+   * Polymarket /events?tag_slug=bitcoin → [{title, endTs, vol24h,
+   * markets:[{question, yesPct, vol24h}]}].
+   *
+   * THE §4e STRING TRAP: market.outcomePrices is a STRING holding a
+   * JSON-encoded array of STRINGS — yesPct = Number(JSON.parse(str)[0]) × 100,
+   * a plain 0–100 Number the view can bar-render. A market whose prices
+   * don't decode is SKIPPED (never a guessed 50%); closed markets are skipped
+   * (their "price" is a settlement artifact, not a live crowd read).
+   *
+   * RAIL (§4e): these are CROWD-IMPLIED PROBABILITIES — the PolymarketView
+   * labels them so; nothing here is a forecast endorsement or a signal.
+   */
+  function normalizePolymarketEvents(json) {
+    if (!Array.isArray(json)) return null;             // the /events route returns a bare array
+    const out = [];
+    for (const ev of json) {
+      if (!ev || typeof ev.title !== 'string' || ev.title === '') continue;
+      const markets = [];
+      for (const m of Array.isArray(ev.markets) ? ev.markets : []) {
+        if (!m || typeof m.question !== 'string' || m.question === '') continue;
+        if (m.closed === true) continue;               // settled — not a live crowd read
+        let prices = null;
+        try { prices = JSON.parse(m.outcomePrices); } catch (_) { prices = null; }
+        if (!Array.isArray(prices) || !prices.length) continue;   // undecodable → skipped, never guessed
+        const yes = Number(prices[0]);                 // outcome[0] is 'Yes' on these binary markets
+        if (!Number.isFinite(yes)) continue;
+        markets.push({ question: m.question, yesPct: yes * 100, vol24h: num(m.volume24hr) });
+      }
+      if (!markets.length) continue;                   // an event with no readable market renders nothing
+      out.push({
+        title: ev.title,
+        endTs: Date.parse(ev.endDate),                 // NaN when absent — the countdown renders '—'
+        vol24h: num(ev.volume24hr),
+        markets,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Tree of Alpha /api/news → [{ts, title, source, url, symbols}], newest
+   * first. `source` is the transport/category ('Twitter', 'Blogs', …); rows
+   * without a finite ts or a title are dropped (an undatable headline can't
+   * be ordered honestly). RAIL (§4e): a CONTEXT FEED — the NewsView labels
+   * it; headlines are descriptive context, never tradeable information.
+   */
+  function normalizeToaNews(json) {
+    if (!Array.isArray(json)) return null;
+    const out = [];
+    for (const r of json) {
+      if (!r || typeof r.title !== 'string' || r.title === '') continue;
+      const ts = Number(r.time);
+      if (!Number.isFinite(ts)) continue;
+      out.push({
+        ts,
+        title: r.title,
+        source: typeof r.source === 'string' ? r.source : '',
+        url: typeof r.url === 'string' ? r.url : '',
+        symbols: Array.isArray(r.symbols) ? r.symbols.filter((s) => typeof s === 'string') : [],
+      });
+    }
+    out.sort((a, b) => b.ts - a.ts);                   // newest first — deterministic whatever the wire order
+    return out;
+  }
+
+  /**
+   * Local dashboard/econ_calendar.json (written by scripts/fetch_econ.py —
+   * §4e: faireconomy has NO CORS, so the browser reads this same-origin
+   * mirror instead) → { fetchedTs, events:[{ts, title, country, impact,
+   * forecast, previous}] }, events sorted ASCENDING by ts (the panel is an
+   * upcoming-events list).
+   *
+   * fetchedTs passes through UNCHANGED — it is the fetch-age stamp the
+   * EconView must show (a calendar of unknown age is a stale-data trap).
+   * Rows whose `date` doesn't parse are dropped (an undatable event can't be
+   * counted down to); forecast/previous stay strings ('' = the source had
+   * none — speeches carry no forecast; '' renders '—', never a fake 0).
+   */
+  function normalizeEconLocal(json) {
+    if (!json || typeof json !== 'object' || !Array.isArray(json.events)) return null;
+    const events = [];
+    for (const r of json.events) {
+      if (!r || typeof r.title !== 'string' || r.title === '') continue;
+      const ts = Date.parse(r.date);                   // ff dates carry their own offset ('2026-06-28T08:15:00-04:00')
+      if (!Number.isFinite(ts)) continue;
+      events.push({
+        ts,
+        title: r.title,
+        country: typeof r.country === 'string' ? r.country : '',
+        impact: typeof r.impact === 'string' ? r.impact : '',
+        forecast: typeof r.forecast === 'string' ? r.forecast : '',
+        previous: typeof r.previous === 'string' ? r.previous : '',
+      });
+    }
+    events.sort((a, b) => a.ts - b.ts);                // ascending — the panel reads top-down toward the future
+    return { fetchedTs: json.fetchedTs, events };
+  }
+
   // ─── Thin fetch wrappers (AbortController 10s, silent-null) ─────────────────
 
   /**
@@ -571,6 +688,41 @@
     } catch (_) { return null; }        // transient REST failure ≠ terminal state — caller renders '—'
   }
 
+  // ─── O-5 fetch wrappers (§4e — same AbortController/silent-null pattern) ────
+
+  /** Polymarket BTC events — the ONE route whose filter actually works (§4e
+   *  empirical: /events?tag_slug=bitcoin; the markets?search / markets?
+   *  tag_slug filters are IGNORED server-side and return unrelated markets).
+   *  CORS `*` — fetched straight from the page. 60s poll. */
+  async function fetchPolymarketBtc() {
+    try {
+      const j = await getJSON(
+        'https://gamma-api.polymarket.com/events?tag_slug=bitcoin&closed=false&limit=12'
+      );
+      return normalizePolymarketEvents(j);
+    } catch (_) { return null; }        // transient REST failure ≠ terminal state — caller renders '—'
+  }
+
+  /** Tree of Alpha news (CORS `*`, §4e) — 30s poll, limit capped sane. */
+  async function fetchToaNews(limit) {
+    const n = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 100) : 30;
+    try {
+      const j = await getJSON('https://news.treeofalpha.com/api/news?limit=' + n);
+      return normalizeToaNews(j);
+    } catch (_) { return null; }        // transient REST failure ≠ terminal state — caller renders '—'
+  }
+
+  /** Local econ mirror (§4e: faireconomy has NO CORS — the browser cannot
+   *  fetch it; scripts/fetch_econ.py writes this same-origin file via
+   *  `make econ`). null = file absent/unreadable → the EconView renders the
+   *  honest "run `make econ`" note instead of an empty-looking calendar. */
+  async function fetchEconLocal() {
+    try {
+      const j = await getJSON('./econ_calendar.json', { cache: 'no-store' });
+      return normalizeEconLocal(j);
+    } catch (_) { return null; }        // absent local file ≠ error state — caller renders the make-econ hint
+  }
+
   // ─── Export (ONE global + Node dual-export, quant.js pattern) ───────────────
   const HIST = {
     // O-3 (§4c)
@@ -581,6 +733,9 @@
     normalizeHlLeaderboard, normalizeHlPositions,
     fetchBybitAllTickers, fetchDeribitChain, fetchDeribitDvol,
     fetchHlLeaderboard, fetchHlClearinghouse,
+    // O-5 (§4e)
+    normalizePolymarketEvents, normalizeToaNews, normalizeEconLocal,
+    fetchPolymarketBtc, fetchToaNews, fetchEconLocal,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = HIST;

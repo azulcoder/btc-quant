@@ -29,15 +29,31 @@
         <a href="index.html" class="ux-btn" title="Back to the analytics / backtest page">analytics ←</a>
       </nav>
     </header>
+
+    <!-- O-5 elite pass (§4e.1): sticky section mini-nav — anchors + per-section
+         collapse toggles (persisted in the settings object by terminal.js;
+         collapsed sections SKIP RENDERING entirely, dirty flags intact). The
+         stats strip (connection chips) and the settings row never collapse:
+         hiding connection health behind a collapse would mask a dead feed
+         (same rule as the pause button). -->
+    <nav class="term-secnav" aria-label="Terminal sections">
+      <span class="secnav-item"><a href="#sec-orderflow">ORDERFLOW</a><button type="button" class="sec-toggle" data-collapse="orderflow" aria-pressed="false" title="collapse/expand — a collapsed section skips rendering; stores keep accumulating">–</button></span>
+      <span class="secnav-item"><a href="#sec-structure">STRUCTURE</a><button type="button" class="sec-toggle" data-collapse="structure" aria-pressed="false" title="collapse/expand — a collapsed section skips rendering; stores keep accumulating">–</button></span>
+      <span class="secnav-item"><a href="#sec-intelligence">INTELLIGENCE</a><button type="button" class="sec-toggle" data-collapse="intelligence" aria-pressed="false" title="collapse/expand — a collapsed section skips rendering; stores keep accumulating">–</button></span>
+      <span class="secnav-item"><a href="#sec-portfolio">PORTFOLIO</a><button type="button" class="sec-toggle" data-collapse="portfolio" aria-pressed="false" title="collapse/expand — a collapsed section skips rendering; stores keep accumulating">–</button></span>
+    </nav>
   </div>
 
   <main class="term-main">
     <!-- Header stats strip (full-width): conn chips + mark/index/basis/funding/
          OI/session range. Content is built by HeaderStatsView at mount. -->
-    <section class="panel area-stats" id="view-header" aria-label="Market stats and connection health"></section>
+    <!-- id sec-orderflow = the section-nav anchor (§4e.1). NO data-sec: the
+         stats strip (connection chips) is exempt from collapse — connection
+         health must stay visible (same honesty rule as the pause button). -->
+    <section class="panel area-stats" id="view-header" aria-label="Market stats and connection health"><span id="sec-orderflow" class="sec-anchor" aria-hidden="true"></span></section>
 
     <!-- Main row, left: footprint (large). Canvas built by FootprintView. -->
-    <section class="panel area-fp">
+    <section class="panel area-fp" data-sec="orderflow">
       <h2>footprint — Bybit BTCUSDT perp
         <span class="signal-tag descriptive" title="Bid×ask aggressor volume per price per bar, session-local. LIVE-DESCRIPTIVE ONLY (DESIGN §0.1): never a backtest input. Imbalance flags are computed on finished bars only.">descriptive · live session</span>
       </h2>
@@ -46,7 +62,7 @@
     </section>
 
     <!-- Main row, middle column: DOM ladder + aggregated book. -->
-    <div class="term-col area-mid">
+    <div class="term-col area-mid" data-sec="orderflow">
       <section class="panel">
         <h2>DOM ladder — Bybit
           <span class="signal-tag descriptive" title="Grouped L2 book around the spread + per-level session sold/bought/delta from the footprint ring (last ≤120 bars, not all-of-session once the ring wraps).">descriptive</span>
@@ -62,7 +78,7 @@
     </div>
 
     <!-- Main row, right column: tape + liquidation feed. -->
-    <div class="term-col area-right">
+    <div class="term-col area-right" data-sec="orderflow">
       <section class="panel">
         <h2>tape — bybit perp + coinbase spot
           <span class="signal-tag descriptive" title="Mixed-venue time &amp; sales — every print carries its exchange tag (§0.7 per-source labels). Aggressor side normalized per venue (§0.6). ◆ = whale ≥ $250k.">descriptive</span>
@@ -109,7 +125,7 @@
     </div>
 
     <!-- O-2 (§4b): book heatmap — wide, directly under the footprint row. -->
-    <section class="panel area-heat">
+    <section class="panel area-heat" data-sec="orderflow">
       <h2>book heatmap — resting depth history
         <span class="signal-tag descriptive" title="Session ring of real 1/s book samples (event-time gated): X = session time, Y = price, α ∝ resting qty (p95-normalized). White line = that venue's own last-price trail. ▽/◈ = heuristic detector marks (bybit only). Reconnect gaps stay blank — nothing is interpolated (§0.7).">descriptive · per-venue</span>
         <span class="heat-controls">
@@ -128,7 +144,7 @@
 
     <!-- Footer row 1: CVD subchart (full-width; logically part of the
          footprint view — FootprintView mounts lightweight-charts here). -->
-    <section class="panel area-cvd">
+    <section class="panel area-cvd" data-sec="orderflow">
       <h2>CVD — per exchange (bybit / okx / coinbase) + by trade size (bybit), session-anchored
         <span class="signal-tag descriptive" title="Cumulative signed USD notional (aggressor buy − sell). One labeled line PER VENUE (§4b — never an unlabeled blend) plus an exact Σ, plus bybit-only trade-size buckets (dashed family). Anchored at page open — CVD has no natural zero; read slope/divergence, never level. NOT a signal, NOT backtestable from here.">descriptive · per-venue labels</span>
       </h2>
@@ -143,7 +159,7 @@
          harness (§0.2 / verification §7). ═══ -->
 
     <!-- Row A, left 2/3: historical kline chart + bar replay. -->
-    <section class="panel area-hist">
+    <section class="panel area-hist" id="sec-structure" data-sec="structure">
       <h2>historical chart — BTCUSDT
         <span class="signal-tag descriptive" title="Bybit v5 REST klines (linear perp), fetched newest-first and reversed to chronological (§4c gotcha). NO live-WS merging (§0.7): this panel is a pure REST snapshot, refreshed only on interval change — the live panels above carry the session.">bybit linear klines · REST</span>
         <span class="hist-flag" id="hist-replay-flag" hidden>REPLAY (historical bars)</span>
@@ -180,7 +196,7 @@
     </section>
 
     <!-- Row A, right 1/3: TPO / market profile from 30m klines. -->
-    <section class="panel area-tpo">
+    <section class="panel area-tpo" data-sec="structure">
       <h2>market profile
         <span class="signal-tag descriptive" title="Classical TPO from 30m OHLC bars: each bar marks its full H–L range for its clock period — that IS the canonical Steidlmayer construction (touched/not-touched per period), nothing intra-bar is approximated. Sessions are UTC days.">kline-range TPO · 30m · bybit</span>
         <span class="heat-controls">
@@ -193,7 +209,7 @@
     </section>
 
     <!-- Row B: composite VP | funding table | macro strip (thirds). -->
-    <section class="panel area-vp">
+    <section class="panel area-vp" data-sec="structure">
       <h2>composite volume profile
         <span class="signal-tag research" title="APPROXIMATION (§4c rail): OHLCV bars don’t say where volume printed inside the bar, so each bar’s volume is spread uniformly across its H–L ticks. Tick-accurate VP = the footprint gutter (live session) or the collector’s stored trades — never this panel.">bar-range approximation</span>
       </h2>
@@ -201,14 +217,14 @@
       <p class="hint">built over the historical chart's current lookback + interval (follows its interval select). ◆ HVN / ◇ LVN (local extrema with a prominence gate); dashed extensions = nodes away from the current price, untested until revisited.</p>
     </section>
 
-    <section class="panel area-farb">
+    <section class="panel area-farb" data-sec="structure">
       <h2>funding — cross-venue
         <span class="signal-tag descriptive" title="Per-row sources: bybit = live WS tickers; binancef = the existing REST poller (5s mark / 60s OI); okx = O-3 REST poll (60s, silent-null tolerated → '—'). Annualized = rate × 8760/intervalH — descriptive only, carry remains off-board (B3).">bybit WS · binancef REST · okx REST 60s</span>
       </h2>
       <div id="view-farb" class="farb-wrap"></div>
     </section>
 
-    <section class="panel area-macro">
+    <section class="panel area-macro" data-sec="structure">
       <h2>macro — HIP-3 mids + proxies
         <span class="signal-tag research" title="Hyperliquid HIP-3 dex perps (km:/xyz: prefixed — the main-universe 'SPX' is the SPX6900 memecoin and is filtered out by construction, §4c) expose LIVE MIDS ONLY keyless: no history, so HIP-3 cells carry session-% and session-corr labeled with n. History legs (BTC/ETH/PAXG) use Bybit 1h klines. On-chain proxies track their index with error; no CME feeds.">on-chain proxies · no CME</span>
       </h2>
@@ -225,7 +241,7 @@
          confluence + alerts read the live stores and run in both modes. ═══ -->
 
     <!-- Row A: VWAP screener (1/2) + RSI heatmap (1/2). -->
-    <section class="panel area-scr">
+    <section class="panel area-scr" id="sec-intelligence" data-sec="intelligence">
       <h2>VWAP screener — bybit linear
         <span class="signal-tag descriptive" title="ONE 30s REST call carries all ~720 linear symbols (§4d). x = 24h %, y = last vs the 24h-VWAP PROXY (turnover24h/volume24h — response-derived, labeled, not a tick-accurate VWAP), r ∝ √turnover, color = funding sign (α ∝ |annualized|). A hot quadrant is a 24h fact, not a signal.">bybit linear · 24h VWAP = turnover/volume</span>
         <span class="heat-controls">
@@ -240,7 +256,7 @@
       <p class="hint">bubble = one perp symbol; quadrant cross at 0/0. Rows without 24h volume have no VWAP and are <b>counted, not plotted</b> (a fabricated 0-deviation would lie). BTCUSDT wears the accent ring.</p>
     </section>
 
-    <section class="panel area-rsi">
+    <section class="panel area-rsi" data-sec="intelligence">
       <h2>RSI heatmap — top-40 by turnover
         <span class="signal-tag descriptive" title="Last 1h RSI-14 (Wilder, quant.js rsi — indicator math is never reimplemented) per top-40 screener symbol; 40 kline fetches behind a 4-way politeness pool, refreshed on demand + every 5min. The strip renders partial state honestly as symbols land.">1h RSI-14 · bybit klines</span>
         <span class="heat-controls">
@@ -253,7 +269,7 @@
     </section>
 
     <!-- Row B: options (2/3) + confluence (1/3). -->
-    <section class="panel area-opts">
+    <section class="panel area-opts" data-sec="intelligence">
       <h2>options — Deribit BTC
         <span class="signal-tag descriptive" title="get_book_summary_by_currency (kind=option), 60s poll, CORS-open (§4d). The endpoint serves mark_iv ONLY (PERCENT → /100 in the normalizer) and no greeks — greeks are client-side Black-76 (quant.js) on the mark surface.">deribit · mark-only chain</span>
         <span class="signal-tag research" title="§0.5 (non-negotiable): the dealer's side of each open contract is unknowable keyless, so gamma exposure stays UNSIGNED Σ|Γ|·OI — a concentration map, never a flip level or dealer-positioning claim.">unsigned Σ|Γ|·OI — dealer sign unknowable (§0.5)</span>
@@ -266,7 +282,7 @@
       <p class="hint">smile + max pain read the <b>selected expiry</b>; term structure, heatmap, PCR and the GEX profile span every live expiry. Max pain / GEX are the same descriptive positioning reads as the analytics page — <b>never a forecast</b>.</p>
     </section>
 
-    <section class="panel area-conf">
+    <section class="panel area-conf" data-sec="intelligence">
       <h2>confluence — 9 mechanical reads
         <span class="signal-tag research" title="The CryExc 'mechanical analysis' board, rebuilt with the §4d honesty rail: 9 descriptive category reads + a tally, evaluated every 5s of event time from the live stores. The IC run-log found ≈0 forward IC for board signals — the mandatory sentence below the tally says so on-page.">un-validated · NOT a signal</span>
       </h2>
@@ -275,19 +291,69 @@
     </section>
 
     <!-- Row C: whale watch (1/2) + alerts (1/2). -->
-    <section class="panel area-whale">
+    <section class="panel area-whale" data-sec="intelligence">
       <h2>whale watch — Hyperliquid
         <span class="signal-tag descriptive" title="clearinghouseState is public on-chain state, queryable for any address — positions are FACTS, not signals (§4d). Watchlist persists locally (cap 25); each address polls every 60s, staggered. The leaderboard discover button is a one-shot ~33 MB opt-in download and says so before fetching.">public on-chain state — facts, not signals</span>
       </h2>
       <div id="view-whale" class="whale-wrap"></div>
     </section>
 
-    <section class="panel area-alerts">
+    <section class="panel area-alerts" data-sec="intelligence">
       <h2>alerts
         <span class="signal-tag research" title="AlertEngine (§4d): descriptive attention triggers over session facts — price cross, whale print, liq burst, funding flip, CVD divergence (heuristic), book imbalance, detector pass-through (heuristic), OI jump, basis. 60s per-rule cooldown, event-time driven. Un-validated: a trigger is a ping, never an entry.">descriptive triggers — un-validated · not signals</span>
       </h2>
       <div id="view-alerts" class="alerts-wrap"></div>
       <p class="hint">thresholds are <b>visible inputs</b> (no defaults hidden in engine logic, §4d); a threshold-kind with an empty box cannot fire. Browser notifications are opt-in and fire only while the tab is hidden — the in-page feed already covers the visible case.</p>
+    </section>
+
+    <!-- ═══ O-5 PORTFOLIO section (§4e) — journal / calendar returns /
+         polymarket / news / econ, after INTELLIGENCE. Rails: the journal
+         records the USER'S OWN trades (manual log, localStorage, CSV
+         portability) and its stats are a descriptive record, NOT a backtest;
+         Polymarket prices are crowd-implied probabilities; news/econ are
+         labeled context feeds. REST-fed panels (polymarket/news/econ) are
+         replaced by an honest 'disabled in replay' note in ?replay modes
+         (deterministic L1, §7 — the econ file read is skipped too: a
+         machine-dependent local file would leak nondeterminism and 404
+         console errors into the harness); journal + calendar are
+         localStorage-fed and run in both modes. ═══ -->
+
+    <!-- Row A: trade journal (2/3) + calendar returns (1/3). -->
+    <section class="panel area-jour" id="sec-portfolio" data-sec="portfolio">
+      <h2>trade journal — your own trades
+        <span class="signal-tag research" title="§4e rail: a MANUAL log of the user's own trades (localStorage; CSV export/import for portability). R = pnl / your declared 1R; stats use the repo's Tharp conventions (quant.js expectancyReport / risk.py expectancy_report). Journaled ≠ backtested: n is tiny, entries are discretionary, and nothing here ever feeds the OOS harness.">your logged trades — NOT a backtest</span>
+      </h2>
+      <div id="view-journal" class="jour-wrap"></div>
+      <p class="hint">the <b>log</b> button snapshots descriptive context (mark / funding / OI / CVD slope / confluence tally) onto the row — a record of conditions, never a judgment. Import rejects bad rows <b>per line</b> (nothing silently coerced); rows with riskUsd ≤ 0 are kept but excluded from R stats, counted on-page.</p>
+    </section>
+
+    <section class="panel area-cal" data-sec="portfolio">
+      <h2>calendar returns
+        <span class="signal-tag research" title="§4e: journal-derived — daily/weekly/monthly/hour-of-day sums of YOUR logged R, bucketed by close time in UTC. Empty cells are days you didn't trade, not zeros.">journal-derived · UTC</span>
+      </h2>
+      <div id="view-calendar" class="cal-wrap"></div>
+    </section>
+
+    <!-- Row B: polymarket + news + econ (thirds). -->
+    <section class="panel area-poly" data-sec="portfolio">
+      <h2>prediction markets — Polymarket BTC
+        <span class="signal-tag research" title="§4e: /events?tag_slug=bitcoin (the one server-side filter that works — markets?search and markets?tag_slug ignore their filters, verified). outcomePrices arrive as STRINGS in a JSON-encoded array; yes% = Number(prices[0])×100. Crowd-implied probabilities — not a forecast endorsement.">crowd-implied probabilities</span>
+      </h2>
+      <div id="view-polymarket" class="poly-wrap"></div>
+    </section>
+
+    <section class="panel area-news" data-sec="portfolio">
+      <h2>news — Tree of Alpha
+        <span class="signal-tag descriptive" title="§4e: REST poll of news.treeofalpha.com (CORS *), 30s. A context feed: headlines are descriptive context, never tradeable information. BTC-tagged items are emphasized using the feed's own symbol tags.">context feed · 30s poll</span>
+      </h2>
+      <div id="view-news" class="news-wrap"></div>
+    </section>
+
+    <section class="panel area-econ" data-sec="portfolio">
+      <h2>econ calendar — ForexFactory mirror
+        <span class="signal-tag descriptive" title="§4e empirical: the faireconomy econ JSON has NO CORS header — the browser cannot fetch it directly. scripts/fetch_econ.py (stdlib, `make econ`) writes dashboard/econ_calendar.json same-origin; this panel reads that local file and shows its fetch age. Scheduled events are context, not predictions.">fetched locally (no CORS)</span>
+      </h2>
+      <div id="view-econ" class="econ-wrap"></div>
     </section>
 
     <!-- Footer row 2: settings (persisted to localStorage 'btcq-terminal'). -->

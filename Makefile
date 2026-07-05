@@ -15,7 +15,7 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare scan test fetch dash collector collector-api verify-browser verify-wire check-ticks
+.PHONY: help install backtest compare scan test fetch dash collector collector-api verify-browser verify-wire check-ticks econ
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
@@ -53,6 +53,13 @@ collector:
 collector-api:
 	@echo "BYOD API -> http://127.0.0.1:$(API_PORT)   (Ctrl-C to stop)"
 	python3 scripts/run_collector.py --symbol $(SYMBOL) --exchanges binancef,bybit --db data/ticks.duckdb --api-port $(API_PORT)
+
+# O-5 econ-calendar mirror (DESIGN-orderflow-terminal.md §4e): the faireconomy
+# JSON has NO CORS header so the browser cannot fetch it — this writes the
+# same-origin dashboard/econ_calendar.json (gitignored) the EconView reads.
+# Re-run whenever the panel says the mirror is stale.
+econ:
+	python3 scripts/fetch_econ.py
 
 # Terminal verification layers (DESIGN-orderflow-terminal.md §7).
 # L1: deterministic — replays the captured fixture frames through the real terminal in

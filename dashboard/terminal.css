@@ -43,6 +43,8 @@ main.term-main {
     "scr   rsi    rsi"
     "opts  opts   conf"
     "whale alerts alerts"
+    "jour  jour   cal"
+    "poly  news   econ"
     "set   set    set";
   /* DEAD-SPACE fix: items STRETCH to fill their grid area (the grid default —
      the old `align-items: start` pinned each panel to its natural height, so
@@ -77,6 +79,21 @@ main.term-main {
 .area-conf   { grid-area: conf; }
 .area-whale  { grid-area: whale; }
 .area-alerts { grid-area: alerts; }
+/* O-5 PORTFOLIO section (§4e): row A = journal (~2/3) + calendar (~1/3);
+   row B = polymarket | news | econ thirds (same column-template approximation
+   as the O-3/O-4 rows above). */
+.area-jour { grid-area: jour; }
+.area-cal  { grid-area: cal; }
+.area-poly { grid-area: poly; }
+.area-news { grid-area: news; }
+.area-econ { grid-area: econ; }
+
+/* §4e.1 collapse: terminal.js sets [hidden] on every [data-sec] element of a
+   collapsed section. Some of those elements carry display:flex/grid rules
+   that would silently defeat the [hidden] UA default — force it. Collapse
+   hides PRESENTATION only; stores keep accumulating (terminal.js skips the
+   render calls, dirty flags intact). */
+[data-sec][hidden] { display: none !important; }
 
 /* Middle/right columns: stacked panels sharing the row height. */
 .term-col { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
@@ -751,3 +768,176 @@ table.farb-table tr.farb-spread td {
   text-overflow: ellipsis;
 }
 .alert-msg { color: var(--fg); overflow-wrap: anywhere; }
+
+/* ═══ O-5 (§4e): section mini-nav + PORTFOLIO panels ═══════════════════════ */
+
+/* §4e.1 sticky section nav: lives inside .app-header (already sticky, so the
+   nav rides its containment); anchors + collapse toggles, statusbar-chip
+   chrome — no new hues. */
+.term-secnav {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-panel-2);
+  border-bottom: 1px solid var(--border);
+  padding: 2px var(--sp-3);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+}
+.secnav-item { display: inline-flex; gap: 3px; align-items: center; }
+.secnav-item a { color: var(--muted); text-decoration: none; }
+.secnav-item a:hover { color: var(--accent); }
+.sec-toggle {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  line-height: 1;
+  width: 16px;
+  padding: 1px 0;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.sec-toggle:hover { color: var(--accent); border-color: var(--accent); }
+.sec-toggle[aria-pressed="true"] { color: var(--accent); }
+/* Anchor targets land BELOW the sticky chrome, not under it. */
+.sec-anchor { display: block; position: relative; top: -120px; visibility: hidden; }
+
+/* ── Journal (§4e): form row + Tharp stats strip + trades table ── */
+.jour-wrap { display: flex; flex-direction: column; min-width: 0; }
+.jour-form { display: flex; flex-wrap: wrap; gap: var(--sp-1); align-items: center; }
+.jour-form input, .jour-form select { font-family: var(--mono); font-size: var(--fs-xs); padding: 1px 3px; }
+.jour-form input[type="number"] { width: 92px; }
+.jour-form .jf-tag { width: 84px; }
+.jour-form .jf-note { flex: 1 1 120px; min-width: 100px; }
+.jour-form button, .jf-import-l {
+  font-family: var(--mono); font-size: var(--fs-xs); cursor: pointer;
+  color: var(--fg); background: var(--bg-panel-2);
+  border: 1px solid var(--border); border-radius: 3px; padding: 1px 6px;
+}
+.jf-import-l:hover, .jour-form button:hover { border-color: var(--accent); color: var(--accent); }
+.jour-note { color: var(--warn-fg); font-family: var(--mono); font-size: var(--fs-xs); min-height: 0; }
+.jour-stats {
+  display: flex; flex-wrap: wrap; gap: var(--sp-3);
+  font-family: var(--mono); font-size: var(--fs-xs);
+  color: var(--muted);
+  padding: var(--sp-1) 0;
+  border-bottom: 1px solid var(--border);
+}
+.jour-stats b { color: var(--fg); font-weight: 600; }
+.jour-tagstat { color: var(--accent-2); }
+.jour-excl { color: var(--warn-fg); }   /* excluded rows are COUNTED on-page (§4e) */
+.jour-list { max-height: 240px; overflow-y: auto; }
+.jour-row {
+  display: grid;
+  grid-template-columns: 46px 22px minmax(120px, 1.2fr) 70px 62px 84px 1fr 20px;
+  gap: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums slashed-zero;
+  padding: 1px 2px;
+  align-items: baseline;
+}
+.jour-row .ts { color: var(--muted); }
+.jour-row .num { text-align: right; white-space: nowrap; }
+.jour-row .num.pos { color: var(--up); }
+.jour-row .num.neg { color: var(--down); }
+.jour-head { color: var(--g-400); border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg-panel); }
+.jour-tag { color: var(--accent-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jour-notecell { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jour-errs { font-family: var(--mono); font-size: var(--fs-xs); }
+.jour-errhead { color: var(--warn-fg); padding-top: var(--sp-1); }
+.jour-err { color: var(--down); }
+
+/* ── Calendar returns (§4e): day grid + weekly/monthly bars + hour strip ── */
+.cal-wrap { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
+.cal-grid { font-family: var(--mono); font-size: var(--fs-xs); }
+.cal-dowrow, .cal-wrow {
+  display: grid;
+  grid-template-columns: 44px repeat(7, 16px);
+  gap: 2px;
+  align-items: center;
+}
+.cal-dowrow span { color: var(--g-400); text-align: center; }
+.cal-wlab { color: var(--muted); font-size: 9px; }
+.cal-cell {
+  width: 14px; height: 14px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--bg-panel-2);
+}
+.cal-future { opacity: 0.35; }
+.cal-bars { display: flex; flex-direction: column; gap: 1px; font-family: var(--mono); font-size: var(--fs-xs); }
+.cal-bhead { color: var(--g-400); padding-top: var(--sp-1); }
+.cal-bar { display: grid; grid-template-columns: 64px 1fr 58px; gap: var(--sp-2); align-items: center; }
+.cal-blab { color: var(--muted); }
+.cal-btrack { height: 8px; background: var(--bg-panel-2); border-radius: 2px; overflow: hidden; }
+.cal-bfill { display: block; height: 100%; }
+.cal-bar .num { text-align: right; }
+.cal-bar .num.pos { color: var(--up); }
+.cal-bar .num.neg { color: var(--down); }
+.cal-hours { font-family: var(--mono); font-size: var(--fs-xs); }
+.cal-hrow { display: flex; gap: 2px; align-items: flex-end; height: 40px; }
+.cal-hcol { flex: 1 1 0; display: flex; align-items: flex-end; min-width: 3px; background: var(--bg-panel-2); height: 100%; border-radius: 1px; }
+.cal-hbar { display: block; width: 100%; }
+
+/* ── Polymarket (§4e): events with per-market yes% bars ── */
+.poly-list { display: flex; flex-direction: column; gap: var(--sp-2); font-family: var(--mono); font-size: var(--fs-xs); }
+.poly-evhead { display: flex; justify-content: space-between; gap: var(--sp-2); border-bottom: 1px solid var(--border); }
+.poly-title { color: var(--fg); font-weight: 600; }
+.poly-meta { color: var(--muted); white-space: nowrap; }
+.poly-mkt {
+  display: grid;
+  grid-template-columns: minmax(90px, 1.4fr) 1fr 48px 52px;
+  gap: var(--sp-2);
+  align-items: center;
+}
+.poly-q { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.poly-track { height: 7px; background: var(--bg-panel-2); border-radius: 2px; overflow: hidden; }
+.poly-fill { display: block; height: 100%; }
+.poly-mkt .num { text-align: right; font-variant-numeric: tabular-nums; }
+.poly-vol { color: var(--g-400); text-align: right; }
+
+/* ── News (§4e): ToA context feed ── */
+.news-list { max-height: 260px; overflow-y: auto; font-family: var(--mono); font-size: var(--fs-xs); }
+.news-row {
+  display: grid;
+  grid-template-columns: 34px 64px 1fr 70px;
+  gap: var(--sp-2);
+  padding: 1px 2px;
+  align-items: baseline;
+}
+.news-row .ts { color: var(--muted); }
+.news-src { color: var(--g-400); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.news-title { color: var(--fg); overflow-wrap: anywhere; }
+.news-title a { color: var(--fg); text-decoration: none; }
+.news-title a:hover { color: var(--accent); text-decoration: underline; }
+.news-syms { text-align: right; }
+.news-syms i { font-style: normal; color: var(--accent-2); margin-left: 3px; }
+/* BTC-tagged emphasis rides the feed's OWN symbol tags (§4e) — accent border,
+   not a P&L color (a headline has no direction). */
+.news-btc { border-left: 2px solid var(--accent); padding-left: 4px; }
+
+/* ── Econ calendar (§4e): local-mirror rows + fetch-age stamp ── */
+.econ-stamp { font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); }
+.econ-stale { color: var(--warn-fg); }
+.econ-list { max-height: 240px; overflow-y: auto; font-family: var(--mono); font-size: var(--fs-xs); }
+.econ-row {
+  display: grid;
+  grid-template-columns: 40px 30px 46px 1fr minmax(70px, 0.6fr) 56px;
+  gap: var(--sp-2);
+  padding: 1px 2px;
+  align-items: baseline;
+}
+.econ-row .ts { color: var(--muted); }
+.econ-cty { color: var(--accent-2); }
+.econ-imp { font-size: 9px; text-align: center; border: 1px solid var(--border); border-radius: 2px; }
+.econ-high { color: var(--warn-fg); border-color: var(--warn-fg); }
+.econ-med { color: var(--accent); border-color: var(--accent); }
+.econ-low { color: var(--g-400); }
+.econ-title { color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.econ-fp { color: var(--muted); text-align: right; white-space: nowrap; }
+.econ-cd { color: var(--muted); text-align: right; }

@@ -3348,6 +3348,451 @@
     return { mount, render };
   }
 
+  // ═══ O-5 PORTFOLIO views (§4e) — journal / calendar / polymarket / news /
+  // econ. All five are DOM renderers (no canvas: their content is tabular,
+  // and the L1 harness judges every canvas stack for non-blankness — a
+  // legitimately-empty journal must not read as a broken plot). Rails: the
+  // journal is the user's OWN trade log ('NOT a backtest'), Polymarket prices
+  // are crowd-implied probabilities, news/econ are labeled context feeds. ═══
+
+  /** Human age from an epoch-ms delta ('42s' / '7m' / '3h' / '2d'); '—' for
+   *  non-finite. Negative (future ts) clamps to '0s' — clock skew must not
+   *  render a headline as unborn. */
+  function ago(deltaMs) {
+    if (!Number.isFinite(deltaMs)) return '—';
+    const s = Math.max(0, Math.floor(deltaMs / 1000));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm';
+    if (s < 86400) return Math.floor(s / 3600) + 'h';
+    return Math.floor(s / 86400) + 'd';
+  }
+
+  /** Signed R with 2dp ('+1.50R' / '-0.75R'); '—' for non-finite. */
+  function fmtR(r) {
+    if (!Number.isFinite(r)) return '—';
+    return (r > 0 ? '+' : '') + r.toFixed(2) + 'R';
+  }
+
+  // ═══ JournalView — manual trade log + Tharp stats strip + CSV (§4e) ═══
+  //
+  // The view owns the FORM and the TABLE; terminal.js owns storage
+  // (localStorage, validated on load), the ctx snapshot, and CSV plumbing
+  // (journalToCsv / validateJournalCsv from terminal-state.js — the pure
+  // layer). Stats definitions cite quant.js expectancyReport / risk.py:
+  // same Tharp family, but R here = pnl / the USER-DECLARED 1R (§4e — the
+  // backtest ledger uses a vol-notional proxy instead; stated, not blurred).
+  function JournalView() {
+    let root = null, form = null, statsEl = null, listEl = null, noteEl = null, errsEl = null;
+    let cb = {};
+    const F = {};   // form field elements
+
+    function mount(el, opts) {
+      root = el;
+      cb = opts || {};
+      form = document.createElement('div');
+      form.className = 'jour-form';
+      form.innerHTML =
+        '<select class="jf-side"><option value="long">long</option><option value="short">short</option></select>'
+        + '<input class="jf-entry" type="number" step="any" placeholder="entry $" />'
+        + '<input class="jf-exit" type="number" step="any" placeholder="exit $" />'
+        + '<input class="jf-size" type="number" step="any" placeholder="size (coin)" />'
+        + '<input class="jf-risk" type="number" step="any" placeholder="1R risk $" title="your declared 1R for this trade — R = pnl / this" />'
+        + '<input class="jf-tag" type="text" placeholder="tag" />'
+        + '<input class="jf-note" type="text" placeholder="note" />'
+        + '<button type="button" class="jf-log" title="logs the trade with an auto-captured context snapshot (mark/funding/OI/CVD slope/confluence tally) — a descriptive record of conditions at log time">log</button>'
+        + '<button type="button" class="jf-export" title="download the journal as CSV (data portability)">export CSV</button>'
+        + '<label class="jf-import-l"><input type="file" class="jf-import" accept=".csv,text/csv" hidden />import CSV</label>';
+      root.appendChild(form);
+      for (const k of ['side', 'entry', 'exit', 'size', 'risk', 'tag', 'note']) {
+        F[k] = form.querySelector('.jf-' + k);
+      }
+      noteEl = document.createElement('div');
+      noteEl.className = 'jour-note';
+      root.appendChild(noteEl);
+      statsEl = document.createElement('div');
+      statsEl.className = 'jour-stats';
+      root.appendChild(statsEl);
+      root.insertAdjacentHTML('beforeend',
+        '<div class="jour-row jour-head"><span>closed</span><span>side</span><span>entry→exit</span>'
+        + '<span>size</span><span>R</span><span>tag</span><span>note</span><span></span></div>');
+      listEl = document.createElement('div');
+      listEl.className = 'jour-list';
+      root.appendChild(listEl);
+      errsEl = document.createElement('div');
+      errsEl.className = 'jour-errs';
+      root.appendChild(errsEl);
+      // §4e mandatory rail label — visible panel text, verbatim.
+      root.insertAdjacentHTML('beforeend',
+        '<div class="farb-note">your logged trades — descriptive record, NOT a backtest. '
+        + 'R = pnl / your declared 1R (Tharp conventions per quant.js expectancyReport / risk.py; '
+        + 'the backtest ledger derives 1R from a vol proxy instead — different denominator, stated).</div>');
+
+      form.querySelector('.jf-log').addEventListener('click', () => {
+        const fields = {
+          side: F.side.value === 'short' ? 'short' : 'long',
+          entry: Number(F.entry.value), exit: Number(F.exit.value),
+          size: Number(F.size.value), riskUsd: Number(F.risk.value),
+          tag: (F.tag.value || '').trim(), note: F.note.value || '',
+        };
+        if (!Number.isFinite(fields.entry) || !Number.isFinite(fields.exit) || !Number.isFinite(fields.size)) {
+          noteEl.textContent = 'entry / exit / size must be numbers';
+          return;
+        }
+        if (!(fields.riskUsd > 0)) {
+          // The stats layer would only exclude it (riskUsd ≤ 0 is uncountable
+          // in R) — better to say so at entry time than to log a stat-less row.
+          noteEl.textContent = 'declare a positive 1R risk ($) — R = pnl / 1R is undefined without it';
+          return;
+        }
+        noteEl.textContent = '';
+        for (const k of ['entry', 'exit', 'size', 'risk', 'note']) F[k].value = '';
+        if (typeof cb.onAdd === 'function') cb.onAdd(fields);
+      });
+      form.querySelector('.jf-export').addEventListener('click', () => {
+        if (typeof cb.onExport === 'function') cb.onExport();
+      });
+      const fileIn = form.querySelector('.jf-import');
+      fileIn.addEventListener('change', () => {
+        const f = fileIn.files && fileIn.files[0];
+        if (!f) return;
+        const rd = new FileReader();
+        rd.onload = () => { if (typeof cb.onImport === 'function') cb.onImport(String(rd.result)); };
+        rd.readAsText(f);
+        fileIn.value = '';
+      });
+      listEl.addEventListener('click', (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest('[data-rm]') : null;
+        if (btn && typeof cb.onRemove === 'function') cb.onRemove(btn.getAttribute('data-rm'));
+      });
+    }
+
+    /** slice = { trades, stats (journalStats output), note, importErrors }. */
+    function render(slice) {
+      if (!listEl) return;
+      const st = slice.stats;
+      // Always assign (not only when truthy): a cleared note must actually
+      // clear on the next render, or a stale 'import: …' line outlives the
+      // state it described. (The mount-time click handlers write their own
+      // inline messages; failed actions flip no dirty flag, so those survive
+      // until the next real render — the honest lifetime.)
+      noteEl.textContent = slice.note || '';
+      if (st && st.n) {
+        let tags = '';
+        for (const tag in st.byTag) {
+          const b = st.byTag[tag];
+          tags += '<span class="jour-tagstat">' + esc(tag) + ' n=' + b.n + ' ' + esc(fmtR(b.expectancyR)) + '</span>';
+        }
+        statsEl.innerHTML =
+          '<span>n <b>' + st.n + '</b></span>'
+          + '<span>win% <b>' + (100 * st.winRate).toFixed(0) + '</b></span>'
+          + '<span>Exp <b>' + esc(fmtR(st.expectancyR)) + '</b></span>'
+          + '<span>SQN <b>' + (Number.isFinite(st.sqn) ? st.sqn.toFixed(2) : '—') + '</b></span>'
+          + '<span>PF <b>' + (Number.isFinite(st.profitFactor) ? st.profitFactor.toFixed(2) : '—') + '</b></span>'
+          + '<span>maxDD <b>' + (Number.isFinite(st.maxDrawR) ? st.maxDrawR.toFixed(2) + 'R' : '—') + '</b></span>'
+          + tags
+          // Excluded rows are COUNTED on-page (§4e) — never silently missing.
+          + (st.excluded ? '<span class="jour-excl">' + st.excluded + ' excluded (riskUsd ≤ 0 — R undefined)</span>' : '');
+      } else {
+        statsEl.innerHTML = '<span class="chart-na">no stats yet — log a trade with a declared 1R'
+          + (st && st.excluded ? ' (' + st.excluded + ' logged row(s) excluded: riskUsd ≤ 0)' : '') + '</span>';
+      }
+      const trades = (slice.trades || []).slice().sort((a, b) => (b.tsClose || 0) - (a.tsClose || 0));
+      if (!trades.length) {
+        listEl.innerHTML = '<div class="chart-na">no journaled trades — this panel records YOUR trades only (manual log; nothing is imported from the feeds).</div>';
+      } else {
+        let html = '';
+        for (const t of trades.slice(0, 60)) {
+          const pnl = (t.exit - t.entry) * t.size * (t.side === 'short' ? -1 : 1);
+          const r = t.riskUsd > 0 ? pnl / t.riskUsd : NaN;
+          const long = t.side === 'long';
+          const ctxTip = t.ctx ? ' title="ctx @ log: ' + esc(JSON.stringify(t.ctx)) + '"' : '';
+          html += '<div class="jour-row"' + ctxTip + '>'
+            + '<span class="ts">' + hm(t.tsClose) + '</span>'
+            + '<span class="side-badge ' + (long ? 'long' : 'short') + '">' + (long ? 'L' : 'S') + '</span>'
+            + '<span class="num">' + fmtUsd(t.entry, 1) + '→' + fmtUsd(t.exit, 1) + '</span>'
+            + '<span class="num">' + fmtQty(t.size) + '</span>'
+            + '<span class="num ' + (r > 0 ? 'pos' : r < 0 ? 'neg' : '') + '">' + esc(fmtR(r)) + '</span>'
+            + '<span class="jour-tag">' + esc(t.tag || '') + '</span>'
+            + '<span class="jour-notecell" title="' + esc(t.note || '') + '">' + esc(t.note || '') + '</span>'
+            + '<span><button type="button" class="whale-rm" data-rm="' + esc(t.id) + '" title="delete this journal row">×</button></span>'
+            + '</div>';
+        }
+        listEl.innerHTML = html;
+      }
+      // Import errors surface PER ROW (§4e: import never silently coerces).
+      const errs = slice.importErrors || [];
+      errsEl.innerHTML = errs.length
+        ? '<div class="jour-errhead">import: ' + errs.length + ' row(s) rejected (nothing guessed):</div>'
+          + errs.slice(0, 8).map((e) => '<div class="jour-err">line ' + e.line + ': ' + esc(e.reason) + '</div>').join('')
+          + (errs.length > 8 ? '<div class="jour-err">… +' + (errs.length - 8) + ' more</div>' : '')
+        : '';
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ CalendarView — daily R heatmap + weekly/monthly bars + hour histogram ═══
+  //
+  // Pure DOM over calendarReturns() (§4e): UTC close-time buckets of the
+  // user's OWN journaled R. Colors: --up/--down alpha ∝ |R| (P&L semantics —
+  // the CVD-safe pair); sign also rides the cell tooltip text (non-color cue).
+  function CalendarView() {
+    let root = null, gridEl = null, barsEl = null, hoursEl = null;
+    const DAY = 86400000;
+
+    function mount(el) {
+      root = el;
+      gridEl = document.createElement('div');
+      gridEl.className = 'cal-grid';
+      root.appendChild(gridEl);
+      barsEl = document.createElement('div');
+      barsEl.className = 'cal-bars';
+      root.appendChild(barsEl);
+      hoursEl = document.createElement('div');
+      hoursEl.className = 'cal-hours';
+      root.appendChild(hoursEl);
+      root.insertAdjacentHTML('beforeend',
+        '<div class="farb-note">journal-derived calendar (UTC close-time buckets) — a record of YOUR logged R, NOT a backtest; empty cells are days you didn\'t trade, not zeros.</div>');
+    }
+
+    function cellStyle(p, r, max) {
+      if (!Number.isFinite(r) || r === 0 || !(max > 0)) return '';
+      const a = 0.15 + 0.6 * Math.min(1, Math.abs(r) / max);
+      return 'style="background:' + rgba(r > 0 ? p.up : p.down, a) + '"';
+    }
+
+    /** slice = { cal: calendarReturns() output, nowMs }. */
+    function render(slice) {
+      if (!gridEl) return;
+      const cal = slice.cal || { daily: {}, weekly: {}, monthly: {}, hourly: {} };
+      const p = pal();
+      const dayKeys = Object.keys(cal.daily);
+      if (!dayKeys.length) {
+        gridEl.innerHTML = '<div class="chart-na">no journaled R yet — the calendar fills in as you log closed trades.</div>';
+        barsEl.innerHTML = '';
+        hoursEl.innerHTML = '';
+        return;
+      }
+      let maxAbs = 0;
+      for (const k of dayKeys) maxAbs = Math.max(maxAbs, Math.abs(cal.daily[k]));
+
+      // 8-week grid, columns Mon..Sun, ending at the current UTC week.
+      const now = Number.isFinite(slice.nowMs) ? slice.nowMs : 0;
+      const today0 = Math.floor(now / DAY) * DAY;
+      const dow = (new Date(today0).getUTCDay() + 6) % 7;   // Mon=0
+      const gridStart = today0 - dow * DAY - 7 * 7 * DAY;   // Monday, 8 weeks back
+      let html = '<div class="cal-dowrow"><span></span>'
+        + ['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d) => '<span>' + d + '</span>').join('') + '</div>';
+      for (let w = 0; w < 8; w++) {
+        const rowStart = gridStart + w * 7 * DAY;
+        html += '<div class="cal-wrow"><span class="cal-wlab">' + new Date(rowStart).toISOString().slice(5, 10) + '</span>';
+        for (let d = 0; d < 7; d++) {
+          const ts = rowStart + d * DAY;
+          const key = new Date(ts).toISOString().slice(0, 10);
+          const r = cal.daily[key];
+          const future = ts > today0;
+          html += '<span class="cal-cell' + (future ? ' cal-future' : '') + '" '
+            + cellStyle(p, r, maxAbs)
+            + ' title="' + key + (Number.isFinite(r) ? ' · ' + fmtR(r) : ' · no trades') + '"></span>';
+        }
+        html += '</div>';
+      }
+      gridEl.innerHTML = html;
+
+      // Weekly + monthly signed bars (last 8 / last 6 buckets).
+      const bar = (label, r, max) => {
+        const w = max > 0 ? Math.min(100, 100 * Math.abs(r) / max) : 0;
+        return '<div class="cal-bar"><span class="cal-blab">' + esc(label) + '</span>'
+          + '<span class="cal-btrack"><span class="cal-bfill" style="width:' + w.toFixed(0) + '%;background:'
+          + rgba(r >= 0 ? p.up : p.down, 0.7) + '"></span></span>'
+          + '<span class="num ' + (r > 0 ? 'pos' : r < 0 ? 'neg' : '') + '">' + esc(fmtR(r)) + '</span></div>';
+      };
+      const wk = Object.keys(cal.weekly).sort().slice(-8);
+      const mo = Object.keys(cal.monthly).sort().slice(-6);
+      const wMax = Math.max.apply(null, wk.map((k) => Math.abs(cal.weekly[k])).concat([0]));
+      const mMax = Math.max.apply(null, mo.map((k) => Math.abs(cal.monthly[k])).concat([0]));
+      barsEl.innerHTML = '<div class="cal-bhead">weekly R (ISO weeks)</div>'
+        + wk.map((k) => bar(k, cal.weekly[k], wMax)).join('')
+        + '<div class="cal-bhead">monthly R</div>'
+        + mo.map((k) => bar(k, cal.monthly[k], mMax)).join('');
+
+      // Hour-of-day histogram (UTC): 24 fixed slots; untouched hours draw
+      // EMPTY (no bar), not zero-height "data".
+      let hMax = 0;
+      for (let h = 0; h < 24; h++) if (Number.isFinite(cal.hourly[h])) hMax = Math.max(hMax, Math.abs(cal.hourly[h]));
+      let hh = '<div class="cal-bhead">R by UTC hour of close</div><div class="cal-hrow">';
+      for (let h = 0; h < 24; h++) {
+        const r = cal.hourly[h];
+        const has = Number.isFinite(r);
+        const hgt = has && hMax > 0 ? Math.max(2, 34 * Math.abs(r) / hMax) : 0;
+        hh += '<span class="cal-hcol" title="' + String(h).padStart(2, '0') + ':00 UTC'
+          + (has ? ' · ' + fmtR(r) : ' · no trades') + '">'
+          + (has ? '<span class="cal-hbar" style="height:' + hgt.toFixed(0) + 'px;background:' + rgba(r >= 0 ? p.up : p.down, 0.75) + '"></span>' : '')
+          + '</span>';
+      }
+      hh += '</div>';
+      hoursEl.innerHTML = hh;
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ PolymarketView — BTC events list, crowd-implied yes% bars (§4e) ═══
+  function PolymarketView() {
+    let root = null, listEl = null;
+
+    function mount(el) {
+      root = el;
+      listEl = document.createElement('div');
+      listEl.className = 'poly-list';
+      root.appendChild(listEl);
+      // §4e mandatory rail label — visible, verbatim.
+      root.insertAdjacentHTML('beforeend',
+        '<div class="farb-note">crowd-implied probabilities (Polymarket) — not a forecast endorsement; a 99% market is a crowd position, not a fact.</div>');
+    }
+
+    /** slice = { events (normalizePolymarketEvents output | null), nowMs }. */
+    function render(slice) {
+      if (!listEl) return;
+      const evs = slice.events;
+      if (!evs) {
+        listEl.innerHTML = '<div class="chart-na">awaiting Polymarket events (60s poll; route /events?tag_slug=bitcoin — the only server-side filter that works, §4e).</div>';
+        return;
+      }
+      if (!evs.length) {
+        listEl.innerHTML = '<div class="chart-na">no open BTC events returned.</div>';
+        return;
+      }
+      const p = pal();
+      let html = '';
+      for (const ev of evs.slice(0, 4)) {
+        html += '<div class="poly-ev"><div class="poly-evhead">'
+          + '<span class="poly-title">' + esc(ev.title) + '</span>'
+          + '<span class="poly-meta">ends in ' + countdown(ev.endTs - slice.nowMs)
+          + ' · 24h ' + fmtCompactUsd(ev.vol24h) + '</span></div>';
+        for (const m of ev.markets.slice(0, 6)) {
+          const pct = Number.isFinite(m.yesPct) ? Math.max(0, Math.min(100, m.yesPct)) : NaN;
+          html += '<div class="poly-mkt" title="' + esc(m.question) + '">'
+            + '<span class="poly-q">' + esc(m.question.replace(/^Will (the price of )?/, '')) + '</span>'
+            + '<span class="poly-track"><span class="poly-fill" style="width:' + (Number.isFinite(pct) ? pct.toFixed(1) : 0) + '%;background:' + rgba(p.accent2, 0.65) + '"></span></span>'
+            + '<span class="num">' + (Number.isFinite(pct) ? pct.toFixed(1) + '%' : '—') + '</span>'
+            + '<span class="poly-vol">' + fmtCompactUsd(m.vol24h) + '</span>'
+            + '</div>';
+        }
+        html += '</div>';
+      }
+      listEl.innerHTML = html;
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ NewsView — Tree of Alpha context feed (§4e) ═══
+  function NewsView() {
+    let root = null, listEl = null;
+
+    function mount(el) {
+      root = el;
+      listEl = document.createElement('div');
+      listEl.className = 'news-list';
+      root.appendChild(listEl);
+      // §4e mandatory rail label — visible, verbatim.
+      root.insertAdjacentHTML('beforeend',
+        '<div class="farb-note">Tree of Alpha — context feed. Headlines are descriptive context, never tradeable information.</div>');
+    }
+
+    /** slice = { items (normalizeToaNews output | null), nowMs }. */
+    function render(slice) {
+      if (!listEl) return;
+      const items = slice.items;
+      if (!items) {
+        listEl.innerHTML = '<div class="chart-na">awaiting Tree of Alpha headlines (30s poll).</div>';
+        return;
+      }
+      if (!items.length) {
+        listEl.innerHTML = '<div class="chart-na">no headlines returned.</div>';
+        return;
+      }
+      let html = '';
+      for (const it of items.slice(0, 18)) {
+        // §4e: whale-emphasis on BTC-symbol items — the feed tags symbols
+        // itself; we only style the tag it already carries.
+        const btc = it.symbols.some((s) => s.indexOf('BTC') === 0);
+        const title = it.title.length > 180 ? it.title.slice(0, 177) + '…' : it.title;
+        html += '<div class="news-row' + (btc ? ' news-btc' : '') + '">'
+          + '<span class="ts">' + esc(ago(slice.nowMs - it.ts)) + '</span>'
+          + '<span class="news-src">' + esc(it.source || '?') + '</span>'
+          + '<span class="news-title">'
+          + (it.url ? '<a href="' + esc(it.url) + '" target="_blank" rel="noopener noreferrer">' + esc(title) + '</a>' : esc(title))
+          + '</span>'
+          + '<span class="news-syms">' + it.symbols.slice(0, 3).map((s) => '<i>' + esc(s) + '</i>').join('') + '</span>'
+          + '</div>';
+      }
+      listEl.innerHTML = html;
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ EconView — local ForexFactory mirror (§4e: NO CORS → make econ) ═══
+  function EconView() {
+    let root = null, stampEl = null, listEl = null;
+
+    function mount(el) {
+      root = el;
+      stampEl = document.createElement('div');
+      stampEl.className = 'econ-stamp';
+      root.appendChild(stampEl);
+      listEl = document.createElement('div');
+      listEl.className = 'econ-list';
+      root.appendChild(listEl);
+      // §4e mandatory rail label — visible, verbatim.
+      root.insertAdjacentHTML('beforeend',
+        '<div class="farb-note">ForexFactory mirror · fetched locally (no CORS) — a context feed; scheduled events, not predictions.</div>');
+    }
+
+    /** slice = { data (normalizeEconLocal output | null), nowMs }. */
+    function render(slice) {
+      if (!listEl) return;
+      const d = slice.data;
+      if (!d) {
+        // §4e honest-absence note: the browser CANNOT fetch faireconomy
+        // directly (no CORS header) — the local mirror is the design, and
+        // its absence gets a how-to, not a blank.
+        stampEl.textContent = '';
+        listEl.innerHTML = '<div class="chart-na">no local econ file — run <b>make econ</b> to fetch this+next week '
+          + '(faireconomy JSON has no CORS header, so the browser cannot fetch it directly; '
+          + 'scripts/fetch_econ.py writes dashboard/econ_calendar.json same-origin).</div>';
+        return;
+      }
+      // Fetch-age stamp (§4e): a calendar of unknown age is a stale-data trap.
+      const age = slice.nowMs - d.fetchedTs;
+      stampEl.innerHTML = 'fetched ' + esc(ago(age)) + ' ago'
+        + (age > 86400000 ? ' <span class="econ-stale">· stale — re-run make econ</span>' : '');
+      const upcoming = d.events.filter((e) => e.ts >= slice.nowMs - 3600000).slice(0, 14);
+      if (!upcoming.length) {
+        listEl.innerHTML = '<div class="chart-na">no upcoming events in the local file — re-run <b>make econ</b> for the current weeks.</div>';
+        return;
+      }
+      let html = '';
+      for (const e of upcoming) {
+        const impCls = e.impact === 'High' ? 'econ-high' : e.impact === 'Medium' ? 'econ-med' : 'econ-low';
+        html += '<div class="econ-row">'
+          + '<span class="ts">' + hm(e.ts) + '</span>'
+          + '<span class="econ-cty">' + esc(e.country) + '</span>'
+          + '<span class="econ-imp ' + impCls + '">' + esc(e.impact || '—') + '</span>'
+          + '<span class="econ-title">' + esc(e.title) + '</span>'
+          + '<span class="econ-fp">' + (e.forecast ? 'f ' + esc(e.forecast) : '')
+          + (e.previous ? ' · p ' + esc(e.previous) : '') + '</span>'
+          + '<span class="econ-cd">' + countdown(e.ts - slice.nowMs) + '</span>'
+          + '</div>';
+      }
+      listEl.innerHTML = html;
+    }
+
+    return { mount, render };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalViews = {
@@ -3360,6 +3805,9 @@
     // O-4 (§4d): intelligence panels — descriptive reads/triggers, never
     // signals; every panel carries its source/honesty label in visible chrome.
     ScreenerView, RsiHeatmapView, OptionsView, WhaleView, AlertsView, ConfluenceView,
+    // O-5 (§4e): portfolio panels — the user's OWN journal (NOT a backtest),
+    // its calendar, and the labeled context feeds (Polymarket / news / econ).
+    JournalView, CalendarView, PolymarketView, NewsView, EconView,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalViews;

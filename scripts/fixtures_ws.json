@@ -6498,5 +6498,263 @@
   ],
   "time": 1783186479014
  },
- "_o4_notes": "O-4 fixtures captured 2026-07-05. Deribit REST is CORS-open to browser origins (verified: access-control-allow-origin echoes). DVOL via get_index_price?index_name=btcdvol_usdc (BTC-DVOL ticker instrument is invalid). HL leaderboard = 33 MB / 40k rows -> browser loads it OPT-IN once, extracts top-N, then polls light clearinghouseState per address. Bybit tickers: 720 linear symbols in ONE call; VWAP proxy = turnover24h/volume24h (label: 24h VWAP); fundingIntervalHour is response-provided (use it, not the 8h constant)."
+ "_o4_notes": "O-4 fixtures captured 2026-07-05. Deribit REST is CORS-open to browser origins (verified: access-control-allow-origin echoes). DVOL via get_index_price?index_name=btcdvol_usdc (BTC-DVOL ticker instrument is invalid). HL leaderboard = 33 MB / 40k rows -> browser loads it OPT-IN once, extracts top-N, then polls light clearinghouseState per address. Bybit tickers: 720 linear symbols in ONE call; VWAP proxy = turnover24h/volume24h (label: 24h VWAP); fundingIntervalHour is response-provided (use it, not the 8h constant).",
+ "toa_news": [
+  {
+   "title": "WHITEHOUSE: Saving Americas Story",
+   "source": "Blogs",
+   "url": "https://www.whitehouse.gov/releases/2026/07/saving-americas-story",
+   "time": 1783206550597,
+   "symbols": [],
+   "sourceName": "WHITEHOUSE",
+   "en": "WHITEHOUSE: Saving Americas Story",
+   "_id": "1783206550597WSAS",
+   "suggestions": []
+  },
+  {
+   "_id": "1783203749225EFoJwctgdoopWru",
+   "source": "Twitter",
+   "title": "SECPaulSAtkins (@SECPaulSAtkins): Every Fourth of July, we celebrate the great deeds of our past. We reflect upon the courage and wisdom of our forefathers\u2014of Washington and Jefferson, of Adams and Franklin\u2014and the virtues of the good and faithful citizens who brought victory to the cause of liberty. The people of our country, trusting in \u201cthe protection of divine Providence,\u201d wagered all that life holds dear to win independence. The reward of their strenuous efforts, of mind and muscle, is a citadel of freedom where human ingenuity has flourished and produced great prosperity and happiness. Over the past two and a half centuries, Americans have added to their freedom an ethic of industriousness and stewardship, building and investing in the capital markets that were born together with our Nation and continue to propel it forward. May today we celebrate 250 years of freedom with all the pomp and fireworks that are fitting for this great national moment.Happy Independence Day! \ud83c\uddfa\ud83c\uddf8",
+   "url": "https://truthsocial.com/@SECPaulSAtkins/posts/116864040687979915",
+   "icon": "https://static-assets-1.truthsocial.com/tmtg:prime-ts-assets/accounts/avatars/114/993/977/374/386/154/original/93a439403a73c4f3.jpg",
+   "image": "https://static-assets-1.truthsocial.com/tmtg:prime-ts-assets/media_attachments/files/116/864/033/406/695/170/small/8e632ebb67363785.png",
+   "time": 1783203749225,
+   "info": {
+    "twitterId": "1917675528082911232",
+    "truthId": "114993977374386154",
+    "isReply": false,
+    "isRetweet": false,
+    "isQuote": false
+   },
+   "suggestions": []
+  },
+  {
+   "_id": "2073527236188422333",
+   "source": "Twitter",
+   "title": "Nikita Bier (@nikitabier): The company refusing to send money overseas for these accounts is not censorship by any stretch of the imagination. \n\nSpeech does not need to be compensated for it to be free.",
+   "url": "https://twitter.com/nikitabier/status/2073527236188422333",
+   "icon": "https://twproxy.twproxy.workers.dev/?url=https%3A%2F%2Fpbs.twimg.com%2Fprofile_images%2F1755448801957945344%2FFh2HNw5Y_400x400.jpg",
+   "image": "",
+   "time": 1783202392992,
+   "info": {
+    "twitterId": "636513296",
+    "isReply": false,
+    "isRetweet": false,
+    "isQuote": true,
+    "isSelfReply": false,
+    "quotedUser": {
+     "name": "shkeela",
+     "screen_name": "shkeela1278",
+     "icon": "https://twproxy.twproxy.workers.dev/?url=https%3A%2F%2Fpbs.twimg.com%2Fprofile_images%2F2029786371142078464%2FQnlepiiY_400x400.jpg",
+     "text": "I am from America \u2764 today is my birthday",
+     "image": "https://twproxy.twproxy.workers.dev/?url=https%3A%2F%2Fpbs.twimg.com%2Fmedia%2FHL7SFfvacAA4wbb.jpg"
+    }
+   },
+   "suggestions": []
+  }
+ ],
+ "ff_econ_sample": [
+  {
+   "title": "RBA Gov Bullock Speaks",
+   "country": "AUD",
+   "date": "2026-06-28T08:15:00-04:00",
+   "impact": "Medium",
+   "forecast": "",
+   "previous": ""
+  },
+  {
+   "title": "FOMC Member Barkin Speaks",
+   "country": "USD",
+   "date": "2026-06-28T12:35:00-04:00",
+   "impact": "Low",
+   "forecast": "",
+   "previous": ""
+  },
+  {
+   "title": "RBA Assist Gov Kent Speaks",
+   "country": "AUD",
+   "date": "2026-06-28T19:30:00-04:00",
+   "impact": "Low",
+   "forecast": "",
+   "previous": ""
+  },
+  {
+   "title": "Retail Sales y/y",
+   "country": "JPY",
+   "date": "2026-06-28T19:50:00-04:00",
+   "impact": "Low",
+   "forecast": "3.1%",
+   "previous": "2.1%"
+  },
+  {
+   "title": "MPC Member Pill Speaks",
+   "country": "GBP",
+   "date": "2026-06-29T01:00:00-04:00",
+   "impact": "Low",
+   "forecast": "",
+   "previous": ""
+  }
+ ],
+ "_o5_notes": "O-5 fixtures 2026-07-05. Polymarket gamma CORS=* (browser-direct OK; outcomePrices are STRINGS in a JSON-encoded array). ROUTE: /events?tag_slug=bitcoin (markets?search AND markets?tag_slug both IGNORE their filters -- verified: they return FIFA/Rihanna markets); events carry nested markets[]. Tree of Alpha REST CORS=* (poll; keys _id/title/source/time/symbols/url). faireconomy econ JSON has NO CORS header -> browser CANNOT fetch directly; design = scripts/fetch_econ.py (stdlib) writes dashboard/econ_calendar.json (gitignored, same-origin) via `make econ`; panel shows fetch-age stamp and a friendly run-make-econ note when absent. thisweek.json can lag -> fetch thisweek+nextweek, filter client-side by date.",
+ "polymarket_events": [
+  {
+   "title": "Bitcoin above ___ on July 5?",
+   "slug": "bitcoin-above-on-july-5-2026",
+   "volume24hr": 864130.3836839998,
+   "endDate": "2026-07-05T16:00:00Z",
+   "liquidity": 594533.28896,
+   "markets": [
+    {
+     "question": "Will the price of Bitcoin be above $50,000 on July 5?",
+     "outcomes": "[\"Yes\", \"No\"]",
+     "outcomePrices": "[\"0.9995\", \"0.0005\"]",
+     "volume24hr": 68312.595,
+     "bestBid": 0.999,
+     "bestAsk": 1,
+     "endDate": "2026-07-05T16:00:00Z",
+     "active": true,
+     "closed": false
+    },
+    {
+     "question": "Will the price of Bitcoin be above $52,000 on July 5?",
+     "outcomes": "[\"Yes\", \"No\"]",
+     "outcomePrices": "[\"0.9995\", \"0.0005\"]",
+     "volume24hr": 26225.07,
+     "bestBid": 0.999,
+     "bestAsk": 1,
+     "endDate": "2026-07-05T16:00:00Z",
+     "active": true,
+     "closed": false
+    },
+    {
+     "question": "Will the price of Bitcoin be above $54,000 on July 5?",
+     "outcomes": "[\"Yes\", \"No\"]",
+     "outcomePrices": "[\"0.9995\", \"0.0005\"]",
+     "volume24hr": 109115.87,
+     "bestBid": 0.999,
+     "bestAsk": 1,
+     "endDate": "2026-07-05T16:00:00Z",
+     "active": true,
+     "closed": false
+    },
+    {
+     "question": "Will the price of Bitcoin be above $56,000 on July 5?",
+     "outcomes": "[\"Yes\", \"No\"]",
+     "outcomePrices": "[\"0.9995\", \"0.0005\"]",
+     "volume24hr": 58367.590159,
+     "bestBid": 0.999,
+     "bestAsk": 1,
+     "endDate": "2026-07-05T16:00:00Z",
+     "active": true,
+     "closed": false
+    }
+   ]
+  },
+  {
+   "title": "What price will Bitcoin hit in July?",
+   "slug": "what-price-will-bitcoin-hit-in-july-2026",
+   "volume24hr": 579480.6411339999,
+   "endDate": "2026-08-01T04:00:00Z",
+   "liquidity": 1426172.45623,
+   "markets": [
+    {
+     "question": "Will Bitcoin reach $100,000 in July?",
+     "outcomes": "[\"Yes\", \"No\"]",
+     "outcomePrices": "[\"0.0015\", \"0.9985\"]",
+     "volume24hr": 122973.87233200006,
+     "bestBid": 0.001,
+     "bestAsk": 0.002,
+     "endDate": "2026-08-01T04:00:00Z",
+     "active": true,
+     "closed": false
+    },
+    {
+     "question": "Will Bitcoin reach $82,500 in July?",
+     "outcomes": "[\"Yes\", \"No\"]",
+     "outcomePrices": "[\"0.0065\", \"0.9935\"]",
+     "volume24hr": 106763.25595499999,
+     "bestBid": 0.006,
+     "bestAsk": 0.007,
+     "endDate": "2026-08-01T04:00:00Z",
+     "active": true,
+     "closed": false
+    },
+    {
+     "question": "Will Bitcoin reach $80,000 in July?",
+     "outcomes": "[\"Yes\", \"No\"]",
+     "outcomePrices": "[\"0.0135\", \"0.9865\"]",
+     "volume24hr": 11721.617342000001,
+     "bestBid": 0.013,
+     "bestAsk": 0.014,
+     "endDate": "2026-08-01T04:00:00Z",
+     "active": true,
+     "closed": false
+    },
+    {
+     "question": "Will Bitcoin reach $77,500 in July?",
+     "outcomes": "[\"Yes\", \"No\"]",
+     "outcomePrices": "[\"0.027\", \"0.973\"]",
+     "volume24hr": 9227.006376999998,
+     "bestBid": 0.026,
+     "bestAsk": 0.028,
+     "endDate": "2026-08-01T04:00:00Z",
+     "active": true,
+     "closed": false
+    }
+   ]
+  },
+  {
+   "title": "What price will Bitcoin hit June 29-July 5?",
+   "slug": "what-price-will-bitcoin-hit-june-29-july-5-2026",
+   "volume24hr": 178013.16745600005,
+   "endDate": "2026-07-06T04:00:00Z",
+   "liquidity": 458722.76949,
+   "markets": [
+    {
+     "question": "Will Bitcoin reach $74,000 June 29-July 5?",
+     "outcomes": "[\"Yes\", \"No\"]",
+     "outcomePrices": "[\"0.0005\", \"0.9995\"]",
+     "volume24hr": 5756.75,
+     "bestBid": null,
+     "bestAsk": 0.001,
+     "endDate": "2026-07-06T04:00:00Z",
+     "active": true,
+     "closed": false
+    },
+    {
+     "question": "Will Bitcoin reach $72,000 June 29-July 5?",
+     "outcomes": "[\"Yes\", \"No\"]",
+     "outcomePrices": "[\"0.002\", \"0.998\"]",
+     "volume24hr": 437.1925,
+     "bestBid": null,
+     "bestAsk": 0.004,
+     "endDate": "2026-07-06T04:00:00Z",
+     "active": true,
+     "closed": false
+    },
+    {
+     "question": "Will Bitcoin reach $70,000 June 29-July 5?",
+     "outcomes": "[\"Yes\", \"No\"]",
+     "outcomePrices": "[\"0.0035\", \"0.9965\"]",
+     "volume24hr": 2927.8879010000005,
+     "bestBid": 0.002,
+     "bestAsk": 0.005,
+     "endDate": "2026-07-06T04:00:00Z",
+     "active": true,
+     "closed": false
+    },
+    {
+     "question": "Will Bitcoin reach $68,000 June 29-July 5?",
+     "outcomes": "[\"Yes\", \"No\"]",
+     "outcomePrices": "[\"0.0055\", \"0.9945\"]",
+     "volume24hr": 1941.1734439999998,
+     "bestBid": 0.003,
+     "bestAsk": 0.008,
+     "endDate": "2026-07-06T04:00:00Z",
+     "active": true,
+     "closed": false
+    }
+   ]
+  }
+ ]
 }

@@ -22,3 +22,8 @@ mlruns/
 # Browser-verification artifacts (scripts/verify_terminal_browser.py) —
 # screenshots of the fixture-replay terminal, regenerated on every run.
 reports/verify/
+
+# O-5 econ-calendar local mirror (DESIGN-orderflow-terminal.md §4e): written by
+# scripts/fetch_econ.py (`make econ`) because faireconomy serves no CORS header —
+# machine-local, re-fetchable, never committed.
+dashboard/econ_calendar.json
