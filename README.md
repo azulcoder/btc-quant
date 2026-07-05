@@ -25,7 +25,7 @@ should match — that is the design.
   - `risk.py` — Sharpe/Sortino/CAGR/Calmar/maxDD/VaR/CVaR, Kelly, **probabilistic & deflated Sharpe**, `min_backtest_length` (MinBTL), `probability_of_backtest_overfitting` (PBO via CSCV).
   - `strategies.py` — literature-grounded baselines (buy-and-hold, MA trend filter, golden cross, time-series momentum ± vol-targeting, BTC–ETH cointegration pairs, funding carry), each citing its edge and its honest caveat. Plus `pairs_ou`, a research variant (see Methodology).
   - `report.py` — matplotlib tearsheet + JSON export for the dashboard.
-  - `collector.py` — **optional** tick collector daemon (`requirements-collector.txt`): keyless WS/REST → local DuckDB (trades, liquidations, depth, funding/mark, OI; keep-all retention). Starts the clock on order-flow history so those families can *eventually* be OOS-tested — see `DESIGN-orderflow-terminal.md` §6.
+  - `collector.py` — **optional** tick collector daemon (`requirements-collector.txt`): keyless WS/REST → local DuckDB (trades, liquidations, depth, funding/mark, OI; keep-all retention). Starts the clock on order-flow history so those families can *eventually* be OOS-tested — see `DESIGN-orderflow-terminal.md` §6. When the disk fills, `make archive` moves closed months to GitHub Releases as checksummed parquet and only then prunes the store (DESIGN §3 "Data lifecycle").
 - **`scripts/`** — CLIs:
   - `compare.py` — **the centerpiece**: every strategy walk-forward-validated on the same data, ranked by out-of-sample deflated Sharpe, with PBO + MinBTL. `--research` also evaluates the pre-registered candidates and prints their verdicts.
   - `run_backtest.py` — single strategy; `--walk` adds the walk-forward + CPCV multi-path dispersion.

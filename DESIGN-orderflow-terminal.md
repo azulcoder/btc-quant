@@ -140,6 +140,37 @@ batches and its `side` is the **maker** side.
   roundtrip on a temp DB; API handler against a seeded temp DB. Skips cleanly (`pytest
   importorskip`) when collector deps absent.
 
+### Data lifecycle — archive to GitHub Releases (`scripts/archive_ticks.py`)
+
+The store grows ~2.4 GB/month against a critically limited disk, so closed UTC months
+move offsite instead of dying. Binding order (§0 rails applied to storage):
+
+- **Archive-then-prune, never prune-then-hope.** Each closed month is exported per
+  table to ZSTD parquet (`<table>_<YYYY-MM>[_pN].parquet`), verified by re-reading
+  (row count + ts range vs source), sha256-checksummed into a provenance-stamped
+  `MANIFEST-ticks-<YYYY-MM>.json`, and (`--upload`) attached to GitHub Release
+  `ticks-YYYY-MM` (repo auto-detected from the git remote). `--prune` refuses to run
+  without a byte-verified upload in the same run (usage error otherwise);
+  `--force-local-prune` is the deliberately scary offline escape hatch and shouts
+  that the only copy is now local parquet.
+- **Archives are immutable.** Data assets are never clobbered on a release — only the
+  manifest is replaceable; an incomplete month needs `--partial` (cutoff = last full
+  hour, captured once per run) and lands beside earlier passes as `_pN`. Ranges whose
+  data overlap an existing manifest entry are refused — double-archived rows corrupt
+  a later merge.
+- **Prune rebuilds the file** (DuckDB files do not shrink in place): DELETE exported
+  ranges → CHECKPOINT → rebuild via `collector.open_db` (the canonical schema +
+  indexes) → per-table count verification → swap; every failure before the swap
+  leaves the live db as-is, and every deleted row already sits in a verified archive.
+- **The archive window is an honest maintenance gap.** The script refuses to run
+  beside a live collector (`/health` probe + lock detection, exit 2) and the downtime
+  is a real hole in `ts_ms` — reported, never filled (§0.7).
+- Archives stay queryable in place over HTTP:
+  `SELECT count(*) FROM read_parquet('https://github.com/<owner>/<repo>/releases/download/ticks-YYYY-MM/trades_YYYY-MM.parquet')`.
+- Make targets: `make archive-dry` (local export only) · `make archive` (export +
+  upload + prune) · `make archive-list` (what is offsite). Tests: `tests/test_archive.py`
+  (no network, no gh — the CLI seam is monkeypatched).
+
 ## 4. Terminal spec (O-1) — files & module contracts
 
 No bundler; plain `<script>` IIFEs exposing ONE global each (matches app.js style).

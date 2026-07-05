@@ -15,11 +15,12 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare scan test fetch dash collector collector-api verify-browser verify-wire check-ticks econ
+.PHONY: help install backtest compare scan test fetch dash collector collector-api verify-browser verify-wire check-ticks econ archive archive-dry archive-list
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
 	@echo "verify:  verify-browser (L1 fixture-replay in headless Chromium) | verify-wire (L2 live invariants, ~45s) | check-ticks (L3 tick-store QA)"
+	@echo "archive: archive-dry (export closed months to local parquet ONLY) | archive (export + upload to GitHub Releases + prune) | archive-list (what is offsite)"
 	@echo "strategies: buy_and_hold ma_trend_filter tsmom pairs_coint carry"
 	@echo "collector needs opt-in deps: pip install -r requirements-collector.txt"
 
@@ -60,6 +61,22 @@ collector-api:
 # Re-run whenever the panel says the mirror is stale.
 econ:
 	python3 scripts/fetch_econ.py
+
+# Data lifecycle (DESIGN-orderflow-terminal.md §3 'Data lifecycle'): the store grows
+# ~2.4 GB/month on a disk-limited machine, so closed UTC months move to GitHub
+# Releases (immutable, checksummed, provenance-stamped parquet) BEFORE any prune.
+# Stop the collector first — the script refuses otherwise; the window is an honest
+# maintenance gap. archive-dry stages local parquet only (nothing uploaded, nothing
+# pruned); archive is the real lifecycle (prune runs only after the upload is
+# byte-verified, and asks for confirmation); archive-list shows what is offsite.
+archive:
+	python3 scripts/archive_ticks.py --db data/ticks.duckdb --out data/archive --upload --prune
+
+archive-dry:
+	python3 scripts/archive_ticks.py --db data/ticks.duckdb --out data/archive
+
+archive-list:
+	python3 scripts/archive_ticks.py --list
 
 # Terminal verification layers (DESIGN-orderflow-terminal.md §7).
 # L1: deterministic — replays the captured fixture frames through the real terminal in

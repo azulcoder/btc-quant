@@ -8,6 +8,12 @@ data/*.json
 # history, single-writer DuckDB file + its WAL. Never committed.
 data/ticks.duckdb
 data/*.duckdb.wal
+# Archive-pipeline staging (scripts/archive_ticks.py — DESIGN §3 data lifecycle):
+# parquet exports + manifests bound for GitHub Releases, plus the prune/rebuild
+# side files. Large, regenerable, never committed.
+data/archive/
+data/*.duckdb.rebuild
+data/*.pre-archive.bak
 .DS_Store
 .venv/
 venv/
