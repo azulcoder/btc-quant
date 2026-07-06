@@ -289,7 +289,13 @@ def hf_list_files(repo: str, prefix: str) -> list[dict]:
             out.append({"path": item.path, "size": int(size), "lfs_sha256": sha})
         return out
     except Exception as exc:  # noqa: BLE001 — absent path == empty listing
-        if type(exc).__name__ == "EntryNotFoundError":
+        # hub<1.x raises EntryNotFoundError; hub>=1.x raises the subclass
+        # RemoteEntryNotFoundError (observed live 2026-07-06: the first real
+        # sync ABORTED here because the exact-name check missed the subclass —
+        # a 404 on the PARTITION path is the expected "not yet uploaded" case,
+        # i.e. the green light, never an abort). Name-contains covers both;
+        # repo-level 404s (RepositoryNotFoundError) still abort loudly below.
+        if "EntryNotFound" in type(exc).__name__:
             return []
         raise Abort(
             f"cannot list {repo}:{prefix}: {type(exc).__name__}: {exc} — {_HF_HINT}"

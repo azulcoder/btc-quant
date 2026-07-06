@@ -445,3 +445,27 @@ def test_missing_duckdb_dep_is_actionable(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(uph, "duckdb", None)
     assert uph.main(["--ticks-dir", str(tmp_path)]) == 1
     assert "requirements-collector" in capsys.readouterr().err
+
+
+def test_hf_list_files_treats_remote_entry_not_found_as_absent(monkeypatch):
+    """hub>=1.x raises RemoteEntryNotFoundError (a SUBCLASS name) for an absent
+    partition path — that is the expected "not yet uploaded" green light, never
+    an abort. Regression for the 2026-07-06 first-real-sync failure: the exact
+    class-name check missed the subclass and aborted the whole day."""
+    # Fresh module copy: the autouse Hub-tripwire replaces uph.hf_list_files
+    # itself, but THIS test exercises that very function's internals with a
+    # fake _hf_api (still zero real-Hub contact).
+    spec = importlib.util.spec_from_file_location(
+        "upload_hf_regression", _REPO / "scripts" / "upload_hf.py")
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+
+    class RemoteEntryNotFoundError(Exception):
+        pass
+
+    class _Api:
+        def list_repo_tree(self, **kw):
+            raise RemoteEntryNotFoundError("404 Client Error")
+
+    monkeypatch.setattr(fresh, "_hf_api", lambda: _Api())
+    assert fresh.hf_list_files("who/ever", "data/date=2099-01-01") == []
