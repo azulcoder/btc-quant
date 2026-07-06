@@ -35,3 +35,4 @@ reports/verify/
 # scripts/fetch_econ.py (`make econ`) because faireconomy serves no CORS header —
 # machine-local, re-fetchable, never committed.
 dashboard/econ_calendar.json
+data/hf-stage/manifests/
