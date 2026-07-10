@@ -117,6 +117,28 @@
     return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
   }
 
+  /** Linear sRGB-hex mix for the I-1 diverging delta ramp (§4f dataviz rail):
+   *  color = mix(NEUTRAL, pole, t) — the midpoint is a GRAY (never a hue at
+   *  zero), poles are the existing --up/--down tokens, neutral is the token
+   *  sheet's --g-400. Ramp validated with the dataviz skill validator against
+   *  the terminal surface #0a0b0d (dark): poles pass the categorical checks
+   *  (CVD ΔE 26.0 protan, contrast ≥3:1), each arm passes the ordinal ramp
+   *  checks (monotone L, ΔL ≥ 0.06, hue spread ≤ 11°, light end ≥ 2:1) —
+   *  results pinned in the I-1 summary. Simple sRGB lerp is enough here
+   *  because only the VALIDATED anchors carry meaning; intermediate t values
+   *  interpolate between validated endpoints. */
+  function lerpHex(a, b, t) {
+    const pa = String(a).replace('#', ''), pb = String(b).replace('#', '');
+    if (pa.length !== 6 || pb.length !== 6) return a;
+    const k = Math.max(0, Math.min(1, t));
+    let out = '#';
+    for (let i = 0; i < 6; i += 2) {
+      const va = parseInt(pa.slice(i, i + 2), 16), vb = parseInt(pb.slice(i, i + 2), 16);
+      out += Math.round(va + (vb - va) * k).toString(16).padStart(2, '0');
+    }
+    return out;
+  }
+
   /** Fixed exchange → categorical-token mapping, consistent across ALL panels
    *  (tape tag, agg-book stack, CVD venue lines, legend) so one venue is always
    *  one color. okx = --c3 (O-2, §4b — the CVD 'whale' bucket line moved to
@@ -184,6 +206,10 @@
     // Fixed gutter/footer geometry.
     const GUT_VP = 84, GUT_AXIS = 60;
     const ROW_DELTA = 16, ROW_TVOL = 16, ROW_TIME = 14;
+    // I-1 (§4f): cum-delta mini-pane strip between the vol row and the time
+    // labels — session-anchored running Σ of per-bar delta (cumDelta accessor;
+    // like CVD it has no natural zero, so the read is slope/divergence only).
+    const ROW_CUM = 34;
     const BAR_W_MIN = 64;      // 'sellVol × buyVol' needs ~9 mono chars + padding
 
     function mount(el, opts) {
@@ -383,7 +409,7 @@
 
       // Visible window: as many most-recent bars as fit at ≥ BAR_W_MIN each.
       const plotW = w - GUT_VP - GUT_AXIS;
-      const cellsH = h - ROW_DELTA - ROW_TVOL - ROW_TIME;
+      const cellsH = h - ROW_DELTA - ROW_TVOL - ROW_CUM - ROW_TIME;
       const nFit = Math.max(1, Math.floor(plotW / BAR_W_MIN));
       const vis = bars.slice(-nFit);
       const barW = plotW / vis.length;
@@ -417,7 +443,9 @@
         const b = vis[i];
         const x0 = i * barW;
         const half = barW / 2;
+        let pocLv = null;   // I-1 (§4f): per-bar POC = max buy+sell level
         for (const lv of b.levels) {
+          if (!pocLv || lv.buy + lv.sell > pocLv.buy + pocLv.sell) pocLv = lv;
           const y = yOf(lv.price);
           const aS = lv.sell > 0 ? 0.07 + 0.48 * Math.sqrt(lv.sell / maxSide) : 0;
           const aB = lv.buy > 0 ? 0.07 + 0.48 * Math.sqrt(lv.buy / maxSide) : 0;
@@ -436,6 +464,14 @@
             ctx.fillStyle = p.muted; ctx.textAlign = 'center';
             ctx.fillText('×', x0 + half, y + rowH / 2);
           }
+        }
+        // I-1 (§4f): per-bar POC dot — the bar's max-volume level, --accent
+        // (reference-marker token, same vocabulary as the session POC line).
+        if (pocLv) {   // drawn at every zoom — a dot survives tiny rows where text can't
+          ctx.fillStyle = p.accent;
+          ctx.beginPath();
+          ctx.arc(x0 + half, yOf(pocLv.price) + rowH / 2, Math.max(1.25, Math.min(2.5, rowH / 5)), 0, Math.PI * 2);
+          ctx.fill();
         }
         // Column separator; the OPEN bar gets a dashed border + 'live' tag so a
         // half-formed bar can never be misread as a finished print (§0.1).
@@ -460,16 +496,104 @@
         ctx.fillText(fmtVol(b.totalVol), x0 + half, yV);
       }
 
+      // ── I-1 (§4f): stacked-imbalance zone shading — side-colored translucent
+      // bands from the zone's bar to the live edge. Zones come precomputed in
+      // the slice (stackedImbalances, terminal-state.js — the diagonal rule at
+      // k=3/minRun=3 on FINISHED bars only); dead zones (traded through) stay
+      // visible at a dimmer alpha with active:false rather than vanishing —
+      // a zone that printed and failed is information, not an error to hide.
+      // These are descriptive order-flow patterns (IC run-log ≈0), never levels
+      // to trade — the panel hint says so.
+      const zoneOffset = bars.length - vis.length;   // zone.barIdx indexes the FULL bars array
+      for (const z of slice.zones || []) {
+        const startIdx = z.barIdx - zoneOffset + 1;  // band begins AFTER the zone's own bar
+        if (startIdx > vis.length) continue;         // zone bar right of the window — nothing to draw
+        if (z.top < minP || z.bottom > maxP) continue;   // fully outside the visible price window
+        const x0 = Math.max(0, startIdx * barW);
+        const yT = Math.max(0, yOf(Math.min(z.top, maxP)));
+        const yB = Math.min(cellsH, yOf(Math.max(z.bottom, minP)) + rowH);
+        if (yB <= yT || plotW <= x0) continue;
+        const col = z.side === 'buy' ? p.up : p.down;
+        ctx.fillStyle = rgba(col, z.active ? 0.10 : 0.04);
+        ctx.fillRect(x0, yT, plotW - x0, yB - yT);
+        if (z.active) {   // active zones get a hairline edge; dead ones stay a faint wash
+          ctx.strokeStyle = rgba(col, 0.4); ctx.lineWidth = 1;
+          ctx.strokeRect(x0 + 0.5, yT + 0.5, plotW - x0 - 1, yB - yT - 1);
+        }
+      }
+
+      // ── I-1 (§4f): absorption ◉ flags — HEURISTIC, labeled in the panel
+      // hint (AbsorptionDetector events carry label:'heuristic'; the glyph is
+      // an annotation, so it wears --accent like every reference marker,
+      // never the P&L pair). ev.ts is the spike bar's open time — map it to
+      // its visible column; events outside the window simply aren't drawn.
+      const absEvs = slice.absorb || [];
+      if (absEvs.length) {
+        const barCol = new Map();
+        for (let i = 0; i < vis.length; i++) barCol.set(vis[i].t, i);
+        font(11, true); ctx.textAlign = 'center';
+        for (const ev of absEvs) {
+          const bi = barCol.get(ev.ts);
+          if (bi === undefined) continue;
+          if (!(ev.price >= minP && ev.price <= maxP)) continue;
+          ctx.fillStyle = p.accent;
+          ctx.fillText('◉', bi * barW + barW / 2, yOf(ev.price) + rowH / 2);
+        }
+      }
+
+      // ── I-1 (§4f): cum-delta mini-pane (cumDelta accessor output). Session-
+      // anchored like CVD — the first bar in the ring is the anchor, so only
+      // slope/divergence read (stated in the hint). Skipped bars (non-finite
+      // delta) simply have no point — nothing is zero-coerced. ──
+      const yCum0 = cellsH + ROW_DELTA + ROW_TVOL;
+      ctx.strokeStyle = p.border; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, yCum0 + 0.5); ctx.lineTo(plotW, yCum0 + 0.5); ctx.stroke();
+      const cumByTs = new Map();
+      for (const cpt of slice.cum || []) cumByTs.set(cpt.ts, cpt.cum);
+      const cumPts = [];
+      let cMin = Infinity, cMax = -Infinity;
+      for (let i = 0; i < vis.length; i++) {
+        const cv = cumByTs.get(vis[i].t);
+        if (!Number.isFinite(cv)) continue;
+        cumPts.push([i * barW + barW / 2, cv]);
+        if (cv < cMin) cMin = cv;
+        if (cv > cMax) cMax = cv;
+      }
+      if (cumPts.length > 1) {
+        const cSpan = Math.max(cMax - cMin, 1e-9);
+        const yCum = (v) => yCum0 + 4 + (ROW_CUM - 8) * (cMax - v) / cSpan;
+        // Zero baseline when it lies inside the pane (dashed, recessive grid).
+        if (cMin < 0 && cMax > 0) {
+          ctx.save();
+          ctx.setLineDash([3, 3]);
+          ctx.strokeStyle = p.grid; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(0, yCum(0)); ctx.lineTo(plotW, yCum(0)); ctx.stroke();
+          ctx.restore();
+        }
+        ctx.strokeStyle = p.c1; ctx.lineWidth = 1.25;   // Σ-family hue (CVD's Σ line is --c1 too)
+        ctx.beginPath();
+        ctx.moveTo(cumPts[0][0], yCum(cumPts[0][1]));
+        for (let i = 1; i < cumPts.length; i++) ctx.lineTo(cumPts[i][0], yCum(cumPts[i][1]));
+        ctx.stroke();
+        // Endpoint value — the pane is 34px, one label is all it can carry.
+        font(8); ctx.fillStyle = p.c1; ctx.textAlign = 'right';
+        ctx.fillText(fmtVol(cumPts[cumPts.length - 1][1]), plotW - 2, yCum(cumPts[cumPts.length - 1][1]));
+      } else {
+        font(8); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+        ctx.fillText('cumΔ accruing…', 4, yCum0 + ROW_CUM / 2);
+      }
+
       // Bar time labels (UTC), thinned to avoid overlap.
       const step = Math.max(1, Math.ceil(56 / barW));
       font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'center';
       for (let i = vis.length - 1; i >= 0; i -= step) {
-        ctx.fillText(hm(vis[i].t), i * barW + barW / 2, cellsH + ROW_DELTA + ROW_TVOL + ROW_TIME / 2);
+        ctx.fillText(hm(vis[i].t), i * barW + barW / 2, cellsH + ROW_DELTA + ROW_TVOL + ROW_CUM + ROW_TIME / 2);
       }
       // Footer row captions in the gutter.
       font(9); ctx.textAlign = 'left'; ctx.fillStyle = p.muted;
       ctx.fillText('Δ', plotW + 4, cellsH + ROW_DELTA / 2);
       ctx.fillText('vol', plotW + 4, cellsH + ROW_DELTA + ROW_TVOL / 2);
+      ctx.fillText('cumΔ', plotW + 4, yCum0 + ROW_CUM / 2);
 
       // ── Right gutter: session VP histogram + POC/VAH/VAL (ProfileStore) ──
       // The profile is FULL-SESSION; the gutter clips it to the visible price
@@ -543,8 +667,11 @@
       }
     }
 
-    /** slice = { bars, profile, cvd, tickSize, nowMs } — all straight from the
-     *  stores; nothing here mutates them. */
+    /** slice = { bars, profile, cvd, tickSize, nowMs } + I-1 (§4f): zones
+     *  (stackedImbalances output over the same bars), absorb (Absorption-
+     *  Detector.events(), every one labeled 'heuristic'), cum (cumDelta
+     *  accessor output) — all straight from the stores; nothing here mutates
+     *  them. */
     function render(slice) {
       lastSlice = slice;
       draw(slice);
@@ -615,13 +742,18 @@
       cell.classList.add('cell-flash');
     }
 
-    /** slice = { grouped:{bids,asks} (best-first), best:{bid,ask}, bars, tickSize } */
+    /** slice = { grouped:{bids,asks} (best-first), best:{bid,ask}, bars,
+     *  tickSize, nakedPocs } — nakedPocs (I-1 §4f, optional): [{price, date}]
+     *  naked POC rows from the /v1/levels registry; a ladder row whose
+     *  [price, price+tick) bucket contains one gets a subtle marker (LevelsView
+     *  'draw on charts' toggle — terminal.js passes [] when it is off). */
     function render(slice) {
       if (!tbody) return;
       const g = slice.grouped || { bids: [], asks: [] };
       const bars = slice.bars || [];
       const tick = slice.tickSize || 1;
       const dp = tick >= 1 ? 0 : 2;
+      const naked = slice.nakedPocs || [];
 
       // Session per-level aggressor volume from the footprint bars (≤121 bars ×
       // their levels — small; recomputed only on dirty renders).
@@ -647,8 +779,21 @@
         if (!lvl) {
           for (let i = 0; i < 6; i++) tds[i].textContent = '';
           tds[1].style.background = ''; tds[3].style.background = '';
+          tr.classList.remove('naked');
+          tds[2].title = '';
           return;
         }
+        // I-1 (§4f): naked-POC marker — dotted underline on the price cell
+        // (terminal.css), tooltip names the day(s). Subtle by design: a prior
+        // day's untested POC is context, not a signal.
+        let nk = '';
+        for (const np of naked) {
+          if (np.price >= lvl.price && np.price < lvl.price + tick) {
+            nk += (nk ? ', ' : '') + np.date;
+          }
+        }
+        tr.classList.toggle('naked', nk !== '');
+        tds[2].title = nk ? 'naked POC (' + nk + ') — untested since that day (registry-derived, descriptive)' : '';
         const s = sess.get(lvl.price);
         const buy = s ? s.buy : 0, sell = s ? s.sell : 0, d = buy - sell;
         tds[0].textContent = sell > 0 ? fmtVol(sell) : '';
@@ -1170,6 +1315,23 @@
       const span = Math.max(tN - t0, 1000);
       const X = (ts) => plotW * (ts - t0) / span;
 
+      // ── I-1 (§4f): Asia/London/NY session boxes (SessionClock.boxesFor,
+      // composed by terminal.js) — drawn FIRST so the shading sits UNDER the
+      // depth cells (recessive chrome, dataviz rule). Overlap hours (London
+      // opens inside Asia, NY inside London) stack their alpha — the darker
+      // strip IS the overlap, deliberately visible. Labels ride the pane
+      // bottom at each box start; the caption states the UTC convention.
+      for (const box of slice.sessions || []) {
+        if (!box || !Number.isFinite(box.startMs) || !Number.isFinite(box.endMs)) continue;
+        const xs = Math.max(0, X(Math.max(box.startMs, t0)));
+        const xe = Math.min(plotW, X(Math.min(box.endMs, tN)));
+        if (xe <= xs) continue;
+        ctx.fillStyle = rgba(p.c5, 0.05);
+        ctx.fillRect(xs, 0, xe - xs, plotH);
+        font(8, true); ctx.fillStyle = rgba(p.muted, 0.85); ctx.textAlign = 'left';
+        ctx.fillText(box.name, xs + 2, plotH - 6);
+      }
+
       // Column decimation: keep every stride-th sample so columns stay ≥ ~1.5
       // CSS px. Plot RESOLUTION only — every drawn column is a real ladder
       // that stood on the wire; we drop columns, we never average two ladders
@@ -1259,7 +1421,8 @@
       }
       // Corner tag: venue + scale statement (per-source label, §0.7).
       font(9, true); ctx.textAlign = 'left'; ctx.fillStyle = p.muted;
-      ctx.fillText((slice.ex || '') + ' · α ∝ resting qty (p95-scaled)' + (velOn ? ' · velocity tint ON' : ''), 6, 8);
+      ctx.fillText((slice.ex || '') + ' · α ∝ resting qty (p95-scaled)' + (velOn ? ' · velocity tint ON' : '')
+        + (slice.sessions && slice.sessions.length ? ' · shaded: Asia/London/NY sessions (UTC, FX-desk convention — §4f)' : ''), 6, 8);
 
       // Hover readout: ts · price · resting qty (+ side) at the cell.
       if (mouse && mouse.x >= 0 && mouse.x < plotW && mouse.y >= 0 && mouse.y < plotH) {
@@ -1294,9 +1457,11 @@
       }
     }
 
-    /** slice = { samples, range, tickSize, trail, events, ex } — samples/range
-     *  straight from DepthHistoryStore (LIVE refs, read-only), trail from the
-     *  bootstrap's per-venue price ring, events from the detector. */
+    /** slice = { samples, range, tickSize, trail, events, ex, sessions } —
+     *  samples/range straight from DepthHistoryStore (LIVE refs, read-only),
+     *  trail from the bootstrap's per-venue price ring, events from the
+     *  detector, sessions (I-1 §4f) from SessionClock.boxesFor over the
+     *  sample span (pure arithmetic — composed by terminal.js). */
     function render(slice) {
       lastSlice = slice;
       draw(slice);
@@ -1644,6 +1809,18 @@
     let ha = false;
     const smaOn = { 20: false, 50: false, 200: false };
     let ctl = {};                   // control elements (from terminal.html chrome)
+    // I-1 (§4f): session-VWAP ± σ band series + levels-overlay price lines.
+    // vwapSeries = 5 lines (vwap, ±1σ, ±2σ) in ONE hue family (--c4) with
+    // dash as the band cue — bands are one concept, not five series, so one
+    // hue + dash weight beats five legend hues. The points are GENUINELY
+    // ACCUMULATED live-session samples of the running AnchoredVwap (terminal
+    // .js's 5s event-ts gate) — never a back-computed history the page did
+    // not witness (§0.7).
+    let vwapSeries = null;          // {v, u1, d1, u2, d2}
+    let lastVwapMeta = null;        // last vwap slice (legend text: anchor, n, store parity)
+    let vwapHasData = false;        // any points set? (drives visibility with the replay cursor)
+    let overlayLines = [];          // candle.createPriceLine handles (LevelsView toggle)
+    let lastOvKey = null;           // overlay identity — price lines rebuild only on change
 
     /** Heikin-Ashi transform — PRESENTATION ONLY (see view header): standard
      *  recursion haC=(o+h+l+c)/4, haO=(prevHaO+prevHaC)/2 seeded at (o+c)/2.
@@ -1713,6 +1890,7 @@
       const replaying = cursor < n - 1;
       if (ctl.flagEl) ctl.flagEl.hidden = !replaying;   // 'REPLAY (historical bars)' — §0 flag
       if (ctl.scrub) { ctl.scrub.max = String(n - 1); ctl.scrub.value = String(cursor); }
+      syncVwapVisibility();   // I-1: present-time bands hide while rewound (§0)
       renderLegend();
     }
 
@@ -1724,8 +1902,115 @@
         if (smaOn[per]) html += '<span><i class="sw" style="background:' + p[SMA_TOKEN[per]] + '"></i>SMA ' + per + '</span>';
       }
       if (ha) html += '<span>Heikin-Ashi (display transform — SMAs stay on raw closes)</span>';
+      // I-1 (§4f): VWAP band legend — every series named (≥2 series ⇒ legend,
+      // dataviz rule) + the AMT hint the panel exists for.
+      if (vwapHasData && lastVwapMeta) {
+        html += '<span><i class="sw" style="background:' + p.c4 + '"></i>VWAP (' + esc(lastVwapMeta.anchorLabel || 'session') + ')</span>'
+          + '<span><i class="sw" style="background:' + rgba(p.c4, 0.6) + '"></i>±1σ / ±2σ (dashed/dotted)</span>'
+          + '<span class="cvd-anchor">AMT read: value ≈ vwap ± 1σ · n=' + (lastVwapMeta.n || 0)
+          + ' live trades since anchor (accumulates from page open)</span>';
+        if (lastVwapMeta.storeTxt) {
+          // /v1/vwap parity read (tick-exact, from the recorded store) — a
+          // labeled cross-check, fetched once per anchor change, never merged
+          // into the live series (§0.7 per-source rail).
+          html += '<span class="cvd-anchor">store (tick-exact): ' + esc(lastVwapMeta.storeTxt) + '</span>';
+        }
+      }
+      if (overlayLines.length) {
+        html += '<span><i class="sw" style="background:' + p.accent + '"></i>levels overlay: prior-day POC/VA + naked POCs (registry, dashed)</span>';
+      }
       html += '<span class="cvd-anchor">bybit linear klines · REST · no live merge (§0.7)</span>';
       legend.innerHTML = html;
+    }
+
+    /** I-1 (§4f): vwap band visibility — bands are PRESENT-TIME session state,
+     *  so they hide while the bar-replay cursor is rewound (drawing "now"
+     *  onto a rewound chart would blend two clocks — same §0 rail as the
+     *  REPLAY flag) and return at the live edge. */
+    function syncVwapVisibility() {
+      if (!vwapSeries) return;
+      const atLiveEdge = !bars || !bars.length || cursor >= bars.length - 1;
+      const vis = vwapHasData && atLiveEdge;
+      for (const k in vwapSeries) vwapSeries[k].applyOptions({ visible: vis });
+    }
+
+    /** slice.vwap = { points:[{ts, vwap, s1, s2}], intervalMs, anchorLabel,
+     *  n, storeTxt } | null. Points are bucketed to the chart's OWN interval
+     *  grid (last sample per bucket): lightweight-charts spaces by time
+     *  INDEX, so off-grid sample times would inject extra columns and crush
+     *  the candles — bucketing to bar times keeps the scale intact while
+     *  every plotted value stays a genuinely-sampled running vwap. */
+    function applyVwap(v) {
+      if (!vwapSeries) return;
+      lastVwapMeta = v || null;
+      const pts = v && Array.isArray(v.points) ? v.points : [];
+      if (!pts.length) {
+        if (vwapHasData) {
+          vwapHasData = false;
+          for (const k in vwapSeries) vwapSeries[k].setData([]);
+          syncVwapVisibility();
+          renderLegend();
+        }
+        return;
+      }
+      const iv = Math.max(1000, (v && v.intervalMs) || 60000);
+      const bucket = new Map();   // bar-time → last sample in that bucket
+      for (const pt of pts) {
+        if (!pt || !Number.isFinite(pt.ts) || !Number.isFinite(pt.vwap)) continue;
+        bucket.set(Math.floor(pt.ts / iv) * iv, pt);
+      }
+      const times = [...bucket.keys()].sort((a, b) => a - b);
+      const rows = { v: [], u1: [], d1: [], u2: [], d2: [] };
+      for (const t of times) {
+        const pt = bucket.get(t);
+        const sec = t / 1000;
+        rows.v.push({ time: sec, value: pt.vwap });
+        if (Number.isFinite(pt.s1)) {
+          rows.u1.push({ time: sec, value: pt.vwap + pt.s1 });
+          rows.d1.push({ time: sec, value: pt.vwap - pt.s1 });
+        }
+        if (Number.isFinite(pt.s2)) {
+          rows.u2.push({ time: sec, value: pt.vwap + pt.s2 });
+          rows.d2.push({ time: sec, value: pt.vwap - pt.s2 });
+        }
+      }
+      vwapSeries.v.setData(rows.v);
+      vwapSeries.u1.setData(rows.u1); vwapSeries.d1.setData(rows.d1);
+      vwapSeries.u2.setData(rows.u2); vwapSeries.d2.setData(rows.d2);
+      vwapHasData = rows.v.length > 0;
+      syncVwapVisibility();
+      renderLegend();
+    }
+
+    /** slice.overlays = [{price, label, kind:'poc'|'va'|'naked'}] | null —
+     *  LevelsView 'draw on charts' toggle (registry-derived reference levels).
+     *  Rebuilt only when the level set changes; axis labels are OFF (a dozen
+     *  naked lines would wallpaper the price scale) — the on-line title
+     *  carries the name instead. */
+    function applyOverlays(list) {
+      if (!candle) return;
+      const items = Array.isArray(list) ? list : [];
+      const key = items.map((o) => (o ? o.price + '|' + o.kind + '|' + o.label : '')).join(',');
+      if (key === lastOvKey) return;
+      lastOvKey = key;
+      for (const h of overlayLines) {
+        try { candle.removePriceLine(h); } catch (_) { /* already gone */ }
+      }
+      overlayLines = [];
+      const p = pal();
+      for (const o of items.slice(0, 24)) {   // cap: a wall of lines stops being an overlay
+        if (!o || !Number.isFinite(o.price)) continue;
+        // POC = accent solid; VA edges = muted dashed; naked POCs = accent
+        // dashed (same reference-marker vocabulary as the footprint gutter).
+        const style = o.kind === 'poc' ? { color: p.accent, lineStyle: 0 }
+          : o.kind === 'naked' ? { color: p.accent, lineStyle: 2 }
+          : { color: p.muted, lineStyle: 2 };
+        overlayLines.push(candle.createPriceLine({
+          price: o.price, color: style.color, lineWidth: 1, lineStyle: style.lineStyle,
+          axisLabelVisible: false, title: String(o.label || ''),
+        }));
+      }
+      renderLegend();
     }
 
     function mount(el, opts) {
@@ -1758,6 +2043,13 @@
           priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
         });
       }
+      // I-1 (§4f): VWAP ± σ band series — one hue (--c4), dash = band rank
+      // (LC lineStyle: 0 solid / 2 dashed / 1 dotted). Hidden until fed.
+      const mkBand = (width, style) => chart.addLineSeries({
+        color: p.c4, lineWidth: width, lineStyle: style, visible: false,
+        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+      });
+      vwapSeries = { v: mkBand(2, 0), u1: mkBand(1, 2), d1: mkBand(1, 2), u2: mkBand(1, 1), d2: mkBand(1, 1) };
       legend = document.createElement('div');
       legend.className = 'term-cvd-legend';
       root.appendChild(legend);
@@ -1802,10 +2094,16 @@
       if (ctl.liveBtn) ctl.liveBtn.addEventListener('click', () => { stopPlay(); cursor = bars ? bars.length - 1 : -1; setView(); });
     }
 
-    /** slice = { bars } — chronological klines from terminal-hist.js (already
-     *  reversed from Bybit's NEWEST-FIRST wire order) or null on fetch failure. */
+    /** slice = { bars, vwap, overlays } — bars: chronological klines from
+     *  terminal-hist.js (already reversed from Bybit's NEWEST-FIRST wire
+     *  order) or null on fetch failure; vwap/overlays: I-1 §4f (see applyVwap
+     *  / applyOverlays docs) — handled BEFORE the bars identity check because
+     *  they move on live-session cadence while the klines only move on
+     *  (re)fetch. */
     function render(slice) {
       if (!chart) return;
+      applyOverlays(slice && slice.overlays);
+      applyVwap(slice && slice.vwap);
       const next = slice && slice.bars;
       if (next === bars) return;   // identity check: REST data only changes on (re)fetch
       stopPlay();
@@ -3793,6 +4091,473 @@
     return { mount, render };
   }
 
+  // ════════ I-1 (§4f) — AUCTION views: tick-exact profiles over the RECORDED
+  // store (collector BYOD API / HF archive), the daily-levels registry, and
+  // book microstructure (OFI / microprice). Rails restated at the section
+  // boundary: every read here is DESCRIPTIVE (§0.1) — recorded history and
+  // live book state, never a signal, never a backtest input; OFI/microprice
+  // carry their paper citations in visible chrome (Cont–Kukanov–Stoikov 2014;
+  // Stoikov 2018); archived-day loads are size-gated and labeled
+  // 'archived day · hf dataset' (§4f Wave 2). ════════
+
+  /** Epoch-ms seconds series for lightweight-charts (strictly-ascending
+   *  unique times, LAST value per second — the FootprintView toLcSeries rule,
+   *  shared here for the microstructure panes). */
+  function lcSecondsSeries(points, valueKey) {
+    const out = [];
+    let prevSec = -1;
+    for (const pt of points || []) {
+      if (!pt || !Number.isFinite(pt.ts)) continue;
+      const v = pt[valueKey];
+      if (!Number.isFinite(v)) continue;
+      const s = Math.floor(pt.ts / 1000);
+      if (s === prevSec) out[out.length - 1].value = v;
+      else if (s > prevSec) { out.push({ time: s, value: v }); prevSec = s; }
+      // s < prevSec (out-of-order sample) — dropped, same rail as toLcSeries
+    }
+    return out;
+  }
+
+  // ═══ AuctionProfileView — tick-exact volume profile, recorded store (§4f) ═══
+  //
+  // The centerpiece: /v1/profile over local day files, client-side aggregation
+  // of ARCHIVED days (hf dataset, size-gated), or a composite multi-day merge
+  // — all composed by terminal.js; this view only renders the slice.
+  //
+  // Modes: total | buy×sell | delta (DIVERGING ramp) | size buckets.
+  // Dataviz discipline (§4f, binding): the delta ramp is two-hue + NEUTRAL
+  // GRAY midpoint — color = mix(neutral --g-400, pole --up/--down, intensity)
+  // where intensity = |Δ|/p95(|Δ|) from buildDeltaProfile (never a hue at
+  // zero; ramp anchors validated — see lerpHex header). Bar LENGTH carries Δ
+  // magnitude redundantly, so hue is never the only cue. Every mode ships a
+  // legend; hover reads level · buy · sell · Δ · % of total.
+  function AuctionProfileView() {
+    let root = null, canvas = null, legend = null, statusEl = null;
+    let mode = 'total';
+    let lastSlice = null, mouse = null, drawQueued = false;
+    let legendKey = '';
+    const GUT_AXIS = 64, CAP_H = 16;
+
+    function mount(el, opts) {
+      root = el;
+      const o = opts || {};
+      canvas = document.createElement('canvas');
+      canvas.className = 'term-canvas';
+      root.appendChild(canvas);
+      legend = document.createElement('div');
+      legend.className = 'term-legend';
+      root.appendChild(legend);
+      statusEl = o.statusEl || null;
+      canvas.addEventListener('mousemove', (e) => {
+        const r = canvas.getBoundingClientRect();
+        mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
+        scheduleDraw();
+      });
+      canvas.addEventListener('mouseleave', () => { mouse = null; scheduleDraw(); });
+      // Controls live in the panel chrome (terminal.html); the view owns the
+      // MODE (pure display choice), terminal.js owns source/composite (they
+      // drive fetches) — the TapeView ownership split.
+      if (o.modeSel) {
+        mode = o.modeSel.value || 'total';
+        o.modeSel.addEventListener('change', () => { mode = o.modeSel.value; legendKey = ''; scheduleDraw(); });
+      }
+      if (o.srcSel && typeof o.onSource === 'function') {
+        o.srcSel.addEventListener('change', () => o.onSource(o.srcSel.value));
+      }
+      if (o.compInput && o.daysSel && typeof o.onComposite === 'function') {
+        const emit = () => {
+          const days = Array.prototype.filter.call(o.daysSel.options, (op) => op.selected).map((op) => op.value);
+          o.onComposite(!!o.compInput.checked, days);
+        };
+        o.compInput.addEventListener('change', () => { o.daysSel.hidden = !o.compInput.checked; emit(); });
+        o.daysSel.addEventListener('change', emit);
+      }
+    }
+
+    function scheduleDraw() {
+      if (drawQueued || !lastSlice) return;
+      drawQueued = true;
+      requestAnimationFrame(() => { drawQueued = false; if (lastSlice) draw(lastSlice); });
+    }
+
+    function renderLegend(p, bucketLabels) {
+      const key = mode + '|' + (bucketLabels || []).join(',');
+      if (key === legendKey) return;
+      legendKey = key;
+      const neutral = cssVar('--g-400', '#5a606e');
+      let html = '';
+      if (mode === 'bs') {
+        html = '<span><i class="sw" style="background:' + p.up + '"></i>buy (taker) →</span>'
+          + '<span><i class="sw" style="background:' + p.down + '"></i>← sell (taker)</span>'
+          + '<span class="lg-note">mirrored from the center — side is position + hue</span>';
+      } else if (mode === 'delta') {
+        html = '<span><i class="sw" style="background:' + p.down + '"></i>sell Δ</span>'
+          + '<span><i class="sw" style="background:' + neutral + '"></i>Δ ≈ 0 (neutral)</span>'
+          + '<span><i class="sw" style="background:' + p.up + '"></i>buy Δ</span>'
+          + '<span class="lg-note">diverging ramp: hue = sign, saturation = |Δ|/p95, length = |Δ| (validated §4f)</span>';
+      } else if (mode === 'buckets') {
+        const toks = ['c2', 'c4', 'c1', 'c6'];
+        html = (bucketLabels || []).map((lb, i) =>
+          '<span><i class="sw" style="background:' + p[toks[Math.min(i, toks.length - 1)]] + '"></i>' + esc(lb) + '</span>').join('')
+          + '<span class="lg-note">stacked notional-size buckets per level</span>';
+      } else {
+        html = '<span><i class="sw" style="background:' + rgba(p.accent2, 0.7) + '"></i>volume (BTC) per level</span>';
+      }
+      html += '<span class="lg-note">POC solid · VAH/VAL dashed · nPOC = naked prior-day POC (age labeled)</span>';
+      legend.innerHTML = html;
+    }
+
+    function draw(slice) {
+      if (!canvas) return;
+      const { ctx, w, h } = fitCanvas(canvas);
+      const p = pal();
+      ctx.clearRect(0, 0, w, h);
+      ctx.textBaseline = 'middle';
+      const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
+      if (statusEl) statusEl.textContent = slice.status || '';
+
+      const prof = slice.profile;
+      renderLegend(p, slice.bucketLabels);
+      if (!prof || !prof.levels || !prof.levels.length) {
+        font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+        ctx.fillText(slice.note || 'no profile loaded', 10, 18);
+        return;
+      }
+      const levels = prof.levels;   // ascending lvl (endpoint + client agg both sort)
+      const tick = slice.tick || 10;
+      const lo = levels[0].lvl, hi = levels[levels.length - 1].lvl;
+      const nRows = Math.round((hi - lo) / tick) + 1;
+      if (nRows > 4000) {
+        font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+        ctx.fillText('range spans ' + nRows + ' rows at $' + tick + ' — degenerate, not drawn', 10, 18);
+        return;
+      }
+      const plotH = h - CAP_H - 4;
+      const plotW = w - GUT_AXIS - 8;
+      const rowH = Math.max(1, plotH / nRows);
+      const yOf = (lvl) => CAP_H + plotH * (hi - lvl) / Math.max(hi - lo, 1e-9);
+      const total = prof.total_vol > 0 ? prof.total_vol : 1;
+
+      // Per-mode scales.
+      let maxVol = 0, maxSide = 0, maxAbsD = 0;
+      const deltaByLvl = new Map();
+      for (const d of slice.delta || []) deltaByLvl.set(d.lvl, d);
+      for (const lv of levels) {
+        const v = lv.buy_vol + lv.sell_vol;
+        if (v > maxVol) maxVol = v;
+        if (lv.buy_vol > maxSide) maxSide = lv.buy_vol;
+        if (lv.sell_vol > maxSide) maxSide = lv.sell_vol;
+        const ad = Math.abs(lv.buy_vol - lv.sell_vol);
+        if (ad > maxAbsD) maxAbsD = ad;
+      }
+      if (!(maxVol > 0)) return;
+      const neutral = cssVar('--g-400', '#5a606e');
+      const nBk = slice.bucketLabels ? slice.bucketLabels.length : 0;
+      const bkToks = ['c2', 'c4', 'c1', 'c6'];
+      const center = plotW / 2;
+
+      for (const lv of levels) {
+        const y = yOf(lv.lvl);
+        const bh = Math.max(1, rowH - (rowH > 2.5 ? 1 : 0));   // thin marks, hairline gaps when room
+        if (mode === 'bs') {
+          // Mirrored buy×sell around a center axis (side = position + hue).
+          const sw = center * (lv.sell_vol / maxSide), bw2 = center * (lv.buy_vol / maxSide);
+          ctx.fillStyle = rgba(p.down, 0.7); ctx.fillRect(center - sw, y, sw, bh);
+          ctx.fillStyle = rgba(p.up, 0.7); ctx.fillRect(center, y, bw2, bh);
+        } else if (mode === 'delta') {
+          const d = deltaByLvl.get(lv.lvl);
+          const val = d ? d.delta : lv.buy_vol - lv.sell_vol;
+          const inten = d ? d.intensity : 0;
+          const len = maxAbsD > 0 ? center * (Math.abs(val) / maxAbsD) : 0;
+          // Diverging fill: neutral→pole by p95 intensity (see view header).
+          ctx.fillStyle = lerpHex(neutral, val >= 0 ? p.up : p.down, inten);
+          if (val >= 0) ctx.fillRect(center, y, len, bh);
+          else ctx.fillRect(center - len, y, len, bh);
+        } else if (mode === 'buckets' && nBk) {
+          let off = 0;
+          for (let i = 0; i < nBk; i++) {
+            const bv = lv['b' + i];
+            if (!Number.isFinite(bv) || bv <= 0) continue;
+            const seg = plotW * (bv / maxVol);
+            ctx.fillStyle = rgba(p[bkToks[Math.min(i, bkToks.length - 1)]], 0.75);
+            ctx.fillRect(off, y, seg, bh);
+            off += seg;
+          }
+        } else {
+          ctx.fillStyle = rgba(p.accent2, lv.lvl >= prof.val && lv.lvl <= prof.vah ? 0.55 : 0.25);
+          ctx.fillRect(0, y, plotW * ((lv.buy_vol + lv.sell_vol) / maxVol), bh);
+        }
+      }
+      // Center axis for the mirrored/diverging modes (zero line = chrome).
+      if (mode === 'bs' || mode === 'delta') {
+        ctx.strokeStyle = p.border;
+        ctx.beginPath(); ctx.moveTo(center + 0.5, CAP_H); ctx.lineTo(center + 0.5, CAP_H + plotH); ctx.stroke();
+      }
+
+      // Price axis (right) FIRST, thinned ~16px — the reference-line labels
+      // below carry opaque backings and must paint OVER the axis text, not
+      // under it (observed POC/axis overprint in the live archived-day probe).
+      const labStep = Math.max(1, Math.ceil(16 / rowH));
+      font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'right';
+      for (let r = 0; r < nRows; r += labStep) {
+        const price = hi - r * tick;
+        ctx.fillText(fmtUsd(price), w - 2, yOf(price) + rowH / 2);
+      }
+
+      // POC / VAH / VAL / vwap reference lines (footprint-gutter vocabulary;
+      // opaque label backing — the TpoView collision fix).
+      const hline = (price, color, dash, label) => {
+        if (!Number.isFinite(price) || price < lo || price > hi + tick) return;
+        const y = yOf(price) + rowH / 2;
+        ctx.save();
+        if (dash) ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = color; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - GUT_AXIS, y); ctx.stroke();
+        ctx.restore();
+        font(9, true);
+        const txt = label;
+        const tw = ctx.measureText(txt).width;
+        ctx.fillStyle = rgba(p.panel2, 0.95);
+        ctx.fillRect(w - GUT_AXIS + 1, y - 6, tw + 4, 12);
+        ctx.fillStyle = color; ctx.textAlign = 'left';
+        ctx.fillText(txt, w - GUT_AXIS + 2, y);
+      };
+      hline(prof.poc, p.accent, false, 'POC ' + fmtUsd(prof.poc));
+      hline(prof.vah, p.muted, true, 'VAH');
+      hline(prof.val, p.muted, true, 'VAL');
+      if (Number.isFinite(prof.vwap)) hline(prof.vwap, p.c4, true, 'vwap');
+
+      // Naked-POC registry overlay (§4f): dashed accent lines, age labeled.
+      // Only levels inside the plotted range draw; the rest are counted in
+      // the caption — an off-scale arrow would imply unverifiable knowledge.
+      let nkClipped = 0;
+      for (const nk of slice.naked || []) {
+        if (!nk || !Number.isFinite(nk.price)) continue;
+        if (nk.price < lo || nk.price > hi + tick) { nkClipped++; continue; }
+        // Canvas text, not markup — no esc() (that helper emits HTML entities;
+        // KlineVpView caption rule). The date is the registry's own YYYY-MM-DD.
+        hline(nk.price, p.accent, true, 'nPOC ' + String(nk.date || '').slice(5) + ' · ' + nk.ageDays + 'd');
+      }
+
+      // Caption: source label (per-source rail §0.7 — 'archived day · hf
+      // dataset' when the bytes came from HF) + construction facts.
+      font(9, true); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+      ctx.fillText((slice.label || '') + ' · $' + tick + ' levels · ' + fmtVol(prof.total_vol) + ' BTC total'
+        + (nkClipped ? ' · +' + nkClipped + ' naked POC(s) off-range' : ''), 4, 8);
+
+      // Hover readout: level · buy · sell · Δ · % of total.
+      if (mouse && mouse.y >= CAP_H && mouse.y <= CAP_H + plotH) {
+        const ri = Math.min(nRows - 1, Math.max(0, Math.floor((mouse.y - CAP_H) / (plotH / nRows))));
+        const lvl = Math.round((hi - ri * tick) / tick) * tick;
+        let lv = null;
+        for (const cand of levels) if (Math.abs(cand.lvl - lvl) < tick / 2) { lv = cand; break; }
+        ctx.save();
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = rgba(p.fg, 0.4); ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, mouse.y + 0.5); ctx.lineTo(w - GUT_AXIS, mouse.y + 0.5); ctx.stroke();
+        ctx.restore();
+        const buy = lv ? lv.buy_vol : 0, sell = lv ? lv.sell_vol : 0, d = buy - sell;
+        const txt = fmtUsd(lvl) + ' · buy ' + fmtVol(buy) + ' × sell ' + fmtVol(sell)
+          + ' · Δ ' + (d > 0 ? '+' : '') + fmtVol(d)
+          + ' · ' + (100 * (buy + sell) / total).toFixed(1) + '% of total'
+          + (lv && Number.isFinite(lv.prints) ? ' · ' + lv.prints + ' prints' : '');
+        font(10);
+        const tw = ctx.measureText(txt).width;
+        ctx.fillStyle = rgba(p.panel2, 0.92);
+        ctx.fillRect(6, h - 24, tw + 14, 18);
+        ctx.strokeStyle = p.border; ctx.strokeRect(6.5, h - 23.5, tw + 13, 17);
+        ctx.fillStyle = p.fg; ctx.textAlign = 'left';
+        ctx.fillText(txt, 13, h - 15);
+      }
+    }
+
+    /** slice = { profile: {levels:[{lvl,buy_vol,sell_vol,prints[,b0..]}], poc,
+     *  vah, val, total_vol, vwap, sigma} | null, delta: buildDeltaProfile
+     *  output (precomputed by terminal.js so the Σdelta invariant stays in
+     *  the tested pure layer), naked:[{price,date,ageDays}], label, note,
+     *  status, tick, bucketLabels } */
+    function render(slice) {
+      lastSlice = slice;
+      draw(slice);
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ LevelsView — recorded-day levels registry table (§4f) ═══
+  //
+  // One row per RECORDED UTC day from /v1/levels (bybit leg): date, O/H/L/C,
+  // POC, value area, volume, and the serve-time-derived `naked` badge (POC
+  // never revisited by any LATER day's range — the endpoint derives it, this
+  // view only renders it). The 'draw on charts' toggle asks terminal.js to
+  // overlay prior-day POC/VA + naked POCs on the historical chart and mark
+  // naked-POC rows on the DOM ladder — reference levels, never signals.
+  function LevelsView() {
+    let root = null, list = null;
+
+    function mount(el, opts) {
+      const o = opts || {};
+      root = el;
+      root.insertAdjacentHTML('beforeend',
+        '<div class="lvls-row lvls-head"><span>date</span><span>O</span><span>H</span><span>L</span><span>C</span>'
+        + '<span>POC</span><span>value area</span><span>vol</span><span></span></div>');
+      list = document.createElement('div');
+      list.className = 'lvls-list';
+      root.appendChild(list);
+      root.insertAdjacentHTML('beforeend',
+        '<div class="farb-note">levels registry (data/ticks/levels.jsonl, bybit leg) — naked derived at serve time, '
+        + 'never stored; recorded days only, gaps stay gaps (§0.7).</div>');
+      if (o.drawInput && typeof o.onDraw === 'function') {
+        o.drawInput.addEventListener('change', () => o.onDraw(!!o.drawInput.checked));
+      }
+    }
+
+    /** slice = { days: /v1/levels days (date-ascending) | null, note } */
+    function render(slice) {
+      if (!list) return;
+      const days = slice.days;
+      if (!days) {
+        list.innerHTML = '<div class="chart-na">' + esc(slice.note || 'awaiting /v1/levels…') + '</div>';
+        return;
+      }
+      if (!days.length) {
+        list.innerHTML = '<div class="chart-na">registry is empty — it fills as the collector closes UTC days '
+          + '(rotation hook) or via <b>make backfill-levels</b> over the HF archive.</div>';
+        return;
+      }
+      let html = '';
+      for (let i = days.length - 1; i >= 0; i--) {   // newest first
+        const d = days[i];
+        html += '<div class="lvls-row">'
+          + '<span class="ts">' + esc(String(d.date || '—')) + '</span>'
+          + '<span class="num">' + fmtUsd(d.o) + '</span>'
+          + '<span class="num">' + fmtUsd(d.h) + '</span>'
+          + '<span class="num">' + fmtUsd(d.l) + '</span>'
+          + '<span class="num">' + fmtUsd(d.c) + '</span>'
+          + '<span class="num poc">' + fmtUsd(d.poc) + '</span>'
+          + '<span class="num">' + fmtUsd(d.val) + '–' + fmtUsd(d.vah) + '</span>'
+          + '<span class="num">' + fmtVol(d.vol) + '</span>'
+          + '<span>' + (d.naked ? '<span class="naked-badge" title="POC never revisited by a later recorded day\'s range — derived at serve time">NAKED</span>' : '') + '</span>'
+          + '</div>';
+      }
+      list.innerHTML = html;
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ MicrostructureView — OFI + microprice panes + readout strip (§4f) ═══
+  //
+  // TWO SEPARATE PANES, own scales (§4f dataviz rail: OFI never shares an
+  // axis — dual-axis charts fabricate correlation by scale choice):
+  //   pane 1: OFI 60s rolling sum (OfiStore.series — Cont, Kukanov & Stoikov
+  //           2014, computed between successive ~1s book snapshots; the
+  //           snapshot approximation is stated in the store and the hint);
+  //   pane 2: microprice − mid (Stoikov 2018 first-order imbalance-weighted
+  //           mid, minus the plain mid — the estimator's PULL, in $).
+  // Readout strip: top-10 book imbalance, microprice, OFI z(300s). The
+  // citation label is ALWAYS-VISIBLE panel text (§4f mandatory), not a tooltip.
+  function MicrostructureView() {
+    let root = null, statsEl = null;
+    let ofiChart = null, ofiSeries = null, mpChart = null, mpSeries = null;
+    let cells = {};
+    let lastSetAt = 0;
+    const SET_MIN_MS = 600;   // setData throttle — the CVD chart's budget
+
+    function mkPane(cap) {
+      const cell = document.createElement('div');
+      cell.className = 'micro-cell';
+      cell.innerHTML = '<div class="opt-cap">' + cap + '</div>';
+      const pane = document.createElement('div');
+      pane.className = 'micro-pane';
+      cell.appendChild(pane);
+      root.appendChild(cell);
+      return pane;
+    }
+
+    function mount(el) {
+      root = el;
+      statsEl = document.createElement('div');
+      statsEl.className = 'term-stats micro-strip';
+      const tile = (key, label, title) => {
+        const d = document.createElement('div');
+        d.className = 'tstat';
+        d.title = title;
+        d.innerHTML = '<span class="k">' + label + '</span><span class="v num">—</span>';
+        statsEl.appendChild(d);
+        cells[key] = d.lastChild;
+      };
+      tile('micro', 'microprice', 'Stoikov imbalance-weighted mid: (Pb·Qa + Pa·Qb)/(Qa+Qb) — pulled toward the thin side (first-order form, stated)');
+      tile('pull', 'micro − mid', 'the estimator’s pull off the plain mid, $ — positive = book leans up');
+      tile('imb', 'book imb (top-10)', '(Σbid − Σask)/(Σbid + Σask) over the top-10 grouped bybit levels; +1 = all bids');
+      tile('z', 'OFI z (300s)', 'z-score of the latest 1s OFI event vs the trailing 300 samples (ddof=1) — NaN below 2 samples/zero variance');
+      root.appendChild(statsEl);
+
+      const LC = global.LightweightCharts;
+      if (!LC || !LC.createChart) {
+        root.insertAdjacentHTML('beforeend',
+          '<div class="chart-na">vendored lightweight-charts unavailable — microstructure panes disabled (nothing is fabricated).</div>');
+      } else {
+        const p = pal();
+        const mkChart = (elPane, color) => {
+          const c = LC.createChart(elPane, {
+            height: elPane.clientHeight || 150,
+            layout: { background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace') },
+            grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
+            timeScale: { timeVisible: true, secondsVisible: true, borderColor: p.border },
+            rightPriceScale: { borderColor: p.border, scaleMargins: { top: 0.12, bottom: 0.12 } },
+            crosshair: { mode: 0 },   // hover readout: LC's own crosshair + axis labels
+          });
+          const s = c.addLineSeries({ color, lineWidth: 1, priceLineVisible: false, lastValueVisible: true });
+          // Zero baseline — both series are signed; zero is the read anchor.
+          s.createPriceLine({ price: 0, color: p.grid, lineWidth: 1, lineStyle: 1, axisLabelVisible: false, title: '' });
+          return { c, s };
+        };
+        // OFI = --c1 (primary data line), microprice pull = --c4 — categorical
+        // tokens, NOT the P&L pair (a signed flow reading is a series, not P&L).
+        const o = mkChart(mkPane('OFI — 60s rolling sum, own pane/scale (1s book snapshots)'), p.c1);
+        ofiChart = o.c; ofiSeries = o.s;
+        const m = mkChart(mkPane('microprice − mid ($) — own pane/scale'), p.c4);
+        mpChart = m.c; mpSeries = m.s;
+        window.addEventListener('resize', () => {
+          if (ofiChart) ofiChart.applyOptions({ width: root.clientWidth });
+          if (mpChart) mpChart.applyOptions({ width: root.clientWidth });
+        });
+      }
+      // §4f mandatory citation label — visible chrome, verbatim.
+      root.insertAdjacentHTML('beforeend',
+        '<div class="farb-note">OFI: Cont–Kukanov–Stoikov · microprice: Stoikov — descriptive.</div>');
+    }
+
+    /** slice = { ofi: OfiStore.series() [{ts,ofi}], mp: [{ts,d}] micro−mid
+     *  ring, z: OfiStore.zscore(300), micro, mid, imb, nowMs } — composed by
+     *  terminal.js from the same event-ts-gated bybit book sampler that feeds
+     *  DepthHistoryStore (1 real ladder/s; gaps produce no samples). */
+    function render(slice) {
+      if (!statsEl) return;
+      const set = (k, v, cls) => {
+        cells[k].textContent = v;
+        cells[k].className = 'v num' + (cls ? ' ' + cls : '');
+      };
+      set('micro', Number.isFinite(slice.micro) ? fmtUsd(slice.micro, 2) : '—');
+      const pull = Number.isFinite(slice.micro) && Number.isFinite(slice.mid) ? slice.micro - slice.mid : NaN;
+      set('pull', Number.isFinite(pull) ? (pull > 0 ? '+' : '') + pull.toFixed(2) : '—',
+        pull > 0 ? 'pos' : pull < 0 ? 'neg' : '');
+      set('imb', Number.isFinite(slice.imb) ? (slice.imb > 0 ? '+' : '') + slice.imb.toFixed(2) : '—',
+        slice.imb > 0 ? 'pos' : slice.imb < 0 ? 'neg' : '');
+      set('z', Number.isFinite(slice.z) ? (slice.z > 0 ? '+' : '') + slice.z.toFixed(2) + 'σ' : '—');
+
+      if (!ofiSeries || !mpSeries) return;
+      const now = Number.isFinite(slice.nowMs) ? slice.nowMs : Date.now();
+      if (now - lastSetAt < SET_MIN_MS) return;
+      lastSetAt = now;
+      ofiSeries.setData(lcSecondsSeries(slice.ofi, 'ofi'));
+      mpSeries.setData(lcSecondsSeries(slice.mp, 'd'));
+    }
+
+    return { mount, render };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalViews = {
@@ -3808,6 +4573,10 @@
     // O-5 (§4e): portfolio panels — the user's OWN journal (NOT a backtest),
     // its calendar, and the labeled context feeds (Polymarket / news / econ).
     JournalView, CalendarView, PolymarketView, NewsView, EconView,
+    // I-1 (§4f): auction suite — tick-exact recorded-store profiles (BYOD /
+    // HF archive, size-gated + labeled), the daily-levels registry table, and
+    // the cited OFI/microprice microstructure panes.
+    AuctionProfileView, LevelsView, MicrostructureView,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalViews;

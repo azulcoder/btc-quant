@@ -32,6 +32,13 @@ What is asserted
    400 on bad params, 404 on unknown paths (legacy mode, contract UNCHANGED);
    rotation mode: cross-day-file reads, aggregated /v1/info row_counts, and the
    410 'archived' answer with the hf:// hint for pre-local ranges.
+9. **§4f auction endpoints + levels registry** — /v1/profile aggregation vs a
+   hand-written reference SQL (exact), POC/VAH/VAL parity with the JS
+   ProfileStore constructed-levels fixture (check_terminal group 9: poc 150 /
+   vah 200 / val 130), buckets_usd splits, two-day-file union, 400 on garbage;
+   /v1/vwap vs the batch formula; the rotation hook's levels.jsonl append +
+   idempotence; naked-POC derivation both ways; backfill_levels skip-existing
+   (HF reader seams monkeypatched — network-free).
 
 Collector deps are opt-in (requirements-collector.txt): this module skips
 cleanly when duckdb is absent. The normalizers themselves need neither dep.
@@ -41,8 +48,11 @@ from __future__ import annotations
 
 import asyncio
 import http.client
+import importlib.util
 import json
+import math
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -913,6 +923,464 @@ def test_api_rotation_aggregates_and_answers_410(tmp_path):
         assert status == 200 and body["ok"] is True
         status, body = _get_json(port, "/v1/nope")
         assert status == 404
+        assert "/v1/profile" in body["routes"]  # §4f routes are advertised
     finally:
         server.shutdown()
         server.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# 18. §4f /v1/profile — hand-SQL exactness, ProfileStore VA parity, buckets,   #
+#     two-day-file union, 400 on garbage                                       #
+# --------------------------------------------------------------------------- #
+def _mk_trade(ts_ms, price, qty, buy=True, symbol="BTCUSDT", exchange="bybit"):
+    """Synthetic trades-schema tuple (never derived from data/ticks/)."""
+    return (exchange, symbol, f"{exchange}-{ts_ms}-{price}", int(ts_ms),
+            float(price), float(qty), bool(buy))
+
+
+def _seed_day(root: Path, day: str, rows: list[tuple]) -> None:
+    """Write synthetic trades into a CLOSED day file under a tmp rotation root."""
+    con = collector.open_db(root / f"{day}.duckdb")
+    con.executemany(collector._INSERT_SQL["trades"], rows)
+    con.close()
+
+
+@contextmanager
+def _rotation_server(root: Path):
+    """Rotation-mode BYOD server over a tmp root; yields the ephemeral port."""
+    manager = collector.DayFileManager(root)
+    lock = threading.Lock()
+    info = {"symbol": "BTCUSDT", "exchanges": ["bybit"], "db": str(root), "started_ms": 0}
+    server = collector.make_api_server(manager, lock, info, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_profile_matches_hand_sql_exactly(tmp_path):
+    """/v1/profile levels == an independent hand-written reference aggregation
+    (round(price/tick)*tick grid, buy/sell/prints per level), run directly on
+    the same synthetic day file; vwap/sigma == the batch formulas."""
+    root = tmp_path / "ticks"
+    t0 = _MIDNIGHT + 3_600_000  # 01:00 UTC today — one synthetic day file
+    trades = [
+        _mk_trade(t0 + 0, 61853.7, 0.010, True),
+        _mk_trade(t0 + 1, 61856.1, 0.020, False),
+        _mk_trade(t0 + 2, 61847.3, 0.500, True),
+        _mk_trade(t0 + 3, 61844.9, 0.125, False),
+        _mk_trade(t0 + 4, 61862.0, 0.075, True),
+        _mk_trade(t0 + 5, 61858.4, 0.300, False),
+    ]
+    decoys = [
+        _mk_trade(t0 + 6, 61850.0, 9.9, True, symbol="ETHUSDT"),  # other symbol
+        _mk_trade(t0 + 7, 61850.0, 9.9, True, exchange="okx"),  # other exchange
+        _mk_trade(t0 + 11, 61850.0, 9.9, True),  # outside [start_ms, end_ms]
+    ]
+    _seed_day(root, _D_TODAY, trades + decoys)
+
+    # Reference aggregation, written independently of the endpoint's SQL.
+    ref_con = duckdb.connect(str(root / f"{_D_TODAY}.duckdb"), read_only=True)
+    try:
+        expected_levels = ref_con.execute(
+            "SELECT round(price / 10) * 10 AS lvl, "
+            "SUM(CASE WHEN aggressor_buy THEN qty ELSE 0 END) AS buy_vol, "
+            "SUM(CASE WHEN NOT aggressor_buy THEN qty ELSE 0 END) AS sell_vol, "
+            "COUNT(*) AS prints FROM trades "
+            "WHERE exchange = 'bybit' AND symbol = 'BTCUSDT' "
+            "AND ts_ms >= ? AND ts_ms <= ? GROUP BY 1 ORDER BY 1",
+            [t0, t0 + 10],
+        ).fetchall()
+    finally:
+        ref_con.close()
+    assert len(expected_levels) >= 2  # the fixture really exercises >1 level
+
+    with _rotation_server(root) as port:
+        status, body = _get_json(
+            port,
+            f"/v1/profile?symbol=BTCUSDT&exchange=bybit&start_ms={t0}"
+            f"&end_ms={t0 + 10}&tick=10",
+        )
+    assert status == 200
+    assert body["levels"] == [
+        {"lvl": lvl, "buy_vol": b, "sell_vol": s, "prints": p}
+        for lvl, b, s, p in expected_levels
+    ]
+
+    # vwap/sigma/total_vol vs the batch formulas over the in-range trades.
+    q = sum(t[5] for t in trades)
+    vwap = sum(t[4] * t[5] for t in trades) / q
+    sigma = math.sqrt(sum(t[5] * (t[4] - vwap) ** 2 for t in trades) / q)
+    assert body["total_vol"] == pytest.approx(q, abs=1e-12)
+    assert body["vwap"] == pytest.approx(vwap, abs=1e-9)
+    assert body["sigma"] == pytest.approx(sigma, abs=1e-9)
+
+
+def test_profile_value_area_parity_with_profilestore_fixture(tmp_path):
+    """VA parity pin (§4f 'one convention: mirror ProfileStore's'): the
+    constructed-levels case from scripts/check_terminal.cjs group 9 — 101
+    one-unit levels at 100..200 plus one extra unit at 150 — must produce the
+    SAME poc/vah/val the JS ProfileStore produces (verified by running the JS:
+    poc 150, vah 200, val 130; ties expand upward, so the up side is absorbed
+    to 200 first, then 20 down-levels reach the 71.4 target)."""
+    root = tmp_path / "ticks"
+    t0 = _MIDNIGHT + 1_000
+    rows = [_mk_trade(t0 + p, float(p), 1.0, True) for p in range(100, 201)]
+    rows.append(_mk_trade(t0 + 999, 150.0, 1.0, False))
+    _seed_day(root, _D_TODAY, rows)
+
+    with _rotation_server(root) as port:
+        status, body = _get_json(
+            port,
+            f"/v1/profile?symbol=BTCUSDT&exchange=bybit&start_ms={t0}"
+            f"&end_ms={t0 + 2_000}&tick=1",
+        )
+    assert status == 200
+    assert body["poc"] == 150.0
+    assert body["vah"] == 200.0
+    assert body["val"] == 130.0
+    assert body["total_vol"] == 102.0
+    assert len(body["levels"]) == 101
+    # Same ±5pp band check_terminal asserts on the JS side.
+    va_vol = sum(
+        lv["buy_vol"] + lv["sell_vol"]
+        for lv in body["levels"]
+        if body["val"] <= lv["lvl"] <= body["vah"]
+    )
+    assert 0.65 <= va_vol / body["total_vol"] <= 0.75
+
+
+def test_profile_buckets_usd_split(tmp_path):
+    """buckets_usd=1000,10000 -> b0 (notional <= 1000, boundary INCLUSIVE:
+    'smallest threshold >= price*qty'), b1 (<= 10000), b2 (overflow last);
+    per level the buckets partition the volume exactly."""
+    root = tmp_path / "ticks"
+    t0 = _MIDNIGHT + 1_000
+    _seed_day(root, _D_TODAY, [
+        _mk_trade(t0 + 0, 100.0, 5.0, True),  # $500 -> b0
+        _mk_trade(t0 + 1, 100.0, 10.0, False),  # $1000 exactly -> b0 (inclusive)
+        _mk_trade(t0 + 2, 100.0, 50.0, True),  # $5000 -> b1
+        _mk_trade(t0 + 3, 100.0, 200.0, False),  # $20000 -> b2 overflow
+        _mk_trade(t0 + 4, 200.0, 2.0, True),  # second level, $400 -> b0
+    ])
+    with _rotation_server(root) as port:
+        status, body = _get_json(
+            port,
+            f"/v1/profile?symbol=BTCUSDT&exchange=bybit&start_ms={t0}"
+            f"&end_ms={t0 + 10}&tick=10&buckets_usd=1000,10000",
+        )
+    assert status == 200
+    by_lvl = {lv["lvl"]: lv for lv in body["levels"]}
+    assert by_lvl[100.0]["b0"] == 15.0
+    assert by_lvl[100.0]["b1"] == 50.0
+    assert by_lvl[100.0]["b2"] == 200.0
+    assert by_lvl[200.0]["b0"] == 2.0 and by_lvl[200.0]["b1"] == 0.0
+    for lv in body["levels"]:  # buckets PARTITION the level's volume
+        assert lv["b0"] + lv["b1"] + lv["b2"] == pytest.approx(
+            lv["buy_vol"] + lv["sell_vol"], abs=1e-12
+        )
+
+
+def test_profile_unions_two_day_files_and_answers_410(tmp_path):
+    """A range spanning UTC midnight merges levels ACROSS day files (sums are
+    exact — disjoint trade sets); a range predating the oldest local day gets
+    the same honest 410 the row endpoints give."""
+    root = tmp_path / "ticks"
+    _seed_day(root, _D_YDAY, [
+        _mk_trade(_MIDNIGHT - 5_000, 61000.0, 1.0, True),
+        _mk_trade(_MIDNIGHT - 4_000, 61010.0, 0.5, False),
+    ])
+    _seed_day(root, _D_TODAY, [_mk_trade(_MIDNIGHT + 5_000, 61000.0, 2.0, True)])
+
+    with _rotation_server(root) as port:
+        status, body = _get_json(
+            port,
+            f"/v1/profile?symbol=BTCUSDT&exchange=bybit"
+            f"&start_ms={_MIDNIGHT - 10_000}&end_ms={_MIDNIGHT + 10_000}&tick=10",
+        )
+        assert status == 200
+        by_lvl = {lv["lvl"]: lv for lv in body["levels"]}
+        assert by_lvl[61000.0]["buy_vol"] == 3.0  # 1.0 (yday) + 2.0 (today)
+        assert by_lvl[61000.0]["prints"] == 2
+        assert by_lvl[61010.0]["sell_vol"] == 0.5
+        assert body["total_vol"] == 3.5
+        assert body["poc"] == 61000.0
+
+        old_ms = _MIDNIGHT - 30 * 86_400_000
+        status, body = _get_json(
+            port,
+            f"/v1/profile?symbol=BTCUSDT&start_ms={old_ms}"
+            f"&end_ms={_MIDNIGHT}&tick=10",
+        )
+        assert status == 410 and body["error"] == "archived"
+
+
+def test_profile_and_vwap_reject_garbage_params(tmp_path):
+    """§4f: params validated -> 400 on garbage (tick<=0/NaN, end<start,
+    missing symbol/range/anchor, unparseable buckets)."""
+    root = tmp_path / "ticks"
+    _seed_day(root, _D_TODAY, [_mk_trade(_MIDNIGHT + 1_000, 61000.0, 1.0, True)])
+    bad = [
+        f"/v1/profile?symbol=B&start_ms={_MIDNIGHT}&end_ms={_MIDNIGHT + 1}&tick=0",
+        f"/v1/profile?symbol=B&start_ms={_MIDNIGHT}&end_ms={_MIDNIGHT + 1}&tick=-5",
+        f"/v1/profile?symbol=B&start_ms={_MIDNIGHT}&end_ms={_MIDNIGHT + 1}&tick=abc",
+        f"/v1/profile?symbol=B&start_ms={_MIDNIGHT}&end_ms={_MIDNIGHT + 1}&tick=nan",
+        f"/v1/profile?symbol=B&start_ms={_MIDNIGHT + 9}&end_ms={_MIDNIGHT}&tick=10",
+        "/v1/profile?symbol=B&tick=10",  # missing range
+        f"/v1/profile?start_ms={_MIDNIGHT}&end_ms={_MIDNIGHT + 1}",  # missing symbol
+        f"/v1/profile?symbol=B&start_ms={_MIDNIGHT}&end_ms={_MIDNIGHT + 1}"
+        "&buckets_usd=abc",
+        f"/v1/profile?symbol=B&start_ms={_MIDNIGHT}&end_ms={_MIDNIGHT + 1}"
+        "&buckets_usd=-5,100",
+        "/v1/vwap?symbol=B",  # missing anchor_ms
+        f"/v1/vwap?anchor_ms={_MIDNIGHT}",  # missing symbol
+        f"/v1/vwap?symbol=B&anchor_ms={_MIDNIGHT + 9}&end_ms={_MIDNIGHT}",
+        "/v1/vwap?symbol=B&anchor_ms=abc",
+    ]
+    with _rotation_server(root) as port:
+        for path in bad:
+            status, body = _get_json(port, path)
+            assert status == 400, f"{path} -> {status} {body}"
+            assert "bad parameter" in body["error"]
+
+
+# --------------------------------------------------------------------------- #
+# 19. §4f /v1/vwap — anchored VWAP ± σ vs the batch formula                    #
+# --------------------------------------------------------------------------- #
+def test_vwap_anchored_matches_batch_formula(tmp_path):
+    """Anchored window (spanning two day files) == the batch Σp·q/Σq and
+    volume-weighted σ; end_ms omitted extends through the newest local trade;
+    an empty window answers honest nulls + n=0."""
+    root = tmp_path / "ticks"
+    yday = [
+        _mk_trade(_MIDNIGHT - 9_000, 61840.0, 0.4, True),  # BEFORE the anchor
+        _mk_trade(_MIDNIGHT - 5_000, 61850.0, 1.0, True),
+        _mk_trade(_MIDNIGHT - 4_000, 61870.0, 0.25, False),
+    ]
+    today = [
+        _mk_trade(_MIDNIGHT + 5_000, 61900.0, 0.5, True),
+        _mk_trade(_MIDNIGHT + 9_000, 61820.0, 2.0, False),  # AFTER end_ms
+    ]
+    _seed_day(root, _D_YDAY, yday)
+    _seed_day(root, _D_TODAY, today)
+
+    anchor, end = _MIDNIGHT - 6_000, _MIDNIGHT + 6_000
+    in_win = [t for t in yday + today if anchor <= t[3] <= end]
+    q = sum(t[5] for t in in_win)
+    vwap = sum(t[4] * t[5] for t in in_win) / q
+    sigma = math.sqrt(sum(t[5] * (t[4] - vwap) ** 2 for t in in_win) / q)
+
+    with _rotation_server(root) as port:
+        status, body = _get_json(
+            port, f"/v1/vwap?symbol=BTCUSDT&exchange=bybit&anchor_ms={anchor}&end_ms={end}"
+        )
+        assert status == 200
+        assert body["n"] == len(in_win) == 3
+        assert body["vwap"] == pytest.approx(vwap, abs=1e-9)
+        assert body["sigma"] == pytest.approx(sigma, abs=1e-9)
+
+        # end_ms omitted -> through the newest LOCAL trade (all 4 from anchor).
+        status, body = _get_json(
+            port, f"/v1/vwap?symbol=BTCUSDT&anchor_ms={anchor}"
+        )
+        assert status == 200 and body["n"] == 4
+        all_from = [t for t in yday + today if t[3] >= anchor]
+        q4 = sum(t[5] for t in all_from)
+        assert body["vwap"] == pytest.approx(sum(t[4] * t[5] for t in all_from) / q4, abs=1e-9)
+
+        # Empty window: nulls + n=0, never a fabricated number.
+        status, body = _get_json(
+            port, f"/v1/vwap?symbol=BTCUSDT&anchor_ms={_MIDNIGHT + 86_000_000}"
+        )
+        assert status == 200
+        assert body == {"vwap": None, "sigma": None, "n": 0}
+
+
+# --------------------------------------------------------------------------- #
+# 20. §4f levels registry — rotation hook append + idempotence, naked serve    #
+# --------------------------------------------------------------------------- #
+def test_rotation_hook_records_day_levels_row(tmp_path):
+    """When the grace window lapses and the manager closes yesterday, ONE
+    levels.jsonl row appears — o/h/l/c by event time, poc/vah/val on the fixed
+    $10 grid (bybit leg only; the okx decoy must not leak in)."""
+    root = tmp_path / "ticks"
+    manager = collector.DayFileManager(root)
+    clock = {"now": _MIDNIGHT + 60_000}  # 00:01 — inside grace
+    logs: list[str] = []
+    writer = collector.RotatingWriter(
+        manager, threading.Lock(), now_ms=lambda: clock["now"], log=logs.append
+    )
+    y = _MIDNIGHT - 3_600_000  # 23:00 yesterday
+    writer.add("trades", [
+        _mk_trade(y + 0, 61843.0, 2.0, True),  # open; lvl 61840
+        _mk_trade(y + 1, 61851.0, 3.0, True),  # lvl 61850 -> POC
+        _mk_trade(y + 2, 61862.0, 1.0, False),  # high; lvl 61860
+        _mk_trade(y + 3, 61838.0, 0.5, False),  # low + close; lvl 61840
+        _mk_trade(y + 4, 99999.0, 9.0, True, exchange="okx"),  # NOT the bybit leg
+    ])
+    writer.flush()
+    assert not manager.levels_path().exists()  # nothing closed yet — no row
+
+    clock["now"] = _MIDNIGHT + collector.GRACE_WINDOW_MS + 1_000
+    writer.flush()  # grace lapsed -> close fires the §4f hook
+    rows = collector.read_levels_registry(manager.levels_path())
+    # Hand-computed: levels 61840 (2.5), 61850 (3 -> POC), 61860 (1); target
+    # 0.7*6.5 = 4.55; expansion absorbs the HEAVIER neighbor (61840, 2.5) ->
+    # covered 5.5 >= 4.55 -> vah 61850, val 61840. o/h/l/c/vol bybit-only.
+    assert rows == [{
+        "date": _D_YDAY, "o": 61843.0, "h": 61862.0, "l": 61838.0, "c": 61838.0,
+        "poc": 61850.0, "vah": 61850.0, "val": 61840.0, "vol": 6.5,
+    }]
+    assert any("levels registry +=" in line for line in logs)
+    # 'naked' is DERIVED at serve time — never stored in the file.
+    assert "naked" not in manager.levels_path().read_text()
+    manager.close_all()
+
+    # Idempotence: re-appending the same date is a no-op (rotation hook and
+    # backfill can both see a date — one recorded day, one row, forever).
+    assert collector.append_levels_row(manager.levels_path(), rows[0]) is False
+    assert len(collector.read_levels_registry(manager.levels_path())) == 1
+
+
+def test_rotation_hook_skips_already_registered_day(tmp_path):
+    """A pre-seeded registry row for the closing day survives untouched — the
+    hook must not duplicate or overwrite it (idempotent by date)."""
+    root = tmp_path / "ticks"
+    root.mkdir()
+    pre = {"date": _D_YDAY, "o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5,
+           "poc": 1.0, "vah": 2.0, "val": 0.5, "vol": 42.0}
+    (root / "levels.jsonl").write_text(json.dumps(pre) + "\n")
+
+    manager = collector.DayFileManager(root)
+    clock = {"now": _MIDNIGHT + 60_000}
+    writer = collector.RotatingWriter(
+        manager, threading.Lock(), now_ms=lambda: clock["now"], log=lambda *_: None
+    )
+    writer.add("trades", [_mk_trade(_MIDNIGHT - 5_000, 61000.0, 1.0, True)])
+    writer.flush()
+    clock["now"] = _MIDNIGHT + collector.GRACE_WINDOW_MS + 1_000
+    writer.flush()  # closes yesterday; hook sees the date already recorded
+    assert collector.read_levels_registry(root / "levels.jsonl") == [pre]
+    manager.close_all()
+
+
+def test_compute_day_levels_none_without_bybit_trades(tmp_path):
+    """No bybit trades that day -> None, never an invented flat row (§0.7)."""
+    con = collector.open_db(tmp_path / "d.duckdb")
+    try:
+        con.executemany(
+            collector._INSERT_SQL["trades"],
+            [_mk_trade(_MIDNIGHT + 1_000, 100.0, 1.0, True, exchange="okx")],
+        )
+        assert collector.compute_day_levels(con, _D_TODAY) is None
+    finally:
+        con.close()
+
+
+def test_levels_endpoint_derives_naked_both_ways(tmp_path):
+    """/v1/levels: naked iff NO LATER recorded day's [l, h] contains the POC —
+    a revisited POC un-nakes (day1), an untouched one stays naked (day2), the
+    newest day is vacuously naked (day3). File order is deliberately shuffled
+    to prove the serve sorts by date."""
+    root = tmp_path / "ticks"
+    root.mkdir()
+    d1 = {"date": "2026-07-01", "o": 61200.0, "h": 62000.0, "l": 61000.0,
+          "c": 61900.0, "poc": 61500.0, "vah": 61900.0, "val": 61200.0, "vol": 10.0}
+    d2 = {"date": "2026-07-02", "o": 61900.0, "h": 62500.0, "l": 61600.0,
+          "c": 62400.0, "poc": 62000.0, "vah": 62400.0, "val": 61800.0, "vol": 12.0}
+    d3 = {"date": "2026-07-03", "o": 61750.0, "h": 61800.0, "l": 61400.0,
+          "c": 61500.0, "poc": 61700.0, "vah": 61780.0, "val": 61450.0, "vol": 8.0}
+
+    with _rotation_server(root) as port:
+        # Registry file absent -> an honest empty registry, not an error.
+        status, body = _get_json(port, "/v1/levels")
+        assert status == 200 and body == {"n": 0, "days": []}
+
+        (root / "levels.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in (d3, d1, d2))  # shuffled on disk
+        )
+        status, body = _get_json(port, "/v1/levels")
+    assert status == 200 and body["n"] == 3
+    assert [r["date"] for r in body["days"]] == ["2026-07-01", "2026-07-02", "2026-07-03"]
+    naked = {r["date"]: r["naked"] for r in body["days"]}
+    # day1 POC 61500 sits inside day3's [61400, 61800] -> revisited, NOT naked
+    # (day2's [61600, 62500] misses it — only day3 un-nakes it).
+    assert naked["2026-07-01"] is False
+    # day2 POC 62000 is above day3's high -> never revisited -> naked.
+    assert naked["2026-07-02"] is True
+    # newest day: no later day exists -> vacuously naked.
+    assert naked["2026-07-03"] is True
+    # Row payload = stored fields + derived naked, nothing dropped.
+    assert body["days"][0] == {**d1, "naked": False}
+
+
+# --------------------------------------------------------------------------- #
+# 21. §4f backfill_levels.py — HF seams monkeypatched; skip-existing;          #
+#     chronological registry; idempotent second run; NO network, NO day files  #
+# --------------------------------------------------------------------------- #
+_REPO_DIR = Path(__file__).resolve().parent.parent
+_bfl_spec = importlib.util.spec_from_file_location(
+    "backfill_levels", _REPO_DIR / "scripts" / "backfill_levels.py"
+)
+bfl = importlib.util.module_from_spec(_bfl_spec)
+_bfl_spec.loader.exec_module(bfl)
+
+
+def _lv(date, poc):
+    return {"date": date, "o": poc, "h": poc + 100, "l": poc - 100, "c": poc,
+            "poc": poc, "vah": poc + 50, "val": poc - 50, "vol": 1.0}
+
+
+def test_backfill_levels_skips_existing_and_is_idempotent(tmp_path, monkeypatch):
+    reg = tmp_path / "levels.jsonl"
+    existing = _lv("2026-07-02", 61500.0)
+    reg.write_text(json.dumps(existing) + "\n")
+
+    hf_rows = {
+        "2026-07-01": _lv("2026-07-01", 61000.0),
+        "2026-07-02": _lv("2026-07-02", 99999.0),  # must NOT replace the local row
+        "2026-07-03": _lv("2026-07-03", 62000.0),
+        "2026-07-04": None,  # archived day without bybit trades -> no row
+    }
+    computed: list[str] = []
+
+    def fake_dates(con, repo):  # noqa: ARG001 — seam signature parity
+        return sorted(hf_rows)
+
+    def fake_day(con, repo, date):  # noqa: ARG001
+        computed.append(date)
+        return hf_rows[date]
+
+    monkeypatch.setattr(bfl, "hf_dates", fake_dates)
+    monkeypatch.setattr(bfl, "hf_day_levels", fake_day)
+
+    rc = bfl.main(["--registry", str(reg), "--repo", "azulcoder/btc-quant-ticks"])
+    assert rc == bfl.EXIT_OK
+    # Skip-existing: 2026-07-02 was never recomputed (it is in the registry).
+    assert computed == ["2026-07-01", "2026-07-03", "2026-07-04"]
+    rows = collector.read_levels_registry(reg)
+    assert [r["date"] for r in rows] == ["2026-07-01", "2026-07-02", "2026-07-03"]
+    assert rows[1] == existing  # the local row won, not the HF recompute
+    # On-disk order is chronological even though 07-01 was backfilled AFTER
+    # 07-02 existed (atomic sorted rewrite).
+    on_disk = [json.loads(ln)["date"] for ln in reg.read_text().splitlines()]
+    assert on_disk == ["2026-07-01", "2026-07-02", "2026-07-03"]
+    # No day files were created or touched anywhere (hf:// reads only).
+    assert list(tmp_path.glob("**/*.duckdb")) == []
+
+    # Second run: every recorded date is skipped; only the row-less day is
+    # honestly re-checked (it never became 'present'); registry byte-identical.
+    before = reg.read_text()
+    computed.clear()
+    rc = bfl.main(["--registry", str(reg), "--repo", "azulcoder/btc-quant-ticks"])
+    assert rc == bfl.EXIT_OK
+    assert computed == ["2026-07-04"]
+    assert reg.read_text() == before
+
+
+def test_backfill_levels_rejects_malformed_repo_id(tmp_path):
+    rc = bfl.main(["--registry", str(tmp_path / "l.jsonl"), "--repo", "not a repo id"])
+    assert rc == bfl.EXIT_USAGE

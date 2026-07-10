@@ -158,6 +158,61 @@
 //                           numbers while good rows still import — §4e:
 //                           import NEVER silently coerces
 //
+// I-1 additions (DESIGN §4f "check_terminal groups mandatory", binding list):
+//  38. buildDeltaProfile   → Σdelta ≡ Σbuy−Σsell EXACTLY (the §4f binding
+//                           invariant), nearest-rank-p95 intensity hand-
+//                           checked (0, 3/8, 1), ascending-lvl order, both
+//                           input spellings; adversarial: an ALL-BUY day
+//                           stays bounded in [0,1] with the outlier clamped
+//                           to exactly 1, an all-zero-delta profile renders
+//                           neutral (never NaN), garbage rows skipped
+//  39. AnchoredVwap        → streaming Welford ≡ two-pass batch Σq(p−μ)²/Σq
+//                           to 1e-9 over 500 deterministic LCG trades at
+//                           BTC price scale; reset(anchor) drops pre-anchor
+//                           prints (hand case σ=√0.75); adversarial: a
+//                           SINGLE trade gives σ=0 (not NaN), empty state
+//                           gives NaN bands + n:0, garbage trades dropped
+//  40. OfiStore            → Cont–Kukanov–Stoikov e_t HAND-COMPUTED on a
+//                           3-snapshot sequence (6 then 20), rolling-sum
+//                           series both windows, zscore(2) = 1/√2 exact;
+//                           adversarial: EMPTY ladder = reconnect gap
+//                           (clears the seed, fabricates no e), CROSSED
+//                           book stays finite (+5 hand value), unequal
+//                           ladder depth = the degenerate add/remove case
+//  41. microprice          → Stoikov hand case 403/4 = 100.75 (pulled
+//                           TOWARD the thin ask), identical through a REAL
+//                           BookStore; equal depth ≡ mid; null on empty/
+//                           one-sided/zero-depth books (never NaN)
+//  42. stackedImbalances   → constructed 3-run buy zone {104..102} fires
+//                           exact; open-bar range INVALIDATES it (l below
+//                           bottom → active:false) while flag-worthy open-
+//                           bar levels create NO zone; sell mirror + the
+//                           strict-inequality boundary (h == top holds);
+//                           adversarial: a grid GAP breaks the run,
+//                           alternating buy/sell rows never stack
+//  43. AbsorptionDetector  → spike (35 vs median 4) + no-follow-through
+//                           fires ONE event with label:'heuristic' riding
+//                           it; progress kills it; no-spike bar is quiet;
+//                           adversarial: the session's FIRST bar alone can
+//                           never fire (no next bar to resolve against),
+//                           unfinished bars are ignored entirely; sell-side
+//                           mirror resolves against the next bar's LOW
+//  44. SessionClock        → half-open [start,end) boundaries EXACT:
+//                           07:00:00.000 UTC = Asia+London, 08:00 leaves
+//                           Asia, 21:00 + 23:59:59.999 = the honest dead
+//                           zone, 00:00 = Asia; negative/NaN ts → [];
+//                           boxesFor pure arithmetic on the given anchor
+//  45. cumDelta            → hand accumulation with malformed bars SKIPPED
+//                           (never zero-coerced) + integration over a REAL
+//                           FootprintStore tape (finished + open bars)
+//  46. terminal-hfdata     → normalizeArchivedRow: parquet BigInt → Number
+//                           (the ONLY decode/BYOD mismatch, §4f probe),
+//                           everything else untouched (depth JSON strings
+//                           stay strings), normalized rows feed the REAL
+//                           byodRowToEvent unchanged; archivedParquetUrl
+//                           %3D hive encoding + allowlist THROWS on bad
+//                           repo/date/table segments — all network-free
+//
 // Exit: 0 with one PASS line per group; non-zero with a clear FAIL message
 // (plus stack) if any group breaks. Run: node scripts/check_terminal.cjs
 
@@ -169,6 +224,10 @@ const A = require(path.join(__dirname, '..', 'dashboard', 'terminal-adapters.js'
 const S = require(path.join(__dirname, '..', 'dashboard', 'terminal-state.js'));
 const H = require(path.join(__dirname, '..', 'dashboard', 'terminal-hist.js'));
 const R = require(path.join(__dirname, '..', 'dashboard', 'terminal-replay.js'));
+// I-1 (§4f Wave 2): hyparquet is resolved LAZILY inside terminal-hfdata.js, so
+// requiring it here never touches the vendor bundle — group 46 only drives the
+// pure normalizer + URL allowlist (network-free by construction).
+const HF = require(path.join(__dirname, '..', 'dashboard', 'terminal-hfdata.js'));
 // quant.js is the O-4 views' options-math source (§4d: Γ via black76Greeks,
 // max pain via maxPain — the house rule forbids reimplementing either), so
 // group 30 drives it directly with normalized chain rows.
@@ -2073,6 +2132,384 @@ group('journal CSV round-trip identity (comma+quote+newline note, ctx JSON) + ba
   assert.strictEqual(S.validateJournalCsv('id,side\n1,long\n').trades.length, 0);
   assert.ok(/header/.test(S.validateJournalCsv('id,side\n').errors[0].reason));
   assert.ok(/empty/.test(S.validateJournalCsv('').errors[0].reason));
+});
+
+// ─── 38. buildDeltaProfile: Σdelta identity + p95 intensity (§4f) ────────────
+group('buildDeltaProfile Σdelta≡Σbuy−Σsell + p95 intensity + all-buy/all-zero bounds', () => {
+  // Hand case (integers so every equality below is EXACT, no float slack):
+  // deltas 90:0, 100:+3, 110:−8 → mags sorted [0,3,8], nearest-rank p95 of
+  // n=3 is index ceil(0.95·3)−1 = 2 → p95 = 8 → intensities 0, 3/8, 1.
+  const dp = S.buildDeltaProfile([
+    { lvl: 100, buy_vol: 5, sell_vol: 2 },
+    { lvl: 110, buy_vol: 1, sell_vol: 9 },
+    { lvl: 90, buy_vol: 3, sell_vol: 3 },
+  ]);
+  assert.deepStrictEqual(dp, [
+    { lvl: 90, delta: 0, intensity: 0 },
+    { lvl: 100, delta: 3, intensity: 0.375 },
+    { lvl: 110, delta: -8, intensity: 1 },
+  ], 'ascending lvl, raw deltas, nearest-rank-p95 intensities — all exact');
+  // The §4f binding invariant, checked as an identity not an approximation.
+  assert.strictEqual(dp.reduce((a, r) => a + r.delta, 0), (5 + 1 + 3) - (2 + 9 + 3),
+    'Σdelta must equal Σbuy − Σsell EXACTLY (intensity is display-only, delta untouched)');
+
+  // The live 'today' selector feeds ProfileStore-adjacent {price, buy, sell}
+  // rows through the same builder — both spellings, one output shape.
+  assert.deepStrictEqual(S.buildDeltaProfile([{ price: 100, buy: 5, sell: 2 }]),
+    [{ lvl: 100, delta: 3, intensity: 1 }], 'alt {price,buy,sell} spelling accepted');
+
+  // ADVERSARIAL — all-buy day: every delta positive and one outlier level.
+  // p95 must keep every intensity in [0,1] with the outlier CLAMPED to 1
+  // (max-normalizing would compress the bulk toward the neutral midpoint).
+  const allBuy = [];
+  for (let i = 0; i < 19; i++) allBuy.push({ lvl: 100 + i, buy_vol: 2 + i, sell_vol: 0 });
+  allBuy.push({ lvl: 200, buy_vol: 1000, sell_vol: 0 });
+  const ab = S.buildDeltaProfile(allBuy);
+  assert.strictEqual(ab.length, 20);
+  for (const r of ab) assert.ok(r.intensity >= 0 && r.intensity <= 1, 'intensity bounded: ' + r.intensity);
+  assert.strictEqual(ab[ab.length - 1].intensity, 1, 'outlier saturates at exactly 1');
+  assert.strictEqual(ab.reduce((a, r) => a + r.delta, 0), 1000 + allBuy.slice(0, 19).reduce((a, r) => a + r.buy_vol, 0),
+    'identity holds on the all-buy day too');
+
+  // ADVERSARIAL — perfectly balanced profile: p95 = 0 must render NEUTRAL
+  // (intensity 0 everywhere), never 0/0 = NaN into a color ramp.
+  assert.deepStrictEqual(S.buildDeltaProfile([
+    { lvl: 1, buy_vol: 2, sell_vol: 2 }, { lvl: 2, buy_vol: 0, sell_vol: 0 },
+  ]), [{ lvl: 1, delta: 0, intensity: 0 }, { lvl: 2, delta: 0, intensity: 0 }]);
+
+  // Hygiene: malformed rows are SKIPPED (validTrade discipline), non-array → [].
+  assert.deepStrictEqual(S.buildDeltaProfile([null, { lvl: NaN, buy_vol: 1, sell_vol: 1 }, { lvl: 5 }, 'x']), []);
+  assert.deepStrictEqual(S.buildDeltaProfile('nope'), []);
+});
+
+// ─── 39. AnchoredVwap: streaming ≡ batch to 1e-9 + reset + single-trade σ (§4f) ─
+group('AnchoredVwap streaming≡batch 1e-9 + reset anchor cut + single-trade σ=0', () => {
+  // 500 deterministic LCG trades at BTC price scale (~60000 ± 100) — the
+  // regime where the naive Σqp²−(Σqp)²/W form loses ~8 digits; the Welford
+  // stream must still match the well-conditioned TWO-PASS batch to 1e-9.
+  let x = 42 >>> 0;
+  const lcg = () => { x = (Math.imul(x, 1664525) + 1013904223) >>> 0; return x / 4294967296; };
+  const trades = [];
+  for (let i = 0; i < 500; i++) trades.push({ ts: i, price: 60000 + lcg() * 200 - 100, qty: 0.001 + lcg() * 2, aggressorBuy: true });
+  const av = S.AnchoredVwap();
+  for (const t of trades) av.onTrade(t);
+  let sq = 0, spq = 0;
+  for (const t of trades) { sq += t.qty; spq += t.price * t.qty; }
+  const vb = spq / sq;                       // batch vwap = Σpq/Σq
+  let ss = 0;
+  for (const t of trades) ss += t.qty * (t.price - vb) * (t.price - vb);
+  const sigB = Math.sqrt(ss / sq);           // batch σ = √(Σq(p−vwap)²/Σq) — /v1/vwap's formula
+  const b = av.bands();
+  assert.ok(approx(b.vwap, vb, 1e-9), 'vwap vs batch: |Δ| = ' + Math.abs(b.vwap - vb));
+  assert.ok(approx(b.s1, sigB, 1e-9), 'σ vs batch: |Δ| = ' + Math.abs(b.s1 - sigB));
+  assert.ok(approx(b.s2, 2 * sigB, 1e-9), 's2 must be exactly the 2σ distance');
+  assert.strictEqual(b.n, 500);
+
+  // reset(anchor) is an EVENT-time cut: the pre-reset trade and the ts<anchor
+  // trade are both gone. Hand case: vwap (1·100+3·102)/4 = 101.5,
+  // σ² = (1·1.5² + 3·0.5²)/4 = 0.75.
+  av.reset(5000);
+  av.onTrade({ ts: 4000, price: 999, qty: 5, aggressorBuy: true });  // pre-anchor — dropped
+  av.onTrade({ ts: 6000, price: 100, qty: 1, aggressorBuy: true });
+  av.onTrade({ ts: 7000, price: 102, qty: 3, aggressorBuy: false });
+  const rb = av.bands();
+  assert.strictEqual(rb.vwap, 101.5);
+  assert.ok(approx(rb.s1, Math.sqrt(0.75)), 'σ after reset = √0.75');
+  assert.strictEqual(rb.n, 2, 'the 999 pre-anchor print must not count');
+
+  // ADVERSARIAL — single trade: population σ is exactly 0, never NaN (a NaN
+  // here would blank the band series on the first post-anchor print).
+  const one = S.AnchoredVwap();
+  one.onTrade({ ts: 1, price: 100.5, qty: 2, aggressorBuy: true });
+  assert.deepStrictEqual(one.bands(), { vwap: 100.5, s1: 0, s2: 0, n: 1 });
+
+  // Empty state → NaN bands ("no data" never looks like price 0) + n:0;
+  // malformed trades never enter the state.
+  const empty = S.AnchoredVwap().bands();
+  assert.ok(Number.isNaN(empty.vwap) && Number.isNaN(empty.s1) && Number.isNaN(empty.s2) && empty.n === 0);
+  const dirty = S.AnchoredVwap();
+  dirty.onTrade(null); dirty.onTrade({ ts: 1, price: NaN, qty: 1 }); dirty.onTrade({ ts: 1, price: 100, qty: 0 });
+  assert.strictEqual(dirty.bands().n, 0, 'garbage/zero-qty trades dropped (validTrade rail)');
+});
+
+// ─── 40. OfiStore: hand-computed CKS e_t + zscore + gap/crossed hygiene (§4f) ─
+group('OfiStore hand-computed 3-snapshot e_t (6, 20) + zscore 1/√2 + gap/crossed/unequal', () => {
+  // Hand computation against the Cont–Kukanov–Stoikov per-side rule the
+  // builder header states (levels=2, index-aligned):
+  //   A(seed): bids [100@5, 99@4]   asks [101@6, 102@7]
+  //   B:       bids [100@8, 99@4]   asks [101@3, 102@7]
+  //     bid0 price held  → +（8−5) = +3;  bid1 held → 0
+  //     ask0 price held  → −(3−6) = +3;  ask1 held → 0        e_B = 6
+  //   C:       bids [101@2, 100@8]  asks [102@7, 103@1]
+  //     bid0 ROSE → +2; bid1 ROSE → +8   (new demand at better prices)
+  //     ask0 ROSE → +3; ask1 ROSE → +7   (standing asks lifted = buying)
+  //                                                            e_C = 20
+  const ofi = S.OfiStore({ levels: 2 });
+  assert.strictEqual(ofi.onDepthSample(1000, {
+    bids: [{ price: 100, qty: 5 }, { price: 99, qty: 4 }],
+    asks: [{ price: 101, qty: 6 }, { price: 102, qty: 7 }],
+  }), null, 'first sample seeds — e needs two book states');
+  assert.strictEqual(ofi.onDepthSample(2000, {
+    bids: [{ price: 100, qty: 8 }, { price: 99, qty: 4 }],
+    asks: [{ price: 101, qty: 3 }, { price: 102, qty: 7 }],
+  }), 6, 'e_B: bid add +3, ask cancel +3');
+  assert.strictEqual(ofi.onDepthSample(3000, {
+    bids: [{ price: 101, qty: 2 }, { price: 100, qty: 8 }],
+    asks: [{ price: 102, qty: 7 }, { price: 103, qty: 1 }],
+  }), 20, 'e_C: both bid levels rose (+10), both asks lifted (+10)');
+  // Rolling sum: window spanning both samples vs a 1 s window that evicts e_B.
+  assert.deepStrictEqual(ofi.series(60000), [{ ts: 2000, ofi: 6 }, { ts: 3000, ofi: 26 }]);
+  assert.deepStrictEqual(ofi.series(1000), [{ ts: 2000, ofi: 6 }, { ts: 3000, ofi: 20 }]);
+  // zscore over the 2-sample tail: mean 13, sample sd (ddof=1) √98 = 7√2 →
+  // z = 7/(7√2) = 1/√2. Machine-exactness of the closed form pinned to 1e-12.
+  assert.ok(approx(ofi.zscore(2), 1 / Math.SQRT2, 1e-12), 'zscore(2) = 1/√2, got ' + ofi.zscore(2));
+
+  // ADVERSARIAL — empty ladder is a RECONNECT GAP (§0.7): it must clear the
+  // seed so no e is fabricated across it, and the next real ladder re-seeds.
+  const g = S.OfiStore({ levels: 5 });
+  g.onDepthSample(1, { bids: [{ price: 100, qty: 5 }, { price: 99, qty: 4 }], asks: [{ price: 101, qty: 6 }] });
+  assert.strictEqual(g.onDepthSample(2, { bids: [{ price: 100, qty: 5 }], asks: [{ price: 101, qty: 6 }] }), -4,
+    'unequal ladder depth = degenerate remove: vanished bid level → −q_prev');
+  assert.strictEqual(g.onDepthSample(3, { bids: [], asks: [] }), null, 'empty ladder skipped');
+  assert.strictEqual(g.onDepthSample(4, { bids: [{ price: 100, qty: 5 }], asks: [{ price: 101, qty: 6 }] }), null,
+    'post-gap sample must RE-SEED, never diff across the gap');
+  assert.strictEqual(g.series(60000).length, 1, 'only the real e (−4) is retained across the gap');
+  // Crossed book (bid ≥ ask happens transiently on fast feeds): the per-side
+  // rule never divides or compares across sides — result stays finite. Hand:
+  // bid rose 100→102 → +5; ask held → 0.
+  const ce = g.onDepthSample(5, { bids: [{ price: 102, qty: 5 }], asks: [{ price: 101, qty: 6 }] });
+  assert.strictEqual(ce, 5, 'crossed snapshot: finite hand value, no special-casing');
+  // Hygiene: non-finite ts / null grouped are refused; zscore honest-NaNs.
+  assert.strictEqual(g.onDepthSample(NaN, { bids: [{ price: 1, qty: 1 }], asks: [] }), null);
+  assert.strictEqual(g.onDepthSample(6, null), null);
+  assert.ok(Number.isNaN(S.OfiStore({}).zscore(300)), 'no samples → NaN (unknown, never a fabricated 0)');
+  assert.ok(Number.isNaN(S.OfiStore({}).zscore(1)), 'window < 2 → NaN');
+});
+
+// ─── 41. microprice: Stoikov hand case + BookStore + null guards (§4f) ───────
+group('microprice hand case 100.75 (thin-ask pull) + real BookStore + empty→null', () => {
+  // Hand: Pᵇ=100 Qᵇ=3, Pᵃ=101 Qᵃ=1 → (100·1 + 101·3)/4 = 403/4 = 100.75 —
+  // ABOVE the 100.5 mid because the ask queue is the thin side (the next
+  // move is likelier up; Stoikov's imbalance-weighted mid).
+  assert.strictEqual(S.microprice({ bid: [100, 3], ask: [101, 1] }), 100.75);
+  // Same numbers through a REAL BookStore (the shape MicrostructureView feeds).
+  const book = S.BookStore();
+  book.applyDepth({ kind: 'depth', ex: 'binancef', ts: 1, bids: [[100, 3]], asks: [[101, 1]], isSnapshot: true });
+  assert.strictEqual(S.microprice(book), 100.75, 'BookStore.best() path must agree with the plain-object path');
+  // Balanced book: microprice degenerates to the mid exactly.
+  assert.strictEqual(S.microprice({ bid: [100, 2], ask: [101, 2] }), 100.5);
+  // Empty/one-sided/zero-depth books → null ("no estimate", never NaN into a
+  // chart series) — the empty-BookStore path is the reconnect reality.
+  assert.strictEqual(S.microprice(S.BookStore()), null);
+  assert.strictEqual(S.microprice({ bid: [100, 1] }), null, 'one-sided book → null');
+  assert.strictEqual(S.microprice({ bid: [100, 0], ask: [101, 0] }), null, 'zero best-depth → null (0/0 guard)');
+  assert.strictEqual(S.microprice(null), null);
+  assert.strictEqual(S.microprice({ bid: [NaN, 1], ask: [101, 1] }), null, 'non-finite level → null');
+});
+
+// ─── 42. stackedImbalances: zone fire + die-on-cross + gap/alternation (§4f) ─
+group('stackedImbalances zone fire/die-on-cross + gap breaks run + alternating sides never stack', () => {
+  // Constructed finished bar, tick=1, k=3, minVol=1 (defaults): buy flags at
+  // 104 (9≥3·2), 103 (9≥3·3), 102 (12≥3·4) — a 3-run; 101 fails (2<3·5);
+  // 105 is dust (0.5<minVol); 100 flags alone via the vacant-below rule but a
+  // 1-run never zones. Expected: exactly {top:104, bottom:102, side:'buy'}.
+  const bar0 = {
+    t: 0, finished: true, l: 100, h: 105, levels: [
+      { price: 105, buy: 0.5, sell: 0 }, { price: 104, buy: 9, sell: 0 },
+      { price: 103, buy: 9, sell: 2 }, { price: 102, buy: 12, sell: 3 },
+      { price: 101, buy: 2, sell: 4 }, { price: 100, buy: 1, sell: 5 }],
+  };
+  const bar1 = { t: 60000, finished: true, l: 103, h: 106, levels: [{ price: 103, buy: 0.5, sell: 0.5 }] };
+  assert.deepStrictEqual(S.stackedImbalances([bar0, bar1], { tickSize: 1 }),
+    [{ top: 104, bottom: 102, side: 'buy', barIdx: 0, active: true }],
+    'one buy zone, still active — bar1 (l=103) never traded below 102');
+
+  // Die-on-cross via the OPEN bar: its prints already happened, so its range
+  // participates in invalidation — but a half-formed bar creates NO new zone
+  // even with a flag-worthy 3-run (flags on open bars flicker).
+  const open = {
+    t: 120000, finished: false, l: 101.5, h: 103, levels: [
+      { price: 104, buy: 9, sell: 0 }, { price: 103, buy: 9, sell: 0 }, { price: 102, buy: 9, sell: 0 }],
+  };
+  assert.deepStrictEqual(S.stackedImbalances([bar0, bar1, open], { tickSize: 1 }),
+    [{ top: 104, bottom: 102, side: 'buy', barIdx: 0, active: false }],
+    'open bar l=101.5 < bottom 102 kills the zone; its own run creates nothing');
+
+  // Sell mirror + the STRICT inequality boundary: a later high EQUAL to the
+  // zone top does not kill it (§4f "traded through" = strictly beyond).
+  const sbar = {
+    t: 0, finished: true, l: 96, h: 100, levels: [
+      { price: 100, buy: 0, sell: 0.5 }, { price: 99, buy: 0, sell: 9 },
+      { price: 98, buy: 0, sell: 9 }, { price: 97, buy: 0, sell: 9 },
+      { price: 96, buy: 5, sell: 0.5 }],
+  };
+  assert.deepStrictEqual(S.stackedImbalances([sbar, { t: 1, finished: true, l: 95, h: 99, levels: [] }], { tickSize: 1 }),
+    [{ top: 99, bottom: 97, side: 'sell', barIdx: 0, active: true }], 'h == top holds the zone');
+  assert.deepStrictEqual(S.stackedImbalances([sbar, { t: 1, finished: true, l: 95, h: 99.5, levels: [] }], { tickSize: 1 }),
+    [{ top: 99, bottom: 97, side: 'sell', barIdx: 0, active: false }], 'h > top kills it');
+
+  // ADVERSARIAL — a vacant grid level BREAKS the run (102 missing → runs of
+  // 2 and 1, no zone): "consecutive" means price-adjacent on the tick grid.
+  assert.deepStrictEqual(S.stackedImbalances([{
+    t: 0, finished: true, l: 101, h: 104, levels: [
+      { price: 104, buy: 9, sell: 0 }, { price: 103, buy: 9, sell: 0 }, { price: 101, buy: 9, sell: 0 }],
+  }], { tickSize: 1 }), [], 'gap in the ladder is never bridged');
+
+  // ADVERSARIAL — aggression alternating sides level-by-level: the diagonal
+  // test fails everywhere (each 9 faces 3·9=27) so NOTHING stacks — flipping
+  // flow is the opposite of the pattern this builder names.
+  assert.deepStrictEqual(S.stackedImbalances([{
+    t: 0, finished: true, l: 101, h: 104, levels: [
+      { price: 104, buy: 9, sell: 0 }, { price: 103, buy: 0, sell: 9 },
+      { price: 102, buy: 9, sell: 0 }, { price: 101, buy: 0, sell: 9 }],
+  }], { tickSize: 1 }), [], 'alternating buy/sell rows never form a zone');
+  // Hygiene: non-array/empty input → no zones, no throw.
+  assert.deepStrictEqual(S.stackedImbalances(null, {}), []);
+});
+
+// ─── 43. AbsorptionDetector: fire + quiet + label + first-bar guard (§4f) ────
+group('AbsorptionDetector spike+no-progress fires labeled, progress/no-spike quiet, first bar never fires', () => {
+  // Spike bar: level 100 prints 35 (buy 30 / sell 5) against a median level
+  // volume of 4 → 35 ≥ 3·4 candidate, side 'buy' (buyers were hitting into
+  // it). Next bar h=101: progress = 101−100 = 1 which is NOT > 1·tick → no
+  // follow-through → exactly one event, ts = the SPIKE bar's t.
+  const spikeLevels = [
+    { price: 104, buy: 2, sell: 2 }, { price: 103, buy: 2, sell: 2 },
+    { price: 102, buy: 2, sell: 2 }, { price: 101, buy: 2, sell: 2 },
+    { price: 100, buy: 30, sell: 5 }];
+  let d = S.AbsorptionDetector({ tickSize: 1 });
+  d.onBar({ t: 60000, finished: true, h: 104, l: 100, levels: spikeLevels });
+  // ADVERSARIAL — the first bar alone can NEVER fire: absorption is defined
+  // against the NEXT bar and there is none yet.
+  assert.strictEqual(d.events().length, 0, 'session first bar: candidates pend, nothing fires');
+  // An unfinished bar between spike and resolution is ignored ENTIRELY
+  // (§4 rail: half-formed bars flicker — they neither resolve nor pend).
+  d.onBar({ t: 90000, finished: false, h: 200, l: 0, levels: [{ price: 100, buy: 1, sell: 1 }] });
+  d.onBar({ t: 120000, finished: true, h: 101, l: 99, levels: [{ price: 100, buy: 1, sell: 1 }] });
+  assert.deepStrictEqual(d.events(),
+    [{ kind: 'absorption', ts: 60000, price: 100, side: 'buy', vol: 35, medianVol: 4, label: 'heuristic' }],
+    'one labeled event — the label rides the EVENT (§4f heuristic rail)');
+
+  // Progress kills it: next bar clears price+1·tick (102.5 − 100 > 1).
+  d = S.AbsorptionDetector({ tickSize: 1 });
+  d.onBar({ t: 60000, finished: true, h: 104, l: 100, levels: spikeLevels });
+  d.onBar({ t: 120000, finished: true, h: 102.5, l: 99, levels: [{ price: 100, buy: 1, sell: 1 }] });
+  assert.strictEqual(d.events().length, 0, 'follow-through = no absorption');
+
+  // No spike, no candidates: all levels at the median (4 < 3·4).
+  d = S.AbsorptionDetector({ tickSize: 1 });
+  d.onBar({ t: 60000, finished: true, h: 104, l: 100, levels: spikeLevels.map((c) => ({ price: c.price, buy: 2, sell: 2 })) });
+  d.onBar({ t: 120000, finished: true, h: 101, l: 99, levels: [{ price: 100, buy: 1, sell: 1 }] });
+  assert.strictEqual(d.events().length, 0, 'flat bar never spikes (median baseline)');
+
+  // Sell-side mirror: dominant sell side resolves against the next bar's LOW
+  // (100 − 99.5 = 0.5 ≤ 1·tick → no downward follow-through → fires 'sell').
+  d = S.AbsorptionDetector({ tickSize: 1 });
+  d.onBar({
+    t: 60000, finished: true, h: 104, l: 100,
+    levels: spikeLevels.map((c) => (c.price === 100 ? { price: 100, buy: 5, sell: 30 } : c)),
+  });
+  d.onBar({ t: 120000, finished: true, h: 101, l: 99.5, levels: [{ price: 100, buy: 1, sell: 1 }] });
+  const sev = d.events();
+  assert.strictEqual(sev.length, 1);
+  assert.strictEqual(sev[0].side, 'sell');
+  assert.strictEqual(sev[0].label, 'heuristic', 'sell mirror carries the label too');
+});
+
+// ─── 44. SessionClock: exact half-open boundaries + boxes (§4f) ──────────────
+group('SessionClock exact boundaries (07:00 both, 08:00 leaves Asia, 21–24 dead zone) + boxesFor', () => {
+  const sc = S.SessionClock();
+  const D0 = Date.UTC(2026, 6, 6); // any UTC midnight — the clock is pure modulo arithmetic
+  const H = 3600000;
+  // Half-open [start,end): the §4f FX-desk-convention hours, boundary-exact.
+  assert.deepStrictEqual(sc.tag(D0), ['Asia'], '00:00:00.000 — Asia opens');
+  assert.deepStrictEqual(sc.tag(D0 + 7 * H - 1), ['Asia'], '06:59:59.999 — London not yet');
+  assert.deepStrictEqual(sc.tag(D0 + 7 * H), ['Asia', 'London'], '07:00:00.000 EXACTLY — the real overlap');
+  assert.deepStrictEqual(sc.tag(D0 + 8 * H), ['London'], '08:00:00.000 — Asia is OVER (half-open end)');
+  assert.deepStrictEqual(sc.tag(D0 + 12 * H), ['London', 'NY'], '12:00 — London/NY overlap');
+  assert.deepStrictEqual(sc.tag(D0 + 16 * H), ['NY'], '16:00 — London closes');
+  assert.deepStrictEqual(sc.tag(D0 + 21 * H), [], '21:00 — NY closes; the honest dead zone begins');
+  assert.deepStrictEqual(sc.tag(D0 + 24 * H - 1), [], '23:59:59.999 — still no session (never wraps into Asia early)');
+  assert.deepStrictEqual(sc.tag(D0 + 24 * H), ['Asia'], 'next midnight — Asia again');
+  // ADVERSARIAL — pre-1970 ts must not break the modulo (negative-safe), and
+  // unknown time is NO session, never a guess.
+  assert.deepStrictEqual(sc.tag(-1), [], 'ts −1 ≡ 23:59:59.999 UTC 1969-12-31 — dead zone, not a crash');
+  assert.deepStrictEqual(sc.tag(NaN), []);
+  // boxesFor: pure arithmetic on the CALLER's anchor (never asks the OS).
+  assert.deepStrictEqual(sc.boxesFor(D0), [
+    { name: 'Asia', startMs: D0, endMs: D0 + 8 * H },
+    { name: 'London', startMs: D0 + 7 * H, endMs: D0 + 16 * H },
+    { name: 'NY', startMs: D0 + 12 * H, endMs: D0 + 21 * H },
+  ]);
+  assert.deepStrictEqual(sc.boxesFor(NaN), []);
+});
+
+// ─── 45. cumDelta: hand accumulation + FootprintStore integration (§4f) ──────
+group('cumDelta hand accumulation (skips never zero-coerced) + real FootprintStore tape', () => {
+  // Hand case with malformed bars interleaved: null / string t / NaN delta
+  // are SKIPPED — a fabricated flat bar would fake "no net flow".
+  assert.deepStrictEqual(
+    S.cumDelta([{ t: 1, delta: 5 }, { t: 2, delta: -2 }, null, { t: 'x', delta: 1 }, { t: 3, delta: NaN }, { t: 4, delta: 4 }]),
+    [{ ts: 1, cum: 5 }, { ts: 2, cum: 3 }, { ts: 4, cum: 7 }]);
+  assert.deepStrictEqual(S.cumDelta(undefined), []);
+
+  // Integration: a real FootprintStore tape (2 finished + 1 open bar).
+  // Hand deltas: bar0 +2−0.5 = +1.5, bar1 −3, bar2(open) +1 → cum 1.5, −1.5, −0.5.
+  const fp = S.FootprintStore({ barMs: 60000, tickSize: 1 });
+  fp.onTrade({ ts: 0, price: 100, qty: 2, aggressorBuy: true });
+  fp.onTrade({ ts: 1000, price: 100, qty: 0.5, aggressorBuy: false });
+  fp.onTrade({ ts: 60000, price: 101, qty: 3, aggressorBuy: false });
+  fp.onTrade({ ts: 120000, price: 102, qty: 1, aggressorBuy: true });
+  const cd = S.cumDelta(fp.bars());
+  assert.deepStrictEqual(cd, [{ ts: 0, cum: 1.5 }, { ts: 60000, cum: -1.5 }, { ts: 120000, cum: -0.5 }]);
+  // Session-anchored invariant: the endpoint equals Σ per-bar delta exactly.
+  assert.strictEqual(cd[cd.length - 1].cum, fp.bars().reduce((a, b) => a + b.delta, 0));
+});
+
+// ─── 46. terminal-hfdata: archived-row normalization + URL allowlist (§4f W2) ─
+group('hfdata normalizeArchivedRow BigInt→Number + byodRowToEvent round-trip + URL allowlist throws', () => {
+  // The ONE decode/BYOD type mismatch (§4f probe): parquet BIGINT columns
+  // arrive as JS BigInt — coerced key-agnostically; everything else passes
+  // through UNTOUCHED (depth sides stay the collector's JSON strings —
+  // byodRowToEvent owns that parse, one vocabulary one owner).
+  const row = HF.normalizeArchivedRow({
+    exchange: 'bybit', symbol: 'BTCUSDT', trade_id: 't1',
+    ts_ms: 1751673600123n, price: 61850.5, qty: 0.001, aggressor_buy: true,
+  });
+  assert.deepStrictEqual(row, {
+    exchange: 'bybit', symbol: 'BTCUSDT', trade_id: 't1',
+    ts_ms: 1751673600123, price: 61850.5, qty: 0.001, aggressor_buy: true,
+  });
+  assert.strictEqual(typeof row.ts_ms, 'number', 'BigInt ts_ms → Number (exact below 2^53)');
+  // Normalized rows feed the REAL replay mapper UNCHANGED — the §4f promise
+  // that archived parquet and live BYOD speak one row vocabulary.
+  assert.deepStrictEqual(R.byodRowToEvent('trades', row),
+    { kind: 'trade', ex: 'bybit', ts: 1751673600123, price: 61850.5, qty: 0.001, aggressorBuy: true, id: 't1' });
+  // Key-agnostic coercion (schema-drift-safe) + string passthrough.
+  const dr = HF.normalizeArchivedRow({ expiry_ts: 1787904000000n, bids: '[[62000.1,1.5]]', name: 'BTC-28AUG26-105000-C' });
+  assert.strictEqual(dr.expiry_ts, 1787904000000);
+  assert.strictEqual(dr.bids, '[[62000.1,1.5]]', 'depth JSON strings stay strings — byodRowToEvent parses them');
+  // Non-objects are refused, never guessed.
+  assert.strictEqual(HF.normalizeArchivedRow(null), null);
+  assert.strictEqual(HF.normalizeArchivedRow(42), null);
+
+  // Resolve-URL contract: hive `=` sent as %3D (the probed router requirement).
+  assert.strictEqual(HF.archivedParquetUrl('azulcoder/btc-quant-ticks', '2026-07-05', 'trades'),
+    'https://huggingface.co/datasets/azulcoder/btc-quant-ticks/resolve/main/data/date%3D2026-07-05/trades.parquet');
+  // ADVERSARIAL — the allowlist THROWS on anything that could smuggle path
+  // segments into the URL (caller bug, refused loudly): bad date shapes,
+  // uppercase/injection table names, slash-less repos.
+  for (const args of [
+    ['azulcoder/btc-quant-ticks', '2026/07/05', 'trades'],
+    ['azulcoder/btc-quant-ticks', '2026-7-5', 'trades'],
+    ['azulcoder/btc-quant-ticks', '2026-07-05', 'Trades'],
+    ['azulcoder/btc-quant-ticks', '2026-07-05', 'a;b'],
+    ['azulcoder/btc-quant-ticks', '2026-07-05', 'a/../b'],
+    ['no-slash', '2026-07-05', 'trades'],
+  ]) {
+    assert.throws(() => HF.archivedParquetUrl(args[0], args[1], args[2]), /bad (repo|date|table)/,
+      'must throw for ' + JSON.stringify(args));
+  }
 });
 
 // ─── Verdict ─────────────────────────────────────────────────────────────────

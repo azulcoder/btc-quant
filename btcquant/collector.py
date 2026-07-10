@@ -61,12 +61,24 @@ in rotation mode it unions the local day files covering the requested range and
 answers 410 + an ``hf://`` hint for ranges older than the oldest local day. All
 DuckDB access (reads AND writes) is serialized through one ``threading.Lock``
 because the API threads share the writer's connections.
+
+§4f Institutional Auction Suite — read-side additions (same lock/contract
+discipline; every derived read stays DESCRIPTIVE, §0.1): ``/v1/profile`` is a
+tick-exact volume profile aggregated in SQL over the local day files, with
+POC/VAH/VAL computed server-side by the SAME 70 %-expansion convention as the
+terminal's ProfileStore (one convention, ported not re-invented); ``/v1/vwap``
+is an anchored VWAP ± volume-weighted sigma; ``/v1/levels`` serves the recorded
+UTC-day levels registry ``data/ticks/levels.jsonl`` — maintained by the
+rotation hook when :class:`DayFileManager` closes a day (idempotent append) and
+by ``scripts/backfill_levels.py`` for days already archived to HF — with the
+``naked`` POC flag DERIVED at serve time, never stored.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import math
 import random
 import re
 import signal
@@ -100,6 +112,7 @@ _INSTALL_HINT = "pip install -r requirements-collector.txt"
 __all__ = [
     "DEFAULT_DB",
     "GRACE_WINDOW_MS",
+    "LEVELS_TICK",
     "OKX_CTVAL",
     "BatchWriter",
     "BybitBook",
@@ -108,6 +121,9 @@ __all__ = [
     "Downsampler",
     "OkxBook",
     "RotatingWriter",
+    "append_levels_row",
+    "compute_day_levels",
+    "derive_naked",
     "make_api_server",
     "migrate_legacy",
     "normalize_binance_aggtrades",
@@ -129,6 +145,7 @@ __all__ = [
     "normalize_okx_trade",
     "open_db",
     "parse_deribit_option_name",
+    "read_levels_registry",
     "run",
     "utc_day",
 ]
@@ -1024,6 +1041,179 @@ def utc_day(ts_ms: int) -> str:
 _DAY_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")  # day-file stems, nothing else
 
 
+# --------------------------------------------------------------------------- #
+# §4f Institutional Auction Suite — server-side auction math + levels registry #
+# (DESIGN §4f, binding). Everything here is DESCRIPTIVE (§0.1): profiles,      #
+# VWAPs and day levels describe what traded; none of it is a signal.           #
+# --------------------------------------------------------------------------- #
+# The levels registry stores its profile fields (poc/vah/val) at a FIXED $10
+# tick (§4f: "bybit leg, tick=10"). Fixed on purpose: registry rows must stay
+# comparable across days — the 'naked POC' derivation asks whether a LATER
+# day's range revisited an EARLIER day's POC, and that question is only
+# well-posed when every day's POC sits on the same price grid. $10 is the grid
+# the §4f contract's own /v1/profile example pins for the BTC perp.
+LEVELS_TICK = 10.0
+LEVELS_FILENAME = "levels.jsonl"
+# The registry summarizes ONE venue (§4f: "bybit leg") — bybit is the primary
+# WS feed (§0.2) with the fullest tape; mixing venues into one o/h/l/c/profile
+# row would blur per-source provenance (§0.7).
+LEVELS_EXCHANGE = "bybit"
+
+
+def _day_bounds_ms(day: str) -> tuple[int, int]:
+    """'YYYY-MM-DD' -> [start_ms, end_ms) in UTC — the exact inverse of utc_day
+    (pure epoch arithmetic; no host tz can leak into a partition boundary)."""
+    lo = (date.fromisoformat(day) - date(1970, 1, 1)).days * _DAY_MS
+    return lo, lo + _DAY_MS
+
+
+def _poc_va(levels: list) -> tuple:
+    """(poc, vah, val) from ascending ``(lvl, weight)`` pairs — ProfileStore PARITY.
+
+    This is a deliberate line-for-line port of dashboard/terminal-state.js
+    ``ProfileStore.profile()`` / ``valueArea70`` (§4f binding: 70 % value-area
+    expansion server-side, "one convention: mirror ProfileStore's"):
+
+    * POC = the max-weight level; ties resolve to the LOWEST price (first
+      strict max in the ascending scan) — deterministic.
+    * Value area = 70 % EXPANSION FROM POC, one row at a time: compare the
+      single next level ABOVE the accepted range vs the single next level
+      BELOW and absorb whichever carries more weight — ties expand UPWARD
+      (``vu >= vd``); an exhausted side uses a ``-1`` sentinel that always
+      loses — until >= 70 % of total weight is inside. VAH/VAL are the extreme
+      accepted prices.
+
+    tests/test_collector.py pins the check_terminal group-9 constructed-levels
+    case (poc 150 / vah 200 / val 130) against this port, so the JS and Python
+    conventions cannot drift apart silently.
+    """
+    if not levels:
+        return None, None, None
+    n = len(levels)
+    weights = [w for _lvl, w in levels]
+    poc_idx = 0
+    for i in range(1, n):
+        if weights[i] > weights[poc_idx]:
+            poc_idx = i
+    target = 0.7 * sum(weights)
+    covered = weights[poc_idx]
+    up, dn = poc_idx + 1, poc_idx - 1
+    while covered < target and (up < n or dn >= 0):
+        vu = weights[up] if up < n else -1.0
+        vd = weights[dn] if dn >= 0 else -1.0
+        if vu >= vd:
+            covered += vu
+            up += 1
+        else:
+            covered += vd
+            dn -= 1
+    return levels[poc_idx][0], levels[up - 1][0], levels[dn + 1][0]
+
+
+def compute_day_levels(
+    con: Any,
+    day: str,
+    tick: float = LEVELS_TICK,
+    exchange: str = LEVELS_EXCHANGE,
+) -> Optional[dict]:
+    """One §4f levels-registry row ``{date, o,h,l,c, poc, vah, val, vol}`` for
+    ``day``, computed from the ``trades`` table behind ``con``.
+
+    Levels snap with ``round(price/tick)*tick`` (the §4f grid rule — same as
+    /v1/profile) and POC/VAH/VAL use the ProfileStore-parity expansion
+    (:func:`_poc_va`). Returns ``None`` when the venue printed no trades that
+    day — an absent row is honest; an invented flat row would poison the naked
+    derivation (§0.7). The store records one symbol per run (§3), but if a file
+    ever carries several, the busiest one is summarized (deterministic tie by
+    name) rather than blending symbols into one fake OHLC.
+    """
+    lo, hi = _day_bounds_ms(day)
+    sym_row = con.execute(
+        "SELECT symbol FROM trades WHERE exchange = ? AND ts_ms >= ? AND ts_ms < ? "
+        "GROUP BY symbol ORDER BY COUNT(*) DESC, symbol LIMIT 1",
+        [exchange, lo, hi],
+    ).fetchone()
+    if sym_row is None:
+        return None
+    symbol = sym_row[0]
+    where = "WHERE exchange = ? AND symbol = ? AND ts_ms >= ? AND ts_ms < ?"
+    o, h, low, c, vol = con.execute(
+        # arg_min/arg_max by ts_ms = first/last print of the day (event time).
+        f"SELECT arg_min(price, ts_ms), max(price), min(price), "
+        f"arg_max(price, ts_ms), SUM(qty) FROM trades {where}",  # noqa: S608 — fixed cols
+        [exchange, symbol, lo, hi],
+    ).fetchone()
+    lvl_rows = con.execute(
+        f"SELECT round(price / ?) * ? AS lvl, SUM(qty) FROM trades {where} "  # noqa: S608
+        "GROUP BY 1 ORDER BY 1",
+        [tick, tick, exchange, symbol, lo, hi],
+    ).fetchall()
+    poc, vah, val = _poc_va([(r[0], r[1]) for r in lvl_rows])
+    return {
+        "date": day, "o": o, "h": h, "l": low, "c": c,
+        "poc": poc, "vah": vah, "val": val, "vol": vol,
+    }
+
+
+def read_levels_registry(path: Any) -> list[dict]:
+    """Parse ``levels.jsonl`` -> day rows, sorted ascending by date.
+
+    A missing file is an EMPTY registry (honest: no recorded day has closed
+    yet), not an error. Sorting on read keeps consumers (naked derivation,
+    /v1/levels) correct regardless of on-disk append order — the rotation hook
+    appends as days close while the backfill script may add older dates.
+    """
+    p = Path(path)
+    if not p.exists():
+        return []
+    rows = [
+        json.loads(line)
+        for line in p.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    rows.sort(key=lambda r: r.get("date") or "")
+    return rows
+
+
+def append_levels_row(path: Any, row: dict) -> bool:
+    """Append one registry row iff its date is not already recorded.
+
+    Idempotence is the whole contract (§4f): the rotation hook can fire again
+    for a day the backfill already wrote (or vice versa) and the registry must
+    not grow a duplicate line — one recorded day, one row, forever.
+    Returns True iff a line was written.
+    """
+    p = Path(path)
+    if any(r.get("date") == row.get("date") for r in read_levels_registry(p)):
+        return False  # already recorded — skip, never duplicate
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+    return True
+
+
+def derive_naked(rows: list[dict]) -> list[dict]:
+    """Add the serve-time ``naked`` flag (§4f: DERIVED at serve time, NEVER
+    stored): a day's POC is naked iff NO LATER recorded day's [l, h] range
+    contains it — price has not traded back through that level on any later
+    recorded day. The newest day is vacuously naked. Derived (not stored)
+    because every new recorded day can un-nake an OLD row — a stored flag
+    would freeze a claim that later data legitimately falsifies.
+    """
+    ordered = sorted(rows, key=lambda r: r.get("date") or "")
+    out: list[dict] = []
+    for i, row in enumerate(ordered):
+        poc = row.get("poc")
+        naked = poc is not None and not any(
+            later.get("l") is not None
+            and later.get("h") is not None
+            and later["l"] <= poc <= later["h"]
+            for later in ordered[i + 1:]
+        )
+        out.append({**row, "naked": naked})
+    return out
+
+
 class DayFileManager:
     """Owns the open per-day DuckDB connections under a rotation root (§3c).
 
@@ -1075,12 +1265,37 @@ class DayFileManager:
         self._cons[day] = con
         return con
 
+    def levels_path(self) -> Path:
+        """``<root>/levels.jsonl`` — the §4f day-levels registry, kept beside
+        the day files it summarizes (one store, one registry)."""
+        return self.root / LEVELS_FILENAME
+
     def close_expired(self, now_ms: int, log=print) -> list[str]:
         """Close every open day whose write window has lapsed; return them."""
         closed: list[str] = []
         for day in sorted(self._cons):
             if not self.writable(day, now_ms):
-                self._cons.pop(day).close()
+                con = self._cons.pop(day)
+                # §4f rotation hook: the caller's contract is flush-THEN-close,
+                # so at this moment the day file is final and the writer's own
+                # connection is the last honest view of it — compute the day
+                # summary now and append one registry line. Idempotent
+                # (append_levels_row skips an already-recorded date) and
+                # non-fatal: a summary failure must never stop the close —
+                # immutability outranks the registry.
+                try:
+                    row = compute_day_levels(con, day)
+                    if row is not None and append_levels_row(self.levels_path(), row):
+                        log(
+                            f"[collector] levels registry += {day} (poc {row['poc']}, "
+                            f"va [{row['val']}, {row['vah']}], vol {row['vol']}) — §4f"
+                        )
+                except Exception as exc:  # noqa: BLE001 — registry is best-effort
+                    log(
+                        f"[collector] levels registry: {day} summary FAILED: "
+                        f"{exc!r} — the day still closes (§3c immutability first)"
+                    )
+                con.close()
                 self._closed.add(day)
                 closed.append(day)
                 log(f"[collector] day file {day} closed — immutable from here (§3c)")
@@ -1647,25 +1862,23 @@ def _rotation_day_cons(manager: DayFileManager, days: list[str]):
                 ro.close()
 
 
-def _query_rotation(
-    manager: DayFileManager,
-    lock: threading.Lock,
-    table: str,
-    qs: dict[str, str],
-) -> dict:
-    """Rotation-mode read: ATTACH-free union over the LOCAL day files covering
-    [start_ms, end_ms] (§3c). Same params/shapes as the legacy read — the BYOD
-    contract is UNCHANGED; only the storage behind it moved.
+def _cons_for_range(store: Any, rotation: bool, start_ms, end_ms, table: str = "trades"):
+    """Yield the connection(s) covering [start_ms, end_ms] — THE union seam.
 
-    A range starting before the oldest local day answers 410 via ``_Archived``
-    (that data was uploaded + pruned by the HF lifecycle) — an empty 200 there
-    would be a lie, the rows exist, just not here.
+    Rotation mode walks the LOCAL day files whose UTC day intersects the range
+    (ascending — day files partition by ts_ms, so per-file ts order composes
+    into global ts order) and raises ``_Archived`` (-> HTTP 410 + the hf://
+    hint) when the range starts before the oldest local day: that data was
+    uploaded + pruned by the HF lifecycle, and an empty 200 would be a lie.
+    Legacy single-file mode yields the one shared connection. Every §3c/§4f
+    read endpoint goes through this generator so range semantics cannot drift
+    between /v1/trades and /v1/profile//v1/vwap. Caller MUST hold the shared
+    lock for the whole walk (see _rotation_day_cons).
     """
-    cols = _TABLE_COLUMNS[table]
-    limit = _bounded_limit(qs)
-    start_ms = int(qs["start_ms"]) if "start_ms" in qs else None
-    end_ms = int(qs["end_ms"]) if "end_ms" in qs else None
-    days = manager.local_days()
+    if not rotation:
+        yield store
+        return
+    days = store.local_days()
     if start_ms is not None and days and utc_day(start_ms) < days[0]:
         raise _Archived(utc_day(start_ms), table)
     lo_day = utc_day(start_ms) if start_ms is not None else None
@@ -1674,16 +1887,247 @@ def _query_rotation(
         d for d in days
         if (lo_day is None or d >= lo_day) and (hi_day is None or d <= hi_day)
     ]
+    for _day, con, _borrowed in _rotation_day_cons(store, wanted):
+        yield con
+
+
+def _query_rotation(
+    manager: DayFileManager,
+    lock: threading.Lock,
+    table: str,
+    qs: dict[str, str],
+) -> dict:
+    """Rotation-mode read: ATTACH-free union over the LOCAL day files covering
+    [start_ms, end_ms] (§3c, via _cons_for_range). Same params/shapes as the
+    legacy read — the BYOD contract is UNCHANGED; only the storage moved.
+    """
+    cols = _TABLE_COLUMNS[table]
+    limit = _bounded_limit(qs)
+    start_ms = int(qs["start_ms"]) if "start_ms" in qs else None
+    end_ms = int(qs["end_ms"]) if "end_ms" in qs else None
     rows: list = []
     with lock:
-        # Day files partition by ts_ms, so walking days ascending and appending
-        # per-file ts-ordered rows keeps the global ORDER BY ts_ms contract.
-        for _day, con, _borrowed in _rotation_day_cons(manager, wanted):
+        for con in _cons_for_range(manager, True, start_ms, end_ms, table):
             remaining = limit - len(rows)
             if remaining <= 0:
                 break
             rows.extend(_run_bounded_select(con, table, qs, remaining))
     return {"table": table, "n": len(rows), "rows": [dict(zip(cols, r)) for r in rows]}
+
+
+# --------------------------------------------------------------------------- #
+# §4f endpoints — /v1/profile, /v1/vwap, /v1/levels (DESIGN §4f, binding).     #
+# All SQL is parameterized; column/table names are fixed strings. Empirical    #
+# basis for doing this server-side at all: DuckDB aggregates a full 2.87 M-    #
+# trade day into a 174-level profile in ~19 ms (§4f probes 2026-07-10).       #
+# --------------------------------------------------------------------------- #
+def _require_pos_finite(value: float, name: str) -> float:
+    if not (math.isfinite(value) and value > 0):
+        raise ValueError(f"{name} must be a finite positive number, got {value!r}")
+    return value
+
+
+def _profile_params(qs: dict[str, str]) -> tuple[str, str, int, int, float, list[float]]:
+    """Validate /v1/profile params (§4f: 400 on garbage, never a half-answer).
+
+    Raises ValueError — the handler's existing 400 path — on anything unsound:
+    missing symbol/range, non-numeric values, tick <= 0, end < start, or a
+    buckets_usd list that is not positive finite numbers.
+    """
+    if "symbol" not in qs:
+        raise ValueError("symbol is required")
+    if "start_ms" not in qs or "end_ms" not in qs:
+        raise ValueError("start_ms and end_ms are required")
+    start_ms, end_ms = int(qs["start_ms"]), int(qs["end_ms"])
+    if end_ms < start_ms:
+        raise ValueError(f"end_ms {end_ms} < start_ms {start_ms}")
+    tick = _require_pos_finite(float(qs.get("tick", "10")), "tick")
+    buckets: list[float] = []
+    if qs.get("buckets_usd"):
+        buckets = sorted(
+            {
+                _require_pos_finite(float(tok), "buckets_usd")
+                for tok in qs["buckets_usd"].split(",")
+                if tok.strip()
+            }
+        )
+        if not buckets:
+            raise ValueError("buckets_usd given but empty")
+    return qs["symbol"], qs.get("exchange", "bybit"), start_ms, end_ms, tick, buckets
+
+
+def _profile_sql(n_buckets: int) -> str:
+    """The per-day-file profile aggregation (§4f). Levels snap with
+    ``round(price/tick)*tick`` (the contract's grid rule); per-level Σp·q
+    rides along so the range VWAP comes from the SAME single scan (summing
+    exact per-trade products grouped by level loses nothing).
+    Bucket columns b0..bn split per-level volume by trade notional: bucket =
+    the smallest threshold >= price*qty, with one OVERFLOW column (bn) last
+    for notionals above every threshold.
+    """
+    cols = [
+        "round(price / ?) * ? AS lvl",
+        "SUM(CASE WHEN aggressor_buy THEN qty ELSE 0 END) AS buy_vol",
+        "SUM(CASE WHEN NOT aggressor_buy THEN qty ELSE 0 END) AS sell_vol",
+        "COUNT(*) AS prints",
+        "SUM(price * qty) AS pq",
+    ]
+    if n_buckets:
+        cols.append("SUM(CASE WHEN price * qty <= ? THEN qty ELSE 0 END) AS b0")
+        for i in range(1, n_buckets):
+            cols.append(
+                "SUM(CASE WHEN price * qty > ? AND price * qty <= ? "
+                f"THEN qty ELSE 0 END) AS b{i}"
+            )
+        cols.append(f"SUM(CASE WHEN price * qty > ? THEN qty ELSE 0 END) AS b{n_buckets}")
+    return (
+        "SELECT " + ", ".join(cols) + " FROM trades "
+        "WHERE exchange = ? AND symbol = ? AND ts_ms >= ? AND ts_ms <= ? "
+        "GROUP BY 1"
+    )
+
+
+def _bucket_params(buckets: list[float]) -> list[float]:
+    """Positional params for _profile_sql's bucket CASEs, in SQL text order."""
+    if not buckets:
+        return []
+    params = [buckets[0]]
+    for i in range(1, len(buckets)):
+        params += [buckets[i - 1], buckets[i]]
+    params.append(buckets[-1])
+    return params
+
+
+def _profile_endpoint(store: Any, lock: threading.Lock, rotation: bool, qs: dict) -> dict:
+    """GET /v1/profile (§4f): tick-exact profile over [start_ms, end_ms].
+
+    Aggregation runs per day file and merges by level — exact, because every
+    output field is a sum (or count) over disjoint trade sets. POC/VAH/VAL use
+    the ProfileStore-parity expansion (_poc_va); vwap/sigma come from the same
+    range (volume-weighted mean / standard deviation of trade price).
+    """
+    symbol, exchange, start_ms, end_ms, tick, buckets = _profile_params(qs)
+    sql = _profile_sql(len(buckets))
+    params = [tick, tick, *_bucket_params(buckets), exchange, symbol, start_ms, end_ms]
+    n_bucket_cols = len(buckets) + 1 if buckets else 0
+    acc: dict[float, list[float]] = {}
+    with lock:
+        for con in _cons_for_range(store, rotation, start_ms, end_ms):
+            for row in con.execute(sql, params).fetchall():
+                cur = acc.get(row[0])
+                if cur is None:
+                    acc[row[0]] = list(row[1:])
+                else:  # same level in two day files -> sums merge exactly
+                    for i, v in enumerate(row[1:]):
+                        cur[i] += v
+        levels: list[dict] = []
+        weights: list[tuple[float, float]] = []
+        total_vol = 0.0
+        pq = 0.0
+        for lvl in sorted(acc):
+            vals = acc[lvl]
+            buy, sell = vals[0], vals[1]
+            entry: dict[str, Any] = {
+                "lvl": lvl, "buy_vol": buy, "sell_vol": sell, "prints": int(vals[2]),
+            }
+            for i in range(n_bucket_cols):
+                entry[f"b{i}"] = vals[4 + i]
+            levels.append(entry)
+            weights.append((lvl, buy + sell))
+            total_vol += buy + sell
+            pq += vals[3]
+        vwap = sigma = None
+        if total_vol > 0:
+            vwap = pq / total_vol
+            sigma = _range_sigma(
+                store, rotation, exchange, symbol, start_ms, end_ms, vwap, total_vol
+            )
+    poc, vah, val = _poc_va(weights)
+    return {
+        "levels": levels, "poc": poc, "vah": vah, "val": val,
+        "total_vol": total_vol, "vwap": vwap, "sigma": sigma,
+    }
+
+
+def _range_sigma(
+    store: Any,
+    rotation: bool,
+    exchange: str,
+    symbol: str,
+    start_ms: Optional[int],
+    end_ms: Optional[int],
+    vwap: float,
+    total_qty: float,
+) -> float:
+    """Volume-weighted σ around ``vwap`` — the SECOND pass of a two-pass batch.
+
+    WHY two passes: the one-scan E[p²]−E[p]² form is catastrophically
+    ill-conditioned at BTC price scale — p² ≈ 4e9 while σ² ≈ tens, so the
+    subtraction burns ~8 of a float64's ~16 digits and misses the batch
+    formula by ~1e-8 (measured). Σq·(p−vwap)² keeps every term at σ's own
+    scale, matching the batch definition (and the terminal AnchoredVwap's
+    Welford stream) to ~1e-12. A day scan costs ~19 ms (§4f probes), so the
+    extra pass is free. Caller holds the shared lock and guarantees
+    ``total_qty > 0``.
+    """
+    sql = (
+        "SELECT COALESCE(SUM(qty * (price - ?) * (price - ?)), 0) FROM trades "
+        "WHERE exchange = ? AND symbol = ? AND ts_ms >= ?"
+    )
+    params: list[Any] = [vwap, vwap, exchange, symbol, start_ms]
+    if end_ms is not None:
+        sql += " AND ts_ms <= ?"
+        params.append(end_ms)
+    m2 = 0.0
+    for con in _cons_for_range(store, rotation, start_ms, end_ms):
+        m2 += con.execute(sql, params).fetchone()[0]
+    return math.sqrt(max(0.0, m2 / total_qty))  # clamp: float round-off only
+
+
+def _vwap_params(qs: dict[str, str]) -> tuple[str, str, int, Optional[int]]:
+    """Validate /v1/vwap params — same 400-on-garbage discipline as _profile_params."""
+    if "symbol" not in qs:
+        raise ValueError("symbol is required")
+    if "anchor_ms" not in qs:
+        raise ValueError("anchor_ms is required")
+    anchor_ms = int(qs["anchor_ms"])
+    end_ms = int(qs["end_ms"]) if "end_ms" in qs else None
+    if end_ms is not None and end_ms < anchor_ms:
+        raise ValueError(f"end_ms {end_ms} < anchor_ms {anchor_ms}")
+    return qs["symbol"], qs.get("exchange", "bybit"), anchor_ms, end_ms
+
+
+def _vwap_endpoint(store: Any, lock: threading.Lock, rotation: bool, qs: dict) -> dict:
+    """GET /v1/vwap (§4f): anchored VWAP ± σ over [anchor_ms, end_ms].
+
+    ``end_ms`` omitted means "through the newest LOCAL trade" — the day walk
+    simply has no upper bound, so every local file from the anchor day onward
+    contributes. Empty range -> nulls + n=0 (an honest nothing, never a NaN
+    smuggled through JSON).
+    """
+    symbol, exchange, anchor_ms, end_ms = _vwap_params(qs)
+    sql = (
+        "SELECT COUNT(*), COALESCE(SUM(qty), 0), COALESCE(SUM(price * qty), 0) "
+        "FROM trades WHERE exchange = ? AND symbol = ? AND ts_ms >= ?"
+    )
+    params: list[Any] = [exchange, symbol, anchor_ms]
+    if end_ms is not None:
+        sql += " AND ts_ms <= ?"
+        params.append(end_ms)
+    n = 0
+    q = pq = 0.0
+    with lock:
+        for con in _cons_for_range(store, rotation, anchor_ms, end_ms):
+            c_n, c_q, c_pq = con.execute(sql, params).fetchone()
+            n += c_n
+            q += c_q
+            pq += c_pq
+        if q <= 0:
+            return {"vwap": None, "sigma": None, "n": n}
+        vwap = pq / q
+        # Two-pass batch σ (see _range_sigma for the conditioning WHY).
+        sigma = _range_sigma(store, rotation, exchange, symbol, anchor_ms, end_ms, vwap, q)
+    return {"vwap": vwap, "sigma": sigma, "n": n}
 
 
 def _rotation_row_counts(manager: DayFileManager, lock: threading.Lock) -> dict[str, int]:
@@ -1715,6 +2159,8 @@ def make_api_server(
     row shapes — is IDENTICAL in both modes; rotation additionally answers 410
     (``{'error':'archived','hint':'hf://…'}``) for ranges older than the oldest
     local day, and /v1/info aggregates row_counts across the local day files.
+    §4f adds /v1/profile and /v1/vwap (both modes, live-local reads) and
+    /v1/levels (rotation only — the registry lives beside the day files).
     """
     rotation = isinstance(store, DayFileManager)
 
@@ -1762,12 +2208,34 @@ def make_api_server(
                                     f"SELECT COUNT(*) FROM {table}"  # noqa: S608 — whitelist
                                 ).fetchone()[0]
                         self._send_json({**info, "row_counts": counts})
+                elif path == "/v1/profile":  # §4f tick-exact auction profile
+                    self._send_json(_profile_endpoint(store, lock, rotation, qs))
+                elif path == "/v1/vwap":  # §4f anchored VWAP ± σ
+                    self._send_json(_vwap_endpoint(store, lock, rotation, qs))
+                elif path == "/v1/levels":  # §4f recorded-day levels registry
+                    if rotation:
+                        rows = derive_naked(read_levels_registry(store.levels_path()))
+                        self._send_json({"n": len(rows), "days": rows})
+                    else:
+                        # The registry lives beside the day files it summarizes;
+                        # a legacy single-file store has no recorded-day notion.
+                        self._send_json(
+                            {"error": "levels registry is rotation-mode only "
+                                      "(data/ticks/levels.jsonl, §4f)"},
+                            status=404,
+                        )
                 elif path in _API_ROUTES:
                     query = _query_rotation if rotation else _query_table
                     self._send_json(query(store, lock, _API_ROUTES[path], qs))
                 else:
                     self._send_json(
-                        {"error": "not found", "routes": ["/health", "/v1/info", *_API_ROUTES]},
+                        {
+                            "error": "not found",
+                            "routes": [
+                                "/health", "/v1/info", *_API_ROUTES,
+                                "/v1/profile", "/v1/vwap", "/v1/levels",  # §4f
+                            ],
+                        },
                         status=404,
                     )
             except _Archived as exc:  # range predates local day files -> HF (§3c)

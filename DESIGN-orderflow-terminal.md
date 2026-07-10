@@ -12,7 +12,7 @@ un-validated). **O-5 shipped 2026-07-05** (§4e portfolio & research — trade j
 returns, Polymarket crowd-implied panel, ToA news feed, local-mirror econ calendar
 (`make econ` — faireconomy has no CORS), + the elite pass: sticky section nav w/
 persisted collapse, hidden-tab/offscreen paint gating (ingestion never pauses), and
-`check_terminal.cjs` (37 groups) promoted to a CI build gate). **The terminal feature
+`check_terminal.cjs` (46 groups) promoted to a CI build gate). **The terminal feature
 plan (§5) is complete** — further work follows the DEVELOPMENT.md §6 greenlight ritual.
 
 Provenance: feature surface adapted from [Cryexc](https://cryexc.josedonato.com/) (José
@@ -544,6 +544,78 @@ feeds** (labeled sources).
   known expectancy/PF/SQN/winRate), calendarReturns bucketing (UTC day + hour), CSV
   round-trip export→import identity + a bad-row lands-in-errors case.
 
+## 4f. I-1 contracts — Institutional Auction Suite (binding; probes 2026-07-10)
+
+Beyond the CryExc map: tick-EXACT auction analytics on the recorded store. Empirical
+basis: DuckDB aggregates a full 2.87 M-trade day into a 174-level profile in **19 ms**
+(server-side endpoints are effectively free); **HF CORS echoes the Pages origin** on
+parquet resolve links (browser can read ARCHIVED days directly). Rails: every derived
+read stays descriptive; heuristics labeled; OFI/microprice carry their paper citations
+(Cont–Kukanov–Stoikov OFI; Stoikov microprice); dataviz discipline — delta profile =
+diverging two-hue + NEUTRAL midpoint (never a hue at zero), OFI in its OWN pane (never
+dual-axis), palette hexes VALIDATED via the dataviz skill validator against the dark
+terminal surface, text in text tokens.
+
+**Backend — collector.py read-side API additions (same lock/contract discipline):**
+- `GET /v1/profile?symbol&exchange=bybit&start_ms&end_ms&tick=10[&buckets_usd=1e4,1e5]`
+  → `{levels:[{lvl, buy_vol, sell_vol, prints[, b0,b1,…]}], poc, vah, val, total_vol,
+  vwap, sigma}` — SQL aggregation across LOCAL day files covering the range (union),
+  70 % value-area expansion server-side (one convention: mirror ProfileStore's).
+- `GET /v1/vwap?symbol&exchange&anchor_ms[&end_ms]` → `{vwap, sigma, n}` (anchored).
+- `GET /v1/levels` → the **levels registry**: one row per RECORDED UTC day
+  `{date, o,h,l,c, poc, vah, val, vol}` (bybit leg), served from
+  `data/ticks/levels.jsonl`; `naked` (POC never revisited by any LATER day's range)
+  is DERIVED at serve time, never stored. Registry maintenance: (a) rotation hook —
+  on day-close the manager computes the day summary from the closing file and appends
+  one line; (b) `scripts/backfill_levels.py` — one-shot over the HF dataset via
+  `hf://` for already-archived days (idempotent: skips dates present). Makefile:
+  `backfill-levels`.
+- Endpoint tests: aggregation vs hand-SQL on synthetic day files; VA expansion parity
+  with the JS ProfileStore fixture case; levels rotation-hook append; naked derivation
+  (revisited vs untouched); range-spanning union across two day files.
+
+**Builders (terminal-state.js, pure; check_terminal groups mandatory):**
+- `buildDeltaProfile(levels)` → per-level `{lvl, delta, intensity∈[0,1]}` (p95-normal-
+  ized) for the diverging render; sums must satisfy Σdelta ≡ Σbuy−Σsell exactly.
+- `SessionClock()` → UTC session tags + boxes: Asia 00–08, London 07–16, NY 12–21
+  (overlaps real, labeled UTC — comment: classic FX-desk convention, not an oracle).
+- `AnchoredVwap()` — streaming (Welford-style) vwap ± σ bands from trades:
+  `onTrade(t)`, `bands()` → `{vwap, s1, s2}`; deterministic vs batch formula 1e-9.
+- `OfiStore({levels=5})` — Cont–Kukanov–Stoikov order-flow imbalance from successive
+  top-N book snapshots (event-ts cadence; comment: 1 s snapshot approximation stated);
+  `onDepthSample(ts, grouped)`, `series()` (rolling sum) + `zscore(window)`.
+- `microprice(book)` — Stoikov imbalance-weighted mid; plus `mid()` delta series.
+- `stackedImbalances(bars, {k=3, minRun=3})` → zones `{top, bottom, side, barIdx}`
+  (≥3 consecutive same-side diagonal imbalances); zone dies when traded through.
+- `AbsorptionDetector({volK=3, progressTicks<=1})` — label:'heuristic' (volume spike
+  at a level, no follow-through next bar — pattern-consistent-with, not proof).
+- Footprint per-bar cum-delta series accessor (for the mini-pane).
+
+**Views/UI (terminal-views.js/js/html/css — INSTITUTIONAL section after STRUCTURE):**
+- `AuctionProfileView` (centerpiece, canvas): day/session/range selector (local days
+  from /v1/levels + 'today live'); modes total | buy×sell | **delta (diverging,
+  validated ramp)** | size-bucket; POC/VAH/VAL lines; **naked-POC registry overlay**
+  (dashed levels, age labels); composite multi-day merge; hover readout; replay mode
+  → honest disabled note (endpoints are live-local only).
+- HistChartView gains: session VWAP + ±1σ/±2σ band series (day|week|custom anchor
+  select — the AMT read: value ≈ vwap ± 1σ), session boxes shading on the book
+  heatmap canvas, levels-overlay toggle (prior-day POC/VA + naked POCs from registry).
+- `MicrostructureView`: OFI rolling-sum pane + microprice−mid series pane (separate
+  scales/panes), readout strip (book imbalance, microprice, OFI z); citations label.
+- FootprintView upgrades: stacked-imbalance zone shading, absorption ◉ flags
+  (labeled), per-bar POC dot, cum-delta mini-pane.
+- `LevelsView`: recorded-day table (date, O/H/L/C, POC, VA, vol, naked badge) +
+  draw-on-charts toggle; DOM ladder rows at naked-POC levels get a subtle marker.
+- Dataviz gates: diverging ramp built from the existing up/down tokens + neutral,
+  hexes run through the skill validator (dark surface) and the report pasted into
+  the PR-style commit body; every new panel ships hover + legend per skill rules.
+
+**Wave 2 (stretch, honesty-gated):** `dashboard/terminal-hfdata.js` + vendored
+single-file parquet reader (`dashboard/vendor/hyparquet.js`, MIT) → AuctionProfileView
+can load ANY ARCHIVED day straight from the HF dataset in-browser (CORS proven),
+labeled `archived day · hf dataset`; if vendoring proves unsound the agent reports
+and the feature defers — no half-measures on the public page.
+
 ## 5. CryExc → btc-quant feature map & phase plan
 
 | # | CryExc view | Phase | Rail notes |
@@ -597,7 +669,7 @@ prevent AC sleep. `make check-ticks` weekly is the standing quality ritual.
 Layer 0 (static, every commit): `python -m pytest` (incl. collector tests; network-free);
 `node --check` on every dashboard JS file; `node scripts/check_terminal.cjs` (fixture
 smoke: adapters + stores + O-3/O-4 normalizers/builders replayed over the REAL captured
-frames/responses, 37 assertion groups — a CI build gate since O-5, §4e.3).
+frames/responses, 46 assertion groups — a CI build gate since O-5, §4e.3).
 
 - **L1 — deterministic browser harness** (`make verify-browser`,
   `scripts/verify_terminal_browser.py`): serves the repo, opens

@@ -71,16 +71,22 @@
     { kind: 'basis-bp', enabled: true, threshold: 25 },
   ];
 
-  // O-5 (§4e.1): the four collapsible page sections — the section mini-nav's
+  // O-5 (§4e.1): the collapsible page sections — the section mini-nav's
   // toggles persist through the settings object like every other control.
-  const SECTIONS = ['orderflow', 'structure', 'intelligence', 'portfolio'];
+  // I-1 (§4f) adds AUCTION between structure and intelligence.
+  const SECTIONS = ['orderflow', 'structure', 'auction', 'intelligence', 'portfolio'];
+  // I-1 (§4f): VWAP anchor whitelist (day = current UTC day, week = current
+  // UTC ISO week, custom = the datetime input — parsed as UTC, stated).
+  const VWAP_ANCHORS = ['day', 'week', 'custom'];
 
   const DEFAULTS = {
     tick: 10, barMs: 60000, tapeMin: 0, liqRange: 'pct6',
     // O-4 (§4d): screener slice, whale watchlist (+BTC filter), alert rules.
     screenerTop: '40', whaleBtcOnly: true, whaleAddrs: [], alertRules: DEFAULT_RULES,
     // O-5 (§4e.1): per-section collapse state (all expanded by default).
-    collapsed: { orderflow: false, structure: false, intelligence: false, portfolio: false },
+    collapsed: { orderflow: false, structure: false, auction: false, intelligence: false, portfolio: false },
+    // I-1 (§4f): levels 'draw on charts' toggle + hist VWAP-band controls.
+    levelsDraw: false, vwapOn: false, vwapAnchor: 'day',
   };
 
   function loadSettings() {
@@ -89,7 +95,7 @@
     // never mutate DEFAULTS (a shared reference would corrupt the fallback).
     s.whaleAddrs = [];
     s.alertRules = DEFAULT_RULES.map((r) => Object.assign({ id: r.kind }, r));
-    s.collapsed = { orderflow: false, structure: false, intelligence: false, portfolio: false };
+    s.collapsed = { orderflow: false, structure: false, auction: false, intelligence: false, portfolio: false };
     try {
       const j = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
       if (TICKS.indexOf(j.tick) >= 0) s.tick = j.tick;
@@ -121,13 +127,17 @@
           dst.threshold = Number.isFinite(r.threshold) ? r.threshold : null;
         }
       }
-      // O-5 (§4e.1): only the four KNOWN section names, strict booleans —
-      // same validated-on-load rule as every other stored value above.
+      // O-5 (§4e.1): only KNOWN section names, strict booleans — same
+      // validated-on-load rule as every other stored value above.
       if (j.collapsed && typeof j.collapsed === 'object') {
         for (const sec of SECTIONS) {
           if (typeof j.collapsed[sec] === 'boolean') s.collapsed[sec] = j.collapsed[sec];
         }
       }
+      // I-1 (§4f): levels-overlay toggle + VWAP band controls (whitelisted).
+      if (typeof j.levelsDraw === 'boolean') s.levelsDraw = j.levelsDraw;
+      if (typeof j.vwapOn === 'boolean') s.vwapOn = j.vwapOn;
+      if (VWAP_ANCHORS.indexOf(j.vwapAnchor) >= 0) s.vwapAnchor = j.vwapAnchor;
     } catch (_) { /* corrupt storage → defaults */ }
     return s;
   }
@@ -141,6 +151,7 @@
         whaleAddrs: settings.whaleAddrs,
         alertRules: settings.alertRules.map((r) => ({ kind: r.kind, enabled: r.enabled, threshold: r.threshold })),
         collapsed: settings.collapsed,
+        levelsDraw: settings.levelsDraw, vwapOn: settings.vwapOn, vwapAnchor: settings.vwapAnchor,
       }));
     } catch (_) { /* private mode / quota — settings just don't persist */ }
   }
@@ -171,7 +182,16 @@
   // in the browser to re-bucket from (that's the collector's job, §3), and
   // synthesizing the old bars onto a new grid would be fabrication (§0.7).
   let footprint, profile;
-  function rebuildFootprint() { footprint = S.FootprintStore({ barMs: settings.barMs, tickSize: settings.tick }); }
+  // I-1 (§4f): the absorption detector consumes finished footprint bars and
+  // shares their tick grid, so it rebuilds (and honestly restarts) with the
+  // footprint — same rule as the O-2 grid-bound stores. absFedT tracks the
+  // newest bar already fed (onBar wants each finished bar exactly once).
+  let absDet, absFedT;
+  function rebuildFootprint() {
+    footprint = S.FootprintStore({ barMs: settings.barMs, tickSize: settings.tick });
+    absDet = S.AbsorptionDetector({ volK: 3, progressTicks: 1, tickSize: settings.tick });   // §4f defaults
+    absFedT = -Infinity;
+  }
   function rebuildProfile() { profile = S.ProfileStore({ tickSize: settings.tick }); }
   rebuildFootprint();
   rebuildProfile();
@@ -197,6 +217,12 @@
   let priceTrail;       // ex → [{ts, price}]
   const lastPriceByEx = {};   // ex → latest trade price (trail source)
   let lastSampleTs;     // ex → event-ts of the last taken depth sample (the ≥1s gate)
+  // I-1 (§4f): OFI store + microprice−mid ring ride the SAME 1/s bybit book
+  // sampler (and the same grouped() tick grid for OFI's per-level qtys), so
+  // they rebuild with the heatmap stores on a tick change — re-bucketing old
+  // ladders onto a new grid would fabricate flow that never printed (§0.7).
+  let ofi;              // OfiStore (Cont–Kukanov–Stoikov, top-5 levels)
+  let mpHist;           // [{ts, d}] microprice − mid ring (same 3600-sample horizon)
   function rebuildHeatmapStores() {
     depthHist = {}; priceTrail = {}; lastSampleTs = {};
     for (const ex of HIST_EXS) {
@@ -208,6 +234,8 @@
     liqModel = S.LiqHeatmapModel({ tickSize: settings.tick });        // §4b defaults (tiers/mmr)
     liqEst = null;
     lastEstTs = -Infinity;
+    ofi = S.OfiStore({ levels: 5 });   // §4f default top-N
+    mpHist = [];
   }
   rebuildHeatmapStores();
 
@@ -224,11 +252,26 @@
   const pendingTrades = [];   // trades since the last AlertEngine evaluate (whale-print input), bounded below
   const oiHistBybit = [];     // [{ts, oi}] ring (~2h) — the 'OI 1h change' read needs history the WS event alone doesn't carry
 
+  // ─── I-1 (§4f): session clock + anchored VWAP, fed off the bybit tape ────
+  //
+  // AnchoredVwap accumulates ONLY trades this page witnessed (weighted
+  // Welford, terminal-state.js): with a day/week anchor earlier than page
+  // open the running value covers page-open→now — stated in the hist legend,
+  // and the one-shot /v1/vwap fetch (recorded store, tick-exact) is the
+  // labeled cross-check for the full anchor range. Re-anchoring mid-session
+  // restarts accumulation from that moment (the browser keeps no raw tick
+  // store to replay — the same honest-restart rule as the tick regroup).
+  const sessionClock = S.SessionClock();
+  const anchoredVwap = S.AnchoredVwap();
+  let vwapHist = [];          // genuinely-sampled {ts, vwap, s1, s2} points (5s intel gate)
+  let storeVwapTxt = null;    // /v1/vwap parity text (one fetch per anchor change, never merged)
+
   // ─── Dirty flags — the ONLY signal that a view needs repainting ─────────
   const dirty = {
     fp: true, dom: true, tape: true, agg: true, header: true, liq: true,
     heat: true, liqmap: true, det: true,   // O-2 panels (§4b)
     hist: true, tpo: true, vp: true, farb: true, macro: true,   // O-3 STRUCTURE panels (§4c)
+    auct: true, lvls: true, micro: true,   // I-1 AUCTION panels (§4f)
     scr: true, rsi: true, opts: true, whale: true, alerts: true, conf: true,   // O-4 INTELLIGENCE panels (§4d)
     jour: true, cal: true, poly: true, news: true, econ: true,   // O-5 PORTFOLIO panels (§4e)
   };
@@ -262,6 +305,7 @@
           // and the agg book's stacked okx segments.
           footprint.onTrade(ev);
           profile.onTrade(ev);
+          anchoredVwap.onTrade(ev);   // I-1 (§4f): session VWAP ± σ bands — primary leg only
           // Detector trades come from BYBIT only — it must see the SAME venue
           // as the depth samples it correlates (traded-volume-vs-wall math is
           // per-book; §4b feeds the detector from the primary venue). New
@@ -1005,6 +1049,562 @@
     setInterval(pollEcon, 300000);
   }
 
+  // ─── I-1 AUCTION section (§4f): auction profile / levels registry /
+  // microstructure + hist-chart VWAP bands & levels overlay ────────────────
+  //
+  // Transport rules (§4f wiring contract):
+  //   - /v1/profile + /v1/levels + /v1/vwap are LIVE-LOCAL collector reads
+  //     (127.0.0.1:8788) — fetched ONLY outside replay modes AND only after a
+  //     one-shot /health probe answers. On the public Pages deployment the
+  //     page is https and the browser BLOCKS http://127.0.0.1 as mixed
+  //     content — the probe's fetch rejects, apiUp goes false, and the panels
+  //     degrade to the honest 'collector API offline' note instead of
+  //     spinning forever (stated here because it is the deployment's normal
+  //     state, not an error).
+  //   - Archived days are read straight from the public HF dataset
+  //     (terminal-hfdata.js, CORS-proven §4f) — ALWAYS behind a size-warning
+  //     confirm() that states the byte cost BEFORE the download (the WhaleView
+  //     33 MB leaderboard gate idiom; trades ≈ 27 MiB/day), and every render
+  //     is labeled 'archived day · hf dataset'.
+  //   - Poll cadences: profile on-demand + 60s refresh for 'today'; levels
+  //     5min; vwap piggybacks the live trade stream (AnchoredVwap — no
+  //     polling; ONE /v1/vwap fetch per anchor change as a labeled parity
+  //     read).
+  //   - Replay modes: every I-1 panel shows an honest disabled note — the
+  //     endpoints are live-local and the microstructure panes read the live
+  //     book sampler; neither has a deterministic replay story (§7 L1).
+  const BYOD_API = 'http://127.0.0.1:8788';   // collector.py --api-port default (terminal-replay.js pins the same)
+  const HFD = window.BTCQ_TERMINAL_HFDATA || null;   // absent ⇒ archived days simply aren't offered
+  const LEVELS_TICK = 10;                      // §4f server default ($10 levels — the BTC-perp contract example)
+  const AUCTION_BUCKETS = [10000, 100000];     // → b0 ≤$10k · b1 ≤$100k · b2 >$100k (CVD bucket family)
+  const AUCTION_BUCKET_LABELS = ['≤$10k', '≤$100k', '>$100k'];
+  const DAY_MS = 86400000;
+  const API_OFFLINE_NOTE = 'collector API offline — run `make collector-api` (127.0.0.1:8788). '
+    + 'On the public Pages deployment this is expected: an https page cannot fetch http://127.0.0.1 (mixed content).';
+
+  let auctionView = null, levelsView = null, microView = null;
+  let apiUp = null;             // null = probing, false = offline, true = answering
+  let levelsDays = null;        // /v1/levels days (date-ascending) | null before first answer
+  let levelsNote = 'awaiting /v1/levels (collector API probe in flight)…';
+  let archDates = null;         // HF archived dates (ascending) | null
+  let auctionSource = 'today';
+  let auctionComposite = { on: false, days: [] };
+  let auctionState = { profile: null, delta: null, label: '', note: 'probing collector API…', status: '' };
+  let auctionGen = 0;           // load generation — a newer source pick abandons stale completions
+  const profCache = new Map();  // 'YYYY-MM-DD' → per-day profile (local fetch or hf aggregation)
+  let levelsDrawOn = settings.levelsDraw;
+  let vwapOn = settings.vwapOn;
+
+  function utcDayStart(ts) { return Math.floor(ts / DAY_MS) * DAY_MS; }
+  function dateStr(ts) { return new Date(ts).toISOString().slice(0, 10); }
+
+  /** Abortable JSON GET (terminal-hist.js idiom, but THROWING — these loads
+   *  are user-visible and the failure text is the render). 410 = the §4f
+   *  'archived to HF' answer: surfaced with the server's own hint. */
+  function fetchJson(url, timeoutMs) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs || 10000);
+    return fetch(url, { signal: ctl.signal }).then((r) => {
+      clearTimeout(t);
+      if (r.status === 410) {
+        return r.json().catch(() => ({})).then((j) => {
+          const e = new Error(j && j.hint ? String(j.hint) : 'day file archived (410)');
+          e.gone = true;
+          throw e;
+        });
+      }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }, (err) => { clearTimeout(t); throw err; });
+  }
+
+  /** ProfileStore-parity 70% value-area expansion over §4f profile levels
+   *  (weight = buy+sell). Mirrors ProfileStore.profile() / collector _poc_va
+   *  step for step — ONE convention everywhere (§4f binding): expand from
+   *  the max-volume level (ties → lowest price), absorb the bigger single
+   *  neighbor (ties expand upward), until ≥70% of total volume is inside. */
+  function pocVa70(levels) {
+    if (!levels.length) return { poc: NaN, vah: NaN, val: NaN };
+    let pocIdx = 0, total = 0;
+    const wt = levels.map((lv) => lv.buy_vol + lv.sell_vol);
+    for (let i = 0; i < levels.length; i++) {
+      total += wt[i];
+      if (wt[i] > wt[pocIdx]) pocIdx = i;
+    }
+    const target = 0.7 * total;
+    let covered = wt[pocIdx];
+    let up = pocIdx + 1, dn = pocIdx - 1;
+    while (covered < target && (up < levels.length || dn >= 0)) {
+      const vu = up < levels.length ? wt[up] : -1;
+      const vd = dn >= 0 ? wt[dn] : -1;
+      if (vu >= vd) { covered += vu; up++; }
+      else { covered += vd; dn--; }
+    }
+    return { poc: levels[pocIdx].lvl, vah: levels[up - 1].lvl, val: levels[dn + 1].lvl };
+  }
+
+  /** Client-side aggregation of ARCHIVED trade rows (BYOD row shapes from
+   *  terminal-hfdata.js) into the /v1/profile response shape — same floor
+   *  bucketing, same notional size-buckets, same VA convention (pocVa70),
+   *  vwap/σ via the weighted-Welford update (AnchoredVwap's precision
+   *  argument: naive Σqp² cancels catastrophically at 1e5-scale prices). */
+  function aggregateTradeRows(rows, tick, bucketsUsd) {
+    const acc = new Map();
+    let W = 0, mean = 0, Sw = 0, totalVol = 0;
+    for (const r of rows) {
+      if (!r || r.exchange !== 'bybit' || r.symbol !== SYM) continue;   // one leg, like the endpoint
+      const price = r.price, qty = r.qty;
+      if (!Number.isFinite(price) || !(qty > 0)) continue;
+      const lvl = Math.floor(price / tick) * tick;
+      let e = acc.get(lvl);
+      if (!e) { e = { buy: 0, sell: 0, prints: 0, bk: new Array(bucketsUsd.length + 1).fill(0) }; acc.set(lvl, e); }
+      if (r.aggressor_buy) e.buy += qty; else e.sell += qty;
+      e.prints++;
+      const ntl = price * qty;
+      let bi = bucketsUsd.length;
+      for (let i = 0; i < bucketsUsd.length; i++) { if (ntl <= bucketsUsd[i]) { bi = i; break; } }
+      e.bk[bi] += qty;
+      totalVol += qty;
+      W += qty;
+      const d = price - mean;
+      mean += (qty / W) * d;
+      Sw += qty * d * (price - mean);
+    }
+    const levels = [...acc.entries()].map(([lvl, e]) => {
+      const row = { lvl, buy_vol: e.buy, sell_vol: e.sell, prints: e.prints };
+      for (let i = 0; i < e.bk.length; i++) row['b' + i] = e.bk[i];
+      return row;
+    }).sort((a, b) => a.lvl - b.lvl);
+    const va = pocVa70(levels);
+    return {
+      levels, poc: va.poc, vah: va.vah, val: va.val, total_vol: totalVol,
+      vwap: W > 0 ? mean : null, sigma: W > 0 ? Math.sqrt(Math.max(0, Sw / W)) : null,
+    };
+  }
+
+  /** Merge several per-day profiles into one composite (client-side, §4f):
+   *  level sums are EXACT (disjoint trade sets); POC/VA recomputed with the
+   *  one shared convention. vwap/σ are deliberately OMITTED — recomputing
+   *  them from $10 level midpoints would approximate and present it as the
+   *  measured value (§0.7); the per-day profiles keep theirs. */
+  function mergeProfiles(profs) {
+    const acc = new Map();
+    let totalVol = 0;
+    for (const p of profs) {
+      for (const lv of p.levels) {
+        let e = acc.get(lv.lvl);
+        if (!e) { e = { buy: 0, sell: 0, prints: 0, bk: new Array(AUCTION_BUCKETS.length + 1).fill(0) }; acc.set(lv.lvl, e); }
+        e.buy += lv.buy_vol; e.sell += lv.sell_vol; e.prints += lv.prints || 0;
+        for (let i = 0; i < e.bk.length; i++) e.bk[i] += Number.isFinite(lv['b' + i]) ? lv['b' + i] : 0;
+        totalVol += lv.buy_vol + lv.sell_vol;
+      }
+    }
+    const levels = [...acc.entries()].map(([lvl, e]) => {
+      const row = { lvl, buy_vol: e.buy, sell_vol: e.sell, prints: e.prints };
+      for (let i = 0; i < e.bk.length; i++) row['b' + i] = e.bk[i];
+      return row;
+    }).sort((a, b) => a.lvl - b.lvl);
+    const va = pocVa70(levels);
+    return { levels, poc: va.poc, vah: va.vah, val: va.val, total_vol: totalVol, vwap: null, sigma: null };
+  }
+
+  function setAuctionProfile(prof, label, note) {
+    auctionState = {
+      profile: prof,
+      // delta precomputed HERE via the tested pure builder (Σdelta ≡ Σbuy−Σsell
+      // stays in the check_terminal-covered layer, the view only paints it).
+      delta: prof ? S.buildDeltaProfile(prof.levels) : null,
+      label, note: note || '', status: '',
+    };
+    dirty.auct = true;
+  }
+  function setAuctionStatus(txt) {
+    auctionState.status = txt || '';
+    dirty.auct = true;
+  }
+
+  /** Naked POCs for overlays (auction panel always; ladder/hist behind the
+   *  LevelsView toggle) — age in days from the row's UTC date to today. */
+  function nakedPocs() {
+    if (!levelsDays) return [];
+    const today0 = utcDayStart(Date.now());
+    const out = [];
+    for (const d of levelsDays) {
+      if (!d || d.naked !== true || !Number.isFinite(d.poc)) continue;
+      const dayMs = Date.parse(String(d.date) + 'T00:00:00Z');
+      out.push({
+        price: d.poc, date: String(d.date),
+        ageDays: Number.isFinite(dayMs) ? Math.max(0, Math.round((today0 - dayMs) / DAY_MS)) : 0,
+      });
+    }
+    return out;
+  }
+
+  /** Hist-chart levels overlay (LevelsView 'draw on charts'): prior recorded
+   *  day's POC/VA + every naked POC (cap applied in the view). */
+  function overlayLevels() {
+    if (!levelsDrawOn || !levelsDays || !levelsDays.length) return null;
+    const out = [];
+    const prior = levelsDays[levelsDays.length - 1];   // newest recorded (closed) day
+    if (Number.isFinite(prior.poc)) out.push({ price: prior.poc, label: 'pPOC ' + String(prior.date).slice(5), kind: 'poc' });
+    if (Number.isFinite(prior.vah)) out.push({ price: prior.vah, label: 'pVAH', kind: 'va' });
+    if (Number.isFinite(prior.val)) out.push({ price: prior.val, label: 'pVAL', kind: 'va' });
+    for (let i = levelsDays.length - 2; i >= 0; i--) {   // prior day already drawn as pPOC
+      const d = levelsDays[i];
+      if (!d || d.naked !== true || !Number.isFinite(d.poc)) continue;
+      out.push({ price: d.poc, label: 'nPOC ' + String(d.date).slice(5), kind: 'naked' });
+    }
+    return out;
+  }
+
+  /** Book-heatmap session boxes: SessionClock.boxesFor over every UTC day the
+   *  sample ring touches (pure arithmetic — works in replay too, §4f). */
+  function sessionBoxes(samples) {
+    if (!samples || !samples.length) return [];
+    const d0 = Math.floor(samples[0].ts / DAY_MS);
+    const d1 = Math.floor(samples[samples.length - 1].ts / DAY_MS);
+    const out = [];
+    for (let d = d0; d <= d1 && out.length < 30; d++) {
+      for (const b of sessionClock.boxesFor(d * DAY_MS)) out.push(b);
+    }
+    return out;
+  }
+
+  // ── VWAP anchor + slices (hist chart) ──
+  function vwapAnchorMs() {
+    const base = Number.isFinite(lastBybitTs) ? lastBybitTs : Date.now();
+    if (settings.vwapAnchor === 'week') {
+      const day0 = utcDayStart(base);
+      const dow = (new Date(day0).getUTCDay() + 6) % 7;   // Mon = 0 (ISO week, UTC)
+      return day0 - dow * DAY_MS;
+    }
+    if (settings.vwapAnchor === 'custom') {
+      const el = $('set-vwap-ts');
+      // datetime-local has no zone — parsed as UTC by appending 'Z' (the
+      // input's title says UTC; guessing the browser zone would mislabel).
+      const t = el && el.value ? Date.parse(el.value + 'Z') : NaN;
+      if (Number.isFinite(t)) return t;
+    }
+    return utcDayStart(base);
+  }
+
+  const VWAP_ANCHOR_LABEL = { day: 'day · UTC 00:00', week: 'week · UTC Mon', custom: 'custom · UTC' };
+  function applyVwapAnchor() {
+    const ts = vwapAnchorMs();
+    anchoredVwap.reset(ts);
+    vwapHist = [];
+    storeVwapTxt = null;
+    dirty.hist = true;
+    // ONE parity fetch per anchor change (§4f: no vwap polling) — the
+    // recorded store's tick-exact answer over the FULL anchor range, shown
+    // as labeled legend text, never merged into the live series (§0.7).
+    if (apiUp === true && !REPLAY) {
+      fetchJson(BYOD_API + '/v1/vwap?symbol=' + SYM + '&exchange=bybit&anchor_ms=' + ts, 15000)
+        .then((r) => {
+          if (r && Number.isFinite(r.vwap)) {
+            storeVwapTxt = '$' + r.vwap.toFixed(1)
+              + (Number.isFinite(r.sigma) ? ' ± ' + r.sigma.toFixed(1) : '')
+              + ' · n=' + (r.n || 0) + ' recorded trades';
+            dirty.hist = true;
+          }
+        })
+        .catch(() => { /* parity read is optional garnish — the live bands stand alone */ });
+    }
+  }
+
+  function vwapSlice() {
+    if (!vwapOn || !vwapHist.length) return null;
+    const IV_MS = { 5: 300000, 30: 1800000, 60: 3600000, 240: 14400000, D: DAY_MS };
+    const b = anchoredVwap.bands();
+    return {
+      points: vwapHist,
+      intervalMs: IV_MS[histInterval] || 3600000,
+      anchorLabel: VWAP_ANCHOR_LABEL[settings.vwapAnchor] || 'day',
+      n: b.n,
+      storeTxt: storeVwapTxt,
+    };
+  }
+
+  // ── Auction source loading ──
+  function profileUrl(startMs, endMs) {
+    return BYOD_API + '/v1/profile?symbol=' + SYM + '&exchange=bybit&start_ms=' + startMs
+      + '&end_ms=' + endMs + '&tick=' + LEVELS_TICK + '&buckets_usd=' + AUCTION_BUCKETS.join(',');
+  }
+
+  /** Failure text with the one actionable special case named: HTTP 404 from
+   *  a /health-answering API means the RUNNING daemon predates the §4f
+   *  endpoints — the fix is a restart, and the note should say so. */
+  function apiErrText(e) {
+    return e.message + (String(e.message) === 'HTTP 404'
+      ? ' — the running collector API predates I-1; restart `make collector-api`' : '');
+  }
+
+  /** Is `date` still served by the LOCAL store? Rotation keeps today +
+   *  yesterday; older days answer 410 with the HF hint (§3c). */
+  function isLocalDate(date) {
+    return date >= dateStr(Date.now() - DAY_MS);
+  }
+
+  /** One recorded day's profile (cache → local API → throw). Archived days
+   *  are NEVER auto-downloaded here — the size gate must be a user click
+   *  (loadArchivedDay), so composite merges only what is already consented. */
+  function ensureDayProfile(date) {
+    if (profCache.has(date)) return Promise.resolve(profCache.get(date));
+    if (!isLocalDate(date)) {
+      return Promise.reject(new Error(date + ' is archived — load it once via the source select (size-gated) first'));
+    }
+    const d0 = Date.parse(date + 'T00:00:00Z');
+    return fetchJson(profileUrl(d0, d0 + DAY_MS), 20000).then((p) => {
+      profCache.set(date, p);
+      return p;
+    });
+  }
+
+  function loadArchivedDay(date, gen) {
+    if (profCache.has(date)) {
+      setAuctionProfile(profCache.get(date), date + ' · archived day · hf dataset', '');
+      return;
+    }
+    if (!HFD) {
+      setAuctionProfile(null, '', 'terminal-hfdata.js not loaded — archived days unavailable');
+      return;
+    }
+    setAuctionStatus('checking archive size…');
+    HFD.listArchivedTables(HFD.DEFAULT_REPO, date).then((tabs) => {
+      if (gen !== auctionGen) return;
+      const tr = (tabs || []).find((t) => t.table === 'trades');
+      const mib = tr && Number.isFinite(tr.bytes) ? (tr.bytes / 1048576).toFixed(1) : '?';
+      // §4f honest size gate (WhaleView idiom): the cost is IN the dialog at
+      // the moment of consent, not just implied by a label.
+      if (!window.confirm('Download the FULL trades parquet for ' + date + ' from the HF dataset now?\n\n'
+        + 'This is a ~' + mib + ' MiB one-shot transfer (whole file by design — one signed redirect, '
+        + 'byte-true progress; ~2.8M rows parse in <1s). The day is then cached for this session.')) {
+        setAuctionStatus('');
+        setAuctionProfile(null, '', date + ' not loaded — download declined (nothing fetched)');
+        return;
+      }
+      return HFD.fetchArchivedTable(HFD.DEFAULT_REPO, date, 'trades', {
+        columns: ['exchange', 'symbol', 'ts_ms', 'price', 'qty', 'aggressor_buy'],
+        onProgress: (pr) => {
+          if (gen !== auctionGen) return;
+          if (pr.phase === 'download') {
+            setAuctionStatus('downloading ' + (pr.received / 1048576).toFixed(1)
+              + (Number.isFinite(pr.total) ? ' / ' + (pr.total / 1048576).toFixed(1) : '') + ' MiB…');
+          } else {
+            setAuctionStatus('parsed ' + pr.rows + ' rows in ' + Math.round(pr.ms) + ' ms — aggregating…');
+          }
+        },
+      }).then((rows) => {
+        if (gen !== auctionGen) return;
+        const prof = aggregateTradeRows(rows, LEVELS_TICK, AUCTION_BUCKETS);
+        profCache.set(date, prof);
+        setAuctionProfile(prof, date + ' · archived day · hf dataset', '');
+      });
+    }).catch((e) => {
+      if (gen !== auctionGen) return;
+      setAuctionProfile(null, '', 'archived load failed: ' + e.message);
+    });
+  }
+
+  function loadComposite() {
+    const gen = ++auctionGen;
+    const days = auctionComposite.days;
+    if (days.length < 2) {
+      setAuctionProfile(null, '', 'composite: pick ≥ 2 recorded days in the multi-select');
+      return;
+    }
+    setAuctionStatus('merging ' + days.length + ' days…');
+    Promise.all(days.map((d) => ensureDayProfile(d).then(
+      (p) => ({ date: d, prof: p }),
+      (e) => ({ date: d, err: e.message })
+    ))).then((results) => {
+      if (gen !== auctionGen) return;
+      const ok = results.filter((r) => r.prof);
+      const skipped = results.filter((r) => r.err);
+      if (!ok.length) {
+        setAuctionProfile(null, '', 'composite: no day loadable — ' + skipped.map((r) => r.err).join(' · '));
+        return;
+      }
+      const merged = mergeProfiles(ok.map((r) => r.prof));
+      setAuctionProfile(merged,
+        'composite · ' + ok.map((r) => r.date).join(' + ') + ' (client-side merge)',
+        skipped.length ? skipped.length + ' day(s) skipped: ' + skipped.map((r) => r.err).join(' · ') : '');
+    });
+  }
+
+  function loadAuctionSource(src) {
+    const gen = ++auctionGen;
+    if (auctionComposite.on) { loadComposite(); return; }
+    if (src === 'today') {
+      if (apiUp !== true) {
+        setAuctionProfile(null, '', apiUp === false ? API_OFFLINE_NOTE : 'probing collector API…');
+        return;
+      }
+      const now = Date.now();
+      fetchJson(profileUrl(utcDayStart(now), now), 20000).then((p) => {
+        if (gen !== auctionGen) return;
+        setAuctionProfile(p, 'today (UTC) · live-local store · refreshes 60s', '');
+      }).catch((e) => {
+        if (gen !== auctionGen) return;
+        setAuctionProfile(null, '', 'today profile failed: ' + apiErrText(e));
+      });
+      return;
+    }
+    if (isLocalDate(src) && apiUp === true) {
+      ensureDayProfile(src).then((p) => {
+        if (gen !== auctionGen) return;
+        setAuctionProfile(p, src + ' · local day file', '');
+      }).catch((e) => {
+        if (gen !== auctionGen) return;
+        // 410 = rotated out; fall through to the archive when it exists there.
+        if (e.gone && archDates && archDates.indexOf(src) >= 0) loadArchivedDay(src, gen);
+        else setAuctionProfile(null, '', src + ': ' + apiErrText(e));
+      });
+      return;
+    }
+    if (archDates && archDates.indexOf(src) >= 0) { loadArchivedDay(src, gen); return; }
+    setAuctionProfile(null, '', apiUp === false ? API_OFFLINE_NOTE : src + ': not local and not in the HF archive listing');
+  }
+
+  /** (Re)build the source select + composite multi-select: 'today' + the
+   *  union of registry days and archived days, newest first, each labeled by
+   *  where its bytes would come from. Selection preserved across rebuilds. */
+  function rebuildAuctionSources() {
+    const sel = $('set-auction-src'), daysSel = $('set-auction-days');
+    if (!sel || !daysSel) return;
+    const dates = new Set();
+    if (levelsDays) for (const d of levelsDays) if (d && d.date) dates.add(String(d.date));
+    if (archDates) for (const d of archDates) dates.add(String(d));
+    const sorted = [...dates].sort().reverse();
+    const opt = (v, label) => '<option value="' + v + '">' + label + '</option>';
+    let html = opt('today', 'today (live BYOD)');
+    let dhtml = '';
+    for (const d of sorted) {
+      const local = isLocalDate(d);
+      const arch = archDates && archDates.indexOf(d) >= 0;
+      html += opt(d, d + (local ? ' · local' : arch ? ' · hf archive' : ' · registry only'));
+      dhtml += opt(d, d + (local ? ' · local' : ' · needs prior hf load'));
+    }
+    const keepSrc = auctionSource, keepDays = auctionComposite.days;
+    sel.innerHTML = html;
+    sel.value = [...sel.options].some((o) => o.value === keepSrc) ? keepSrc : 'today';
+    daysSel.innerHTML = dhtml;
+    for (const o of daysSel.options) o.selected = keepDays.indexOf(o.value) >= 0;
+  }
+
+  function pollLevels() {
+    fetchJson(BYOD_API + '/v1/levels', 10000).then((r) => {
+      levelsDays = r && Array.isArray(r.days) ? r.days : [];
+      levelsNote = '';
+      rebuildAuctionSources();
+      dirty.lvls = true; dirty.hist = true; dirty.dom = true; dirty.auct = true;
+    }).catch((e) => {
+      // Name the failure — a daemon started before I-1 answers 404 here even
+      // though /health passes; 'probe in flight' would be a lie at that point.
+      levelsNote = '/v1/levels failed: ' + e.message
+        + ' — if the collector daemon predates I-1, restart `make collector-api` to pick up the endpoint';
+      dirty.lvls = true;
+    });
+  }
+
+  if (REPLAY) {
+    // Honest replay note (§4f wiring rule — same text discipline as O-3/O-4/
+    // O-5): the collector endpoints are live-local and the microstructure
+    // panes read the live book sampler; neither belongs in the deterministic
+    // fixture harness, so the panels say why they are empty instead of
+    // mounting blank canvases.
+    const NOTE_I1 = '<div class="chart-na">auction suite disabled in replay — /v1/profile · /v1/levels · '
+      + '/v1/vwap are live-local collector endpoints (make collector-api) and the microstructure panes read '
+      + 'the live book sampler; the deterministic L1 harness allows no network beyond the fixture file. '
+      + 'Nothing is fabricated to fill these panels (§0.7).</div>';
+    for (const id of ['view-auction', 'view-levels', 'view-micro']) {
+      $(id).innerHTML = NOTE_I1;
+    }
+    for (const id of ['set-auction-src', 'set-auction-mode', 'set-auction-comp', 'set-auction-days',
+      'set-levels-draw', 'set-vwap-on', 'set-vwap-anchor', 'set-vwap-ts']) {
+      $(id).disabled = true;
+    }
+  } else {
+    auctionView = V.AuctionProfileView();
+    auctionView.mount($('view-auction'), {
+      modeSel: $('set-auction-mode'),
+      srcSel: $('set-auction-src'),
+      compInput: $('set-auction-comp'),
+      daysSel: $('set-auction-days'),
+      statusEl: $('auction-status'),
+      onSource: (v) => { auctionSource = v; loadAuctionSource(v); },
+      onComposite: (on, days) => {
+        auctionComposite = { on: !!on, days: days || [] };
+        if (on) loadComposite();
+        else loadAuctionSource(auctionSource);
+      },
+    });
+    levelsView = V.LevelsView();
+    const levelsDrawInput = $('set-levels-draw');
+    levelsDrawInput.checked = levelsDrawOn;
+    levelsView.mount($('view-levels'), {
+      drawInput: levelsDrawInput,
+      onDraw: (on) => {
+        levelsDrawOn = on;
+        settings.levelsDraw = on;
+        saveSettings();
+        dirty.hist = true; dirty.dom = true;
+      },
+    });
+    microView = V.MicrostructureView();
+    microView.mount($('view-micro'));
+
+    // VWAP band controls (hist panel chrome — wired here like the heatmap
+    // venue select: they drive DATA composition, not just display).
+    const vwapOnInput = $('set-vwap-on'), vwapAnchorSel = $('set-vwap-anchor'), vwapTsInput = $('set-vwap-ts');
+    vwapOnInput.checked = vwapOn;
+    vwapAnchorSel.value = settings.vwapAnchor;
+    vwapTsInput.hidden = settings.vwapAnchor !== 'custom';
+    vwapOnInput.addEventListener('change', () => {
+      vwapOn = !!vwapOnInput.checked;
+      settings.vwapOn = vwapOn;
+      saveSettings();
+      dirty.hist = true;
+    });
+    vwapAnchorSel.addEventListener('change', () => {
+      if (VWAP_ANCHORS.indexOf(vwapAnchorSel.value) < 0) return;
+      settings.vwapAnchor = vwapAnchorSel.value;
+      saveSettings();
+      vwapTsInput.hidden = settings.vwapAnchor !== 'custom';
+      applyVwapAnchor();
+    });
+    vwapTsInput.addEventListener('change', () => { if (settings.vwapAnchor === 'custom') applyVwapAnchor(); });
+    applyVwapAnchor();   // initial anchor (day, UTC) — before any trade arrives
+
+    // One-shot /health probe (see section header for the mixed-content note).
+    fetchJson(BYOD_API + '/health', 5000).then(() => {
+      apiUp = true;
+      pollLevels();
+      setInterval(pollLevels, 300000);   // §4f cadence: levels every 5min
+      loadAuctionSource(auctionSource);
+      // 'today' is the one live-moving profile — 60s refresh, single-flight
+      // by generation; day/composite sources refresh only on user action.
+      setInterval(() => {
+        if (auctionSource === 'today' && !auctionComposite.on) loadAuctionSource('today');
+      }, 60000);
+      applyVwapAnchor();   // re-run so the /v1/vwap parity read fires now the API is known up
+    }).catch(() => {
+      apiUp = false;
+      setAuctionProfile(null, '', API_OFFLINE_NOTE);
+      dirty.lvls = true;
+    });
+
+    // Archived-day listing (public HF tree API, CORS-open — §4f): populates
+    // the source select; the actual 27 MiB download stays behind its gate.
+    if (HFD) {
+      HFD.listArchivedDates(HFD.DEFAULT_REPO).then((ds) => {
+        archDates = ds || [];
+        rebuildAuctionSources();
+        dirty.auct = true;
+      }).catch(() => { archDates = null; /* archive unreachable — sources stay local-only */ });
+    }
+  }
+
   // ── O-4 intel gate (§4d): confluence inputs + AlertEngine snapshot, both
   // assembled from EXISTING stores every ≥5s of EVENT time (lastBybitTs — the
   // same event-clock discipline as the liq-model gate: no fresh bybit events
@@ -1137,6 +1737,19 @@
     if (fired.length) {
       for (const ev of fired) alertFresh.push(ev);
       dirty.alerts = true;
+    }
+
+    // ── I-1 (§4f): sample the running anchored VWAP on the SAME 5s event-ts
+    // gate — each point is the value the accumulator genuinely held at that
+    // moment (a true series, no back-computation §0.7). Skipped in replay
+    // (the hist chart is REST-fed and honestly disabled there anyway). ──
+    if (!REPLAY && vwapOn) {
+      const vb = anchoredVwap.bands();
+      if (Number.isFinite(vb.vwap)) {
+        vwapHist.push({ ts, vwap: vb.vwap, s1: vb.s1, s2: vb.s2 });
+        if (vwapHist.length > 4096) vwapHist.shift();   // ~5.7h at the 5s gate — plenty for a session
+        dirty.hist = true;
+      }
     }
   }
 
@@ -1293,6 +1906,9 @@
   const MIN_MS = {
     fp: 250, dom: 120, tape: 180, agg: 220, header: 400, liq: 300, heat: 500, liqmap: 600, det: 250,
     hist: 500, tpo: 800, vp: 800, farb: 500, macro: 800,
+    // I-1 budgets: auct moves on fetch/60s refresh; lvls at its 5min poll;
+    // micro at the 1/s sampler cadence (the view throttles setData further).
+    auct: 800, lvls: 1000, micro: 500,
     scr: 800, rsi: 500, opts: 1000, whale: 600, alerts: 300, conf: 800,
     // O-5 budgets: jour/cal move on user actions; poly/news/econ at their
     // 30–60s poll cadence — budgets just cap redraw bursts.
@@ -1301,6 +1917,7 @@
   const lastAt = {
     fp: 0, dom: 0, tape: 0, agg: 0, header: 0, liq: 0, heat: 0, liqmap: 0, det: 0,
     hist: 0, tpo: 0, vp: 0, farb: 0, macro: 0,
+    auct: 0, lvls: 0, micro: 0,
     scr: 0, rsi: 0, opts: 0, whale: 0, alerts: 0, conf: 0,
     jour: 0, cal: 0, poly: 0, news: 0, econ: 0,
   };
@@ -1324,6 +1941,7 @@
     fp: 'orderflow', dom: 'orderflow', tape: 'orderflow', agg: 'orderflow',
     liq: 'orderflow', heat: 'orderflow', liqmap: 'orderflow', det: 'orderflow',
     hist: 'structure', tpo: 'structure', vp: 'structure', farb: 'structure', macro: 'structure',
+    auct: 'auction', lvls: 'auction', micro: 'auction',
     scr: 'intelligence', rsi: 'intelligence', opts: 'intelligence',
     whale: 'intelligence', alerts: 'intelligence', conf: 'intelligence',
     jour: 'portfolio', cal: 'portfolio', poly: 'portfolio', news: 'portfolio', econ: 'portfolio',
@@ -1332,6 +1950,7 @@
     fp: 'view-footprint', dom: 'view-dom', tape: 'view-tape', agg: 'view-aggbook',
     liq: 'view-liq', heat: 'view-bookheat', liqmap: 'view-liqheat', det: 'view-detect',
     hist: 'view-hist', tpo: 'view-tpo', vp: 'view-klinevp', farb: 'view-farb', macro: 'view-macro',
+    auct: 'view-auction', lvls: 'view-levels', micro: 'view-micro',
     scr: 'view-screener', rsi: 'view-rsi', opts: 'view-options',
     whale: 'view-whale', alerts: 'view-alerts', conf: 'view-conf',
     jour: 'view-journal', cal: 'view-calendar', poly: 'view-polymarket', news: 'view-news', econ: 'view-econ',
@@ -1442,7 +2061,21 @@
         // Detector rides the SAME 1/s bybit cadence and the SAME tick grid
         // as the history store (§4b: primary venue — deepest verified book,
         // and the only leg whose trades we correlate against its depth).
-        detector.onDepthSample(ts, book.grouped(settings.tick, 40));
+        const g40 = book.grouped(settings.tick, 40);
+        detector.onDepthSample(ts, g40);
+        // I-1 (§4f): OFI + microprice ride the SAME event-ts-gated sampler
+        // (the MicrostructureView contract) — a stalled feed stops producing
+        // samples instead of recording fake flat flow (§0.7). OfiStore takes
+        // the top-5 of the same grouped ladder; microprice reads best-of-book
+        // (grid-free). An empty-ladder gap re-seeds OFI inside the store.
+        ofi.onDepthSample(ts, g40);
+        const mp = S.microprice(book);
+        const best = book.best();
+        if (mp !== null && best && best.bid && best.ask) {
+          mpHist.push({ ts, d: mp - (best.bid[0] + best.ask[0]) / 2 });
+          if (mpHist.length > 3600) mpHist.shift();   // same horizon as the sample ring
+        }
+        dirty.micro = true;
       }
       if (ex === heatVenue) dirty.heat = true;
     }
@@ -1508,12 +2141,23 @@
         // line per venue, the exact Σ, and the bybit by-size bucket lines.
         const cvdExs = {};
         for (const ex of CVD_EXS) cvdExs[ex] = cvds[ex].series();
+        const fpBars = footprint.bars();
+        // I-1 (§4f): feed the absorption detector every NEWLY finished bar
+        // (onBar wants each exactly once, in order — absFedT tracks it), then
+        // compose the pro-footprint slice: zones + heuristic flags + cumΔ,
+        // all from the tested pure builders.
+        for (const b of fpBars) {
+          if (b.finished && Number.isFinite(b.t) && b.t > absFedT) { absDet.onBar(b); absFedT = b.t; }
+        }
         fpView.render({
-          bars: footprint.bars(),
+          bars: fpBars,
           profile: profile.profile(),
           cvd: { exs: cvdExs },
           tickSize: settings.tick,
           nowMs: now,
+          zones: S.stackedImbalances(fpBars, { k: 3, minRun: 3, tickSize: settings.tick, minVol: 1 }),
+          absorb: absDet.events(),
+          cum: S.cumDelta(fpBars),
         });
       }
       if (due('dom', now)) {
@@ -1522,6 +2166,8 @@
           best: bybitBook.best(),
           bars: footprint.bars(),
           tickSize: settings.tick,
+          // I-1 (§4f): naked-POC row markers, behind the LevelsView toggle.
+          nakedPocs: levelsDrawOn ? nakedPocs() : [],
         });
       }
       if (due('agg', now)) {
@@ -1542,8 +2188,9 @@
       }
       if (due('heat', now)) {
         const dh = depthHist[heatVenue];
+        const dhSamples = dh.samples();
         bookHeatView.render({
-          samples: dh.samples(),
+          samples: dhSamples,
           range: dh.priceRange(),
           tickSize: settings.tick,
           trail: priceTrail[heatVenue],   // empty for binancef (no trades leg, §0.2) — honestly absent
@@ -1552,6 +2199,9 @@
           // venue's book would misattribute them, §0.7 per-source rail).
           events: heatVenue === 'bybit' ? detector.events() : [],
           ex: heatVenue,
+          // I-1 (§4f): Asia/London/NY boxes over the sample span (pure UTC
+          // arithmetic — deterministic in replay too).
+          sessions: sessionBoxes(dhSamples),
         });
       }
       if (due('liqmap', now)) {
@@ -1567,7 +2217,9 @@
       // O-3 STRUCTURE panels (§4c) — null views in replay (honest notes were
       // rendered instead; the dirty flags simply expire unread).
       if (histView && due('hist', now)) {
-        histView.render({ bars: histBars });
+        // I-1 (§4f): + VWAP band series (AnchoredVwap samples) and the
+        // LevelsView overlay — both composed here, painted by the view.
+        histView.render({ bars: histBars, vwap: vwapSlice(), overlays: overlayLevels() });
       }
       if (tpoView && due('tpo', now)) {
         tpoView.render({ sessions: tpoSessions, tickSize: tpoTick });
@@ -1580,6 +2232,40 @@
       }
       if (macroView && due('macro', now)) {
         macroView.render(macroSlice());
+      }
+      // I-1 AUCTION panels (§4f) — null views in replay (honest notes were
+      // rendered instead; the dirty flags simply expire unread).
+      if (auctionView && due('auct', now)) {
+        auctionView.render({
+          profile: auctionState.profile,
+          delta: auctionState.delta,
+          naked: nakedPocs(),   // the §4f naked-POC overlay is part of the panel, not toggle-gated
+          label: auctionState.label,
+          note: auctionState.note,
+          status: auctionState.status,
+          tick: LEVELS_TICK,
+          bucketLabels: AUCTION_BUCKET_LABELS,
+        });
+      }
+      if (levelsView && due('lvls', now)) {
+        levelsView.render({
+          days: levelsDays,
+          note: apiUp === false ? API_OFFLINE_NOTE : levelsNote,
+        });
+      }
+      if (microView && due('micro', now)) {
+        const best = bybitBook.best();
+        const mid = (best && best.bid && best.ask) ? (best.bid[0] + best.ask[0]) / 2 : NaN;
+        const mpNow = S.microprice(bybitBook);
+        microView.render({
+          ofi: ofi.series(60000),
+          mp: mpHist,
+          z: ofi.zscore(300),
+          micro: mpNow === null ? NaN : mpNow,
+          mid,
+          imb: bookImb10(),
+          nowMs: now,
+        });
       }
       // O-4 INTELLIGENCE panels (§4d). REST-fed views are null in replay
       // (honest notes were rendered instead); conf/alerts run in both modes.
@@ -1674,5 +2360,6 @@
     dirty.fp = true; dirty.agg = true; dirty.heat = true; dirty.liqmap = true;
     dirty.tpo = true; dirty.vp = true;
     dirty.scr = true; dirty.rsi = true; dirty.opts = true;
+    dirty.auct = true;   // I-1: profile canvas re-measures; micro panes resize themselves in-view
   });
 })();

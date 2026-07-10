@@ -1,5 +1,5 @@
 // terminal-state.js — orderflow terminal: pure in-memory stores + structure builders
-// (DESIGN-orderflow-terminal.md §4 + §4b + §4c + §4d).
+// (DESIGN-orderflow-terminal.md §4 + §4b + §4c + §4d + §4e + §4f).
 //
 // RESEARCH / DESCRIPTIVE ONLY. Everything held here is LIVE-DESCRIPTIVE session
 // state (§0.1): it is never merged into a backtested series or the OOS harness,
@@ -2061,6 +2061,517 @@
     return out;
   }
 
+  // ════════ I-1 (§4f) — Institutional Auction Suite builders: tick-exact
+  // auction analytics, pure over already-normalized inputs ══════════════════
+  //
+  // §4f rails, restated where they bite: every derived read below is
+  // DESCRIPTIVE (§0.1 — nothing feeds a signal or the OOS harness);
+  // heuristics carry label:'heuristic' on the event itself; OFI and
+  // microprice carry their paper citations (Cont–Kukanov–Stoikov 2014;
+  // Stoikov 2018) in the code that implements them. Same two rails as every
+  // store above: zero DOM, zero Date.now() — event ts is the only clock.
+
+  // ─── buildDeltaProfile(levels) — per-level delta + render intensity (§4f) ─
+  //
+  // Input: /v1/profile `levels` rows ({lvl, buy_vol, sell_vol}; the live
+  // ProfileStore-adjacent {price, buy, sell} spelling is accepted too so the
+  // 'today live' selector can feed footprint-derived levels through the same
+  // builder). Output: ascending-lvl [{lvl, delta, intensity}] for the
+  // diverging delta render (§4f dataviz rail: two-hue + NEUTRAL midpoint).
+  //
+  // `delta` is the RAW per-level difference buy−sell, untouched by the
+  // normalization — so Σdelta ≡ Σbuy−Σsell exactly (§4f binding invariant):
+  // intensity is a SEPARATE display field, never a scaled/clamped delta, and
+  // no level is dropped or merged by this builder (malformed rows are skipped
+  // per the validTrade hygiene rule — skipping garbage is not clamping data).
+  //
+  // `intensity` = |delta| / p95(|delta|), clamped to [0, 1]. WHY p95 and not
+  // max: one outlier level (a single sweep print) would otherwise compress
+  // every other level's hue toward the neutral midpoint and the profile would
+  // render as one colored line — normalizing at the 95th percentile lets the
+  // bulk of the distribution use the full ramp while the true outliers
+  // saturate at 1. Nearest-rank p95 (deterministic, no interpolation).
+  function buildDeltaProfile(levels) {
+    const out = [];
+    for (const r of Array.isArray(levels) ? levels : []) {
+      if (!r) continue;
+      const lvl = Number.isFinite(r.lvl) ? r.lvl : r.price;
+      const buy = Number.isFinite(r.buy_vol) ? r.buy_vol : r.buy;
+      const sell = Number.isFinite(r.sell_vol) ? r.sell_vol : r.sell;
+      if (!Number.isFinite(lvl) || !Number.isFinite(buy) || !Number.isFinite(sell)) continue;
+      out.push({ lvl, delta: buy - sell, intensity: 0 });
+    }
+    out.sort((a, b) => a.lvl - b.lvl); // ascending — profile renders low→high
+    if (!out.length) return out;
+    const mags = out.map((r) => Math.abs(r.delta)).sort((a, b) => a - b);
+    const p95 = mags[Math.min(mags.length - 1, Math.max(0, Math.ceil(0.95 * mags.length) - 1))];
+    if (p95 > 0) {
+      for (const r of out) r.intensity = Math.min(1, Math.abs(r.delta) / p95);
+    }
+    // p95 === 0 (all deltas zero) → every intensity stays 0: a perfectly
+    // balanced profile renders neutral, never NaN (0/0) into a color ramp.
+    return out;
+  }
+
+  // ─── SessionClock() — UTC session tags + boxes (§4f) ─────────────────────
+  //
+  // Sessions (§4f, UTC): Asia 00–08, London 07–16, NY 12–21. HONESTY NOTE,
+  // stated not hidden: these hours are the classic FX-DESK CONVENTION, not an
+  // oracle — crypto perps trade 24/7 with no venue open/close, so a "session"
+  // here is a human attention window borrowed from FX desks, useful for
+  // reading WHERE flow concentrated, never a claim that the market opens or
+  // closes. The overlaps are REAL and deliberately labeled as such: London
+  // overlaps Asia 07–08 and NY 12–16 (both sessions tag simultaneously), and
+  // 21–24 UTC belongs to no session at all — an honest dead zone, not a bug.
+  //
+  // Boundary semantics: half-open [start, end) — at exactly 07:00 UTC both
+  // Asia and London are active; at exactly 08:00 Asia is over. Half-open is
+  // the only convention where every instant maps to a deterministic tag set
+  // with no double-counted boundary hour.
+  function SessionClock() {
+    const HOUR = 3600000, DAY = 86400000;
+    const SESSIONS = [
+      { name: 'Asia', startH: 0, endH: 8 },
+      { name: 'London', startH: 7, endH: 16 },
+      { name: 'NY', startH: 12, endH: 21 },
+    ];
+
+    /** Active session names at epoch-ms `ts` (possibly several — overlaps are
+     *  real). Non-finite ts → [] (unknown time is no session, never a guess). */
+    function tag(ts) {
+      if (!Number.isFinite(ts)) return [];
+      const ms = ((ts % DAY) + DAY) % DAY; // UTC intra-day offset (negative-safe)
+      const out = [];
+      for (const s of SESSIONS) {
+        if (ms >= s.startH * HOUR && ms < s.endH * HOUR) out.push(s.name);
+      }
+      return out;
+    }
+
+    /** Session shading boxes for the UTC day starting at `dayStartMs`:
+     *  [{name, startMs, endMs}]. Pure arithmetic on the given anchor — the
+     *  caller owns "which day"; this never asks the OS what day it is. */
+    function boxesFor(dayStartMs) {
+      if (!Number.isFinite(dayStartMs)) return [];
+      return SESSIONS.map((s) => ({
+        name: s.name,
+        startMs: dayStartMs + s.startH * HOUR,
+        endMs: dayStartMs + s.endH * HOUR,
+      }));
+    }
+
+    return { tag, boxesFor, sessions: SESSIONS.map((s) => ({ name: s.name, startH: s.startH, endH: s.endH })) };
+  }
+
+  // ─── AnchoredVwap() — streaming anchored vwap ± σ bands (§4f) ────────────
+  //
+  // Volume-weighted mean + variance via the WEIGHTED WELFORD update (Welford
+  // 1962; West 1979 weighted-increment form) — one pass, O(1) state, no
+  // stored trade list:
+  //     W += w;  Δ = x − μ;  μ += (w/W)·Δ;  S += w·Δ·(x − μ)
+  // giving μ = Σwx/Σw (the vwap) and σ² = S/W ≡ Σw(x−μ)²/Σw — the volume-
+  // weighted POPULATION variance, i.e. byte-for-byte the batch formula the
+  // /v1/vwap endpoint computes (§4f: deterministic vs batch to 1e-9; the
+  // self-check pins that). WHY Welford and not naive Σwx²−(Σwx)²/W: at 1e5-
+  // scale BTC prices the naive form cancels catastrophically (1e10-scale
+  // squares differing in the 12th digit); Welford keeps full precision on a
+  // stream of millions of trades.
+  //
+  // bands() → {vwap, s1, s2, n}: s1/s2 are the 1σ and 2σ DISTANCES — views
+  // draw vwap±s1 / vwap±s2 (the AMT read, §4f: value ≈ vwap ± 1σ). Empty
+  // state → NaN bands (ProfileStore convention: "no data" never looks like
+  // price 0). reset(anchorTs) re-anchors: state zeroed, trades with
+  // ts < anchorTs ignored — the anchor is an EVENT-time cut, no Date.now().
+  function AnchoredVwap() {
+    let anchorTs = -Infinity; // default: everything fed is in-anchor
+    let W = 0, mean = 0, S = 0, n = 0;
+
+    /** Re-anchor at `ts` (epoch ms). Non-finite → -Infinity (accept all). */
+    function reset(ts) {
+      anchorTs = Number.isFinite(ts) ? ts : -Infinity;
+      W = 0; mean = 0; S = 0; n = 0;
+    }
+
+    /** Ingest one normalized trade (§4 shape). Pre-anchor / malformed → dropped. */
+    function onTrade(t) {
+      if (!validTrade(t)) return;
+      if (t.ts < anchorTs) return; // before the anchor — not this vwap's flow
+      const w = t.qty, x = t.price;
+      W += w;
+      const d = x - mean;
+      mean += (w / W) * d;
+      S += w * d * (x - mean);
+      n++;
+    }
+
+    /** {vwap, s1, s2, n} — see header. Math.max(0, ·) guards the sqrt against
+     *  a −1e-18 float residue on constant-price streams. */
+    function bands() {
+      if (!(W > 0)) return { vwap: NaN, s1: NaN, s2: NaN, n: 0 };
+      const sigma = Math.sqrt(Math.max(0, S / W));
+      return { vwap: mean, s1: sigma, s2: 2 * sigma, n };
+    }
+
+    return { onTrade, bands, reset };
+  }
+
+  // ─── OfiStore({levels=5}) — Cont–Kukanov–Stoikov order-flow imbalance (§4f) ─
+  //
+  // CITATION + EXACT RULE (§4f mandatory): R. Cont, A. Kukanov & S. Stoikov
+  // (2014), "The Price Impact of Order Book Events", J. Financial
+  // Econometrics 12(1), 47–88 — OFI between successive book states n−1 → n:
+  //     e_n =  1{Pᵇ_n ≥ Pᵇ_{n−1}}·qᵇ_n − 1{Pᵇ_n ≤ Pᵇ_{n−1}}·qᵇ_{n−1}
+  //          − 1{Pᵃ_n ≤ Pᵃ_{n−1}}·qᵃ_n + 1{Pᵃ_n ≥ Pᵃ_{n−1}}·qᵃ_{n−1}
+  // Spelled out per side (the rule this store implements, bid side): if the
+  // bid PRICE ROSE → +qᵇ_n (new demand at a better price); price UNCHANGED →
+  // qᵇ_n − qᵇ_{n−1} (net add/cancel at the standing price — both indicators
+  // fire); price FELL → −qᵇ_{n−1} (the standing bid was removed/consumed).
+  // Asks are the exact mirror with the sign flipped: ask price FELL → −qᵃ_n,
+  // unchanged → −(qᵃ_n − qᵃ_{n−1}), ROSE → +qᵃ_{n−1} (standing ask lifted =
+  // buying pressure). Positive e = net buy-side pressure.
+  //
+  // Top-N extension (§4f "formula family"): the same per-level rule applied
+  // at each ladder INDEX i = 0..levels−1 and summed — the standard multi-
+  // level generalization (index-aligned, as in Xu, Gould et al. 2019,
+  // "Multi-level order-flow imbalance in a limit order book"). A level index
+  // present on only one side of the comparison is the degenerate case of the
+  // same rule: newly-visible bid depth → +qᵇ_n, vanished bid depth → −qᵇ_{n−1},
+  // mirrored for asks.
+  //
+  // STATED APPROXIMATION (§4f): CKS define e_n per individual book EVENT;
+  // this store computes it between successive ~1 s GROUPED snapshots (the
+  // same cadence terminal.js feeds DepthHistoryStore), so each e_t aggregates
+  // every event inside the sample interval. That loses intra-second
+  // sequencing, not net flow — and it is what the wire cadence honestly
+  // supports. An EMPTY ladder is a reconnect gap, not a mass cancel (§0.7):
+  // it is skipped AND clears the prev seed so no e is fabricated across it.
+  function OfiStore(opts) {
+    const levels = Math.max(1, Math.floor(finiteOr(opts && opts.levels, 5)));
+    // ~68 min at the 1/s cadence — bounded, and longer than any zscore/rolling
+    // window a view asks for (MicrostructureView's pane shows minutes).
+    const ring = makeRing(4096); // {ts, e}
+    let prev = null;             // {bids:[{price,qty}], asks:[{price,qty}]} top-N
+
+    /** Validated top-N copy of one grouped side (best-first order preserved). */
+    function topN(rows) {
+      const out = [];
+      if (Array.isArray(rows)) {
+        for (const r of rows) {
+          if (!r || !Number.isFinite(r.price) || !Number.isFinite(r.qty)) continue;
+          out.push({ price: r.price, qty: r.qty });
+          if (out.length >= levels) break;
+        }
+      }
+      return out;
+    }
+
+    /** One side's summed per-level contribution; `sign` = +1 bids / −1 asks.
+     *  For asks the price indicators flip direction with the sign (see the
+     *  header formula) — implemented by comparing sign·price so one body
+     *  serves both sides without duplicating the rule. */
+    function sideContribution(cur, prv, sign) {
+      let e = 0;
+      const m = Math.max(cur.length, prv.length);
+      for (let i = 0; i < m; i++) {
+        const c = cur[i], p = prv[i];
+        if (c && p) {
+          const pc = sign * c.price, pp = sign * p.price;
+          if (pc >= pp) e += sign * c.qty;  // price improved-or-held → count new qty
+          if (pc <= pp) e -= sign * p.qty;  // price worsened-or-held → remove old qty
+        } else if (c) {
+          e += sign * c.qty;                // newly visible depth (degenerate rose)
+        } else if (p) {
+          e -= sign * p.qty;                // vanished depth (degenerate fell)
+        }
+      }
+      return e;
+    }
+
+    /** Ingest one grouped ladder (BookStore.grouped() shape). Returns the
+     *  computed e_t, or null on seed/skip. */
+    function onDepthSample(ts, grouped) {
+      if (!Number.isFinite(ts) || !grouped) return null;
+      const bids = topN(grouped.bids), asks = topN(grouped.asks);
+      if (!bids.length && !asks.length) { prev = null; return null; } // gap — see header
+      if (!prev) { prev = { bids, asks }; return null; }              // seed: e needs two states
+      const e = sideContribution(bids, prev.bids, 1) + sideContribution(asks, prev.asks, -1);
+      prev = { bids, asks };
+      ring.push({ ts, e });
+      return e;
+    }
+
+    /** Rolling-sum series over the retained e_t ring: [{ts, ofi}] where ofi =
+     *  Σe over (ts−windowMs, ts]. Two-pointer O(n) over the ring — the pane
+     *  redraws this whole series per frame. Default 60 s (the classic OFI
+     *  aggregation bucket in CKS's regressions is O(10 s)–O(1 min)). */
+    function series(windowMs) {
+      const w = posOr(windowMs, 60000);
+      const evs = ring.toArray();
+      const out = [];
+      let lo = 0, sum = 0;
+      for (let i = 0; i < evs.length; i++) {
+        sum += evs[i].e;
+        while (evs[lo].ts <= evs[i].ts - w) { sum -= evs[lo].e; lo++; }
+        out.push({ ts: evs[i].ts, ofi: sum });
+      }
+      return out;
+    }
+
+    /** z-score of the LATEST e against the trailing `window` samples
+     *  (inclusive; sample stdev ddof=1, the quant.js std convention). NaN
+     *  below 2 samples or at zero variance — "unknown" stays NaN, never a
+     *  fabricated 0 (which would claim "exactly average"). */
+    function zscore(window) {
+      const w = Math.floor(finiteOr(window, 300));
+      if (w < 2) return NaN;
+      const evs = ring.toArray();
+      if (evs.length < 2) return NaN;
+      const tail = evs.slice(Math.max(0, evs.length - w));
+      if (tail.length < 2) return NaN;
+      let m = 0;
+      for (const ev of tail) m += ev.e;
+      m /= tail.length;
+      let s = 0;
+      for (const ev of tail) s += (ev.e - m) * (ev.e - m);
+      const sd = Math.sqrt(s / (tail.length - 1));
+      return sd > 0 ? (tail[tail.length - 1].e - m) / sd : NaN;
+    }
+
+    return { onDepthSample, series, zscore, levels };
+  }
+
+  // ─── microprice(book) — Stoikov imbalance-weighted mid (§4f) ─────────────
+  //
+  // CITATION (§4f mandatory): S. Stoikov (2018), "The micro-price: a high-
+  // frequency estimator of future prices", Quantitative Finance 18(12). The
+  // §4f contract uses the paper's first-order object, the imbalance-weighted
+  // mid:
+  //     microprice = (Pᵇ·Qᵃ + Pᵃ·Qᵇ) / (Qᵃ + Qᵇ)
+  // — the mid pulled TOWARD the thin side: when the ask queue is small the
+  // next move is likelier up, so the estimator sits above mid. (Stoikov's
+  // full micro-price adds a Markov-chain adjustment on the imbalance state;
+  // that refinement needs fitted transition estimates and is NOT computed
+  // here — this is the closed-form first approximation, stated as such.)
+  //
+  // Input: a BookStore (its .best() is used) or a plain {bid:[p,q],
+  // ask:[p,q]} best-levels object. Returns null on an empty/one-sided book
+  // or zero total best-depth — null is "no estimate", never NaN into a chart.
+  function microprice(book) {
+    if (!book) return null;
+    let bb = null, ba = null;
+    if (typeof book.best === 'function') {
+      const b = book.best();
+      bb = b && b.bid; ba = b && b.ask;
+    } else {
+      bb = book.bid; ba = book.ask;
+    }
+    if (!bb || !ba) return null;
+    const pb = +bb[0], qb = +bb[1], pa = +ba[0], qa = +ba[1];
+    if (!Number.isFinite(pb) || !Number.isFinite(qb)
+        || !Number.isFinite(pa) || !Number.isFinite(qa)) return null;
+    const den = qa + qb;
+    if (!(den > 0)) return null;
+    return (pb * qa + pa * qb) / den;
+  }
+
+  // ─── stackedImbalances(bars, {k, minRun, tickSize, minVol}) — zones (§4f) ─
+  //
+  // Consecutive same-side DIAGONAL-imbalance runs inside one finished
+  // footprint bar → price zones [{top, bottom, side, barIdx, active}].
+  // Diagonal rule = FootprintStore's §4 convention exactly (recomputed here
+  // with THIS k so the builder is parameterizable independent of the store's
+  // imbalanceK): buy-imbalance at p ⇔ buy(p) ≥ k·sell(p−tick) with a vacant
+  // neighbor counting as 0 and the same minVol dust floor (default 1.0,
+  // mirroring imbalanceMinVol — see FootprintStore for the WHY). `tickSize`
+  // MUST match the FootprintStore that built the bars (default 1, same as
+  // the store's default): "consecutive" means price-adjacent ON THE TICK
+  // GRID — a vacant level breaks the run (no imbalance printed there), it is
+  // never bridged.
+  //
+  // Zones are read as the classic footprint objects: a stacked BUY run =
+  // aggressive buying absorbed level after level → demand zone (support);
+  // stacked SELL run → supply zone (resistance). INVALIDATION (§4f "zone
+  // dies when traded through"): a buy zone dies when any LATER bar's range
+  // trades strictly below its bottom (price broke down through the support);
+  // a sell zone when a later bar's high exceeds its top. Dead zones stay in
+  // the output with active:false — views shade them differently rather than
+  // pretending they never printed.
+  //
+  // SESSION-LOCAL HONESTY (§4f, stated not hidden): zones exist only within
+  // the bars array passed — this session's footprint window (≤120 finished
+  // bars). There is no cross-session persistence and no claim these are
+  // validated structure levels; a stacked imbalance is a descriptive
+  // order-flow pattern, and the IC run-log grants board patterns ≈0 forward
+  // IC. Zones from the OPEN bar are never created (flags on a half-formed
+  // bar flicker — FootprintStore's rule), but the open bar's real range DOES
+  // participate in invalidation: its prints already happened.
+  function stackedImbalances(bars, opts) {
+    const o = opts || {};
+    const k = posOr(o.k, 3);
+    const minRun = Math.max(1, Math.floor(finiteOr(o.minRun, 3)));
+    const tick = posOr(o.tickSize, 1);
+    const minVol = finiteOr(o.minVol, 1.0);
+    const list = Array.isArray(bars) ? bars : [];
+    const zones = [];
+
+    for (let bi = 0; bi < list.length; bi++) {
+      const bar = list[bi];
+      if (!bar || bar.finished !== true || !Array.isArray(bar.levels)) continue;
+      const byPx = new Map(); // roundPx price → {buy, sell}
+      for (const lv of bar.levels) {
+        if (!lv || !Number.isFinite(lv.price)
+            || !Number.isFinite(lv.buy) || !Number.isFinite(lv.sell)) continue;
+        byPx.set(roundPx(lv.price), lv);
+      }
+      const prices = [...byPx.keys()].sort((a, b) => b - a); // ladder order (desc)
+
+      // Diagonal flags at THIS k (see header — same rule as FootprintStore).
+      const imb = (p, side) => {
+        const cell = byPx.get(p);
+        if (!cell) return false;
+        if (side === 'buy') {
+          const below = byPx.get(roundPx(p - tick));
+          return cell.buy > 0 && cell.buy >= minVol && cell.buy >= k * (below ? below.sell : 0);
+        }
+        const above = byPx.get(roundPx(p + tick));
+        return cell.sell > 0 && cell.sell >= minVol && cell.sell >= k * (above ? above.buy : 0);
+      };
+
+      for (const side of ['buy', 'sell']) {
+        let run = []; // consecutive grid-adjacent flagged prices, descending
+        const flush = () => {
+          if (run.length >= minRun) {
+            zones.push({ top: run[0], bottom: run[run.length - 1], side, barIdx: bi, active: true });
+          }
+          run = [];
+        };
+        for (const p of prices) {
+          const on = imb(p, side);
+          const contiguous = run.length > 0 && roundPx(run[run.length - 1] - tick) === p;
+          if (on && (run.length === 0 || contiguous)) run.push(p);
+          else { flush(); if (on) run.push(p); }
+        }
+        flush();
+      }
+    }
+
+    // Invalidation pass — later bars only (including the open bar; see header).
+    for (const z of zones) {
+      for (let j = z.barIdx + 1; j < list.length; j++) {
+        const b = list[j];
+        if (!b || !Number.isFinite(b.l) || !Number.isFinite(b.h)) continue;
+        const crossed = z.side === 'buy' ? b.l < z.bottom : b.h > z.top;
+        if (crossed) { z.active = false; break; }
+      }
+    }
+    return zones;
+  }
+
+  // ─── AbsorptionDetector({volK, progressTicks, tickSize}) — HEURISTIC (§4f) ─
+  //
+  // ⚠ HEURISTIC, NOT PROOF (§4f rail — label:'heuristic' rides EVERY event,
+  // same discipline as SpoofIcebergDetector): "absorption" here means a
+  // volume spike at one price level with no follow-through — a pattern
+  // CONSISTENT WITH passive size absorbing aggressive flow, but from public
+  // prints alone it is indistinguishable from, e.g., two aggressors crossing
+  // at a magnet price and interest simply moving on. Pattern-consistent-with,
+  // never proof of a resting iceberg or institutional defense.
+  //
+  // Rule (both legs on FINISHED bars only — half-formed bars flicker):
+  //   1. spike: a finished bar has a level whose total volume (buy+sell) ≥
+  //      volK × the MEDIAN level volume of that same bar (median, not mean —
+  //      the spike itself cannot drag the baseline up and hide itself; the
+  //      SpoofIcebergDetector wall rule uses the same argument);
+  //   2. no follow-through: the NEXT finished bar fails to progress beyond
+  //      progressTicks ticks past the spike level in the AGGRESSOR direction
+  //      — aggressor = the level's dominant side (buy ≥ sell → buyers were
+  //      hitting into it → progress would be next bar's high clearing
+  //      price + progressTicks·tick; mirrored for sells vs the next low).
+  // Both legs true → one event {kind:'absorption', ts (spike bar's t), price,
+  // side, vol, medianVol, label:'heuristic'}. `tickSize` must match the
+  // FootprintStore that built the bars (default 1, same as the store).
+  function AbsorptionDetector(opts) {
+    const o = opts || {};
+    const volK = posOr(o.volK, 3);
+    const progressTicks = finiteOr(o.progressTicks, 1);
+    const tick = posOr(o.tickSize, 1);
+    const ring = makeRing(100); // events, oldest→newest (SpoofIcebergDetector precedent)
+    let pending = null;         // spike candidates from the previous finished bar
+
+    /** Feed finished bars IN ORDER (terminal.js feeds each bar once as it
+     *  closes; the self-check replays FootprintStore.bars()). Unfinished or
+     *  malformed bars are ignored — never resolved against. */
+    function onBar(bar) {
+      if (!bar || bar.finished !== true || !Array.isArray(bar.levels) || !bar.levels.length) return;
+      if (!Number.isFinite(bar.h) || !Number.isFinite(bar.l)) return;
+
+      // 1. Resolve the previous bar's candidates against THIS bar's range.
+      //    The 1e-9 epsilon absorbs float residue in price+ticks arithmetic
+      //    (snapTick's own epsilon rationale) — never decides a real case.
+      if (pending) {
+        for (const c of pending.candidates) {
+          const progressed = c.side === 'buy'
+            ? bar.h - c.price > progressTicks * tick + 1e-9
+            : c.price - bar.l > progressTicks * tick + 1e-9;
+          if (!progressed) {
+            ring.push({
+              kind: 'absorption', ts: pending.ts, price: c.price, side: c.side,
+              vol: c.vol, medianVol: c.med, label: 'heuristic',
+            });
+          }
+        }
+      }
+
+      // 2. Collect this bar's spike candidates (they resolve on the NEXT bar).
+      const cells = [];
+      for (const lv of bar.levels) {
+        if (!lv || !Number.isFinite(lv.price)
+            || !Number.isFinite(lv.buy) || !Number.isFinite(lv.sell)) continue;
+        cells.push({ price: lv.price, buy: lv.buy, sell: lv.sell, vol: lv.buy + lv.sell });
+      }
+      const candidates = [];
+      if (cells.length) {
+        const vols = cells.map((c) => c.vol).sort((a, b) => a - b);
+        const m = vols.length;
+        const med = m % 2 ? vols[(m - 1) / 2] : 0.5 * (vols[m / 2 - 1] + vols[m / 2]);
+        if (med > 0) { // an all-empty bar has no baseline to spike against
+          for (const c of cells) {
+            if (c.vol >= volK * med) {
+              candidates.push({ price: c.price, side: c.buy >= c.sell ? 'buy' : 'sell', vol: c.vol, med });
+            }
+          }
+        }
+      }
+      pending = { ts: bar.t, candidates };
+    }
+
+    /** Retained events, oldest→newest, ≤100, EVERY one labeled 'heuristic'
+     *  (the label rides the event so no view can drop it by accident). */
+    function events() { return ring.toArray(); }
+
+    return { onBar, events };
+  }
+
+  // ─── cumDelta(bars) — footprint cumulative-delta series accessor (§4f) ───
+  //
+  // Running sum of per-bar delta (buyVol−sellVol, already computed by
+  // FootprintStore.snapshot) over the bars IN THE ORDER GIVEN →
+  // [{ts, cum}] for the footprint cum-delta mini-pane. SESSION-ANCHORED like
+  // CvdStore: cum-delta has no natural zero — only slope/divergence read —
+  // so the anchor is the first bar in the window and the view states it.
+  // Bars with a non-finite t or delta are SKIPPED, never zero-coerced (a
+  // fabricated flat bar would fake "no net flow" — CvdStore hygiene).
+  function cumDelta(bars) {
+    const out = [];
+    let cum = 0;
+    for (const b of Array.isArray(bars) ? bars : []) {
+      if (!b || !Number.isFinite(b.t) || !Number.isFinite(b.delta)) continue;
+      cum += b.delta;
+      out.push({ ts: b.t, cum });
+    }
+    return out;
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalState = {
@@ -2076,6 +2587,11 @@
     // O-5 (§4e): journal stats/calendar/CSV over the user's OWN logged trades
     // — descriptive record, NOT a backtest (mandatory label rides the stats).
     journalStats, calendarReturns, journalToCsv, validateJournalCsv,
+    // I-1 (§4f): Institutional Auction Suite builders — tick-exact auction
+    // analytics; OFI/microprice carry their paper citations at the
+    // implementation, heuristics carry label:'heuristic' on every event.
+    buildDeltaProfile, SessionClock, AnchoredVwap, OfiStore, microprice,
+    stackedImbalances, AbsorptionDetector, cumDelta,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalState;

@@ -15,13 +15,14 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare scan test fetch dash collector collector-api verify-browser verify-wire check-ticks econ archive archive-dry archive-list hf-sync
+.PHONY: help install backtest compare scan test fetch dash collector collector-api verify-browser verify-wire check-ticks econ archive archive-dry archive-list hf-sync backfill-levels
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
 	@echo "verify:  verify-browser (L1 fixture-replay in headless Chromium) | verify-wire (L2 live invariants, ~45s) | check-ticks (L3 tick-store QA)"
 	@echo "archive: archive-dry (export closed months to local parquet ONLY) | archive (export + upload to GitHub Releases + prune) | archive-list (what is offsite)"
 	@echo "hf:      hf-sync (closed day files -> HF dataset, verify on Hub, then delete local; ARGS=--dry-run to stage only, ARGS=--yes for cron)"
+	@echo "levels:  backfill-levels (archived HF days -> data/ticks/levels.jsonl registry; idempotent, never touches day files)"
 	@echo "strategies: buy_and_hold ma_trend_filter tsmom pairs_coint carry"
 	@echo "collector needs opt-in deps: pip install -r requirements-collector.txt"
 
@@ -92,6 +93,13 @@ archive-list:
 # Extra flags via ARGS, e.g.:  make hf-sync ARGS="--dry-run"   |   ARGS="--yes"
 hf-sync:
 	python3 scripts/upload_hf.py $(ARGS)
+
+# §4f levels registry backfill: one row per ARCHIVED HF day (o/h/l/c, POC/VA at the
+# fixed $10 tick, bybit leg) into data/ticks/levels.jsonl — the same row the rotation
+# hook appends when a day closes locally. Idempotent (skips recorded dates), reads
+# hf:// only, never touches day files; safe while the collector runs.
+backfill-levels:
+	python3 scripts/backfill_levels.py $(ARGS)
 
 # Terminal verification layers (DESIGN-orderflow-terminal.md §7).
 # L1: deterministic — replays the captured fixture frames through the real terminal in

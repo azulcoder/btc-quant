@@ -39,6 +39,7 @@
     <nav class="term-secnav" aria-label="Terminal sections">
       <span class="secnav-item"><a href="#sec-orderflow">ORDERFLOW</a><button type="button" class="sec-toggle" data-collapse="orderflow" aria-pressed="false" title="collapse/expand — a collapsed section skips rendering; stores keep accumulating">–</button></span>
       <span class="secnav-item"><a href="#sec-structure">STRUCTURE</a><button type="button" class="sec-toggle" data-collapse="structure" aria-pressed="false" title="collapse/expand — a collapsed section skips rendering; stores keep accumulating">–</button></span>
+      <span class="secnav-item"><a href="#sec-auction">AUCTION</a><button type="button" class="sec-toggle" data-collapse="auction" aria-pressed="false" title="collapse/expand — a collapsed section skips rendering; stores keep accumulating">–</button></span>
       <span class="secnav-item"><a href="#sec-intelligence">INTELLIGENCE</a><button type="button" class="sec-toggle" data-collapse="intelligence" aria-pressed="false" title="collapse/expand — a collapsed section skips rendering; stores keep accumulating">–</button></span>
       <span class="secnav-item"><a href="#sec-portfolio">PORTFOLIO</a><button type="button" class="sec-toggle" data-collapse="portfolio" aria-pressed="false" title="collapse/expand — a collapsed section skips rendering; stores keep accumulating">–</button></span>
     </nav>
@@ -58,7 +59,7 @@
         <span class="signal-tag descriptive" title="Bid×ask aggressor volume per price per bar, session-local. LIVE-DESCRIPTIVE ONLY (DESIGN §0.1): never a backtest input. Imbalance flags are computed on finished bars only.">descriptive · live session</span>
       </h2>
       <div id="view-footprint" class="fp-wrap"></div>
-      <p class="hint">cells: <b>sell × buy</b> aggressor volume (BTC) per $-grouped level; outlined half = diagonal imbalance (k=3, finished bars only). Right gutter: session volume profile with POC/VAH/VAL. Dashed column = the open (unfinished) bar.</p>
+      <p class="hint">cells: <b>sell × buy</b> aggressor volume (BTC) per $-grouped level; outlined half = diagonal imbalance (k=3, finished bars only). Right gutter: session volume profile with POC/VAH/VAL. Dashed column = the open (unfinished) bar. I-1 (§4f): • = per-bar POC; translucent bands = stacked-imbalance zones (≥3 grid-adjacent same-side imbalances, finished bars; a traded-through zone dims instead of vanishing); ◉ = absorption flag — <b>heuristic</b> (volume spike, no follow-through next bar: pattern-consistent-with, never proof); bottom strip = cumΔ (session-anchored running Σ of bar deltas — slope/divergence only, level is meaningless).</p>
     </section>
 
     <!-- Main row, middle column: DOM ladder + aggregated book. -->
@@ -139,7 +140,7 @@
         </span>
       </h2>
       <div id="view-bookheat" class="heat-wrap"></div>
-      <p class="hint">one venue at a time, labeled — books are never merged here. bid depth in green, ask depth in red (α ∝ resting size, p95-scaled so one whale wall can't wash out the ladder); ▽ = heuristic spoof-pull, ◈ = heuristic iceberg-refill (see detections panel). binancef shows no price line — its trades are topic-filtered on this network (§0.2), so there is honestly no per-venue print series to draw.</p>
+      <p class="hint">one venue at a time, labeled — books are never merged here. bid depth in green, ask depth in red (α ∝ resting size, p95-scaled so one whale wall can't wash out the ladder); ▽ = heuristic spoof-pull, ◈ = heuristic iceberg-refill (see detections panel). binancef shows no price line — its trades are topic-filtered on this network (§0.2), so there is honestly no per-venue print series to draw. I-1 (§4f): shaded columns = Asia (00–08) / London (07–16) / NY (12–21) session boxes, <b>UTC, classic FX-desk convention</b> — crypto never closes; overlaps are real and render darker; 21–24 UTC belongs to no session.</p>
     </section>
 
     <!-- Footer row 1: CVD subchart (full-width; logically part of the
@@ -176,6 +177,19 @@
           <label><input type="checkbox" id="set-hist-sma50" /> SMA50</label>
           <label><input type="checkbox" id="set-hist-sma200" /> SMA200</label>
           <label title="Display transform of the same bars (candle re-drawing convention) — SMAs stay computed on raw closes"><input type="checkbox" id="set-hist-ha" /> Heikin-Ashi</label>
+          <!-- I-1 (§4f): session VWAP ± 1σ/2σ bands — AnchoredVwap over the LIVE
+               bybit trade stream (accumulates from page open; weighted Welford,
+               terminal-state.js). The AMT read: value ≈ vwap ± 1σ. Bands hide
+               while the bar-replay cursor is rewound (present-time state on a
+               rewound chart would blend two clocks, §0). -->
+          <label title="session VWAP ± 1σ / 2σ bands from the live bybit trade stream (AnchoredVwap, §4f) — the AMT read: value ≈ vwap ± 1σ"><input type="checkbox" id="set-vwap-on" /> VWAP ±σ</label>
+          <label for="set-vwap-anchor">anchor</label>
+          <select id="set-vwap-anchor" title="day = current UTC day 00:00 · week = current UTC week (Mon 00:00) · custom = the timestamp box">
+            <option value="day" selected>day</option>
+            <option value="week">week</option>
+            <option value="custom">custom</option>
+          </select>
+          <input type="datetime-local" id="set-vwap-ts" title="custom anchor (UTC) — used when anchor = custom" hidden />
         </span>
       </h2>
       <div id="view-hist" class="hist-wrap"></div>
@@ -229,6 +243,63 @@
         <span class="signal-tag research" title="Hyperliquid HIP-3 dex perps (km:/xyz: prefixed — the main-universe 'SPX' is the SPX6900 memecoin and is filtered out by construction, §4c) expose LIVE MIDS ONLY keyless: no history, so HIP-3 cells carry session-% and session-corr labeled with n. History legs (BTC/ETH/PAXG) use Bybit 1h klines. On-chain proxies track their index with error; no CME feeds.">on-chain proxies · no CME</span>
       </h2>
       <div id="view-macro" class="macro-wrap"></div>
+    </section>
+
+    <!-- ═══ I-1 AUCTION section (§4f) — Institutional Auction Suite, between
+         STRUCTURE and INTELLIGENCE. Data sources: the LOCAL collector's BYOD
+         API (/v1/profile, /v1/levels, /v1/vwap — 127.0.0.1:8788, probed once
+         via /health; on the public Pages deployment that http://127.0.0.1
+         fetch is blocked as mixed content, so the panels degrade to an honest
+         'collector API offline' note — commented in terminal.js), the HF
+         archive for older days (size-gated, labeled 'archived day · hf
+         dataset'), and the live bybit book sampler (microstructure). In
+         ?replay= modes every panel here shows an honest disabled note —
+         live-local endpoints + live book reads have no deterministic replay
+         story (§7 L1). ═══ -->
+
+    <!-- Row A, left ~2/3: the auction profile centerpiece. -->
+    <section class="panel area-auct" id="sec-auction" data-sec="auction">
+      <h2>auction profile — recorded ticks
+        <span class="signal-tag descriptive" title="Tick-EXACT volume-at-price over the collector's recorded trades (bybit leg): today/local days via the BYOD API's /v1/profile (DuckDB aggregation, §4f), archived days read straight from the HF dataset in-browser (hyparquet, size-gated before download). POC/VAH/VAL use the ProfileStore-parity 70% expansion. Descriptive — recorded history, never a backtest input (§0.1).">tick-exact · local store / hf archive</span>
+      </h2>
+      <div class="auction-controls">
+        <label for="set-auction-src">source</label>
+        <select id="set-auction-src"><option value="today" selected>today (live BYOD)</option></select>
+        <label for="set-auction-mode">mode</label>
+        <select id="set-auction-mode">
+          <option value="total" selected>total</option>
+          <option value="bs">buy×sell</option>
+          <option value="delta">delta (diverging)</option>
+          <option value="buckets">size buckets</option>
+        </select>
+        <label title="merge several recorded days into one composite profile (client-side level sum; POC/VA recomputed with the same 70% expansion)"><input type="checkbox" id="set-auction-comp" /> composite</label>
+        <select id="set-auction-days" multiple size="3" hidden title="pick 2+ recorded days to merge (ctrl/cmd-click)"></select>
+        <span id="auction-status" class="auction-status"></span>
+      </div>
+      <div id="view-auction" class="auction-wrap"></div>
+      <p class="hint">levels are $10 buckets over <b>recorded bybit trades</b> (the collector's store — not this browser session). delta mode = diverging ramp: hue = Δ sign, saturation = |Δ|/p95, <b>neutral gray at zero</b> (§4f dataviz rail, validated); size buckets = per-level notional classes. Archived days state their download size <b>before</b> fetching (~27 MiB/day) and render labeled <b>archived day · hf dataset</b>. Naked POC overlay = prior-day POCs never revisited (registry-derived, age labeled).</p>
+    </section>
+
+    <!-- Row A, right ~1/3 (spans both auction rows): the levels registry. -->
+    <section class="panel area-lvls" data-sec="auction">
+      <h2>daily levels — registry
+        <span class="signal-tag descriptive" title="/v1/levels: one row per RECORDED UTC day (bybit leg) from data/ticks/levels.jsonl — O/H/L/C, POC, 70% value area, volume; 'naked' (POC never revisited by a LATER day's range) is DERIVED at serve time, never stored. Reference levels, not signals.">/v1/levels · serve-time naked</span>
+        <span class="heat-controls">
+          <label title="overlay prior-day POC/VA + naked POCs on the historical chart and mark naked-POC rows on the DOM ladder"><input type="checkbox" id="set-levels-draw" /> draw on charts</label>
+        </span>
+      </h2>
+      <div id="view-levels" class="lvls-wrap"></div>
+      <p class="hint">recorded days only — a day the collector missed is an absent row, never an interpolated one (§0.7). <b>draw on charts</b> puts prior-day POC/VA + naked POCs on the historical chart (dashed) and dots the DOM ladder rows at naked POCs.</p>
+    </section>
+
+    <!-- Row B, left ~1/2 (cols 1-2 of the shared template — same approximation
+         as the O-3/O-4 rows): microstructure panes. -->
+    <section class="panel area-micro" data-sec="auction">
+      <h2>microstructure — bybit book
+        <span class="signal-tag descriptive" title="OFI (Cont–Kukanov–Stoikov 2014) between successive ~1s top-5 book snapshots — the 1s snapshot approximation is stated (per-event OFI needs a full event feed); microprice (Stoikov 2018, first-order imbalance-weighted mid) minus mid. Both DESCRIPTIVE flow reads on the live bybit book — never signals. Each series gets its OWN pane and scale (§4f: never dual-axis).">OFI · microprice — descriptive, cited</span>
+      </h2>
+      <div id="view-micro" class="micro-wrap"></div>
+      <p class="hint">fed by the same event-ts-gated 1/s bybit book sampler as the depth history — a stalled feed stops producing samples (gaps stay gaps, §0.7). OFI aggregates each second's book events into one e_t (stated approximation of the per-event definition); positive = net buy-side pressure. microprice − mid = how far the thin side pulls the estimator off the mid.</p>
     </section>
 
     <!-- ═══ O-4 INTELLIGENCE section (§4d) — screener / RSI / options / whales /
@@ -393,13 +464,17 @@
     <p>Live-descriptive orderflow terminal (DESIGN-orderflow-terminal.md). Everything above renders only what arrived over the public wire this session — <b>never a backtest input</b>, never merged into the OOS harness. Feeds: Bybit v5 linear (primary), Binance Futures depth WS + REST mark/OI, Coinbase Advanced Trade spot tape, OKX v5 swap book+trades (O-2), Deribit options REST + Hyperliquid public state (O-4). Liq heatmap = <b>model estimate</b>; spoof/iceberg flags = <b>heuristics</b>; screener/confluence/alerts = <b>un-validated descriptive reads</b> (IC run-log ≈ 0) — all labeled in-panel. See <a href="../DISCLAIMER.md">DISCLAIMER.md</a>.</p>
   </footer>
 
-  <!-- Script order is a CONTRACT (DESIGN §4/§4c): vendor/lightweight-charts.js →
+  <!-- Script order is a CONTRACT (DESIGN §4/§4c/§4f): vendor/lightweight-charts.js →
        quant.js → livewire.js → terminal-adapters.js → terminal-state.js →
-       terminal-hist.js → terminal-views.js → terminal-replay.js → terminal.js.
+       terminal-hist.js → vendor/hyparquet.js → terminal-hfdata.js →
+       terminal-views.js → terminal-replay.js → terminal.js.
        Each file is a plain IIFE exposing ONE global. O-3 additions: quant.js
        (HistChartView reads window.Quant.sma — indicator math is never
        reimplemented, house rule) and terminal-hist.js (REST fetchers/
-       normalizers consumed by terminal.js). terminal-replay.js must precede
+       normalizers consumed by terminal.js). I-1 (§4f Wave 2): vendor/
+       hyparquet.js (MIT parquet reader, provenance in its header) MUST
+       precede terminal-hfdata.js — the hfdata module resolves the vendor
+       global lazily and throws without it. terminal-replay.js must precede
        terminal.js (the bootstrap checks BTCQ_TERMINAL_REPLAY.active() at
        startup for the ?replay=1 / ?replay=byod seam); terminal.js consumes
        all of them and must load last. -->
@@ -409,6 +484,8 @@
   <script src="terminal-adapters.js"></script>
   <script src="terminal-state.js"></script>
   <script src="terminal-hist.js"></script>
+  <script src="vendor/hyparquet.js"></script>
+  <script src="terminal-hfdata.js"></script>
   <script src="terminal-views.js"></script>
   <script src="terminal-replay.js"></script>
   <script src="terminal.js"></script>
