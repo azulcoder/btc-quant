@@ -39,6 +39,14 @@ What is asserted
    /v1/vwap vs the batch formula; the rotation hook's levels.jsonl append +
    idempotence; naked-POC derivation both ways; backfill_levels skip-existing
    (HF reader seams monkeypatched — network-free).
+10. **Canonical symbol expansion (the 643d3be BYOD caveat, fixed)** —
+    /v1/trades?symbol=BTCUSDT returns the okx ('BTC-USDT-SWAP') and coinbase
+    ('BTC-USD') legs stored under their NATIVE ids (rows keep the stored id,
+    §0.7); an explicit native-id query stays narrow (no silent aliasing); the
+    expansion rides the shared SELECT (so /v1/funding widens identically) and
+    reuses run()'s _symbol_legs derivation; §4f profile/vwap widen only the
+    symbol filter while ``exchange`` still selects the leg; /v1/info
+    advertises ``symbol_aliases``.
 
 Collector deps are opt-in (requirements-collector.txt): this module skips
 cleanly when duckdb is absent. The normalizers themselves need neither dep.
@@ -1384,3 +1392,140 @@ def test_backfill_levels_skips_existing_and_is_idempotent(tmp_path, monkeypatch)
 def test_backfill_levels_rejects_malformed_repo_id(tmp_path):
     rc = bfl.main(["--registry", str(tmp_path / "l.jsonl"), "--repo", "not a repo id"])
     assert rc == bfl.EXIT_USAGE
+
+
+# --------------------------------------------------------------------------- #
+# 22. Canonical symbol expansion (the 643d3be BYOD caveat, fixed) — one        #
+#     canonical query, every venue leg; native ids stay narrow                 #
+# --------------------------------------------------------------------------- #
+def test_expand_symbol_shares_run_derivation():
+    """_expand_symbol IS _symbol_legs' derivation (one mapping, shared — the
+    recorder and the replay API can never disagree): the canonical id widens
+    to exactly run()'s okx/coinbase leg ids; a '-' id is an explicit NATIVE
+    request and passes through alone; the deribit leg is absent because its
+    tables carry no symbol column (§3c schema)."""
+    legs = collector._symbol_legs("BTCUSDT")
+    assert collector._expand_symbol("BTCUSDT") == ["BTCUSDT", legs["okx"], legs["coinbase"]]
+    assert collector._expand_symbol("BTCUSDT") == ["BTCUSDT", "BTC-USDT-SWAP", "BTC-USD"]
+    assert collector._expand_symbol("ETHUSDT") == ["ETHUSDT", "ETH-USDT-SWAP", "ETH-USD"]
+    # Explicit native ids: verbatim, alone — no silent aliasing.
+    assert collector._expand_symbol("BTC-USDT-SWAP") == ["BTC-USDT-SWAP"]
+    assert collector._expand_symbol("BTC-USD") == ["BTC-USD"]
+    assert legs["deribit"] not in collector._expand_symbol("BTCUSDT")
+
+
+def test_api_canonical_symbol_returns_all_venue_rows(tmp_path):
+    """/v1/trades?symbol=BTCUSDT (the CANONICAL id) returns the okx and
+    coinbase legs too — stored under their NATIVE ids, which the pre-fix
+    ``symbol = ?`` filter silently dropped from BYOD replay. A NATIVE-id
+    query stays narrow; rows keep their STORED symbol (§0.7 — never rewritten
+    to the canonical); the expansion rides the shared bounded SELECT, so
+    /v1/funding widens identically; /v1/info advertises ``symbol_aliases``."""
+    root = tmp_path / "ticks"
+    t0 = _MIDNIGHT + 1_000
+    con = collector.open_db(root / f"{_D_TODAY}.duckdb")
+    con.executemany(collector._INSERT_SQL["trades"], [
+        _mk_trade(t0 + 0, 61850.0, 0.5, True),  # bybit — native == canonical
+        _mk_trade(t0 + 1, 61851.0, 0.25, False, exchange="binancef"),
+        _mk_trade(t0 + 2, 61852.0, 2.0, True, symbol="BTC-USDT-SWAP", exchange="okx"),
+        _mk_trade(t0 + 3, 61853.0, 0.1, False, symbol="BTC-USD", exchange="coinbase"),
+        _mk_trade(t0 + 4, 61854.0, 9.9, True, symbol="ETHUSDT"),  # other family
+    ])
+    con.executemany(collector._INSERT_SQL["funding_mark"], [
+        ("okx", "BTC-USDT-SWAP", t0 + 5, None, None, 3.9e-05, t0 + 3_600_000),
+    ])
+    con.close()
+
+    with _rotation_server(root) as port:
+        # Canonical id -> ALL venue legs, ts-ascending, native symbols KEPT
+        # (the ETHUSDT decoy is another canonical family — excluded).
+        status, body = _get_json(
+            port, f"/v1/trades?symbol=BTCUSDT&start_ms={t0}&end_ms={t0 + 10}"
+        )
+        assert status == 200 and body["n"] == 4
+        assert [(r["exchange"], r["symbol"]) for r in body["rows"]] == [
+            ("bybit", "BTCUSDT"),
+            ("binancef", "BTCUSDT"),
+            ("okx", "BTC-USDT-SWAP"),
+            ("coinbase", "BTC-USD"),
+        ]
+
+        # Explicit NATIVE ids stay narrow — no silent aliasing of a query
+        # that named one venue's tape.
+        status, body = _get_json(port, "/v1/trades?symbol=BTC-USDT-SWAP")
+        assert status == 200 and body["n"] == 1
+        assert body["rows"][0]["exchange"] == "okx"
+        status, body = _get_json(port, "/v1/trades?symbol=BTC-USD")
+        assert status == 200 and body["n"] == 1
+        assert body["rows"][0]["exchange"] == "coinbase"
+
+        # The expansion rides the SHARED bounded SELECT -> /v1/funding (and
+        # every other row route) widens identically.
+        status, body = _get_json(port, "/v1/funding?symbol=BTCUSDT")
+        assert status == 200 and body["n"] == 1
+        assert body["rows"][0]["symbol"] == "BTC-USDT-SWAP"  # stored id kept
+
+        # /v1/info advertises exactly the expansion the filters apply.
+        status, body = _get_json(port, "/v1/info")
+        assert status == 200
+        assert body["symbol_aliases"] == {
+            "BTCUSDT": ["BTCUSDT", "BTC-USDT-SWAP", "BTC-USD"]
+        }
+
+
+def test_profile_and_vwap_canonical_symbol_selects_native_leg(tmp_path):
+    """§4f endpoints under the expansion: ``exchange`` still selects ONE leg;
+    the canonical symbol only widens which STORED id that leg is found under —
+    exchange=okx&symbol=BTCUSDT aggregates the rows stored as 'BTC-USDT-SWAP',
+    the default bybit leg is untouched, and venues are never blended."""
+    root = tmp_path / "ticks"
+    t0 = _MIDNIGHT + 1_000
+    okx = [
+        _mk_trade(t0 + 0, 100.0, 1.0, True, symbol="BTC-USDT-SWAP", exchange="okx"),
+        _mk_trade(t0 + 1, 200.0, 3.0, False, symbol="BTC-USDT-SWAP", exchange="okx"),
+    ]
+    bybit = [_mk_trade(t0 + 2, 300.0, 0.5, True)]
+    _seed_day(root, _D_TODAY, okx + bybit)
+
+    q = sum(t[5] for t in okx)
+    vwap = sum(t[4] * t[5] for t in okx) / q
+    sigma = math.sqrt(sum(t[5] * (t[4] - vwap) ** 2 for t in okx) / q)
+
+    with _rotation_server(root) as port:
+        # /v1/profile — the okx leg found under its native id; both passes
+        # (levels scan + the two-pass sigma) filter by the SAME expanded set.
+        status, body = _get_json(
+            port,
+            f"/v1/profile?symbol=BTCUSDT&exchange=okx&start_ms={t0}"
+            f"&end_ms={t0 + 10}&tick=10",
+        )
+        assert status == 200
+        assert {lv["lvl"]: lv["buy_vol"] + lv["sell_vol"] for lv in body["levels"]} == {
+            100.0: 1.0, 200.0: 3.0,
+        }
+        assert body["total_vol"] == q
+        assert body["vwap"] == pytest.approx(vwap, abs=1e-9)
+        assert body["sigma"] == pytest.approx(sigma, abs=1e-9)
+
+        # /v1/vwap — same leg selection through the expansion.
+        status, body = _get_json(
+            port,
+            f"/v1/vwap?symbol=BTCUSDT&exchange=okx&anchor_ms={t0}&end_ms={t0 + 10}",
+        )
+        assert status == 200 and body["n"] == 2
+        assert body["vwap"] == pytest.approx(vwap, abs=1e-9)
+        assert body["sigma"] == pytest.approx(sigma, abs=1e-9)
+
+        # Default exchange (bybit) still answers ONLY the bybit tape — the
+        # symbol expansion widens ids, never the venue selection.
+        status, body = _get_json(
+            port, f"/v1/vwap?symbol=BTCUSDT&anchor_ms={t0}&end_ms={t0 + 10}"
+        )
+        assert status == 200 and body["n"] == 1
+        assert body["vwap"] == 300.0
+
+        # NATIVE symbol on the WRONG leg -> an honest empty (narrow filter).
+        status, body = _get_json(
+            port, f"/v1/vwap?symbol=BTC-USDT-SWAP&exchange=bybit&anchor_ms={t0}"
+        )
+        assert status == 200 and body == {"vwap": None, "sigma": None, "n": 0}

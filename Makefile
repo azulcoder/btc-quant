@@ -19,7 +19,7 @@ API_PORT ?= 8788
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
-	@echo "verify:  verify-browser (L1 fixture-replay in headless Chromium) | verify-wire (L2 live invariants, ~45s) | check-ticks (L3 tick-store QA)"
+	@echo "verify:  verify-browser (L1 fixture-replay in headless Chromium) | verify-wire (L2 live invariants, ~45s) | check-ticks (L3 tick-store QA + MinBTL readiness meter)"
 	@echo "archive: archive-dry (export closed months to local parquet ONLY) | archive (export + upload to GitHub Releases + prune) | archive-list (what is offsite)"
 	@echo "hf:      hf-sync (closed day files -> HF dataset, verify on Hub, then delete local; ARGS=--dry-run to stage only, ARGS=--yes for cron)"
 	@echo "levels:  backfill-levels (archived HF days -> data/ticks/levels.jsonl registry; idempotent, never touches day files)"

@@ -58,9 +58,14 @@ is the user's budget — documented, not hidden. The optional BYOD HTTP API (std
 OFF unless an api_port is given) serves the same store for later replay — its
 paths/params/shapes are IDENTICAL in both modes (§3c: the contract is UNCHANGED);
 in rotation mode it unions the local day files covering the requested range and
-answers 410 + an ``hf://`` hint for ranges older than the oldest local day. All
-DuckDB access (reads AND writes) is serialized through one ``threading.Lock``
-because the API threads share the writer's connections.
+answers 410 + an ``hf://`` hint for ranges older than the oldest local day. Every
+``symbol`` filter accepts the CANONICAL id: 'BTCUSDT' expands server-side to the
+venue-native id set (okx 'BTC-USDT-SWAP', coinbase 'BTC-USD') via the SAME
+``_symbol_legs`` derivation the daemon records with (see ``_expand_symbol``); an
+explicit native id stays narrow, and rows keep their STORED native symbol (§0.7
+— recorded data is never rewritten). All DuckDB access (reads AND writes) is
+serialized through one ``threading.Lock`` because the API threads share the
+writer's connections.
 
 §4f Institutional Auction Suite — read-side additions (same lock/contract
 discipline; every derived read stays DESCRIPTIVE, §0.1): ``/v1/profile`` is a
@@ -1800,11 +1805,44 @@ def _bounded_limit(qs: dict[str, str]) -> int:
     return max(1, min(int(qs.get("limit", _API_DEFAULT_LIMIT)), _API_MAX_LIMIT))
 
 
+def _expand_symbol(symbol: str) -> list[str]:
+    """CANONICAL symbol id -> the venue-native id set the daemon records under.
+
+    THE BYOD replay fix (the 643d3be caveat): venues store their NATIVE ids —
+    bybit/binancef 'BTCUSDT', okx 'BTC-USDT-SWAP', coinbase 'BTC-USD' — so a
+    query for the canonical 'BTCUSDT' used to silently return only the same-id
+    venues and lose the okx+coinbase legs from replay. The expansion reuses
+    :func:`_symbol_legs`, the SAME derivation ``run()`` wires the venue legs
+    with (one mapping, shared, never duplicated), so recorder and replay can
+    never disagree about which native id a canonical symbol maps to.
+
+    A symbol containing '-' is an EXPLICIT venue-native id (okx/coinbase
+    style) and is returned alone, verbatim: a query for 'BTC-USDT-SWAP' still
+    matches only okx rows — no silent aliasing of an explicit native request
+    (the caller named one venue's tape; widening it would hand back
+    cross-venue rows they did not ask for).
+
+    The deribit leg is deliberately absent: its tables (dvol/options_chain)
+    carry no symbol column (§3c schema), so there is no deribit-native id a
+    symbol filter could ever match. Rows keep their STORED native symbol in
+    every response (§0.7 — recorded data is never rewritten to the canonical).
+    """
+    if "-" in symbol:
+        return [symbol]  # explicit native id — never silently aliased (above)
+    legs = _symbol_legs(symbol)
+    # dict.fromkeys: order-stable dedupe, canonical id first.
+    return list(dict.fromkeys([symbol, legs["okx"], legs["coinbase"]]))
+
+
 def _run_bounded_select(con: "duckdb.DuckDBPyConnection", table: str, qs: dict, limit: int) -> list:
     """One bounded, parameterized read on one connection (caller holds any lock).
 
     Params: ``symbol``, ``start_ms``, ``end_ms`` (inclusive bounds). All values
     go through ``?`` placeholders; table/column names come only from whitelists.
+    ``symbol`` takes the canonical id and matches the whole venue-native id set
+    (:func:`_expand_symbol`) — every row-serving route shares this SELECT, so
+    /v1/trades, /v1/depth, /v1/liquidations, /v1/funding and /v1/oi all widen
+    (or stay native-narrow) identically.
     """
     cols = _TABLE_COLUMNS[table]
     select_cols = ", ".join(f'"{c}"' for c in cols)  # "index" needs the quotes
@@ -1812,8 +1850,9 @@ def _run_bounded_select(con: "duckdb.DuckDBPyConnection", table: str, qs: dict, 
     clauses: list[str] = []
     params: list[Any] = []
     if "symbol" in qs and "symbol" in cols:
-        clauses.append("symbol = ?")
-        params.append(qs["symbol"])
+        ids = _expand_symbol(qs["symbol"])
+        clauses.append("symbol IN (" + ", ".join("?" * len(ids)) + ")")
+        params.extend(ids)
     if "start_ms" in qs:
         clauses.append("ts_ms >= ?")
         params.append(int(qs["start_ms"]))
@@ -1956,7 +1995,7 @@ def _profile_params(qs: dict[str, str]) -> tuple[str, str, int, int, float, list
     return qs["symbol"], qs.get("exchange", "bybit"), start_ms, end_ms, tick, buckets
 
 
-def _profile_sql(n_buckets: int) -> str:
+def _profile_sql(n_buckets: int, n_symbols: int) -> str:
     """The per-day-file profile aggregation (§4f). Levels snap with
     ``round(price/tick)*tick`` (the contract's grid rule); per-level Σp·q
     rides along so the range VWAP comes from the SAME single scan (summing
@@ -1964,6 +2003,9 @@ def _profile_sql(n_buckets: int) -> str:
     Bucket columns b0..bn split per-level volume by trade notional: bucket =
     the smallest threshold >= price*qty, with one OVERFLOW column (bn) last
     for notionals above every threshold.
+    ``n_symbols`` sizes the ``symbol IN (…)`` placeholders: the exchange param
+    still selects ONE leg; the canonical-symbol expansion only widens which
+    stored id that leg is found under (:func:`_expand_symbol`).
     """
     cols = [
         "round(price / ?) * ? AS lvl",
@@ -1982,8 +2024,8 @@ def _profile_sql(n_buckets: int) -> str:
         cols.append(f"SUM(CASE WHEN price * qty > ? THEN qty ELSE 0 END) AS b{n_buckets}")
     return (
         "SELECT " + ", ".join(cols) + " FROM trades "
-        "WHERE exchange = ? AND symbol = ? AND ts_ms >= ? AND ts_ms <= ? "
-        "GROUP BY 1"
+        "WHERE exchange = ? AND symbol IN (" + ", ".join("?" * n_symbols) + ") "
+        "AND ts_ms >= ? AND ts_ms <= ? GROUP BY 1"
     )
 
 
@@ -2007,8 +2049,9 @@ def _profile_endpoint(store: Any, lock: threading.Lock, rotation: bool, qs: dict
     range (volume-weighted mean / standard deviation of trade price).
     """
     symbol, exchange, start_ms, end_ms, tick, buckets = _profile_params(qs)
-    sql = _profile_sql(len(buckets))
-    params = [tick, tick, *_bucket_params(buckets), exchange, symbol, start_ms, end_ms]
+    symbol_ids = _expand_symbol(symbol)  # canonical widens; native stays narrow
+    sql = _profile_sql(len(buckets), len(symbol_ids))
+    params = [tick, tick, *_bucket_params(buckets), exchange, *symbol_ids, start_ms, end_ms]
     n_bucket_cols = len(buckets) + 1 if buckets else 0
     acc: dict[float, list[float]] = {}
     with lock:
@@ -2040,7 +2083,7 @@ def _profile_endpoint(store: Any, lock: threading.Lock, rotation: bool, qs: dict
         if total_vol > 0:
             vwap = pq / total_vol
             sigma = _range_sigma(
-                store, rotation, exchange, symbol, start_ms, end_ms, vwap, total_vol
+                store, rotation, exchange, symbol_ids, start_ms, end_ms, vwap, total_vol
             )
     poc, vah, val = _poc_va(weights)
     return {
@@ -2053,7 +2096,7 @@ def _range_sigma(
     store: Any,
     rotation: bool,
     exchange: str,
-    symbol: str,
+    symbol_ids: list[str],
     start_ms: Optional[int],
     end_ms: Optional[int],
     vwap: float,
@@ -2067,14 +2110,16 @@ def _range_sigma(
     formula by ~1e-8 (measured). Σq·(p−vwap)² keeps every term at σ's own
     scale, matching the batch definition (and the terminal AnchoredVwap's
     Welford stream) to ~1e-12. A day scan costs ~19 ms (§4f probes), so the
-    extra pass is free. Caller holds the shared lock and guarantees
-    ``total_qty > 0``.
+    extra pass is free. Caller holds the shared lock, guarantees
+    ``total_qty > 0``, and passes the ALREADY-expanded ``symbol_ids``
+    (:func:`_expand_symbol`) so both passes filter identically by construction.
     """
     sql = (
         "SELECT COALESCE(SUM(qty * (price - ?) * (price - ?)), 0) FROM trades "
-        "WHERE exchange = ? AND symbol = ? AND ts_ms >= ?"
+        "WHERE exchange = ? AND symbol IN (" + ", ".join("?" * len(symbol_ids)) + ") "
+        "AND ts_ms >= ?"
     )
-    params: list[Any] = [vwap, vwap, exchange, symbol, start_ms]
+    params: list[Any] = [vwap, vwap, exchange, *symbol_ids, start_ms]
     if end_ms is not None:
         sql += " AND ts_ms <= ?"
         params.append(end_ms)
@@ -2106,11 +2151,13 @@ def _vwap_endpoint(store: Any, lock: threading.Lock, rotation: bool, qs: dict) -
     smuggled through JSON).
     """
     symbol, exchange, anchor_ms, end_ms = _vwap_params(qs)
+    symbol_ids = _expand_symbol(symbol)  # exchange still selects the leg (§4f)
     sql = (
         "SELECT COUNT(*), COALESCE(SUM(qty), 0), COALESCE(SUM(price * qty), 0) "
-        "FROM trades WHERE exchange = ? AND symbol = ? AND ts_ms >= ?"
+        "FROM trades WHERE exchange = ? AND symbol IN ("
+        + ", ".join("?" * len(symbol_ids)) + ") AND ts_ms >= ?"
     )
-    params: list[Any] = [exchange, symbol, anchor_ms]
+    params: list[Any] = [exchange, *symbol_ids, anchor_ms]
     if end_ms is not None:
         sql += " AND ts_ms <= ?"
         params.append(end_ms)
@@ -2126,7 +2173,7 @@ def _vwap_endpoint(store: Any, lock: threading.Lock, rotation: bool, qs: dict) -
             return {"vwap": None, "sigma": None, "n": n}
         vwap = pq / q
         # Two-pass batch σ (see _range_sigma for the conditioning WHY).
-        sigma = _range_sigma(store, rotation, exchange, symbol, anchor_ms, end_ms, vwap, q)
+        sigma = _range_sigma(store, rotation, exchange, symbol_ids, anchor_ms, end_ms, vwap, q)
     return {"vwap": vwap, "sigma": sigma, "n": n}
 
 
@@ -2161,8 +2208,13 @@ def make_api_server(
     local day, and /v1/info aggregates row_counts across the local day files.
     §4f adds /v1/profile and /v1/vwap (both modes, live-local reads) and
     /v1/levels (rotation only — the registry lives beside the day files).
+    /v1/info also advertises ``symbol_aliases`` — the canonical -> venue-native
+    expansion every symbol filter applies (:func:`_expand_symbol`) — so a
+    replay client can see exactly which stored ids a canonical query widens to.
     """
     rotation = isinstance(store, DayFileManager)
+    if info.get("symbol"):
+        info = {**info, "symbol_aliases": {info["symbol"]: _expand_symbol(info["symbol"])}}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "btcq-collector/0.1"
@@ -2268,6 +2320,10 @@ def _symbol_legs(symbol: str) -> dict[str, str]:
     'BTCUSDT' -> okx 'BTC-USDT-SWAP', coinbase 'BTC-USD' (spot), deribit 'BTC'.
     Non-USDT symbols keep the raw base heuristically — every derived id is
     logged at startup so a wrong mapping is visible, not silent.
+
+    SHARED with the BYOD API's canonical-symbol expansion (``_expand_symbol``):
+    one derivation for record AND replay, so the API can never disagree with
+    the daemon about which native id a canonical symbol maps to.
     """
     base = symbol[:-4] if symbol.upper().endswith("USDT") else symbol
     return {

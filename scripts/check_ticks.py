@@ -5,7 +5,8 @@ The collector daemon (btcquant/collector.py) accumulates the future research dat
 in ``data/ticks.duckdb``. This script is the standing quality gate that keeps that
 dataset *honest*: it opens the store READ-ONLY and grades what is actually in the
 file — inventory, integrity, coverage/gaps, cross-venue coherence, liquidation
-sanity — each section with an OK/WARN/FAIL verdict and the raw numbers behind it.
+sanity — each section with an OK/WARN/FAIL verdict and the raw numbers behind it,
+plus one INFO-only section (research readiness: the MinBTL countdown, § below).
 
 Honesty rails (DESIGN §0, binding)
 ----------------------------------
@@ -65,7 +66,20 @@ try:  # optional dependency — see requirements-collector.txt
 except Exception:  # noqa: BLE001 — any import failure means "store unavailable"
     duckdb = None  # type: ignore[assignment]
 
+# The schema below is deliberately RESTATED (not imported from collector.py) so a
+# copied store grades on a duckdb-only machine — but the MinBTL closed form is
+# IMPORTED: two copies of the Bailey-LdP math drifting apart would be a
+# methodology bug, and btcquant.risk owns the convention (returns YEARS under
+# the annualized-Sharpe convention — see its docstring). Guarded the same way:
+# without the core deps (scipy), sections 1–5 still run and §6 says so honestly.
+try:  # core dependency — see requirements.txt
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from btcquant.risk import min_backtest_length  # Bailey et al. (2014), YEARS
+except Exception:  # noqa: BLE001 — §6 reports the miss instead of exploding
+    min_backtest_length = None  # type: ignore[assignment]
+
 _INSTALL_HINT = "pip install -r requirements-collector.txt"
+_INSTALL_HINT_CORE = "pip install -r requirements.txt"
 
 # --------------------------------------------------------------------------- #
 # Schema knowledge (mirrors collector._SCHEMA_DDL — DESIGN §3, verbatim).      #
@@ -118,8 +132,22 @@ MARK_DIVERGENCE_WARN_BP = 50.0
 # a WARN (it usually means one venue's funding leg stopped updating).
 FUNDING_SIGN_AGREE_WARN = 0.90
 
-# Verdict ordering for section roll-ups.
-_VERDICT_RANK = {"OK": 0, "WARN": 1, "FAIL": 2}
+# Research-readiness meter (section 6). MinBTL (btcquant.risk.min_backtest_length)
+# returns YEARS under the annualized-Sharpe convention; the repo's 1h-bar year is
+# 24*365 bars (compare._ppy — 24/7 market, no sessions/holidays), so years -> days
+# of 1h bars is a flat *365 with no trading-day calendar to correct for.
+DAYS_PER_YEAR = 365.0
+# Trial counts for the countdown: 5 = the public board's scale (compare.SPOT_STRATS),
+# 20 = a research library once variants/sweeps start inflating effective N
+# (compare.RESEARCH_STRATS is already 8), 100 = a modest parameter sweep. MinBTL
+# treats trials as independent, so every count here is a LOWER bound on effective N.
+READINESS_TRIALS = (5, 20, 100)
+READINESS_TARGET_N = 20  # the verdict line's yardstick
+
+# Verdict ordering for section roll-ups. INFO ties OK on purpose: it marks a
+# section that INFORMS but never gates (§6 readiness — a young store is
+# time-gated, not defective), so it must never darken the overall verdict.
+_VERDICT_RANK = {"INFO": 0, "OK": 0, "WARN": 1, "FAIL": 2}
 
 
 def _worst(*verdicts: str) -> str:
@@ -617,6 +645,129 @@ def sec_liquidations(con, present: set) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Section 6 — Research readiness: the honest MinBTL countdown. INFO ONLY.      #
+# --------------------------------------------------------------------------- #
+def sec_readiness(
+    db_path: Path,
+    day_files: Optional[list[Path]],
+    skipped_locked: Optional[list[Path]],
+    anchor_ms: Optional[int],
+) -> dict:
+    """How far the recorded history is from MinBTL for N in {5, 20, 100} trials.
+
+    Clearing MinBTL is NECESSARY, not sufficient — a pre-registered hypothesis
+    + kill criterion is still required (DEVELOPMENT §6). This section is a
+    countdown, never a greenlight.
+
+    INFO only, never WARN/FAIL, by design: a young store is a *status*, not a
+    defect (§0.3 spirit) — the order-flow research families are time-gated, NOT
+    validated (DESIGN §6 "time-gated, not granted"; §3c accumulates the gate's
+    clock). Being short of MinBTL is a fact about elapsed calendar time; grading
+    it would punish the store for existing recently.
+
+    Recorded-day counting is OFFLINE on purpose (this gate never touches the
+    network): the §4f levels registry (levels.jsonl in the rotation root) is
+    the local union of ALL recorded history — the rotation hook appends a row
+    as each UTC day closes locally, and scripts/backfill_levels.py appends rows
+    for days already archived to HF (so pruned-after-upload day files stay
+    counted WITHOUT listing HF partitions). ASSUMPTION, stated: a day with no
+    registry row is treated as unrecorded — honest, since both maintainers
+    write a row for every day that actually closed with data.
+
+    Day math: span = first registry date -> newest LOCAL day (registry dates ∪
+    §3c day-file names, including a live-locked today ∪ the newest-row date),
+    inclusive. The registry row count is reported alongside so coverage holes
+    inside the span stay visible (a span is calendar time, not uptime).
+    """
+    lines: list[str] = [
+        "clearing MinBTL is NECESSARY, not sufficient — a pre-registered "
+        "hypothesis + kill criterion is still required (DEVELOPMENT §6)"
+    ]
+    data: dict[str, Any] = {}
+
+    # Registry path: the rotation root in dir mode; the single-file layout keeps
+    # the registry in the sibling rotation dir (data/ticks.duckdb <-> data/ticks/).
+    reg_path = (db_path if db_path.is_dir() else db_path.with_suffix("")) / "levels.jsonl"
+    # Date-only parse, restated from collector.read_levels_registry (same
+    # no-collector-import rule as the schema note at the top of this file).
+    reg_dates: list[str] = []
+    if reg_path.exists():
+        for raw in reg_path.read_text(encoding="utf-8").splitlines():
+            if raw.strip():
+                d = json.loads(raw).get("date")
+                if d:
+                    reg_dates.append(d)
+    reg_dates.sort()
+
+    # Newest local day: ISO YYYY-MM-DD strings compare correctly as text.
+    candidates = list(reg_dates)
+    candidates += [
+        f.stem
+        for f in [*(day_files or []), *(skipped_locked or [])]
+        if _DAY_FILE_RE.fullmatch(f.stem)
+    ]
+    if anchor_ms is not None:
+        candidates.append(
+            datetime.fromtimestamp(anchor_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+        )
+    newest = max(candidates) if candidates else None
+
+    span_days = 0
+    if reg_dates and newest is not None:
+        # newest >= reg_dates[0] by construction (candidates ⊇ reg_dates).
+        first_day = datetime.strptime(reg_dates[0], "%Y-%m-%d").date()
+        last_day = datetime.strptime(newest, "%Y-%m-%d").date()
+        span_days = (last_day - first_day).days + 1  # inclusive: 07-01..07-04 = 4
+        lines.append(
+            f"[INFO] recorded span {reg_dates[0]} -> {newest}: "
+            f"{span_days} days (~{span_days * 24:,} 1h bars; "
+            f"{len(reg_dates)} closed day(s) in the registry)"
+        )
+    else:
+        lines.append(
+            f"[INFO] no recorded days yet — the levels registry ({reg_path}) has no "
+            "closed-day rows (the rotation hook writes the first row when a UTC day "
+            "closes under `make collector`; scripts/backfill_levels.py covers "
+            "HF-archived days)"
+        )
+
+    minbtl: dict[str, dict] = {}
+    target_days: Optional[float] = None
+    if min_backtest_length is None:
+        lines.append(f"[INFO] btcquant.risk unavailable — MinBTL not computed ({_INSTALL_HINT_CORE})")
+    else:
+        for n in READINESS_TRIALS:
+            yrs = float(min_backtest_length(n))
+            days = yrs * DAYS_PER_YEAR
+            minbtl[str(n)] = {"years": yrs, "days": days}
+            if n == READINESS_TARGET_N:
+                target_days = days
+            lines.append(
+                f"[INFO] MinBTL N={n:>3}: {yrs:.2f} yrs = {days:,.0f} days of 1h bars "
+                f"({days * 24:,.0f} bars) — recorded {span_days} ({span_days / days:.1%})"
+            )
+        if target_days is not None:
+            lines.append(
+                f"[INFO] {span_days} of {target_days:,.0f} days toward "
+                f"N={READINESS_TARGET_N} OOS candidacy "
+                f"({span_days / target_days * 100.0:.1f}%)"
+            )
+
+    data.update({
+        "registry_path": str(reg_path),
+        "registry_days": len(reg_dates),
+        "first_registry_date": reg_dates[0] if reg_dates else None,
+        "newest_local_date": newest,
+        "span_days": span_days,
+        "bars_1h": span_days * 24,
+        "minbtl": minbtl,
+        "target_n": READINESS_TARGET_N,
+        "pct_toward_target": (span_days / target_days * 100.0) if target_days else None,
+    })
+    return {"name": "research readiness", "verdict": "INFO", "lines": lines, "data": data}
+
+
+# --------------------------------------------------------------------------- #
 # CLI + report assembly.                                                       #
 # --------------------------------------------------------------------------- #
 def _build_parser() -> argparse.ArgumentParser:
@@ -681,6 +832,9 @@ def build_report(
         sec_coverage(con, present, window_start, anchor_ms),
         sec_coherence(con, present, window_start),
         sec_liquidations(con, present),
+        # (6) readiness gets the RAW anchor (None when the store is empty) — the
+        # wall-clock fallback would invent a "newest local day" out of thin air.
+        sec_readiness(db_path, day_files, skipped_locked, anchor),
     ]
     overall = _worst(*(s["verdict"] for s in sections))
     return {
