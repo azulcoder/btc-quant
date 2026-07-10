@@ -231,6 +231,157 @@ def test_run_surfaces_deflated_sharpe_below_raw():
 
 
 # --------------------------------------------------------------------------- #
+# 3b. M6 DSR convention pins (C1-C3): hand-computed sr0, N=1 flag, fold-V      #
+# --------------------------------------------------------------------------- #
+def test_dsr_sr0_hand_pin_n5_v001():
+    """C1 hand pin: sr0(N=5, V=0.001) exactly.
+
+    sr0 = sqrt(V) * ((1-γ)·Φ⁻¹(1-1/5) + γ·Φ⁻¹(1-1/(5e))) with γ = 0.5772156649015329:
+      Φ⁻¹(0.8)                = 0.8416212335729143
+      Φ⁻¹(1 - 1/(5e))         = 1.4496656592240222
+      E[max Z of 5]           = 1.1925940010147893
+      sr0 = sqrt(0.001)·E[max] = 0.03771313367059893   (hand-computed, hard-coded)
+
+    With Gaussian moments (skew=0, kurt=3) and sr == sr0 the PSR z-score is exactly
+    0, so DSR must be exactly 0.5 — the pin exercises the full C1 composition
+    DSR := PSR(sr0(N, V)) without touching PSR internals (C4).
+    """
+    SR0 = 0.03771313367059893
+    n = 100
+    # sr exactly at the skill-less expected-max benchmark -> z = 0 -> DSR = 0.5.
+    assert risk.deflated_sharpe_ratio(SR0, n, 0.0, 3.0, 5, 0.001) == pytest.approx(
+        0.5, abs=1e-12
+    )
+    # Strictly above / below the benchmark moves the probability the right way.
+    assert risk.deflated_sharpe_ratio(SR0 + 1e-4, n, 0.0, 3.0, 5, 0.001) > 0.5
+    assert risk.deflated_sharpe_ratio(SR0 - 1e-4, n, 0.0, 3.0, 5, 0.001) < 0.5
+    # And DSR(N, V) is literally PSR with sr_benchmark = sr0 (the C1 definition).
+    sr = 0.1
+    assert risk.deflated_sharpe_ratio(sr, n, 0.0, 3.0, 5, 0.001) == pytest.approx(
+        risk.probabilistic_sharpe_ratio(sr, n, 0.0, 3.0, sr_benchmark=SR0), rel=1e-12
+    )
+
+
+def test_run_n1_dsr_is_psr_flag_and_var_fallback():
+    """C1/C2 wiring in backtest.run: n_trials=1 sets dsr_is_psr (DSR ≡ PSR, sr0=0)
+    without the fallback flag; n_trials>1 with no supplied trial variance fires the
+    1/n null fallback and flags it (var_trials_sr stored either way)."""
+    prices = _make_prices(n=300, seed=5)
+    pos = pd.Series(1.0, index=prices.index)
+
+    res1 = backtest.run(pos, prices, n_trials=1)
+    st1 = res1["stats"]
+    assert st1["dsr_is_psr"] is True
+    assert st1["var_fallback"] is False           # N=1 declaration, nothing deflated
+    assert st1["deflated_sharpe"] == pytest.approx(st1["psr"], rel=1e-12)
+
+    res5 = backtest.run(pos, prices, n_trials=5)  # fallback fires (no trial SRs)
+    st5 = res5["stats"]
+    assert st5["dsr_is_psr"] is False
+    assert st5["var_fallback"] is True
+    assert st5["var_trials_sr"] == pytest.approx(1.0 / st5["n_periods"], rel=1e-12)
+
+    res5v = backtest.run(pos, prices, n_trials=5, var_trials_sr=0.002)
+    st5v = res5v["stats"]
+    assert st5v["var_fallback"] is False          # empirical V supplied -> no fallback
+    assert st5v["var_trials_sr"] == pytest.approx(0.002, rel=1e-12)
+
+
+def test_run_funding_stores_var_trials_sr_and_flags():
+    """C3 asymmetry fix: run_funding stores var_trials_sr in stats exactly like run,
+    with the same C1 (dsr_is_psr) and C2 (var_fallback) semantics."""
+    rng = np.random.default_rng(11)
+    idx = pd.date_range("2024-01-01", periods=400, freq="8h", tz="UTC")
+    fr = pd.Series(rng.normal(1e-4, 5e-5, len(idx)), index=idx)
+    pos = pd.Series(-1.0, index=idx)              # standard short-perp carry leg
+
+    r1 = backtest.run_funding(pos, fr, n_trials=1)["stats"]
+    assert r1["dsr_is_psr"] is True
+    assert r1["var_fallback"] is False
+    assert r1["var_trials_sr"] == pytest.approx(1.0 / r1["n_periods"], rel=1e-12)
+    assert r1["deflated_sharpe"] == pytest.approx(r1["psr"], rel=1e-12)
+
+    r3 = backtest.run_funding(pos, fr, n_trials=3)["stats"]
+    assert r3["dsr_is_psr"] is False
+    assert r3["var_fallback"] is True             # 1/n null stood in for trial SRs
+    assert r3["var_trials_sr"] == pytest.approx(1.0 / r3["n_periods"], rel=1e-12)
+
+    r3v = backtest.run_funding(pos, fr, n_trials=3, var_trials_sr=0.004)["stats"]
+    assert r3v["var_fallback"] is False
+    assert r3v["var_trials_sr"] == pytest.approx(0.004, rel=1e-12)
+
+
+def test_walk_forward_empirical_fold_variance_hand_pin():
+    """C2/C3 fold-V wiring: synthetic prices with KNOWN per-fold OOS returns give
+    hand-computable per-fold per-period Sharpe ratios, and walk_forward must set
+    V = var(fold_SRs, ddof=1) exactly (no 1/n_oos, no max() floor).
+
+    12 bars, n_splits=2 -> blocks [0:4] train, [4:8] fold-1 OOS, [8:12] fold-2 OOS.
+    A constant long-1 strategy at zero cost makes each fold's net returns
+    [0, r1, r2, r3] with r_i the within-slice pct changes:
+      fold 1: (0.01, 0.02, 0.03) -> SR1 = 0.015/std([0,.01,.02,.03]) = 1.161895003862225
+      fold 2: (0.01, 0.01, 0.04) -> SR2 = 0.015/std([0,.01,.01,.04]) = 0.8660254037844386
+      V = var([SR1, SR2], ddof=1) = (SR1-SR2)^2 / 2 = 0.043769410125094665
+    """
+    SR1 = 1.161895003862225        # = 0.015 * sqrt(6000)
+    SR2 = 0.8660254037844386       # = 0.015 / sqrt(0.0003)
+    V = 0.043769410125094665       # = (SR1 - SR2)**2 / 2
+
+    idx = pd.date_range("2022-01-01", periods=12, freq="D", tz="UTC")
+    p = [100.0, 101.0, 102.0, 103.0]                       # train block (arbitrary)
+    f1 = [100.0]
+    for r in (0.01, 0.02, 0.03):
+        f1.append(f1[-1] * (1.0 + r))
+    f2 = [100.0]
+    for r in (0.01, 0.01, 0.04):
+        f2.append(f2[-1] * (1.0 + r))
+    px = pd.Series(p + f1 + f2, index=idx)
+
+    wf = backtest.walk_forward(
+        lambda s: pd.Series(1.0, index=s.index), px,
+        n_splits=2, cost_bps=0.0, slippage_bps=0.0,
+    )
+    oos = wf["oos"]
+    assert oos["fold_srs"] == pytest.approx([SR1, SR2], rel=1e-9)
+    assert oos["var_trials_sr"] == pytest.approx(V, rel=1e-9)
+    assert oos["var_fallback"] is False
+    assert oos["n_trials"] == 2
+    # fold_srs mirror the per-fold stats produced by the same risk.summary path.
+    assert oos["fold_srs"] == pytest.approx(
+        [f["stats"]["sharpe_per_period"] for f in wf["folds"]], rel=1e-12
+    )
+    # And the headline OOS DSR uses exactly that empirical V.
+    expect = risk.deflated_sharpe_ratio(
+        oos["sharpe_per_period"], oos["n_periods"], oos["skew"], oos["kurtosis"], 2, V
+    )
+    assert oos["deflated_sharpe"] == pytest.approx(expect, rel=1e-12)
+
+
+def test_compare_leaderboard_empirical_var_helper():
+    """C3 leaderboard V: scripts/compare._empirical_var_sr is the ddof=1 variance of
+    the finite strategy SRs, with the flagged fallback only when <2 are in hand."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "compare.py"
+    spec = importlib.util.spec_from_file_location("_m6_compare_script", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # Hand pin: var([0.01, 0.02, 0.03], ddof=1) = 1e-4.
+    v, fb = mod._empirical_var_sr([0.01, 0.02, 0.03])
+    assert fb is False and v == pytest.approx(1e-4, rel=1e-12)
+    # NaNs are excluded, remaining pair still yields the empirical variance.
+    v2, fb2 = mod._empirical_var_sr([0.01, float("nan"), 0.03])
+    assert fb2 is False and v2 == pytest.approx(2e-4, rel=1e-12)
+    # <2 finite SRs -> flagged fallback (caller uses 1/n + prints the caveat).
+    v3, fb3 = mod._empirical_var_sr([0.01])
+    assert fb3 is True and math.isnan(v3)
+    v4, fb4 = mod._empirical_var_sr([float("nan"), float("nan")])
+    assert fb4 is True and math.isnan(v4)
+
+
+# --------------------------------------------------------------------------- #
 # 4. Drawdown <= 0 and max_drawdown matches                                     #
 # --------------------------------------------------------------------------- #
 def test_drawdown_non_positive_and_max_matches():

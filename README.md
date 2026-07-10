@@ -83,23 +83,28 @@ A backtest fit and scored on the same history flatters itself. The leaderboard i
 held-out block, score on the concatenated OOS returns (Bailey & López de Prado 2014). The drop from
 in-sample to out-of-sample Sharpe is the overfitting tell, and it is printed side by side.
 
-The honest result, from `compare.py` on the 2018→ daily history (N = 5 strategies):
+The honest result, from `compare.py` on the 2018→ daily history (N = 5 strategies). The deflation
+uses the **empirical cross-trial variance** (Bailey & López de Prado as written): V is the ddof=1
+variance of the N strategies' actual OOS per-period Sharpe ratios — measured from the board's own
+rows, never the skill-less `1/n` null, which is reserved (and printed as a caveat) for the rare
+case where the trial SRs genuinely don't exist:
 
 ```
 strategy            OOS CAGR   OOS SR    IS SR   OOS DSR  OOS MaxDD  beats B&H
-tsmom                 12.38%     0.99     1.31     0.93     -22.51%        yes
-buy_and_hold          33.25%     0.78     0.76     0.81     -77.29%        (baseline)
-tsmom_ls              12.46%     0.75     1.09     0.79     -24.48%        no
-ma_trend_filter       24.89%     0.70     0.93     0.74     -65.94%        no
-pairs_coint           -0.19%    -0.00     0.05     0.12     -14.85%        no
+tsmom                 12.55%     1.01     1.29     0.95     -20.50%        yes
+buy_and_hold          33.61%     0.78     0.75     0.83     -75.44%        (baseline)
+tsmom_ls              12.65%     0.76     1.08     0.82     -24.69%        no
+ma_trend_filter       23.96%     0.68     0.91     0.75     -65.94%        no
+pairs_coint            0.19%     0.06     0.05     0.17     -12.54%        no
 ```
 
-Read it straight: **every strategy's Sharpe decays in-sample → out-of-sample** (tsmom 1.31 → 0.99,
-ma_trend 0.93 → 0.70, pairs 0.05 → −0.00). On this long window `tsmom` tops the board and does beat
+Read it straight: **every strategy's Sharpe decays in-sample → out-of-sample** (tsmom 1.29 → 1.01,
+ma_trend 0.91 → 0.68, pairs 0.05 → 0.06). On this long window `tsmom` tops the board and does beat
 buy-and-hold — **but nothing clears OOS deflated Sharpe 0.95**, the threshold for "distinguishable
-from luck after deflating for the number of strategies tried." Even the winner (0.93) is not
-significant. The other three trend/reversion strategies do not beat buy-and-hold net of cost
-out-of-sample, and the one that wins on return (buy-and-hold, +33% CAGR) does it with a −77%
+from luck after deflating for the number of strategies tried." Even the winner is not significant:
+its DSR prints as 0.95 at two decimals but is precisely **0.946 ≤ 0.95** (rounding, not a pass —
+hence no `*`). The other three trend/reversion strategies do not beat buy-and-hold net of cost
+out-of-sample, and the one that wins on return (buy-and-hold, +34% CAGR) does it with a −75%
 drawdown. That is the point, not a disappointment: most of what survives crypto OOS is
 risk-management, not alpha.
 
@@ -117,9 +122,9 @@ overfit. Three diagnostics guard the selection:
   the backtest winner" have picked an out-of-sample *under*-performer? Above ~0.50 the ranking is
   essentially noise. **The number depends on the data window and N — do not quote a single value as
   "the" PBO:**
-  - `compare.py` (N = 5, 2018→) prints **PBO ≈ 0.67**.
-  - `compare.py --research` (N = 8, the same window + the research candidates) prints **≈ 0.63**;
-    inside it, PBO over just the 5 board strategies is again 0.67.
+  - `compare.py` (N = 5, 2018→) prints **PBO ≈ 0.64**.
+  - `compare.py --research` (N = 8, the same window + the research candidates) prints **≈ 0.60**;
+    inside it, PBO over just the 5 board strategies is again 0.64.
   - the dashboard's shorter default window (N = 7) shows **≈ 0.83**.
 
   All three say the same thing — the cross-sectional ranking is not robust — but only the value from
@@ -127,15 +132,15 @@ overfit. Three diagnostics guard the selection:
 
 - **MinBTL — Minimum Backtest Length** (Bailey et al. 2014). Given N configurations tried, how many
   years of history do you need before an in-sample Sharpe of ~1 is expected even from pure noise?
-  `compare.py` prints **2.70 yr for N = 5** (2.85 yr for N = 8 under `--research`) against 8.4 yr of
+  `compare.py` prints **2.70 yr for N = 5** (2.85 yr for N = 8 under `--research`) against 8.5 yr of
   data — so here the history is long enough. On shorter windows it correctly flags the backtest as
   under-powered. Every added strategy raises the required MinBTL and lowers everyone's deflated
   Sharpe — which is the explicit cost of putting another strategy on the board.
 
 - **CPCV — Combinatorial Purged Cross-Validation.** Instead of one walk-forward path, score the
   strategy over many purged block combinations and report the *distribution* of OOS Sharpe.
-  `run_backtest.py --strategy tsmom --walk --start 2018-01-01` prints **median 0.97 [p25 0.68,
-  p75 1.50] over 15 paths** — wide and sign-flipping (on a recent default window it is even negative).
+  `run_backtest.py --strategy tsmom --walk --start 2018-01-01` prints **median 1.14 [p25 0.75,
+  p75 1.51] over 15 paths** — wide and sign-flipping (on a recent default window it is even negative).
   A single equity curve hides that; the dispersion says the result is regime-dependent, not a stable
   edge.
 
@@ -167,8 +172,11 @@ The dashboard's headline deflated Sharpe is, by construction, the selected strat
 OOS leaderboard row — one number, read from a single source, not a parallel recompute. When
 walk-forward cannot run (too little history, e.g. a thin pair), the panel degrades to "insufficient
 history for OOS" rather than silently falling back to the flattering in-sample figure. The dashboard
-mirrors the Python engine's formulas and agrees with it to ~1e-8 (the inverse-normal approximation,
-not bit-identical); the engine is the source of truth.
+mirrors the Python engine's formulas and agrees with it to ~1e-7 (the inverse-normal approximation,
+not bit-identical; `scripts/check_parity.py` pins 41 shared fields, including unsaturated deflated-
+Sharpe probes); the engine is the source of truth. Deflated-Sharpe semantics are one binding
+convention across both engines (empirical cross-trial variance; N = 1 is labeled
+`PSR (single trial — no deflation)`) — see the M6 entry in [AUDIT_LOG.md](AUDIT_LOG.md).
 
 ## Honesty rails (non-negotiable)
 

@@ -184,16 +184,26 @@ def run(
     kurt = stats.get("kurtosis", float("nan"))
 
     if var_trials_sr is None:
-        # Sampling variance of a skill-less per-period Sharpe ≈ 1/n (Bailey-LdP).
+        # Null fallback: sampling variance of a skill-less per-period Sharpe
+        # ≈ 1/n (Bailey-LdP). Permitted ONLY because the trial SRs are genuinely
+        # unavailable here (bare n_trials declaration) — flagged when it deflates
+        # (n_trials > 1) so every display surface can print the M6 C2 caveat.
         var_sr = 1.0 / n_periods if n_periods > 0 else float("nan")
+        var_fallback = n_trials > 1
     else:
         var_sr = float(var_trials_sr)
+        var_fallback = False
 
     stats["deflated_sharpe"] = risk.deflated_sharpe_ratio(
         sr_period, n_periods, skew, kurt, int(n_trials), var_sr
     )
     stats["n_trials"] = int(n_trials)
     stats["var_trials_sr"] = float(var_sr) if var_sr == var_sr else float("nan")
+    # M6 C1: N=1 ⟹ sr0=0 ⟹ DSR ≡ PSR — display surfaces must relabel it
+    # 'PSR (single trial — no deflation)'. Numeric key unchanged.
+    stats["dsr_is_psr"] = bool(int(n_trials) == 1)
+    # M6 C2: true iff the 1/n null-variance fallback actually deflated something.
+    stats["var_fallback"] = bool(var_fallback)
     stats["trades"] = trades
     stats["total_turnover"] = float(turnover.sum())
     stats["avg_turnover"] = float(turnover.mean()) if len(turnover) else float("nan")
@@ -269,12 +279,22 @@ def run_funding(
 
     stats = risk.summary(net_returns, equity=equity, periods_per_year=periods_per_year)
     n_periods = int(stats.get("n_periods", 0))
-    var_sr = (1.0 / n_periods if n_periods > 0 else float("nan")) if var_trials_sr is None else float(var_trials_sr)
+    if var_trials_sr is None:
+        # Null fallback (M6 C2) — trial SRs unavailable; flagged when it deflates.
+        var_sr = 1.0 / n_periods if n_periods > 0 else float("nan")
+        var_fallback = n_trials > 1
+    else:
+        var_sr = float(var_trials_sr)
+        var_fallback = False
     stats["deflated_sharpe"] = risk.deflated_sharpe_ratio(
         stats.get("sharpe_per_period", float("nan")), n_periods,
         stats.get("skew", float("nan")), stats.get("kurtosis", float("nan")),
         int(n_trials), var_sr)
     stats["n_trials"] = int(n_trials)
+    # M6 C3 asymmetry fix: run_funding stores var_trials_sr exactly like run().
+    stats["var_trials_sr"] = float(var_sr) if var_sr == var_sr else float("nan")
+    stats["dsr_is_psr"] = bool(int(n_trials) == 1)   # M6 C1
+    stats["var_fallback"] = bool(var_fallback)        # M6 C2
     stats["trades"] = trades
     stats["total_turnover"] = float(turnover.sum())
     stats["cost_bps"] = float(cost_bps)
@@ -342,7 +362,9 @@ def walk_forward(
     dict
         ``{oos, is_, folds, oos_equity, oos_returns}`` where ``oos`` and ``is_``
         are :func:`risk.summary`-style stat dicts (with ``n_trials = n_splits``
-        for the OOS Deflated Sharpe — each fold is a trial), ``folds`` is a list
+        for the OOS Deflated Sharpe — each fold is a trial — and ``V =`` the
+        empirical ddof=1 variance of the per-fold OOS per-period Sharpe ratios,
+        stored as ``var_trials_sr`` alongside ``fold_srs``; M6 C2/C3), ``folds`` is a list
         of per-fold ``{train_end, oos_start, oos_end, stats}`` records, and
         ``oos_equity`` / ``oos_returns`` are the concatenated OOS series.
     """
@@ -434,17 +456,35 @@ def walk_forward(
     )
     is_returns = is_returns[~is_returns.index.duplicated(keep="first")]
 
-    # OOS deflated Sharpe treats each fold as a trial (selection across folds).
+    # OOS deflated Sharpe treats each fold as a trial (selection across folds;
+    # N = n_splits, the regime-stability reading). Per M6 C2/C3 the trial
+    # variance V is the EMPIRICAL variance (ddof=1) of the per-fold OOS
+    # per-period Sharpe ratios (each fold's OOS slice went through the same
+    # risk.summary convention inside run()) — the 1/n_oos null fallback is used
+    # ONLY when fewer than 2 folds produced a finite SR, and is flagged.
     oos_stats = risk.summary(oos_returns, equity=oos_equity, periods_per_year=periods_per_year)
+    fold_srs = [float(f["stats"].get("sharpe_per_period", float("nan"))) for f in folds]
+    valid_fold_srs = [s for s in fold_srs if np.isfinite(s)]
+    if len(valid_fold_srs) >= 2:
+        var_sr = float(np.var(valid_fold_srs, ddof=1))
+        var_fallback = False
+    else:
+        var_sr = (1.0 / oos_stats["n_periods"]
+                  if oos_stats.get("n_periods", 0) > 0 else float("nan"))
+        var_fallback = n_splits > 1
     oos_stats["deflated_sharpe"] = risk.deflated_sharpe_ratio(
         oos_stats.get("sharpe_per_period", float("nan")),
         int(oos_stats.get("n_periods", 0)),
         oos_stats.get("skew", float("nan")),
         oos_stats.get("kurtosis", float("nan")),
         int(n_splits),
-        1.0 / oos_stats["n_periods"] if oos_stats.get("n_periods", 0) > 0 else float("nan"),
+        var_sr,
     )
     oos_stats["n_trials"] = int(n_splits)
+    oos_stats["fold_srs"] = fold_srs
+    oos_stats["var_trials_sr"] = float(var_sr) if var_sr == var_sr else float("nan")
+    oos_stats["dsr_is_psr"] = bool(int(n_splits) == 1)   # M6 C1
+    oos_stats["var_fallback"] = bool(var_fallback)        # M6 C2
 
     is_stats = (
         risk.summary(is_returns, periods_per_year=periods_per_year)

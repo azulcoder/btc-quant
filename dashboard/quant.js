@@ -51,8 +51,13 @@
   }
 
   /** Sample excess kurtosis (Fisher). Returns the *non-excess* kurtosis when
-   *  asked, but the DSR formula below uses the full kurtosis (excess + 3). */
-  function kurtosis(xs, excess = true) {
+   *  asked, but the DSR formula below uses the full kurtosis (excess + 3).
+   *  `unbiased=true` applies scipy's bias=False sample correction
+   *  G2 = [(n-1)/((n-2)(n-3))]·[(n+1)·g2 + 6] — risk.summary feeds the PSR/DSR
+   *  with bias=False moments (M6 C4), so computeStats MUST use it too (the old
+   *  biased g2 here was a real mirror divergence that the saturated DSR parity
+   *  pins never caught; the unsaturated walk-forward probe did). */
+  function kurtosis(xs, excess = true, unbiased = false) {
     const fin = xs.filter(Number.isFinite);
     const n = fin.length;
     if (n < 4) return excess ? 0 : 3;
@@ -61,7 +66,8 @@
     if (!(sd > 0)) return excess ? 0 : 3;
     let s = 0;
     for (const x of fin) s += ((x - m) / sd) ** 4;
-    const g2 = s / n - 3;
+    let g2 = s / n - 3;
+    if (unbiased) g2 = ((n - 1) / ((n - 2) * (n - 3))) * ((n + 1) * g2 + 6);
     return excess ? g2 : g2 + 3;
   }
 
@@ -289,18 +295,40 @@
    * Benchmarks the observed SR against the *expected maximum* SR of `nTrials`
    * skill-less strategies, then runs PSR against that inflated benchmark.
    * This is the headline honesty metric: significance when DSR > 0.95.
+   * Exact mirror of risk.deflated_sharpe_ratio (M6 C1/C4/C5), incl. the guards
+   * (nTrials < 1 or negative/NaN varTrialsSr → NaN) and the N=1 special case.
    * @param {number} sr observed per-period Sharpe (NOT annualized)
    * @param {number} n number of observations
    * @param {number} nTrials number of independent configurations tried
-   * @param {number} varTrialsSr variance of the SR across those trials
+   * @param {number} varTrialsSr variance of the per-period SR across those trials
    */
   function deflatedSharpe(sr, n, skew, kurt, nTrials = 1, varTrialsSr = 1) {
-    const N = Math.max(1, nTrials);
-    const sigma = Math.sqrt(Math.max(varTrialsSr, 1e-12));
-    const gamma = 0.5772156649; // Euler–Mascheroni
-    const e = Math.E;
-    // Expected max of N standard normals (Gumbel approximation).
-    const sr0 = sigma * ((1 - gamma) * normPpf(1 - 1 / N) + gamma * normPpf(1 - 1 / (N * e)));
+    // Mirror the Python guards: degenerate trial inputs are NaN, never a fake 1.0.
+    if (!(nTrials >= 1) || varTrialsSr == null || Number.isNaN(varTrialsSr) || varTrialsSr < 0) return NaN;
+    const gamma = 0.5772156649015329; // Euler–Mascheroni, full double precision (M6 C1)
+    let sr0;
+    if (nTrials === 1) {
+      // M6 C1: a single trial has no selection to deflate — sr0 = 0, so
+      // DSR ≡ PSR(sr, n, skew, kurt, 0). Display surfaces must label this
+      // 'PSR (single trial — no deflation)' (see stats.dsrIsPsr).
+      //
+      // BUG HISTORY (fixed 2026-07-11, M6 JS-parity wave): the pre-M6 mirror fed
+      // N=1 straight through the Gumbel expected-max formula below, hitting
+      // normPpf(1 - 1/1) = normPpf(0) = -Infinity, so sr0 = -Inf and this
+      // function returned 1.0 IDENTICALLY for ANY (sr, n, skew, kurt) — a
+      // fabricated 100% significance for exactly the "no search happened" case.
+      // Python's risk.deflated_sharpe_ratio always special-cased N=1 to sr0 = 0;
+      // the mirror now matches (unsaturated pin `dsr_n1` in scripts/check_parity.py).
+      sr0 = 0;
+    } else {
+      // Expected max of N standard normals (Gumbel approximation), scaled by the
+      // cross-trial SR dispersion. No max(varTrialsSr, 1e-12) floor — M6 C2 keeps
+      // V honest in BOTH directions (V = 0 legitimately means sr0 = 0), matching
+      // Python byte-for-byte semantics.
+      const e = Math.E;
+      sr0 = Math.sqrt(varTrialsSr)
+        * ((1 - gamma) * normPpf(1 - 1 / nTrials) + gamma * normPpf(1 - 1 / (nTrials * e)));
+    }
     return probabilisticSharpe(sr, n, skew, kurt, sr0);
   }
 
@@ -325,7 +353,10 @@
     const slipBps = opts.slippageBps != null ? opts.slippageBps : 2;
     const ppy = opts.periodsPerYear || 365;
     const nTrials = opts.nTrials || 1;
-    const varTrialsSr = opts.varTrialsSr != null ? opts.varTrialsSr : 1;
+    // M6 C2 (mirror of backtest.run): an omitted varTrialsSr means the trial SRs
+    // are genuinely unavailable → computeStats applies the 1/n_periods null
+    // fallback and flags it (stats.varFallback), instead of the old silent `1`.
+    const varTrialsSr = opts.varTrialsSr != null ? opts.varTrialsSr : null;
     const costRate = (costBps + slipBps) / 1e4; // charged per unit turnover
 
     const n = Math.min(positions.length, prices.length);
@@ -377,7 +408,9 @@
     return out;
   }
 
-  /** Bundle the headline stats for a returns/equity pair (mirrors risk.summary). */
+  /** Bundle the headline stats for a returns/equity pair (mirrors risk.summary
+   *  plus the DSR bookkeeping backtest.run stitches on top: varTrialsSr,
+   *  dsrIsPsr (M6 C1) and varFallback (M6 C2)). */
   function computeStats(returns, equity, opts = {}) {
     const ppy = opts.periodsPerYear || 365;
     const fin = returns.filter(Number.isFinite);
@@ -387,8 +420,23 @@
       return sd > 0 ? mean(fin) / sd : 0;
     })();
     const sk = skewness(fin);
-    const ku = kurtosis(fin, false); // non-excess for the PSR/DSR formula
+    const ku = kurtosis(fin, false, true); // non-excess, bias=False — mirror of risk.summary (M6 C4)
     const grossEq = equity;
+
+    // M6 C2 (mirror of backtest.run): explicit trial-SR variance wins; the
+    // skill-less 1/n_periods null fallback fires ONLY when the caller has no
+    // trial SRs (varTrialsSr omitted/null), and is flagged when it actually
+    // deflates something (nTrials > 1) so display surfaces can print the caveat
+    // 'null-variance fallback — deflation may be under- or over-stated'.
+    const nTrials = opts.nTrials || 1;
+    let varTrialsSr, varFallback;
+    if (opts.varTrialsSr != null) {
+      varTrialsSr = opts.varTrialsSr;
+      varFallback = false;
+    } else {
+      varTrialsSr = n > 0 ? 1 / n : NaN;
+      varFallback = nTrials > 1;
+    }
 
     return {
       n,
@@ -410,8 +458,14 @@
       bhCagr: opts.bhReturns ? cagr(compound(opts.bhReturns), ppy) : NaN,
       bhMaxDrawdown: opts.bhReturns ? maxDrawdown(compound(opts.bhReturns)) : NaN,
       probabilisticSharpe: probabilisticSharpe(perPeriodSharpe, n, sk, ku, 0),
-      deflatedSharpe: deflatedSharpe(perPeriodSharpe, n, sk, ku, opts.nTrials || 1, opts.varTrialsSr != null ? opts.varTrialsSr : 1),
-      nTrials: opts.nTrials || 1,
+      deflatedSharpe: deflatedSharpe(perPeriodSharpe, n, sk, ku, nTrials, varTrialsSr),
+      nTrials,
+      varTrialsSr,
+      // M6 C1: N=1 ⟹ sr0=0 ⟹ the "deflated" Sharpe IS the PSR — surfaces must
+      // relabel it 'PSR (single trial — no deflation)'. Numeric key unchanged.
+      dsrIsPsr: nTrials === 1,
+      // M6 C2: true iff the 1/n null-variance fallback actually deflated something.
+      varFallback,
     };
   }
 
@@ -704,38 +758,68 @@
    * Anchored walk-forward. Split the series into `folds`+1 contiguous blocks; for
    * each fold trade the *next* out-of-sample block with positions decided as data
    * arrived (the strategies are causal). Returns the concatenated OOS returns +
-   * stats; the OOS Deflated Sharpe is deflated for `nTrials` with the skill-less
-   * Sharpe variance 1/n — matching the Python engine (backtest.walk_forward).
+   * stats. M6 C3, exact mirror of backtest.walk_forward: the OOS Deflated Sharpe
+   * uses N = `folds` (folds-as-trials, the regime-stability reading) and V = the
+   * EMPIRICAL ddof=1 variance of the per-fold OOS per-period Sharpe ratios (C2 —
+   * no invented 1/n floor); the skill-less 1/n_oos null fallback fires ONLY when
+   * fewer than 2 folds produce a finite SR, and is flagged (oosStats.varFallback).
+   * A caller-supplied opts.nTrials is intentionally IGNORED for the DSR — Python's
+   * walk_forward has no such knob either; search-count deflation belongs to the
+   * leaderboard / MinBTL surface, not to the fold DSR.
    * @param {number[]} positions full-history target weights
    * @param {number[]} prices    aligned close series
-   * @param {object} opts { folds, periodsPerYear, costBps, slippageBps, nTrials }
+   * @param {object} opts { folds, periodsPerYear, costBps, slippageBps }
    */
   function walkForward(positions, prices, opts = {}) {
     const folds = opts.folds || 5;
     const ppy = opts.periodsPerYear || 365;
     const n = Math.min(positions.length, prices.length);
-    const out = { oosReturns: [], oosStats: null, oosPositions: [], oosPrices: [] };
+    const out = { oosReturns: [], oosStats: null, oosPositions: [], oosPrices: [], foldSrs: [] };
     if (n < (folds + 1) * 2) return out;
     const edge = (i) => Math.floor((i * n) / (folds + 1));
     const oos = [];
+    const foldSrs = [];
     for (let k = 1; k <= folds; k++) {
       const a = edge(k), b = edge(k + 1);
       if (b <= a) continue;
       const bt = backtest(positions.slice(a, b), prices.slice(a, b),
         { costBps: opts.costBps, slippageBps: opts.slippageBps, periodsPerYear: ppy });
       for (let i = 0; i < bt.returns.length; i++) oos.push(bt.returns[i]);
+      // Per-fold OOS per-period Sharpe — mirror of risk.summary's sharpe_per_period
+      // convention (NaN when the fold is degenerate: < 2 finite returns or σ = 0).
+      const finR = bt.returns.filter(Number.isFinite);
+      const sd = std(finR, 1);
+      foldSrs.push(finR.length >= 2 && Number.isFinite(sd) && sd > 0 ? mean(finR) / sd : NaN);
     }
     if (!oos.length) return out;
     const nOos = oos.filter(Number.isFinite).length;
     out.oosReturns = oos;
+    out.foldSrs = foldSrs;
     // Contiguous OOS positions/prices (the anchored OOS span) — for the Tharp expectancy ledger.
     out.oosPositions = positions.slice(edge(1), edge(folds + 1));
     out.oosPrices = prices.slice(edge(1), edge(folds + 1));
+    // M6 C2/C3: V = empirical ddof=1 variance of the per-fold SRs (the paper's
+    // definition — the trial SRs ARE in hand here); 1/n_oos null ONLY if < 2
+    // finite fold SRs exist, flagged so surfaces can print the C2 caveat.
+    const finSrs = foldSrs.filter(Number.isFinite);
+    let varTrialsSr, varFallback;
+    if (finSrs.length >= 2) {
+      const m = mean(finSrs);
+      let s2 = 0;
+      for (const x of finSrs) s2 += (x - m) * (x - m);
+      varTrialsSr = s2 / (finSrs.length - 1);
+      varFallback = false;
+    } else {
+      varTrialsSr = nOos > 0 ? 1 / nOos : NaN;
+      varFallback = folds > 1;
+    }
     out.oosStats = computeStats(oos, compound(oos), {
       periodsPerYear: ppy,
-      nTrials: opts.nTrials || 1,
-      varTrialsSr: nOos > 0 ? 1 / nOos : 1,   // Python-parity (skill-less Sharpe variance ≈ 1/n)
+      nTrials: folds,      // M6 C3: folds-as-trials — N = n_splits, like Python
+      varTrialsSr,
     });
+    out.oosStats.foldSrs = foldSrs;          // mirror of oos_stats["fold_srs"]
+    out.oosStats.varFallback = varFallback;  // C2 caveat flag (empirical V ⇒ false)
     return out;
   }
 

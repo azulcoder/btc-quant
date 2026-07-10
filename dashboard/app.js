@@ -176,6 +176,22 @@
   function pct(x, dp = 2) { return Number.isFinite(x) ? (x * 100).toFixed(dp) + '%' : '—'; }
   function num(x, dp = 2) { return Number.isFinite(x) ? x.toFixed(dp) : '—'; }
 
+  // ─── M6 C1/C2 DSR honesty labels ───────────────────────────────────────
+  // C1: with N=1 there is nothing to deflate (sr0 = 0) — the "deflated" Sharpe
+  // IS the plain PSR and every surface must say so instead of implying a
+  // deflation happened. Honors dsrIsPsr from the quant.js mirror stats AND
+  // dsr_is_psr from a report.py dashboard-JSON stats dict, when present.
+  function dsrIsPsr(st) {
+    return !!st && (st.dsrIsPsr === true || st.dsr_is_psr === true
+      || st.nTrials === 1 || st.n_trials === 1);
+  }
+  const DSR_PSR_LABEL = 'PSR (single trial — no deflation)';
+  // C2: appended wherever a stats dict admits the 1/n null-variance fallback fired.
+  function dsrVarCaveat(st) {
+    return st && (st.varFallback === true || st.var_fallback === true)
+      ? ' ⚠ null-variance fallback — deflation may be under- or over-stated.' : '';
+  }
+
   function showBanner(kind, msg) {
     const b = $('stale-banner');
     if (!b) return;
@@ -368,6 +384,17 @@
     // If the strategy/timeframe is too short to walk forward, we degrade HONESTLY — we never
     // fall back to the in-sample number (that would resurrect the very inconsistency we killed).
     const oosStats = oos && oos.oosStats ? oos.oosStats : null;
+    // M6 C1: at N=1 the headline must read 'PSR (single trial — no deflation)'.
+    // The label <span class="k"> wraps #stat-ntrials, so rebuild it in place
+    // (BEFORE the setText calls below, which re-target the rebuilt #stat-ntrials).
+    const statSingle = dsrIsPsr(oosStats);
+    const dsrName = statSingle ? DSR_PSR_LABEL : 'Deflated Sharpe';
+    const dsrLabelEl = $('stat-ntrials') ? $('stat-ntrials').parentElement : null;
+    if (dsrLabelEl) {
+      dsrLabelEl.innerHTML = statSingle
+        ? DSR_PSR_LABEL + ' (walk-forward OOS)'
+        : 'Deflated Sharpe (walk-forward OOS, N=<span id="stat-ntrials">—</span>)';
+    }
     setText('stat-sr-is', num(s.sharpe));                                  // full-history (in-sample) net Sharpe
     setText('stat-sr-oos', oosStats ? num(oosStats.sharpe) : '—');
     setText('stat-psr', oosStats ? pct(oosStats.probabilisticSharpe, 1) : '—');
@@ -377,12 +404,13 @@
     // Verdict line — the honest read, now OUT-OF-SAMPLE.
     const dsr = oosStats ? oosStats.deflatedSharpe : NaN;
     const nT = oosStats ? oosStats.nTrials : NaN;
+    const deflNote = statSingle ? 'a single trial — no deflation applied' : `deflating for ${nT} trials`;
     const beatsBH = s.sharpe > s.bhSharpe;
     let verdict, vclass;
     if (key === 'buy_and_hold') { verdict = 'This IS the baseline. Every other strategy must beat it net of cost, out-of-sample.'; vclass = 'neutral'; }
     else if (!oosStats) { verdict = 'Insufficient history to walk this strategy forward on the current timeframe — no out-of-sample deflated Sharpe to report (try the daily timeframe or a longer window). The in-sample number is deliberately NOT shown as a substitute.'; vclass = 'warn'; }
-    else if (Number.isFinite(dsr) && dsr > 0.95) { verdict = 'Deflated Sharpe > 0.95, walk-forward out-of-sample: survives the multiple-testing deflation OUT-OF-SAMPLE. Still verify live.'; vclass = 'good'; }
-    else { verdict = `Deflated Sharpe ${pct(dsr, 0)} ≤ 95%, walk-forward out-of-sample: NOT distinguishable from luck after deflating for ${nT} trials. ${beatsBH ? 'Beats B&H Sharpe in-sample but' : 'Does not beat B&H and'} treat as noise.`; vclass = 'warn'; }
+    else if (Number.isFinite(dsr) && dsr > 0.95) { verdict = `${dsrName} > 0.95, walk-forward out-of-sample: survives ${statSingle ? 'the significance bar (but N=1 means no multiple-testing deflation was applied)' : 'the multiple-testing deflation'} OUT-OF-SAMPLE. Still verify live.${dsrVarCaveat(oosStats)}`; vclass = 'good'; }
+    else { verdict = `${dsrName} ${pct(dsr, 0)} ≤ 95%, walk-forward out-of-sample: NOT distinguishable from luck after ${deflNote}. ${beatsBH ? 'Beats B&H Sharpe in-sample but' : 'Does not beat B&H and'} treat as noise.${dsrVarCaveat(oosStats)}`; vclass = 'warn'; }
     setText('verdict', verdict);
     const v = $('verdict'); if (v) v.className = 'verdict ' + vclass;
 
@@ -421,6 +449,14 @@
     const oosStats = oos && oos.oosStats ? oos.oosStats : null;
     const dsr = oosStats ? oosStats.deflatedSharpe : NaN;
     const nT = oosStats ? oosStats.nTrials : NaN;
+    // M6 C1: relabel the hero when N=1 (DSR ≡ PSR — nothing was deflated). The
+    // hero label wraps #kpi-ntrials, so rebuild it BEFORE the setText below.
+    const heroSingle = dsrIsPsr(oosStats);
+    const heroLabelEl = document.querySelector('.kpi-hero-label');
+    if (heroLabelEl) {
+      heroLabelEl.innerHTML = (heroSingle ? DSR_PSR_LABEL : 'Deflated Sharpe')
+        + ' <span class="kpi-hero-n">walk-forward OOS · N=<span id="kpi-ntrials">—</span></span>';
+    }
     setText('kpi-dsr', oosStats ? pct(dsr, 1) : '—');
     setText('kpi-ntrials', oosStats ? String(nT) : '—');
     const sig = Number.isFinite(dsr) && dsr > 0.95;
@@ -428,8 +464,8 @@
     setText('kpi-dsr-verdict', isBH
       ? 'The baseline. Every strategy is measured against this, net of cost, out-of-sample.'
       : !oosStats ? 'Insufficient history for a walk-forward out-of-sample test on this timeframe — no deflated Sharpe to report. The in-sample number is deliberately not shown.'
-      : sig ? 'Above 0.95 — survives the multiple-testing deflation OUT-OF-SAMPLE (walk-forward). Verify live before believing it.'
-            : `At/below 0.95 — not distinguishable from luck after deflating for ${nT} trials, walk-forward out-of-sample. Treat as noise, not alpha.`);
+      : sig ? `Above 0.95 — survives ${heroSingle ? 'the significance bar (single trial — no multiple-testing deflation applied)' : 'the multiple-testing deflation'} OUT-OF-SAMPLE (walk-forward). Verify live before believing it.${dsrVarCaveat(oosStats)}`
+            : `At/below 0.95 — not distinguishable from luck after ${heroSingle ? 'a single trial (no deflation applied)' : `deflating for ${nT} trials`}, walk-forward out-of-sample. Treat as noise, not alpha.${dsrVarCaveat(oosStats)}`);
     // Secondary KPIs — value sign-coloured, with the B&H delta arrow.
     const setV = (id, txt, cls) => { const e = $(id); if (e) { e.textContent = txt; e.classList.remove('pos', 'neg'); if (cls) e.classList.add(cls); } };
     const setD = (id, txt, dir) => { const e = $(id); if (e) { e.textContent = txt; e.classList.remove('up', 'down'); if (dir) e.classList.add(dir); } };
@@ -617,7 +653,11 @@
     const costBps = +($('cost-bps') ? $('cost-bps').value : 10);
     const slipBps = +($('slip-bps') ? $('slip-bps').value : 2);
     const keys = Object.keys(STRATEGIES);
-    const nTrials = keys.length;   // selection-count deflation (best of this many)
+    // Search-count N (best-of-this-many) — feeds MinBTL below. The walk-forward
+    // DSR itself deflates by N = folds with the EMPIRICAL fold-SR variance inside
+    // Q.walkForward (M6 C3: folds-as-trials, matching backtest.walk_forward and
+    // the pre-registered 0.95 kill bar on the folds-DSR).
+    const nTrials = keys.length;
     const rows = [];
     const oosCols = [];            // {key, ret, positions} for the PBO/CPCV matrix
     const lbMap = {};              // key → { oosStats, isSharpe } — single source for the Performance panel
@@ -635,7 +675,8 @@
         }
         // In-sample full-history (for the IS Sharpe contrast) + walk-forward OOS (the rank basis).
         const is = Q.backtest(positions, o.close, { costBps, slippageBps: slipBps, periodsPerYear: p });
-        const wf = Q.walkForward(positions, o.close, { folds: 5, costBps, slippageBps: slipBps, periodsPerYear: p, nTrials });
+        // No nTrials here: walkForward deflates by its own folds (M6 C3).
+        const wf = Q.walkForward(positions, o.close, { folds: 5, costBps, slippageBps: slipBps, periodsPerYear: p });
         // Tharp OOS expectancy / R-multiples on the held-out positions (vol-notional R, k=2σ;
         // RESEARCH-tharp-runlog.md). The OOS span is the trailing bars, so vol aligns by tail-slice.
         let expectancy = null;

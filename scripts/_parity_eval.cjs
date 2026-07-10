@@ -14,6 +14,7 @@ const Q = require(path.join(__dirname, '..', 'dashboard', 'quant.js'));
 
 const fx = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const { close, positions, ppy, volWindow, k, sr, n, skew, kurt, nTrials, varTrialsSr,
+        varN1, srMid, nMid, nTrialsMid, varMid, folds,
         costBps, slipBps, fwd, strike, iv, t } = fx;
 
 const last = (a) => a[a.length - 1];
@@ -26,6 +27,11 @@ const er = Q.expectancyReport(positions, close, vol, ppy, k);
 const g = Q.black76Greeks(fwd, strike, iv, t, 'C', 0);
 const bt = Q.backtest(positions, close, {
   costBps, slippageBps: slipBps, periodsPerYear: ppy, nTrials, varTrialsSr,
+});
+// Walk-forward fold-V probe (M6 C2/C3): JS walkForward vs Python backtest.walk_forward
+// on the same fixture series — empirical ddof=1 fold-SR variance, folds-deflated DSR.
+const wf = Q.walkForward(positions, close, {
+  folds, costBps, slippageBps: slipBps, periodsPerYear: ppy,
 });
 
 const out = {
@@ -54,6 +60,9 @@ const out = {
   hitRate: Q.hitRate(ret),
   psr: Q.probabilisticSharpe(sr, n, skew, kurt, 0),
   dsr: Q.deflatedSharpe(sr, n, skew, kurt, nTrials, varTrialsSr),
+  // M6 unsaturated DSR pins: N=1 special case (≡ PSR(0), any variance) + mid-range point
+  dsr_n1: Q.deflatedSharpe(sr, n, skew, kurt, 1, varN1),
+  dsr_mid: Q.deflatedSharpe(srMid, nMid, skew, kurt, nTrialsMid, varMid),
   minBTL: Q.minBacktestLength(nTrials),
   // Tharp eval layer (camelCase -> snake_case mapped on the Python side)
   er_nTrades: er.nTrades,
@@ -70,6 +79,11 @@ const out = {
   bt_sharpe: bt.stats.sharpe,
   bt_maxDrawdown: bt.stats.maxDrawdown,
   bt_deflatedSharpe: bt.stats.deflatedSharpe,
+  // walk-forward fold-V (M6 C2/C3) — mirrors wf["oos"] on the Python side
+  wf_oosSharpe: wf.oosStats ? wf.oosStats.sharpe : NaN,
+  wf_varTrialsSr: wf.oosStats ? wf.oosStats.varTrialsSr : NaN,
+  wf_deflatedSharpe: wf.oosStats ? wf.oosStats.deflatedSharpe : NaN,
+  wf_varFallback: wf.oosStats ? !!wf.oosStats.varFallback : null,
 };
 
 process.stdout.write(JSON.stringify(out));

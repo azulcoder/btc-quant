@@ -13,6 +13,32 @@ Conventions
 * Risk-free rate is assumed 0 unless a ``rf`` arg is provided (so Sharpe ==
   mean/std * sqrt(ppy)). Sharpe/Sortino are reported **annualized**.
 * All ratios degrade gracefully to ``np.nan`` on empty / zero-variance input.
+
+Deflated-Sharpe convention (M6, 2026-07-10 — Bailey & López de Prado 2014 as written)
+-------------------------------------------------------------------------------------
+* **C1** — ``DSR := PSR(sr0(N, V))`` with
+  ``sr0 = sqrt(V) * ((1 - γ) * Φ⁻¹(1 - 1/N) + γ * Φ⁻¹(1 - 1/(N·e)))``,
+  γ = 0.5772156649015329 (Euler–Mascheroni). ``N = 1 ⟹ sr0 = 0 ⟹ DSR ≡ PSR``
+  and must be **labeled** ``'PSR (single trial — no deflation)'`` wherever
+  displayed; the producing stats dict carries ``dsr_is_psr: true`` in that case
+  (the numeric key ``deflated_sharpe`` is unchanged for compatibility).
+* **C2** — ``V`` is the **empirical variance (ddof=1) of the per-period Sharpe
+  ratios across the N trials** whenever the trial SRs are in hand — honest in
+  both directions (no invented ``max(V, 1/n)`` floor). The ``1/n_periods`` null
+  fallback is permitted ONLY when trial SRs are genuinely unavailable (a bare
+  ``--n-trials`` declaration), and every such output carries the printed caveat
+  ``'null-variance fallback — deflation may be under- or over-stated'``
+  (stats carry ``var_fallback: true`` when it fired with ``n_trials > 1``).
+* **C3** — N by surface: the leaderboard (``scripts/compare.py``) uses
+  ``N =`` strategies ranked in that run with ``V =`` empirical var of their OOS
+  per-period SRs; ``backtest.walk_forward`` keeps ``N = n_splits``
+  (folds-as-trials, regime-stability reading) with ``V =`` empirical var of the
+  per-fold OOS per-period SRs; ``backtest.run`` / ``backtest.run_funding`` keep
+  the caller's ``n_trials`` and both store ``var_trials_sr`` in stats.
+* **C4** — PSR internals are unchanged (per-period SR, unbiased moments
+  ``bias=False``, non-excess kurtosis, denominator
+  ``sqrt(1 - skew·SR + (kurt - 1)/4 · SR²)``, ``sqrt(n - 1)`` scaling); the JS
+  mirror (``dashboard/quant.js``) carries identical semantics.
 """
 
 from __future__ import annotations

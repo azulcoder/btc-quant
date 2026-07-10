@@ -54,6 +54,18 @@ def build_fixture() -> dict:
         # fixed scalars for the PSR / DSR math (raw, non-excess kurtosis)
         "sr": 0.08, "n": 250, "skew": -0.3, "kurt": 4.0,
         "nTrials": 10, "varTrialsSr": 1.0,
+        # M6 UNSATURATED DSR pins. The nTrials=10/var=1.0 point above deflates the
+        # benchmark so hard that the CDF sits ~0-saturated in the tail — any two
+        # implementations agree there "for free", so it detects nothing. These two
+        # sit where a real formula drift would move the value:
+        #   dsr_n1  — N=1 must hit the sr0=0 special case (DSR ≡ PSR(0) ≈ 0.8934,
+        #             for ANY trial variance; pre-M6 the JS mirror returned 1.0
+        #             identically here via normPpf(0) = -Inf).
+        #   dsr_mid — N=5, V=0.001, sr=0.05/period, n=500 → ≈ 0.6073 (mid-range).
+        "varN1": 123.456,
+        "srMid": 0.05, "nMid": 500, "nTrialsMid": 5, "varMid": 0.001,
+        # walk-forward fold-V probe (M6 C2/C3): folds-as-trials on the fixture series
+        "folds": 5,
         "costBps": 10.0, "slipBps": 2.0,
         # one option contract for Black-76 greeks (~30d)
         "fwd": 65000.0, "strike": 66000.0, "iv": 0.55, "t": 30.0 / 365.0,
@@ -76,6 +88,16 @@ def python_side(fx: dict) -> dict:
                        periods_per_year=ppy, n_trials=fx["nTrials"],
                        var_trials_sr=fx["varTrialsSr"])
     st = run["stats"]
+
+    # Walk-forward fold-V probe (M6 C2/C3): the engine's own walk_forward must agree
+    # with the JS mirror on the empirical ddof=1 fold-SR variance, the fold-deflated
+    # DSR (N = n_splits), and the fallback flag — on the same fixture series.
+    wf = backtest.walk_forward(
+        lambda px: pd.Series(fx["positions"], index=px.index), close,
+        n_splits=fx["folds"], cost_bps=fx["costBps"], slippage_bps=fx["slipBps"],
+        periods_per_year=ppy,
+    )
+    wfo = wf["oos"]
 
     return {
         # numeric
@@ -104,6 +126,11 @@ def python_side(fx: dict) -> dict:
         "psr": float(risk.probabilistic_sharpe_ratio(fx["sr"], fx["n"], fx["skew"], fx["kurt"])),
         "dsr": float(risk.deflated_sharpe_ratio(fx["sr"], fx["n"], fx["skew"], fx["kurt"],
                                                 fx["nTrials"], fx["varTrialsSr"])),
+        # M6 unsaturated DSR pins (see build_fixture; also anchored to constants in PINS)
+        "dsr_n1": float(risk.deflated_sharpe_ratio(fx["sr"], fx["n"], fx["skew"], fx["kurt"],
+                                                   1, fx["varN1"])),
+        "dsr_mid": float(risk.deflated_sharpe_ratio(fx["srMid"], fx["nMid"], fx["skew"],
+                                                    fx["kurt"], fx["nTrialsMid"], fx["varMid"])),
         "minBTL": float(risk.min_backtest_length(fx["nTrials"])),
         # Tharp eval layer
         "er_nTrades": int(er["n_trades"]),
@@ -120,6 +147,11 @@ def python_side(fx: dict) -> dict:
         "bt_sharpe": float(st["sharpe"]),
         "bt_maxDrawdown": float(st["max_drawdown"]),
         "bt_deflatedSharpe": float(st["deflated_sharpe"]),
+        # walk-forward fold-V (M6 C2/C3) — engine walk_forward vs JS walkForward
+        "wf_oosSharpe": float(wfo["sharpe"]),
+        "wf_varTrialsSr": float(wfo["var_trials_sr"]),
+        "wf_deflatedSharpe": float(wfo["deflated_sharpe"]),
+        "wf_varFallback": bool(wfo["var_fallback"]),
     }
 
 
@@ -132,11 +164,23 @@ TOL = {
     "sma_last": 1e-12, "ema_last": 1e-12, "momentum_last": 1e-12,
     "zscore_last": 1e-12, "rsi_last": 1e-6, "maxDrawdown": 1e-12,
     "sharpe": 1e-12, "sortino": 1e-12, "cagr": 1e-12, "hitRate": 1e-12,
-    "psr": 1e-7, "dsr": 1e-7, "minBTL": 1e-9,
+    "psr": 1e-7, "dsr": 1e-7, "dsr_n1": 1e-7, "dsr_mid": 1e-7, "minBTL": 1e-9,
     "er_nTrades": 0, "er_expectancyR": 1e-12, "er_winRate": 1e-12,
     "er_payoffRatio": 1e-12, "er_sqn": 1e-12, "er_profitFactor": 1e-12,
     "b76_delta": 5e-7, "b76_gamma": 1e-9, "b76_vega": 1e-9,
     "bt_sharpe": 1e-9, "bt_maxDrawdown": 1e-12, "bt_deflatedSharpe": 1e-7,
+    "wf_oosSharpe": 1e-9, "wf_varTrialsSr": 1e-9, "wf_deflatedSharpe": 1e-7,
+    "wf_varFallback": 0,
+}
+
+# M6 anchor pins: the PYTHON side must sit on these constants (they were computed
+# once from the Bailey-LdP closed form and are pre-registered here) so the two
+# engines cannot drift TOGETHER and still "pass". dsr_n1 must additionally equal
+# the psr field exactly (C1 identity: N=1 ⟹ sr0 = 0 ⟹ DSR ≡ PSR(0)).
+PINS = {
+    "psr": (0.8933576314257702, 1e-7),
+    "dsr_n1": (0.8933576314257702, 1e-7),   # == psr; ANY trial variance at N=1
+    "dsr_mid": (0.6072585304659127, 1e-7),  # N=5, V=0.001, sr=0.05/period, n=500
 }
 
 
@@ -159,6 +203,19 @@ def main() -> int:
 
     fx = build_fixture()
     py = python_side(fx)
+
+    # Anchor the Python side to the pre-registered constants BEFORE comparing to
+    # JS: a joint drift of both engines must fail here, not slide through parity.
+    pin_fails = [name for name, (want, tol) in PINS.items()
+                 if not math.isclose(py[name], want, rel_tol=tol, abs_tol=tol)]
+    if py["dsr_n1"] != py["psr"]:
+        pin_fails.append("dsr_n1 != psr (C1 identity: N=1 ⟹ DSR ≡ PSR(0))")
+    if pin_fails:
+        for f in pin_fails:
+            print(f"PIN FAIL — {f}")
+        for k, (want, tol) in PINS.items():
+            print(f"  {k}: python={py[k]!r}  pinned={want!r}  tol={tol}")
+        return 1
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
         json.dump(fx, fh)

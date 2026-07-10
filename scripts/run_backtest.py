@@ -190,11 +190,18 @@ def _run_carry(args, positions, funding_rate) -> int:
     in_trade = float((pd.Series(positions).fillna(0.0) != 0.0).mean()) * 100.0
     print(f"\nbtc-quant carry (perp FUNDING accrual, delta-neutral) | {len(funding_rate)} "
           f"funding intervals @ {fpy}/yr | {in_trade:.0f}% time in-trade\n")
-    print(f"  funding Sharpe (ann.)   {_fmt(st.get('sharpe'))}")
-    print(f"  funding CAGR            {_fmt(st.get('cagr'), pct=True)}")
-    print(f"  Deflated Sharpe         {_fmt(st.get('deflated_sharpe'))}")
-    print(f"  max drawdown            {_fmt(st.get('max_drawdown'), pct=True)}")
-    print(f"  rebalances              {res['trades']}")
+    # M6 C1: N=1 ⟹ DSR ≡ PSR — label it honestly.
+    dsr_label = ("PSR (single trial — no deflation)" if st.get("dsr_is_psr")
+                 else "Deflated Sharpe")
+    lw = max(24, len(dsr_label) + 2)
+    print(f"  {'funding Sharpe (ann.)':<{lw}}{_fmt(st.get('sharpe'))}")
+    print(f"  {'funding CAGR':<{lw}}{_fmt(st.get('cagr'), pct=True)}")
+    print(f"  {dsr_label:<{lw}}{_fmt(st.get('deflated_sharpe'))}")
+    print(f"  {'max drawdown':<{lw}}{_fmt(st.get('max_drawdown'), pct=True)}")
+    print(f"  {'rebalances':<{lw}}{res['trades']}")
+    if st.get("var_fallback"):
+        print("  ⚠ null-variance fallback — deflation may be under- or over-stated "
+              "(trial SRs not supplied; V = 1/n_periods null).")
     print("  P&L = funding received on the short-perp leg (delta-neutral); NOT spot price returns.")
     print("  NOT FINANCIAL ADVICE - backtest != forecast.")
     return 0
@@ -268,10 +275,13 @@ def _print_stats_table(strat_name: str, strat_stats: dict, bh_stats: dict) -> No
     The headline is the net-of-cost **Deflated Sharpe**; buy-and-hold is always the
     reference column (DESIGN.md non-negotiable).
     """
+    # M6 C1: at N=1 the DSR is *identically* the PSR (sr0 = 0) — label it honestly.
+    strat_is_psr = bool(strat_stats.get("dsr_is_psr"))
+    dsr_label = "PSR (single trial — no deflation)" if strat_is_psr else "Deflated Sharpe *"
     rows = [
         ("CAGR", "cagr", True, 2),
         ("Sharpe (net, ann.)", "sharpe", False, 3),
-        ("Deflated Sharpe *", "deflated_sharpe", False, 3),
+        (dsr_label, "deflated_sharpe", False, 3),
         ("Prob. Sharpe (PSR)", "psr", False, 3),
         ("Sortino", "sortino", False, 3),
         ("Volatility (ann.)", "volatility", True, 2),
@@ -286,7 +296,7 @@ def _print_stats_table(strat_name: str, strat_stats: dict, bh_stats: dict) -> No
         ("Terminal equity (x)", "terminal_equity", False, 2),
     ]
 
-    label_w = 22
+    label_w = max(22, len(dsr_label) + 2)
     col_w = 16
     header = f"{'metric':<{label_w}}{strat_name:>{col_w}}{'buy_and_hold':>{col_w}}"
     print("=" * len(header))
@@ -306,11 +316,21 @@ def _print_stats_table(strat_name: str, strat_stats: dict, bh_stats: dict) -> No
     n_trials = strat_stats.get("n_trials", 1)
     cost = strat_stats.get("cost_bps", 0.0)
     slip = strat_stats.get("slippage_bps", 0.0)
-    print(
-        f"* Deflated Sharpe benchmarks the observed SR against the expected max of "
-        f"N={n_trials} skill-less trials (Bailey & Lopez de Prado 2014). "
-        f"Significant when > 0.95."
-    )
+    if strat_is_psr:
+        print(
+            "  N=1 trial: no selection to deflate, so the Deflated Sharpe is identically "
+            "the PSR (Bailey & Lopez de Prado 2014). Significant when > 0.95."
+        )
+    else:
+        print(
+            f"* Deflated Sharpe benchmarks the observed SR against the expected max of "
+            f"N={n_trials} skill-less trials (Bailey & Lopez de Prado 2014). "
+            f"Significant when > 0.95."
+        )
+    if strat_stats.get("var_fallback"):
+        # M6 C2: the 1/n null variance stood in for the (unavailable) trial SRs.
+        print("  ⚠ null-variance fallback — deflation may be under- or over-stated "
+              "(trial SRs not supplied; V = 1/n_periods null).")
     print(f"  Costs ON: {cost:.1f} bps fee + {slip:.1f} bps slippage per unit turnover (one-way).")
     print("  NOT FINANCIAL ADVICE - backtest != forecast.")
 
@@ -384,6 +404,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  OUT-OF-SAMPLE Sharpe {oos.get('sharpe', float('nan')):.2f} | "
                   f"OOS Deflated Sharpe {oos.get('deflated_sharpe', float('nan')):.2f} "
                   f"(folds as trials){' *' if oos.get('deflated_sharpe', 0) > 0.95 else ''}")
+            if oos.get("var_fallback"):
+                print("  ⚠ null-variance fallback — deflation may be under- or over-stated "
+                      "(<2 folds produced a finite Sharpe).")
             cp = backtest.cpcv(make_pos, prices, periods_per_year=ppy)
             if cp["n_paths"]:
                 print(f"  CPCV multi-path OOS Sharpe: median {cp['median_sharpe']:.2f} "

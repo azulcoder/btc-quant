@@ -49,6 +49,22 @@ def _fmt(v: object, pct: bool = False, dp: int = 2) -> str:
     return f"{f * 100:.{dp}f}%" if pct else f"{f:.{dp}f}"
 
 
+def _empirical_var_sr(srs: list) -> tuple[float, bool]:
+    """M6 C2/C3 leaderboard trial variance: the EMPIRICAL variance (ddof=1) of the
+    ranked strategies' OOS per-period Sharpe ratios (they are all in rows — computed,
+    not assumed). Returns ``(V, fallback)``; ``fallback=True`` (V=nan) only when fewer
+    than 2 finite SRs are in hand, in which case callers fall back to the 1/n_periods
+    null and MUST print the caveat 'null-variance fallback — deflation may be under-
+    or over-stated'."""
+    finite = [float(s) for s in srs
+              if isinstance(s, (int, float)) and math.isfinite(float(s))]
+    if len(finite) < 2:
+        return float("nan"), True
+    m = sum(finite) / len(finite)
+    v = sum((s - m) ** 2 for s in finite) / (len(finite) - 1)
+    return float(v), False
+
+
 def _funding_periods_per_year(index) -> int:
     """Funding intervals per year from the median stamp spacing (≈1095 for an 8h cadence).
     Carry stats must annualize on the funding clock, not the spot bar count (audit M3)."""
@@ -153,13 +169,11 @@ def main() -> int:
                                        slippage_bps=args.slippage_bps, periods_per_year=ppy)
             oos, is_ = wf["oos"], wf["is_"]
             oos_by_name[name] = wf["oos_returns"]
-            # OOS DSR deflated for N strategies (mirrors the selection-count deflation),
-            # computed on the held-out OOS returns rather than the in-sample fit.
+            # The leaderboard OOS DSR is deflated for N strategies (selection-count
+            # deflation) with V = the EMPIRICAL variance of the OOS per-period SRs
+            # across those N trials (M6 C2/C3) — computed after this loop, once every
+            # strategy's SR is in hand. Stash the PSR inputs here.
             np_ = int(oos.get("n_periods", 0))
-            oos_dsr = risk.deflated_sharpe_ratio(
-                oos.get("sharpe_per_period", float("nan")), np_,
-                oos.get("skew", float("nan")), oos.get("kurtosis", float("nan")),
-                n_trials, 1.0 / np_ if np_ > 0 else float("nan"))
             # Tharp OOS expectancy / R-multiple on the held-out positions (vol-notional R,
             # k=2σ — see RESEARCH-tharp-runlog.md). Evaluation layer, NOT a signal.
             op = wf["oos_positions"]
@@ -171,8 +185,10 @@ def main() -> int:
             ic_prof = ic.ic_profile(op, op_px, horizons=(1, 3, 5, 10), method="spearman")
             icir = ic.ic_ir(op, op_px, k=3, block=21, method="spearman")
             rows.append({"name": name, "oos_cagr": oos.get("cagr"), "oos_sharpe": oos.get("sharpe"),
-                         "is_sharpe": is_.get("sharpe", float("nan")), "oos_dsr": oos_dsr,
+                         "is_sharpe": is_.get("sharpe", float("nan")),
                          "oos_mdd": oos.get("max_drawdown"),
+                         "sr_period": oos.get("sharpe_per_period", float("nan")), "n_periods": np_,
+                         "skew": oos.get("skew", float("nan")), "kurt": oos.get("kurtosis", float("nan")),
                          "exp_r": er["expectancy_r"], "sqn": er["sqn"], "win": er["win_rate"], "ntr": er["n_trades"],
                          "ic": ic_prof, "icir_t": icir["t_stat"]})
             if name == "buy_and_hold":
@@ -181,6 +197,15 @@ def main() -> int:
             rows.append({"name": name, "err": str(exc)[:60]})
 
     ok = [r for r in rows if "err" not in r]
+    # ── Leaderboard DSR (M6 C1-C3): N = strategies ranked in this run; V = the
+    # empirical (ddof=1) variance of their OOS per-period Sharpe ratios. The
+    # 1/n_periods null fires ONLY if <2 finite SRs exist, with the printed caveat.
+    var_lb, var_fallback = _empirical_var_sr([r["sr_period"] for r in ok])
+    for r in ok:
+        np_ = int(r["n_periods"])
+        v = var_lb if not var_fallback else (1.0 / np_ if np_ > 0 else float("nan"))
+        r["oos_dsr"] = risk.deflated_sharpe_ratio(
+            r["sr_period"], np_, r["skew"], r["kurt"], n_trials, v)
     ok.sort(key=lambda r: (r["oos_dsr"] if isinstance(r["oos_dsr"], (int, float))
                            and not math.isnan(float(r["oos_dsr"])) else -9e9), reverse=True)
     bad = [r for r in rows if "err" in r]
@@ -198,7 +223,12 @@ def main() -> int:
     bars, span = len(df), f"{df.index[0].date()} -> {df.index[-1].date()}"
     print(f"\nbtc-quant OOS leaderboard | {args.symbol} {args.granularity} | {span} | {bars} bars | "
           f"{args.folds} walk-forward folds | cost {args.cost_bps}+{args.slippage_bps} bps/side | "
-          f"N={n_trials} trials\n")
+          f"N={n_trials} trials")
+    print(f"DSR convention (M6): leaderboard 'OOS DSR' uses N={n_trials} strategy trials, "
+          f"V = {_fmt(var_lb, dp=6)} empirical across N strategy trials (ddof=1 var of the OOS "
+          f"per-period SRs); research sweeps use folds-as-trials, labeled 'OOS DSR (folds)'."
+          + ("\n  ⚠ null-variance fallback — deflation may be under- or over-stated"
+             if var_fallback else "") + "\n")
     hdr = (f"{'strategy':<18}{'OOS CAGR':>10}{'OOS SR':>9}{'IS SR':>9}{'OOS DSR':>10}"
            f"{'OOS MaxDD':>11}  {'beats B&H':>9}{'OOS ExpR':>9}{'SQN':>7}{'Win%':>7}{'#T':>5}")
     print("=" * len(hdr)); print(hdr); print("-" * len(hdr))
@@ -329,7 +359,7 @@ def main() -> int:
             "+ pct_risk 2.5% ATR20":   strategies.percent_risk_size(base, df, risk_pct=0.025, atr_window=20),
         }
         print("\nTHARP SIZING SWEEP on ma_trend (walk-forward OOS; max-DD is the point, not terminal wealth):")
-        sh = f"  {'sizing':<24}{'OOS DSR':>9}{'OOS SR':>9}{'OOS MaxDD':>11}{'corr vs voltgt':>15}"
+        sh = f"  {'sizing':<24}{'OOS DSR (folds)':>16}{'OOS SR':>9}{'OOS MaxDD':>11}{'corr vs voltgt':>15}"
         print(sh); print("  " + "-" * (len(sh) - 2))
         vt = sized["+ vol_target 15%"]
         for label, pos in sized.items():
@@ -340,7 +370,7 @@ def main() -> int:
                 o = w["oos"]
                 dfc = pd.concat({"a": pos, "b": vt}, axis=1).dropna()
                 corr = float(dfc["a"].corr(dfc["b"])) if len(dfc) > 2 else float("nan")
-                print(f"  {label:<24}{_fmt(o.get('deflated_sharpe')):>9}{_fmt(o.get('sharpe')):>9}"
+                print(f"  {label:<24}{_fmt(o.get('deflated_sharpe')):>16}{_fmt(o.get('sharpe')):>9}"
                       f"{_fmt(o.get('max_drawdown'), True):>11}{_fmt(corr):>15}")
             except Exception as exc:  # noqa: BLE001
                 print(f"  {label:<24}  (skipped: {str(exc)[:40]})")
@@ -350,7 +380,7 @@ def main() -> int:
         print("─" * 78)
 
         # ---- Tier-B candidate sweep (research-only; NOT added to the board) -------------
-        print("\nTIER-B CANDIDATE SWEEP — pre-registered, kill = OOS DSR ≤ 0.95 "
+        print("\nTIER-B CANDIDATE SWEEP — pre-registered, kill = OOS DSR (folds) ≤ 0.95 "
               "(see RESEARCH-tharp-runlog.md). Expected: deflate.")
         cands = {
             "donchian 55/20": strategies.donchian_breakout(df, 55, 20),
@@ -359,7 +389,7 @@ def main() -> int:
                 strategies.ma_trend_filter(df, n=args.ma_n), df),
             "random_entry (control)": strategies.random_entry(df, seed=7),
         }
-        hdr = (f"  {'candidate':<24}{'OOS DSR':>9}{'OOS SR':>9}{'OOS MaxDD':>11}"
+        hdr = (f"  {'candidate':<24}{'OOS DSR (folds)':>16}{'OOS SR':>9}{'OOS MaxDD':>11}"
                f"{'ExpR':>8}{'SQN':>7}{'#T':>5}  verdict")
         print(hdr)
         print("  " + "-" * (len(hdr) - 2))
@@ -377,7 +407,7 @@ def main() -> int:
                 nt = er.get("n_trades", 0)
                 exp_s = _fmt(er.get("expectancy_r")) if nt >= 5 else "  n/a"
                 sqn_s = _fmt(er.get("sqn")) if nt >= 5 else " n/a"
-                print(f"  {label:<24}{_fmt(dsr):>9}{_fmt(o.get('sharpe')):>9}"
+                print(f"  {label:<24}{_fmt(dsr):>16}{_fmt(o.get('sharpe')):>9}"
                       f"{_fmt(o.get('max_drawdown'), True):>11}{exp_s:>8}{sqn_s:>7}{nt:>5}  {verdict}")
             except Exception as exc:  # noqa: BLE001
                 print(f"  {label:<24}  (skipped: {str(exc)[:40]})")

@@ -99,10 +99,10 @@ in the docstring so a quant can audit.
 ## 4. Verification suite (run before every commit)
 
 ```bash
-python3 -m pytest -q                      # 70 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
+python3 -m pytest -q                      # 157 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
 node --check dashboard/app.js             # JS syntax (also quant.js, charts.js, livewire.js, terminal-*.js)
 node dashboard/app.js --check             # ppy guard: ppy()=365 (1d)/8760 (1h); no literal-365 at an annualization site
-python3 scripts/check_parity.py           # JS↔Python mirror parity (35 shared formulas; the one rule)
+python3 scripts/check_parity.py           # JS↔Python mirror parity (41 shared fields; the one rule)
 node scripts/check_terminal.cjs           # orderflow terminal smoke: adapters+stores replayed over REAL captured WS frames (fixtures_ws.json)
 make verify-browser                       # L1: terminal.html?replay=1 in headless Chromium — render + zero-console-error gate + screenshots (needs playwright)
 make verify-wire                          # L2: ~45s live-wire invariants through the PRODUCTION adapters (exit 2 = offline, not a bug)
@@ -141,7 +141,7 @@ fallback). Pattern: serve on a port → `page.goto` → wait for `#leaderboard-b
 option` → click each `button[data-tab="…"]` → assert + screenshot.
 
 **JS↔Python parity check** (the discipline behind "the mirror agrees"): [scripts/check_parity.py](scripts/check_parity.py)
-builds a fixed deterministic fixture, computes 35 shared formulas in Python (`btcquant.*`) and in Node
+builds a fixed deterministic fixture, computes 41 shared fields in Python (`btcquant.*`) and in Node
 (`scripts/_parity_eval.cjs` → `require('dashboard/quant.js')`), and diffs them within the §5 tolerances.
 It is committed, wrapped by `tests/test_parity_mirror.py` (so `pytest` enforces it; skipped when Node is
 absent), and run as its own CI step. To extend the mirror, add the formula to both sides **and** a row to
@@ -151,11 +151,22 @@ was dividing the downside variance by the downside count instead of the full sam
 ## 5. Gotchas & numerical tolerances (hard-won — do not relitigate)
 
 - **JS↔Python is NOT bit-for-bit; it agrees to a known tolerance.** PBO is exact (`0.0`); MinBTL & the
-  Deflated/Probabilistic Sharpe agree to **~1e-8** (JS `normPpf` is Acklam's rational approx vs scipy
-  `norm.ppf`); Black-76 **gamma/vega are exact** (they use `normPdf`/`exp`) while **delta agrees to
-  ~7e-8** (JS `erf` approx); a full DSR computed from independently-estimated **skew/kurtosis agrees
-  to ~1e-5** (JS moment helpers vs scipy `bias=False`). State the *real* tolerance; don't claim
-  bit-for-bit.
+  Deflated/Probabilistic Sharpe agree to **~1e-7** (JS `normPpf` is Acklam's rational approx vs scipy
+  `norm.ppf`; the M6 unsaturated pins `dsr_n1`/`dsr_mid` and the walk-forward probes
+  `wf_oosSharpe`/`wf_varTrialsSr`/`wf_deflatedSharpe`/`wf_varFallback` sit at ~6e-8 worst); Black-76
+  **gamma/vega are exact** (they use `normPdf`/`exp`) while **delta agrees to ~7e-8** (JS `erf`
+  approx); a full DSR computed from independently-estimated **skew/kurtosis agrees to ~1e-5** (JS
+  moment helpers vs scipy `bias=False`). Overall parity worst today: **~1.6e-7** (on `rsi`, 41
+  fields). State the *real* tolerance; don't claim bit-for-bit.
+- **DSR convention (M6, binding — do not relitigate): V = the EMPIRICAL ddof=1 cross-trial variance
+  of the per-period SRs whenever the trial SRs are in hand; N = 1 ≡ PSR and is LABELED
+  `'PSR (single trial — no deflation)'` (`dsr_is_psr`/`dsrIsPsr` in stats).** Never reintroduce a
+  silent `1/n`-only variance (nor a `max(V, 1/n)` floor — the convention is honest in BOTH
+  directions); the `1/n` null is a *flagged fallback* (`var_fallback`) with a printed caveat, legal
+  only when trial SRs genuinely don't exist. Cautionary tale: the JS mirror fed N=1 through
+  `normPpf(1 − 1/1) = −Inf` and **returned DSR = 1.0 identically for ~8 months** — any strategy,
+  even a losing one, scored 100% significant at N=1 — and the then-saturated parity pins (both
+  tails ≈ 0) couldn't see it. Keep the unsaturated pins; full post-mortem in AUDIT_LOG.md (M6).
 - **Deribit ticker endpoint is `public/ticker`, NOT `get_ticker`** (the latter returns "Method not
   found"). `get_book_summary_by_currency` has **no greeks** and **`mark_iv` only** (no bid/ask IV) —
   hence client-side Black-76 (validated against `public/ticker` greeks).
@@ -198,9 +209,10 @@ was dividing the downside variance by the downside count instead of the full sam
 - **Part B strategies B1/B2/B3** — already evaluated and **rejected/logged** (B1 tsmom×vol-target = a
   literal duplicate of the board's vol-scaled tsmom, corr 1.00; B2 OU-pairs = "model, not edge"; B3
   carry = OOS-insufficient). Re-judge only through the harness on OOS DSR / PBO.
-- **DSR-convention unification** — the older single-strategy Performance code path historically used a
-  different Sharpe-variance convention than the leaderboard; the headline is unified, but a full audit
-  of every DSR call to one convention is a tidy follow-up.
+- ~~DSR-convention unification~~ — **done (M6, 2026-07-11)**: one binding convention (C1–C5) across
+  every Python and JS DSR call site — empirical cross-trial V, N by surface (leaderboard =
+  strategies, walk-forward = folds), N=1 labeled as PSR, flagged 1/n fallback only — with
+  unsaturated parity pins and hand-pinned tests. See AUDIT_LOG.md (M6) and the §5 gotcha.
 - **True bit-for-bit parity** — swap JS `normPpf` (Acklam) / `erf` for higher-order approximations to
   close the ~1e-8 / ~7e-8 gaps, if ever wanted.
 - ~~Commit the parity probes under `scripts/`/`tests/` for CI~~ — **done**: `scripts/check_parity.py` +

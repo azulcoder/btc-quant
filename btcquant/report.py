@@ -187,10 +187,13 @@ def tearsheet(
             return "n/a"
         return f"{v * 100:.{dp}f}%" if pct else f"{v:.{dp}f}"
 
+    # M6 C1: at N=1 the DSR is identically the PSR — the headline must say so.
+    dsr_label = ("PSR (single trial — no deflation)" if stats.get("dsr_is_psr")
+                 else "Deflated Sharpe")
     headline = (
         f"{title}   |   CAGR {_fmt('cagr', pct=True)}   "
         f"Sharpe(net) {_fmt('sharpe')}   "
-        f"Deflated Sharpe {_fmt('deflated_sharpe')}   "
+        f"{dsr_label} {_fmt('deflated_sharpe')}   "
         f"maxDD {_fmt('max_drawdown', pct=True)}   "
         f"trades {stats.get('trades', 'n/a')}"
     )
@@ -246,10 +249,18 @@ def to_dashboard_json(
     stats = dict(result.get("stats", {}))
 
     # JSON-sanitize the stats dict (NaN/inf -> null; numpy scalars -> python).
+    # Booleans pass through as JSON booleans (M6 C1: ``dsr_is_psr`` tells the
+    # dashboard to relabel the DSR 'PSR (single trial — no deflation)';
+    # ``var_fallback`` carries the C2 caveat flag). Lists of floats (e.g.
+    # walk-forward ``fold_srs``) are element-sanitized rather than dropped.
     clean_stats = {}
     for k, v in stats.items():
-        if isinstance(v, (int, np.integer)) and not isinstance(v, bool):
+        if isinstance(v, (bool, np.bool_)):
+            clean_stats[k] = bool(v)
+        elif isinstance(v, (int, np.integer)):
             clean_stats[k] = int(v)
+        elif isinstance(v, (list, tuple)):
+            clean_stats[k] = [_safe_float(x) for x in v]
         else:
             f = _safe_float(v)
             clean_stats[k] = f if f is not None else v if isinstance(v, str) else None
