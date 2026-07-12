@@ -30,7 +30,7 @@ import pandas as pd
 
 from . import features, risk
 
-__all__ = ["run", "walk_forward", "cpcv"]
+__all__ = ["run", "walk_forward", "cpcv", "LockBox"]
 
 
 # --------------------------------------------------------------------------- #
@@ -89,6 +89,7 @@ def run(
     periods_per_year: int = 365,
     n_trials: int = 1,
     var_trials_sr: Optional[float] = None,
+    extra_cost_turnover: Optional[pd.Series] = None,
 ) -> dict:
     """Vectorized backtest of a target-position series against a price series.
 
@@ -128,6 +129,18 @@ def run(
         Variance of the (per-period) Sharpe ratios across the ``n_trials``. If
         omitted with ``n_trials > 1`` it falls back to the sampling variance of a
         skill-less Sharpe, ``1 / n_periods`` (Bailey-LdP), which is conservative.
+    extra_cost_turnover : pd.Series, optional
+        An OPTIONAL extra per-bar turnover series (aligned by index; reindexed +
+        ``fillna(0)`` here) ADDED to the cost base ``|Δ position|`` before charging
+        ``cost_rate`` — i.e. ``costs = (turnover + extra) * cost_rate``. It exists
+        for multi-leg strategies whose per-bar traded notional is larger than the
+        headline position: e.g. the pairs trade holds a BTC leg AND a
+        ``beta``-scaled ETH hedge, so ``extra_cost_turnover =`` the ETH leg's
+        ``|Δ (beta_t·state_t)|`` (see :func:`btcquant.strategies.pairs_legs`) makes
+        the round-trip pay ~``(1+|beta|)`` (≈2×) instead of under-charging one leg.
+        **Default ``None`` ⇒ byte-identical to the single-leg cost for every
+        non-pairs strategy** (the addition path is never entered). This adds to the
+        COST ONLY; ``gross_returns`` is untouched (audit M2 scope rail).
 
     Returns
     -------
@@ -164,7 +177,29 @@ def run(
     turnover = turnover.rename("turnover")
 
     cost_rate = (float(cost_bps) + float(slippage_bps)) / 10_000.0
-    costs = turnover * cost_rate
+    # Cost base = single-leg |Δ position| turnover, PLUS any optional extra-leg
+    # turnover (audit M2: the pairs ETH hedge's |Δ(beta·state)|). None ⇒ cost_base
+    # IS turnover ⇒ byte-identical to the pre-M2 single-leg charge for non-pairs.
+    if extra_cost_turnover is not None:
+        # A pd.Series is aligned by INDEX (reindex+fillna(0) → non-overlapping bars cost
+        # nothing, NaN never reaches the charge). A raw positional array/list is aligned
+        # by POSITION and MUST match length exactly — otherwise pandas would silently
+        # broadcast a RangeIndex against the price index and drop the whole leg to zero
+        # (a silent under-charge). Fail LOUDLY instead (audit M2 adversarial).
+        if isinstance(extra_cost_turnover, pd.Series):
+            extra = extra_cost_turnover.astype("float64").reindex(turnover.index).fillna(0.0)
+        else:
+            arr = np.asarray(extra_cost_turnover, dtype="float64")
+            if arr.ndim != 1 or arr.shape[0] != len(turnover):
+                raise ValueError(
+                    f"extra_cost_turnover positional length {getattr(arr, 'shape', None)} "
+                    f"!= position/price length {len(turnover)}; pass an index-aligned "
+                    f"pd.Series or a 1-D array of matching length.")
+            extra = pd.Series(arr, index=turnover.index).fillna(0.0)
+        cost_base = (turnover + extra).rename("turnover")
+    else:
+        cost_base = turnover
+    costs = cost_base * cost_rate
 
     net_returns = (gross_returns.fillna(0.0) - costs).rename("returns")
     # Re-mask the warm-up bar (no traded position yet) as a true 0-return bar,
@@ -173,6 +208,9 @@ def run(
 
     equity = (1.0 + net_returns.fillna(0.0)).cumprod().rename("equity")
 
+    # `trades` counts BTC-leg state changes only (the ETH hedge rebalances every
+    # bar by construction, so counting it would be meaningless); when None this is
+    # the original single-leg count.
     trades = int((turnover > 0).sum())
 
     # --- Stats, incl. the headline Deflated Sharpe (selection-bias aware). ---
@@ -205,8 +243,10 @@ def run(
     # M6 C2: true iff the 1/n null-variance fallback actually deflated something.
     stats["var_fallback"] = bool(var_fallback)
     stats["trades"] = trades
-    stats["total_turnover"] = float(turnover.sum())
-    stats["avg_turnover"] = float(turnover.mean()) if len(turnover) else float("nan")
+    # total/avg turnover reflect the CHARGED cost base (BTC + any ETH-leg extra);
+    # equal to the single-leg turnover when extra_cost_turnover is None.
+    stats["total_turnover"] = float(cost_base.sum())
+    stats["avg_turnover"] = float(cost_base.mean()) if len(cost_base) else float("nan")
     stats["cost_bps"] = float(cost_bps)
     stats["slippage_bps"] = float(slippage_bps)
 
@@ -214,7 +254,7 @@ def run(
         "equity": equity,
         "returns": net_returns,
         "gross_returns": gross_returns,
-        "turnover": turnover,
+        "turnover": cost_base,
         "trades": trades,
         "stats": stats,
     }
@@ -321,6 +361,9 @@ def walk_forward(
     slippage_bps: float = 2.0,
     periods_per_year: int = 365,
     min_train: Optional[int] = None,
+    extra_cost_turnover: Optional[pd.Series] = None,
+    purge: int = 0,
+    embargo: int = 0,
 ) -> dict:
     """Anchored walk-forward: fit in-sample, trade the *next* out-of-sample block.
 
@@ -356,6 +399,33 @@ def walk_forward(
     min_train : int, optional
         Minimum number of bars in the first in-sample window. Defaults to one
         block. Folds whose OOS slice would be empty are skipped.
+    extra_cost_turnover : pd.Series, optional
+        A full-history extra-leg turnover series (audit M2: the pairs ETH-hedge
+        ``|Δ(beta·state)|``) threaded to each fold's :func:`run` for BOTH the IS and
+        OOS blocks. ``run`` reindexes it to each block's own index (slice-aligned),
+        so the fold edges / purge / embargo are untouched — this only enlarges the
+        cost base. ``None`` ⇒ single-leg cost, byte-identical to before.
+    purge : int, default 0
+        AFML ch.7 purge: drop from each fold's **in-sample** set the last ``purge``
+        bars adjacent to the test-block start — the bars whose forward label window
+        ``[t, t+purge)`` overlaps the held-out test block. **HONEST NOTE (audit M4).**
+        Every strategy shipped today is a *1-bar* causal label (``pos.shift(1)`` inside
+        :func:`run`), parameter-free, and its positions are generated **once on the full
+        series then sliced** — so no train row's label reaches into any test block and
+        purge is **not needed for today's numbers**. The machinery is here so the harness
+        is *correct-by-construction* for the k-step-label order-flow signals arriving when
+        MinBTL clears (the readiness meter). Because positions are global, purge cannot
+        change the *positions*; it is a **real index mask on the per-fold IS return
+        series** (masking the returns, not the prices, so :func:`run`'s ``pct_change`` is
+        never taken across a gap) — it changes the reported IS statistic only, never OOS.
+        **Default ``0`` ⇒ every IS/OOS number is byte-identical to the pre-M4 engine.**
+    embargo : int, default 0
+        AFML ch.7 embargo: after each test block, exclude the next ``embargo`` bars from
+        re-entering **later** folds' expanding IS/train windows (a gap the anchored window
+        skips). Implemented as a real position-index mask on the pooled per-fold IS return
+        series; like purge it touches the IS statistic only, never OOS, and — for the same
+        correct-by-construction reason above — is **not needed for today's 1-bar-label
+        numbers**. **Default ``0`` ⇒ no gap ⇒ byte-identical.**
 
     Returns
     -------
@@ -373,6 +443,10 @@ def walk_forward(
     n = len(px)
     if n_splits < 1:
         raise ValueError("n_splits must be >= 1.")
+    if int(purge) < 0 or int(embargo) < 0:
+        raise ValueError("purge and embargo must be >= 0.")
+    purge = int(purge)
+    embargo = int(embargo)
     if n < (n_splits + 1) * 2:
         raise ValueError(
             f"walk_forward needs >= {(n_splits + 1) * 2} bars for {n_splits} splits; "
@@ -388,6 +462,11 @@ def walk_forward(
     oos_pos_parts: list[pd.Series] = []
     is_returns_parts: list[pd.Series] = []
     folds: list[dict] = []
+    # Absolute px positions embargoed by ALREADY-scored test blocks: the union of
+    # ``[oos_end_j, oos_end_j + embargo)`` over prior folds j. A later fold's
+    # expanding IS window (positions ``[0, train_end)``) drops any bar in this set —
+    # the AFML ch.7 embargo gap. Empty (and inert) when ``embargo == 0``.
+    embargoed_positions: set[int] = set()
 
     for k in range(1, n_splits + 1):
         train_end = max(int(edges[k]), min_train)
@@ -405,6 +484,7 @@ def walk_forward(
         # In-sample block performance (the optimistic, fitted view).
         is_px = train_px
         is_pos = full_pos.reindex(is_px.index)
+        n_is = 0
         if is_px.notna().sum() >= 2 and is_pos.notna().any():
             is_res = run(
                 is_pos,
@@ -412,8 +492,23 @@ def walk_forward(
                 cost_bps=cost_bps,
                 slippage_bps=slippage_bps,
                 periods_per_year=periods_per_year,
+                extra_cost_turnover=extra_cost_turnover,
             )
-            is_returns_parts.append(is_res["returns"])
+            # Purge/embargo are index masks on the IS RETURN series (never the prices,
+            # so run()'s pct_change is never taken across a masked gap). is_ret rows sit
+            # at absolute px positions 0..train_end-1 (1:1), so both masks are exact.
+            is_ret = is_res["returns"]
+            if purge > 0 or embargo > 0:
+                keep = np.ones(len(is_ret), dtype=bool)
+                if purge > 0:                              # last `purge` bars adjacent to test start
+                    keep[max(0, len(is_ret) - purge):] = False
+                if embargo > 0 and embargoed_positions:    # gap after prior test blocks
+                    for pos_i in embargoed_positions:
+                        if 0 <= pos_i < len(keep):
+                            keep[pos_i] = False
+                is_ret = is_ret.iloc[keep]
+            n_is = int(len(is_ret))
+            is_returns_parts.append(is_ret)
 
         # Out-of-sample block (untouched by the fit's selection).
         oos_px = px.iloc[oos_start:oos_end]
@@ -424,6 +519,7 @@ def walk_forward(
             cost_bps=cost_bps,
             slippage_bps=slippage_bps,
             periods_per_year=periods_per_year,
+            extra_cost_turnover=extra_cost_turnover,
         )
         oos_returns_parts.append(oos_res["returns"])
         oos_pos_parts.append(oos_pos)
@@ -435,9 +531,14 @@ def walk_forward(
                 "oos_start": oos_px.index[0],
                 "oos_end": oos_px.index[-1],
                 "oos_sharpe": oos_res["stats"]["sharpe"],
+                "n_is": n_is,   # IS bars used AFTER purge/embargo masking (audit M4)
                 "stats": oos_res["stats"],
             }
         )
+
+        # Register this test block's embargo gap so LATER (larger) IS windows skip it.
+        if embargo > 0:
+            embargoed_positions.update(range(oos_end, min(oos_end + embargo, n)))
 
     if not oos_returns_parts:
         raise ValueError("walk_forward produced no out-of-sample folds.")
@@ -510,10 +611,12 @@ def cpcv(
     prices: pd.Series,
     n_blocks: int = 6,
     k_test: int = 2,
-    embargo: float = 0.01,
+    embargo_pct: float = 0.01,
     cost_bps: float = 10.0,
     slippage_bps: float = 2.0,
     periods_per_year: int = 365,
+    purge: int = 0,
+    embargo: int = 0,
 ) -> dict:
     """Combinatorial Purged CV — the *distribution* of OOS Sharpe across time-block
     subsets (López de Prado 2018; RESEARCH.md §3/§5: "report multi-path dispersion as
@@ -521,10 +624,9 @@ def cpcv(
 
     Split the bars into ``n_blocks`` contiguous groups; for each of the
     ``C(n_blocks, k_test)`` ways to pick ``k_test`` groups as the test set, evaluate
-    the strategy on **only those** bars (with a leading ``embargo`` trimmed from each
-    test group to purge signal leakage from the preceding bar), giving one OOS path
-    Sharpe. The spread of those paths is the honest headline: a strategy whose edge
-    lives in one regime shows a wide, often sign-flipping dispersion.
+    the strategy on **only those** bars, giving one OOS path Sharpe. The spread of
+    those paths is the honest headline: a strategy whose edge lives in one regime
+    shows a wide, often sign-flipping dispersion.
 
     These strategies are causal and parameter-free, so there is no per-fold *refit*;
     CPCV here measures **regime sensitivity** of the same position rule across
@@ -532,6 +634,26 @@ def cpcv(
     paths::
 
         {paths, n_paths, median_sharpe, mean_sharpe, p25, p75, iqr, min, max}
+
+    Purge / embargo (audit M4)
+    --------------------------
+    ``embargo_pct`` (default ``0.01``) is the LEGACY fractional leading-edge trim: each
+    test group drops its first ``max(1, round(embargo_pct·|block|))`` bars, which purges
+    signal leakage from the bar immediately preceding the block (the 1-bar causal shift).
+    This is the pre-M4 default behaviour and is preserved verbatim.
+
+    ``purge`` / ``embargo`` (int, default ``0/0``) add the AFML ch.7 purge+embargo *per
+    the same convention as* :func:`walk_forward`: ``purge`` drops that many additional
+    **leading** bars of each test group (whose forward label window overlaps the adjacent
+    preceding block), and ``embargo`` drops that many **trailing** bars (the gap re-entering
+    a following block). **HONEST NOTE:** because positions are generated **once globally**
+    and CPCV scores only the *test* paths (no per-combo refit of a train set), the real
+    train-side purge/embargo would leave the test-path Sharpe unchanged — so the *observable*
+    half of purge/embargo here is the removal of test-block bars **adjacent to the train
+    blocks** on either side (leading = purge, trailing = embargo). For today's 1-bar causal
+    labels this is not needed; the machinery is correct-by-construction for the future
+    k-step-label signals. **Default ``purge=embargo=0`` ⇒ only the ``embargo_pct`` trim
+    runs ⇒ every path Sharpe is byte-identical to the pre-M4 engine.**
 
     Reference: López de Prado (2018), *Advances in Financial Machine Learning*, ch. 7
     (purged CV / embargo) & ch. 12 (CPCV).
@@ -544,6 +666,10 @@ def cpcv(
     px = pd.Series(prices, dtype="float64")
     px = px[~px.index.duplicated(keep="first")].sort_index().dropna()
     n = len(px)
+    if int(purge) < 0 or int(embargo) < 0:
+        raise ValueError("purge and embargo must be >= 0.")
+    purge = int(purge)
+    embargo = int(embargo)
     if n_blocks < 2 or k_test < 1 or k_test >= n_blocks or n < (n_blocks + 1) * 2:
         return nan_out
 
@@ -563,8 +689,15 @@ def cpcv(
         parts = []
         for bi in combo:
             blk = blocks[bi]
-            drop = min(blk.size - 1, max(1, int(round(embargo * blk.size)))) if blk.size > 1 else 0
-            parts.append(blk[drop:])
+            # Legacy fractional leading trim (embargo_pct) — the pre-M4 default.
+            frac_drop = (min(blk.size - 1, max(1, int(round(embargo_pct * blk.size))))
+                         if blk.size > 1 else 0)
+            # AFML int purge (leading) + embargo (trailing). At 0/0 this is a no-op ⇒
+            # the slice is exactly the legacy blk[frac_drop:].
+            lead = frac_drop + purge
+            trail = embargo
+            hi = max(lead, blk.size - trail)
+            parts.append(blk[lead:hi])
         idx = np.concatenate(parts) if parts else np.array([], dtype=int)
         if idx.size < 2:
             continue
@@ -583,3 +716,71 @@ def cpcv(
         "p25": p25, "p75": p75, "iqr": float(p75 - p25),
         "min": float(np.min(arr)), "max": float(np.max(arr)),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Lockbox — an evaluate-once OOS ledger (audit M4)                             #
+# --------------------------------------------------------------------------- #
+class LockBox:
+    """Evaluate-once ledger for out-of-sample slices (López de Prado, AFML §11.6 —
+    the *lockbox* / one-shot final test).
+
+    The deepest overfitting leak is not intra-bar look-ahead but **repeated peeking**:
+    scoring the same held-out slice again and again while tuning until it flatters the
+    strategy. A lockbox is the discipline antidote — a final OOS slice must be scored
+    **exactly once**, and any second scoring is a methodological error that should be
+    *detectable*, not silent.
+
+    This is a lightweight, **opt-in** helper: it records each scored ``(start, end)``
+    slice and can assert a given slice was scored exactly once. Nothing in the harness
+    is forced to use it (``compare.py`` / ``walk_forward`` / :func:`cpcv` are untouched);
+    it exists so a caller running a genuine final holdout can *prove* the one-shot
+    property. Slice endpoints are used verbatim as the ledger key (any hashable —
+    ``pd.Timestamp``, ``int`` bar position, ISO string), so equal keys collide exactly.
+
+    Example
+    -------
+    >>> lb = LockBox()
+    >>> lb.record("2025-01-01", "2025-06-30")   # score the final holdout once
+    1
+    >>> lb.assert_scored_once("2025-01-01", "2025-06-30")   # ok, silent
+    >>> lb.record("2025-01-01", "2025-06-30")   # a second peek...
+    2
+    >>> lb.assert_scored_once("2025-01-01", "2025-06-30")   # ...is now detectable
+    Traceback (most recent call last):
+        ...
+    AssertionError: lockbox: slice ('2025-01-01', '2025-06-30') was scored 2 times ...
+    """
+
+    def __init__(self) -> None:
+        self._ledger: dict[tuple, int] = {}
+
+    def record(self, start, end) -> int:
+        """Record one scoring of the OOS slice ``(start, end)``; return its running
+        count (1 on the first, ``2`` on a double-score, …)."""
+        key = (start, end)
+        self._ledger[key] = self._ledger.get(key, 0) + 1
+        return self._ledger[key]
+
+    def count(self, start, end) -> int:
+        """How many times ``(start, end)`` has been scored (0 if never)."""
+        return self._ledger.get((start, end), 0)
+
+    def was_scored(self, start, end) -> bool:
+        """True iff ``(start, end)`` has been scored at least once."""
+        return self.count(start, end) > 0
+
+    def assert_scored_once(self, start, end) -> None:
+        """Raise :class:`AssertionError` unless ``(start, end)`` was scored **exactly
+        once** — the lockbox contract. A count of 0 (never scored) or ≥2 (double-peek)
+        both fail, so a forgotten *and* a repeated evaluation are each caught."""
+        c = self.count(start, end)
+        if c != 1:
+            raise AssertionError(
+                f"lockbox: slice {(start, end)!r} was scored {c} times "
+                f"(expected exactly 1 — a final OOS holdout must be evaluated once)."
+            )
+
+    def slices(self) -> dict:
+        """A read-only snapshot ``{(start, end): count}`` of the ledger."""
+        return dict(self._ledger)

@@ -99,10 +99,10 @@ in the docstring so a quant can audit.
 ## 4. Verification suite (run before every commit)
 
 ```bash
-python3 -m pytest -q                      # 157 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
+python3 -m pytest -q                      # 173 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
 node --check dashboard/app.js             # JS syntax (also quant.js, charts.js, livewire.js, terminal-*.js)
 node dashboard/app.js --check             # ppy guard: ppy()=365 (1d)/8760 (1h); no literal-365 at an annualization site
-python3 scripts/check_parity.py           # JS↔Python mirror parity (41 shared fields; the one rule)
+python3 scripts/check_parity.py           # JS↔Python mirror parity (55 shared fields; the one rule)
 node scripts/check_terminal.cjs           # orderflow terminal smoke: adapters+stores replayed over REAL captured WS frames (fixtures_ws.json)
 make verify-browser                       # L1: terminal.html?replay=1 in headless Chromium — render + zero-console-error gate + screenshots (needs playwright)
 make verify-wire                          # L2: ~45s live-wire invariants through the PRODUCTION adapters (exit 2 = offline, not a bug)
@@ -156,8 +156,9 @@ was dividing the downside variance by the downside count instead of the full sam
   `wf_oosSharpe`/`wf_varTrialsSr`/`wf_deflatedSharpe`/`wf_varFallback` sit at ~6e-8 worst); Black-76
   **gamma/vega are exact** (they use `normPdf`/`exp`) while **delta agrees to ~7e-8** (JS `erf`
   approx); a full DSR computed from independently-estimated **skew/kurtosis agrees to ~1e-5** (JS
-  moment helpers vs scipy `bias=False`). Overall parity worst today: **~1.6e-7** (on `rsi`, 41
-  fields). State the *real* tolerance; don't claim bit-for-bit.
+  moment helpers vs scipy `bias=False`). Overall parity worst today: **~1.6e-7** (on `rsi`, 55
+  fields — +5 M2 two-leg pairs cost, +9 M4 CPCV dispersion). State the *real* tolerance; don't claim
+  bit-for-bit.
 - **DSR convention (M6, binding — do not relitigate): V = the EMPIRICAL ddof=1 cross-trial variance
   of the per-period SRs whenever the trial SRs are in hand; N = 1 ≡ PSR and is LABELED
   `'PSR (single trial — no deflation)'` (`dsr_is_psr`/`dsrIsPsr` in stats).** Never reintroduce a
@@ -203,6 +204,36 @@ was dividing the downside variance by the downside count instead of the full sam
   CSS `!important` on `.tv-embed` (don't assume; read the rendered DOM).
 - **Stats grids:** explicit column counts that divide the cell count (auto-fit wraps to a ragged
   half-row of empty cells at wide widths).
+- **`bfill()` on a later-listed leg is a LOOK-BACK LEAK — ffill only (audit M1).** ETH listed after
+  BTC; the old pairs alignment `eth.reindex(btc.index).ffill().bfill()` back-stamped ETH's first
+  observed price into the pre-listing region, fabricating a spread there. Align with **ffill only** so
+  the leading pre-ETH bars stay `NaN` and the index-intersection drops them. Same trap the M1-carry
+  fix closed on the funding clock. Never add a `.bfill()` to a price/return series that feeds a signal.
+- **Pairs cost is TWO legs (audit M2).** A pairs trade holds a BTC leg AND a `beta`-scaled ETH hedge
+  that rebalances every bar. Charge the total-variation turnover of BOTH: `|Δ position|` (BTC) +
+  `|Δ(beta·state)|` (ETH), via `backtest.run(..., extra_cost_turnover=)` (default `None` ⇒
+  byte-identical single-leg cost for every non-pairs strategy). `strategies._hedge_beta` is the ONE
+  source of `beta` (no duplicated OLS); `pairs_legs → (state, beta)` exposes it. `extra_cost_turnover`
+  aligns a **`pd.Series` by index**, a **raw array by position (exact length)**, and **raises loudly**
+  on a length mismatch — never pass a RangeIndex array against a DatetimeIndex (it would silently zero
+  the leg). SCOPE: P&L stays single-leg directional — netting the ETH leg's price move is the open **M9**
+  finding.
+- **Purge/embargo are default-OFF machinery for k-step labels (audit M4).** `walk_forward`/`cpcv`
+  take `purge`/`embargo` as index masks on the per-fold **IN-SAMPLE** return series ONLY — **OOS is
+  invariant**, and `purge=embargo=0` reproduces the pre-M4 engine **bit-for-bit** (pinned to golden
+  constants). Today's strategies are all 1-bar causal labels generated once then sliced, so no train
+  label reaches a test block and purge/embargo are not needed for today's numbers; they ship dormant so
+  the harness is correct-by-construction for the k-step-label order-flow signals arriving when MinBTL
+  clears. `cpcv`'s legacy float trim is now `embargo_pct` (don't confuse with the int `embargo`).
+  `backtest.LockBox` is the evaluate-once ledger (`assert_scored_once` catches a double-peek).
+- **Forward-IC significance is Newey-West / HAC at lag k-1 (audit M5), NOT a fixed band.** A k-bar
+  forward IC is scored on overlapping windows (consecutive pairs share k-1 forward bars ⇒ MA(k-1)
+  autocorrelation), so `ic.ic_significance` fits `fwd_rank ~ const + signal_rank` by OLS with
+  `cov_type="HAC"`, `maxlags=max(k-1,0)`. The rank-slope IS the Spearman IC; its HAC t/p test
+  `H0: IC=0` exactly. The old crude `|IC| > 1.96·√(k/n)` band is gone. HAC makes significance strictly
+  HARDER than a naive OLS SE (wider SE, smaller |t|), so a NONE-significant run-log verdict can only
+  strengthen. `compare.py` prints `NW t(k=3)`/`NW p(k=3)` (overlap-corrected) beside the retained
+  `IC-IR t(k=3)` (non-overlapping block). IC is an eval layer — no quant.js mirror, not in parity.
 
 ## 6. Roadmap / deferred (pre-registered — do NOT start without an explicit greenlight)
 
@@ -213,6 +244,19 @@ was dividing the downside variance by the downside count instead of the full sam
   every Python and JS DSR call site — empirical cross-trial V, N by surface (leaderboard =
   strategies, walk-forward = folds), N=1 labeled as PSR, flagged 1/n fallback only — with
   unsaturated parity pins and hand-pinned tests. See AUDIT_LOG.md (M6) and the §5 gotcha.
+- ~~M1-pairs bfill leak · M2 two-leg pairs cost · M4 purge/embargo/lockbox · M5 IC HAC~~ — **done
+  (2026-07-12)**: M1-pairs dropped the `.bfill()` (ffill-only, no back-stamped pre-listing price);
+  M2 charges the ETH hedge leg via `extra_cost_turnover` (single-source `_hedge_beta`/`pairs_legs`,
+  +5 parity fields, pairs DSR moved down, P&L still single-leg); M4 added default-OFF, byte-identical
+  purge/embargo + `LockBox` (+9 CPCV parity fields); M5 replaced the crude IC band with Newey-West
+  HAC at lag k-1 (`compare.py` prints NW t/p — board strategies still show NO significant OOS lead,
+  now stronger). See AUDIT_LOG.md (2026-07-12) and the four §5 gotchas.
+- **M9 — delta-neutral pairs P&L (NEW, needs greenlight)**: M2 charged both legs' *cost* but the
+  pairs backtest P&L is still single-leg directional (`traded_pos · BTC_ret`); a genuinely
+  delta-neutral pairs return should net the ETH leg's price move (`−beta·state · ETH_ret`), which
+  changes the pairs *return* series, not just cost. Deliberately deferred (M2 scope rail); do not
+  start without a before/after + sign-off. Also still open: M7 (app.js `--check` in CI), M8 (options
+  parity).
 - **True bit-for-bit parity** — swap JS `normPpf` (Acklam) / `erf` for higher-order approximations to
   close the ~1e-8 / ~7e-8 gaps, if ever wanted.
 - ~~Commit the parity probes under `scripts/`/`tests/` for CI~~ — **done**: `scripts/check_parity.py` +

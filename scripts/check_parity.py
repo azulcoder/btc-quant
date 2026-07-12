@@ -28,7 +28,7 @@ import pandas as pd
 from scipy import stats as sps
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from btcquant import backtest, features, risk  # noqa: E402
+from btcquant import backtest, features, risk, strategies  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EVAL_CJS = os.path.join(HERE, "_parity_eval.cjs")
@@ -66,10 +66,31 @@ def build_fixture() -> dict:
         "srMid": 0.05, "nMid": 500, "nTrialsMid": 5, "varMid": 0.001,
         # walk-forward fold-V probe (M6 C2/C3): folds-as-trials on the fixture series
         "folds": 5,
+        # M4 CPCV probe: cpcv was ABSENT from the harness before M4. Pin the multi-path
+        # dispersion + the legacy embargo_pct leading-trim formula, AND a run that
+        # exercises the new int purge/embargo edge-trims so a Python↔JS drift is caught.
+        "cpcvBlocks": 6, "cpcvKTest": 2, "cpcvPurge": 1, "cpcvEmbargo": 2,
         "costBps": 10.0, "slipBps": 2.0,
         # one option contract for Black-76 greeks (~30d)
         "fwd": 65000.0, "strike": 66000.0, "iv": 0.55, "t": 30.0 / 365.0,
+        **_pairs_fixture(),
     }
+
+
+def _pairs_fixture() -> dict:
+    """M2 pairs two-leg-cost probe: a fixed synthetic (btc, eth) with a mean-reverting
+    log-spread (so the z-score fades actually trade), for a Python-vs-JS parity pin on
+    the ETH-leg turnover |Δ(beta·state)| and the two-leg cost base. This is the pairs
+    path that was UNPINNED before M2 — a real mirror gap."""
+    rng = np.random.default_rng(19)
+    npair = 180
+    btc = 30000.0 * np.cumprod(1.0 + 0.01 * rng.standard_normal(npair))
+    sp = np.zeros(npair)
+    noise = 0.02 * rng.standard_normal(npair)
+    for i in range(1, npair):          # AR(1) φ=0.7 stationary spread → reversion trades
+        sp[i] = 0.7 * sp[i - 1] + noise[i]
+    eth = btc * 0.07 * np.exp(sp)
+    return {"btcPairs": btc.tolist(), "ethPairs": eth.tolist(), "pairsWindow": 30}
 
 
 def python_side(fx: dict) -> dict:
@@ -92,12 +113,34 @@ def python_side(fx: dict) -> dict:
     # Walk-forward fold-V probe (M6 C2/C3): the engine's own walk_forward must agree
     # with the JS mirror on the empirical ddof=1 fold-SR variance, the fold-deflated
     # DSR (N = n_splits), and the fallback flag — on the same fixture series.
+    # M4: thread purge=0/embargo=0 EXPLICITLY (the audit convention default) — the OOS
+    # headline must be byte-identical to the no-arg call, mirrored on the JS side.
     wf = backtest.walk_forward(
         lambda px: pd.Series(fx["positions"], index=px.index), close,
         n_splits=fx["folds"], cost_bps=fx["costBps"], slippage_bps=fx["slipBps"],
-        periods_per_year=ppy,
+        periods_per_year=ppy, purge=0, embargo=0,
     )
     wfo = wf["oos"]
+
+    # M4 CPCV probe. Default (embargo_pct=0.01 legacy trim) + an int purge/embargo run.
+    cpcv_pos = lambda p: pd.Series(fx["positions"], index=p.index)
+    cp = backtest.cpcv(cpcv_pos, close, n_blocks=fx["cpcvBlocks"], k_test=fx["cpcvKTest"],
+                       cost_bps=fx["costBps"], slippage_bps=fx["slipBps"], periods_per_year=ppy)
+    cp_pe = backtest.cpcv(cpcv_pos, close, n_blocks=fx["cpcvBlocks"], k_test=fx["cpcvKTest"],
+                          cost_bps=fx["costBps"], slippage_bps=fx["slipBps"], periods_per_year=ppy,
+                          purge=fx["cpcvPurge"], embargo=fx["cpcvEmbargo"])
+
+    # M2 pairs two-leg-cost probe: pairs_legs is the ONE source of (state, beta_t); the
+    # ETH-leg turnover |Δ(beta·state)| is fed to run() as extra_cost_turnover. Pin both
+    # the ETH-leg turnover and the two-leg cost base vs the JS mirror.
+    btc_p = pd.Series(fx["btcPairs"])
+    eth_p = pd.Series(fx["ethPairs"])
+    pos_p, beta_p = strategies.pairs_legs(btc_p, eth_p, window=fx["pairsWindow"], model="coint")
+    eth_turn = (beta_p * pos_p).diff().abs()
+    pr_none = backtest.run(pos_p, btc_p, cost_bps=fx["costBps"], slippage_bps=fx["slipBps"],
+                           periods_per_year=ppy)
+    pr_ext = backtest.run(pos_p, btc_p, cost_bps=fx["costBps"], slippage_bps=fx["slipBps"],
+                          periods_per_year=ppy, extra_cost_turnover=eth_turn)
 
     return {
         # numeric
@@ -152,6 +195,23 @@ def python_side(fx: dict) -> dict:
         "wf_varTrialsSr": float(wfo["var_trials_sr"]),
         "wf_deflatedSharpe": float(wfo["deflated_sharpe"]),
         "wf_varFallback": bool(wfo["var_fallback"]),
+        # M4 CPCV multi-path dispersion (Python source-of-truth vs quant.js mirror)
+        "cpcv_nPaths": int(cp["n_paths"]),
+        "cpcv_median": float(cp["median_sharpe"]),
+        "cpcv_p25": float(cp["p25"]),
+        "cpcv_p75": float(cp["p75"]),
+        "cpcv_iqr": float(cp["iqr"]),
+        "cpcv_min": float(cp["min"]),
+        "cpcv_max": float(cp["max"]),
+        # M4 CPCV with int purge=1/embargo=2 edge-trims (new-param mirror)
+        "cpcv_pe_median": float(cp_pe["median_sharpe"]),
+        "cpcv_pe_nPaths": int(cp_pe["n_paths"]),
+        # M2 pairs two-leg cost (Python source-of-truth vs quant.js mirror)
+        "pairs_beta_last": float(beta_p.iloc[-1]),
+        "pairs_ethTurnover": float(eth_turn.fillna(0.0).sum()),
+        "pairs_btcTurnover": float(pr_none["stats"]["total_turnover"]),
+        "pairs_totalTurnover": float(pr_ext["stats"]["total_turnover"]),
+        "pairs_netEquity": float(pr_ext["equity"].iloc[-1]),
     }
 
 
@@ -171,6 +231,11 @@ TOL = {
     "bt_sharpe": 1e-9, "bt_maxDrawdown": 1e-12, "bt_deflatedSharpe": 1e-7,
     "wf_oosSharpe": 1e-9, "wf_varTrialsSr": 1e-9, "wf_deflatedSharpe": 1e-7,
     "wf_varFallback": 0,
+    "cpcv_nPaths": 0, "cpcv_median": 1e-9, "cpcv_p25": 1e-9, "cpcv_p75": 1e-9,
+    "cpcv_iqr": 1e-9, "cpcv_min": 1e-9, "cpcv_max": 1e-9,
+    "cpcv_pe_median": 1e-9, "cpcv_pe_nPaths": 0,
+    "pairs_beta_last": 1e-9, "pairs_ethTurnover": 1e-7, "pairs_btcTurnover": 1e-7,
+    "pairs_totalTurnover": 1e-7, "pairs_netEquity": 1e-7,
 }
 
 # M6 anchor pins: the PYTHON side must sit on these constants (they were computed

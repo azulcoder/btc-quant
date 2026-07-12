@@ -103,7 +103,12 @@ def _make_positions_fn(name: str, args: argparse.Namespace, ppy: int, eth_close)
     if name == "pairs_coint":
         if eth_close is None:
             raise ValueError("no ETH data for pairs")
-        return lambda px: strategies.pairs_coint(px, eth_close.reindex(px.index).ffill().bfill())
+        # no bfill, audit M1-pairs — mirrors the carry fix. A trailing .bfill() would
+        # back-stamp ETH's first observed price into the leading region where ETH did
+        # not yet trade, fabricating a spread there (a look-back leak). ffill only ⇒
+        # the leading pre-ETH bars stay NaN and pairs_coint (index-intersection) drops
+        # them; JS is unaffected (aligns by slice(-m), never bfills).
+        return lambda px: strategies.pairs_coint(px, eth_close.reindex(px.index).ffill())
     # ── Part B research candidates (pre-registered; not on the public board) ──
     if name == "tsmom_dir":   # B1 baseline: raw directional momentum, NO sizing
         return lambda px: strategies.tsmom(pd.DataFrame({"close": px}), lookback=args.lookback,
@@ -117,7 +122,8 @@ def _make_positions_fn(name: str, args: argparse.Namespace, ppy: int, eth_close)
     if name == "pairs_ou":   # B2 candidate: OU-σ_eq normalizer instead of empirical z
         if eth_close is None:
             raise ValueError("no ETH data for pairs_ou")
-        return lambda px: strategies.pairs_ou(px, eth_close.reindex(px.index).ffill().bfill())
+        # no bfill, audit M1-pairs — see pairs_coint above (leading pre-ETH bars stay NaN).
+        return lambda px: strategies.pairs_ou(px, eth_close.reindex(px.index).ffill())
     raise ValueError(name)
 
 
@@ -158,6 +164,23 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         eth_close = None
 
+    def _pairs_eth_leg_turnover(name: str) -> pd.Series | None:
+        """ETH-leg turnover for a pairs strategy = total variation of the hedge
+        notional |Δ(beta_t · state_t)| (audit M2). ``strategies.pairs_legs`` is the
+        ONE source of both the BTC-leg state and the per-bar beta_t, so the ETH-leg
+        cost is charged on the same hedge ratio the signal was built from. This is a
+        COST-ONLY series (fed to backtest.run as extra_cost_turnover); the P&L stays
+        single-leg directional (M2 scope rail — the delta-neutral-P&L observation is
+        the separate M9 finding). Non-pairs ⇒ None ⇒ single-leg cost unchanged."""
+        if name not in ("pairs_coint", "pairs_ou") or eth_close is None:
+            return None
+        eth_aligned = eth_close.reindex(close.index).ffill()   # no bfill (audit M1)
+        model = "ou" if name == "pairs_ou" else "coint"
+        pos_full, beta_full = strategies.pairs_legs(close, eth_aligned, model=model)
+        # |Δ(beta·state)| captures discrete entries/exits AND continuous rolling-beta
+        # rebalancing of the hedge each bar (state=0 ⇒ 0 notional ⇒ no cost).
+        return (beta_full * pos_full).diff().abs()
+
     strat_list = RESEARCH_STRATS if args.research else SPOT_STRATS
     n_trials = len(strat_list)   # selection-count deflation (best of this many)
     oos_vol = features.realized_vol(features.simple_returns(close), 30, ppy)  # for Tharp R-multiples
@@ -166,7 +189,8 @@ def main() -> int:
         try:
             wf = backtest.walk_forward(_make_positions_fn(name, args, ppy, eth_close), close,
                                        n_splits=args.folds, cost_bps=args.cost_bps,
-                                       slippage_bps=args.slippage_bps, periods_per_year=ppy)
+                                       slippage_bps=args.slippage_bps, periods_per_year=ppy,
+                                       extra_cost_turnover=_pairs_eth_leg_turnover(name))
             oos, is_ = wf["oos"], wf["is_"]
             oos_by_name[name] = wf["oos_returns"]
             # The leaderboard OOS DSR is deflated for N strategies (selection-count
@@ -260,10 +284,15 @@ def main() -> int:
           + ("   ⚠ UNDER-POWERED: history shorter than MinBTL" if short else "   (ok)"))
 
     # ── Lead-time IC: does the OOS signal actually LEAD returns? ──────────────────
+    # M5 wiring: the crude fixed band (|IC| > 1.96·√(k/N)) is GONE — significance is now
+    # a data-driven Newey-West / HAC rank test at lag k-1 (the overlap-induced MA order;
+    # ic.ic_significance). The `*` on each IC cell is HAC p<0.05; the NW t(k=3)/p(k=3)
+    # columns expose the overlap-corrected statistic, contrasted with the complementary
+    # NON-overlapping block IC-IR t at the same k=3.
     print("\nLEAD-TIME IC (OOS, Spearman rank corr of signalₜ vs forward return t→t+k; "
-          "* = significant at 95%, |IC| > 1.96·√(k/N) overlap-corrected):")
-    ich = (f"{'strategy':<18}{'IC k=1':>10}{'IC k=3':>10}{'IC k=5':>10}{'IC k=10':>10}"
-           f"{'IC-IR t(k=3)':>14}")
+          "* = HAC-significant at 95%, Newey-West lag k-1 — the overlap-corrected p<0.05):")
+    ich = (f"{'strategy':<18}{'IC k=1':>9}{'IC k=3':>9}{'IC k=5':>9}{'IC k=10':>9}"
+           f"{'NW t(k=3)':>11}{'NW p(k=3)':>11}{'IC-IR t(k=3)':>14}")
     print(ich); print("-" * len(ich))
 
     def _icCell(prof, k):
@@ -273,14 +302,29 @@ def main() -> int:
             return "n/a"
         return f"{v:+.3f}{'*' if d.get('significant') else ''}"
 
+    def _icP(prof, k):
+        """HAC two-sided p-value at horizon k (compact; '<.001' below 1e-3)."""
+        d = (prof or {}).get(k, {})
+        pv = d.get("p_value")
+        if not isinstance(pv, (int, float)) or pv != pv:
+            return "n/a"
+        return "<.001" if pv < 1e-3 else f"{pv:.3f}"
+
+    def _icTstat(prof, k):
+        d = (prof or {}).get(k, {})
+        return _fmt(d.get("t_stat"))
+
     for r in ok:
         prof = r.get("ic")
         if not prof:
             continue
-        print(f"{r['name']:<18}{_icCell(prof, 1):>10}{_icCell(prof, 3):>10}"
-              f"{_icCell(prof, 5):>10}{_icCell(prof, 10):>10}{_fmt(r.get('icir_t')):>14}")
-    print("  IC = the per-bet LEADING skill (Grinold-Kahn: IR ≈ IC·√breadth). Near-zero / "
-          "insignificant ⇒ the signal does NOT lead returns OOS — whatever the equity curve shows.")
+        print(f"{r['name']:<18}{_icCell(prof, 1):>9}{_icCell(prof, 3):>9}"
+              f"{_icCell(prof, 5):>9}{_icCell(prof, 10):>9}"
+              f"{_icTstat(prof, 3):>11}{_icP(prof, 3):>11}{_fmt(r.get('icir_t')):>14}")
+    print("  IC = the per-bet LEADING skill (Grinold-Kahn: IR ≈ IC·√breadth). NW t/p is the")
+    print("  overlapping-window Newey-West HAC test (lag k-1) of H0: IC=0; IC-IR t is the")
+    print("  complementary NON-overlapping block t-stat. Near-zero / insignificant ⇒ the")
+    print("  signal does NOT lead returns OOS — whatever the equity curve shows.")
     print("  (buy_and_hold has a constant signal ⇒ IC undefined; that is correct, not a bug.)")
 
     # ── Part B verdicts (pre-registered kill criteria; --research only) ──────────

@@ -55,7 +55,9 @@ def test_parity_harness_covers_unsaturated_and_walkforward_probes():
     dropping them from either side would silently un-pin the mirror."""
     py_src = open(SCRIPT, encoding="utf-8").read()
     js_src = open(os.path.join(ROOT, "scripts", "_parity_eval.cjs"), encoding="utf-8").read()
-    for name in ("dsr_n1", "dsr_mid", "wf_varTrialsSr", "wf_deflatedSharpe", "wf_varFallback"):
+    for name in ("dsr_n1", "dsr_mid", "wf_varTrialsSr", "wf_deflatedSharpe", "wf_varFallback",
+                 # M2 pairs two-leg-cost probe (the pairs path was UNPINNED before M2)
+                 "pairs_ethTurnover", "pairs_btcTurnover", "pairs_totalTurnover"):
         assert name in py_src, f"{name} probe missing from check_parity.py"
         assert name in js_src, f"{name} probe missing from _parity_eval.cjs"
     # the anchor constants themselves (a joint drift must fail the pins, not parity)

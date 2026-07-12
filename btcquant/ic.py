@@ -13,10 +13,12 @@ Conventions / honesty rails:
   definition, future data — it is used only to *score* the signal, never to build it.
 * **Rank IC (Spearman) is the default** — robust to the heavy tails and outliers of
   crypto returns; Pearson is offered for comparison.
-* **Overlap-corrected significance.** For horizon ``k`` the forward windows overlap, so
-  the ``N`` pairs carry only ≈ ``N/k`` independent observations. The 95% band is widened
-  accordingly: ``crit = 1.96 · √(k / N)`` (it reduces to the textbook ``1.96/√N`` at
-  ``k = 1``). A naive ``1.96/√N`` at ``k > 1`` would over-state significance.
+* **Overlap-corrected significance (Newey-West HAC).** For horizon ``k`` the forward
+  windows overlap, so the scoring errors of adjacent pairs share ``k-1`` of their forward
+  bars — an ``MA(k-1)`` autocorrelation structure that a naive (homoskedastic) standard
+  error understates. We therefore test the IC with a **Newey-West HAC** covariance at lag
+  ``k-1`` (exactly the overlap-induced MA order). Because the default IC is Spearman
+  (rank), the test is run on the *rank* relationship — see :func:`ic_significance`.
 * **IC-IR** (information ratio of the IC) uses **non-overlapping** blocks, so its
   t-stat is not inflated by autocorrelation.
 
@@ -30,6 +32,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm
 
 __all__ = [
     "forward_returns",
@@ -71,29 +74,78 @@ def information_coefficient(signal: pd.Series, prices: pd.Series, k: int = 1,
     return float(df["sig"].corr(df["fwd"], method=method))
 
 
-def ic_significance(ic: float, n: int, k: int = 1) -> dict:
-    """Overlap-corrected 95% significance for an IC over ``n`` pairs at horizon ``k``.
-    ``crit = 1.96·√(k/n)`` (textbook ``1.96/√n`` at ``k=1``). Returns
-    ``{ic, n, k, crit, significant}``."""
-    crit = 1.96 * math.sqrt(k / n) if n and n > 0 else float("nan")
-    sig = bool(np.isfinite(ic) and np.isfinite(crit) and abs(ic) > crit)
-    return {"ic": float(ic), "n": int(n), "k": int(k), "crit": float(crit), "significant": sig}
+def ic_significance(signal: pd.Series, fwd: pd.Series, k: int = 1) -> dict:
+    """Newey-West (HAC) significance of a ``k``-horizon forward IC on **overlapping**
+    windows.
+
+    A ``k``-bar forward IC is scored on overlapping windows: consecutive pairs share
+    ``k-1`` of their forward bars, so the scoring errors follow an ``MA(k-1)`` process and
+    a naive (homoskedastic) standard error *understates* the uncertainty — the classic
+    overlapping-returns pitfall. We correct it with a **Newey-West heteroskedasticity- and
+    autocorrelation-consistent (HAC)** covariance at lag ``k-1``, exactly the overlap-
+    induced MA order (Newey & West 1987, *Econometrica* 55(3); Lopez de Prado, *Advances
+    in Financial Machine Learning* §4-5 on overlapping-label serial dependence). At ``k=1``
+    there is no overlap and ``maxlags`` collapses to 0.
+
+    Because the default IC is Spearman (**rank**), we test the *rank* relationship: rank-
+    transform ``signal`` and ``fwd`` over the aligned sample, then fit
+    ``fwd_rank ~ const + signal_rank`` by OLS with ``cov_type="HAC"`` and
+    ``cov_kwds={"maxlags": max(k-1, 0)}``. Ranks of a common sample have (near-)equal
+    variance, so the OLS **slope equals** ``corr(signal_rank, fwd_rank)`` = the Spearman IC
+    itself; the slope's HAC t-stat and two-sided p-value therefore test *exactly*
+    ``H0: IC = 0``. (This is a rank-HAC: the reported ``ic`` is the standardized rank
+    slope, i.e. the Spearman coefficient.)
+
+    ``signal`` and ``fwd`` are the **aligned** series (signal known at ``t`` and its forward
+    return; callers pass the already-``dropna``-joined columns). Returns
+    ``{ic, n, k, t_stat, p_value, se, significant (p<0.05), method}`` with
+    ``method == "newey-west-k-1"``. Degenerate samples (too few points or zero variance)
+    return ``NaN`` stats and ``significant=False`` rather than raising.
+
+    See :func:`ic_ir` for the complementary **non-overlapping** block IC-IR t-stat."""
+    s = pd.Series(signal, dtype="float64")
+    f = pd.Series(fwd, dtype="float64")
+    df = pd.concat([s.rename("sig"), f.rename("fwd")], axis=1).dropna()
+    n = int(len(df))
+    maxlags = max(int(k) - 1, 0)
+    nan = float("nan")
+    out = {"ic": nan, "n": n, "k": int(k), "t_stat": nan, "p_value": nan,
+           "se": nan, "significant": False, "method": "newey-west-k-1"}
+    # Need enough points to fit the slope and estimate a HAC kernel of width ``maxlags``.
+    if n < 3 or n <= maxlags + 1 or df["sig"].std() == 0 or df["fwd"].std() == 0:
+        return out
+    # Spearman == Pearson on average-ranked data; the OLS slope of these ranks IS the IC.
+    x_rank = df["sig"].rank().to_numpy()
+    y_rank = df["fwd"].rank().to_numpy()
+    fit = sm.OLS(y_rank, sm.add_constant(x_rank)).fit(
+        cov_type="HAC", cov_kwds={"maxlags": maxlags})
+    slope, se, t_stat, p_value = (float(fit.params[1]), float(fit.bse[1]),
+                                  float(fit.tvalues[1]), float(fit.pvalues[1]))
+    out.update(ic=slope, se=se, t_stat=t_stat, p_value=p_value,
+               significant=bool(np.isfinite(p_value) and p_value < 0.05))
+    return out
 
 
 def ic_profile(signal: pd.Series, prices: pd.Series,
                horizons: Sequence[int] = (1, 3, 5, 10),
                method: str = "spearman") -> dict:
-    """IC at each horizon with overlap-corrected significance — the lead-time profile.
-    Returns ``{k: {ic, n, k, crit, significant}}``. A profile that peaks at ``k>1`` and
-    fades is a genuine *lead*; one that is largest at ``k=1`` and small is, at best,
-    contemporaneous."""
+    """IC at each horizon with Newey-West (HAC) significance — the lead-time profile.
+    Returns ``{k: {ic, n, k, t_stat, p_value, se, significant, method}}`` (see
+    :func:`ic_significance`). A profile that peaks at ``k>1`` and fades is a genuine
+    *lead*; one that is largest at ``k=1`` and small is, at best, contemporaneous.
+
+    ``method`` selects how the *displayed* IC magnitude is computed; the HAC significance
+    is always run on the rank relationship (the default, robust Spearman notion — so for
+    ``method="spearman"`` the returned ``ic`` and the significance coincide)."""
     out = {}
     s = pd.Series(signal, dtype="float64")
     for k in horizons:
         fr = forward_returns(prices, k).reindex(s.index)
-        n = int(pd.concat([s, fr], axis=1).dropna().shape[0])
-        ic = information_coefficient(s, prices, k, method=method)
-        out[int(k)] = ic_significance(ic, n, k)
+        df = pd.concat([s.rename("sig"), fr.rename("fwd")], axis=1).dropna()
+        res = ic_significance(df["sig"], df["fwd"], k)
+        if method != "spearman":
+            res["ic"] = information_coefficient(s, prices, k, method=method)
+        out[int(k)] = res
     return out
 
 
@@ -128,16 +180,17 @@ def regime_conditional_ic(signal: pd.Series, prices: pd.Series, mask: pd.Series,
     """IC computed separately on the bars where ``mask`` is True vs False — the question
     "does the signal lead *only* in a particular regime?" (e.g. ``mask = ADX ≥ 25``).
     A signal that is significant inside the regime and null outside is regime-conditional,
-    not a universal lead. Returns ``{"in": {...}, "out": {...}}`` significance dicts."""
+    not a universal lead. Returns ``{"in": {...}, "out": {...}}`` HAC-significance dicts
+    (see :func:`ic_significance`)."""
     s = pd.Series(signal, dtype="float64")
     m = pd.Series(mask, dtype="bool").reindex(s.index).fillna(False)
     fr = forward_returns(prices, k).reindex(s.index)
     base = pd.concat([s.rename("sig"), fr.rename("fwd"), m.rename("m")], axis=1).dropna()
 
     def _ic(sub: pd.DataFrame) -> dict:
-        if len(sub) < 3 or sub["sig"].std() == 0 or sub["fwd"].std() == 0:
-            return ic_significance(float("nan"), len(sub), k)
-        ic = float(sub["sig"].corr(sub["fwd"], method=method))
-        return ic_significance(ic, len(sub), k)
+        res = ic_significance(sub["sig"], sub["fwd"], k)
+        if method != "spearman" and np.isfinite(res["ic"]):
+            res["ic"] = float(sub["sig"].corr(sub["fwd"], method=method))
+        return res
 
     return {"in": _ic(base[base["m"]]), "out": _ic(base[~base["m"]])}

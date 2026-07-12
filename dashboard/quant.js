@@ -358,6 +358,10 @@
     // fallback and flags it (stats.varFallback), instead of the old silent `1`.
     const varTrialsSr = opts.varTrialsSr != null ? opts.varTrialsSr : null;
     const costRate = (costBps + slipBps) / 1e4; // charged per unit turnover
+    // M2 mirror of backtest.run: an OPTIONAL extra per-bar turnover (the pairs
+    // ETH-leg |Δ(beta·state)|) ADDED to the cost base. null/absent ⇒ byte-identical
+    // single-leg cost for every non-pairs strategy.
+    const extraCost = opts.extraCostTurnover != null ? opts.extraCostTurnover : null;
 
     const n = Math.min(positions.length, prices.length);
     const assetRet = simpleReturns(prices.slice(0, n));
@@ -372,16 +376,20 @@
 
     const grossReturns = new Array(n).fill(0);
     const returns = new Array(n).fill(0);
-    const turnover = new Array(n).fill(0);
+    const turnover = new Array(n).fill(0);      // BTC-leg |Δpos| (drives the trade count)
+    const costTurnover = new Array(n).fill(0);  // charged cost base (BTC + ETH-leg extra)
     let trades = 0;
     let prevPos = 0;
     for (let i = 0; i < n; i++) {
       const r = Number.isFinite(assetRet[i]) ? assetRet[i] : 0;
       const to = Math.abs(pos[i] - prevPos);
       turnover[i] = to;
-      if (to > 1e-9) trades++;
-      grossReturns[i] = pos[i] * r;
-      returns[i] = pos[i] * r - to * costRate;
+      if (to > 1e-9) trades++;               // ETH hedge rebalances every bar ⇒ not a "trade"
+      const et = extraCost && Number.isFinite(extraCost[i]) ? extraCost[i] : 0;
+      const costTo = to + et;
+      costTurnover[i] = costTo;
+      grossReturns[i] = pos[i] * r;          // M2 scope rail: P&L stays single-leg
+      returns[i] = pos[i] * r - costTo * costRate;
       prevPos = pos[i];
     }
 
@@ -391,7 +399,7 @@
 
     const stats = computeStats(returns, equity, {
       periodsPerYear: ppy, nTrials, varTrialsSr,
-      bhReturns, turnover,
+      bhReturns, turnover: costTurnover,       // stats.turnover = charged cost base (mirror of total_turnover)
     });
 
     return { equity, returns, grossReturns, position: pos, turnover, trades, bhEquity, bhReturns, stats };
@@ -590,7 +598,10 @@
 
     // Per-bar rolling-OLS hedge ratio beta_t (cov/var over the trailing window) and
     // spread_t = log(btc)_t - beta_t·log(eth)_t — a single series (NaN in warm-up).
+    // betaArr is EXPOSED (mirror of strategies.pairs_legs) so app.js can price the
+    // ETH-leg turnover |Δ(beta·state)| — the M2 two-leg cost — on the same beta.
     const spread = new Array(n).fill(NaN);
+    const betaArr = new Array(n).fill(NaN);
     for (let i = 0; i < n; i++) {
       if (i + 1 < window) continue;
       const a = i - window + 1;
@@ -600,6 +611,7 @@
       let cov = 0, vx = 0;
       for (let k = a; k <= i; k++) { const dx = le[k] - mx; cov += dx * (lb[k] - my); vx += dx * dx; }
       const beta = vx > 0 ? cov / vx : 0;
+      betaArr[i] = beta;
       spread[i] = lb[i] - beta * le[i];
     }
 
@@ -634,7 +646,7 @@
       }
       pos[i] = state;
     }
-    return { positions: pos, z };
+    return { positions: pos, z, beta: betaArr };
   }
 
   /**
@@ -766,13 +778,30 @@
    * A caller-supplied opts.nTrials is intentionally IGNORED for the DSR — Python's
    * walk_forward has no such knob either; search-count deflation belongs to the
    * leaderboard / MinBTL surface, not to the fold DSR.
+   *
+   * M4 purge/embargo (opts.purge, opts.embargo; default 0): accepted for signature
+   * parity with backtest.walk_forward. In Python they are index masks on the per-fold
+   * **in-sample** statistic ONLY — the held-out OOS track record (which is all this
+   * dashboard surface reports) is invariant to them. This mirror therefore threads the
+   * params but the OOS output is byte-identical for ANY purge/embargo, exactly as in
+   * Python; the IS-side masking lives in the engine (btcquant) where IS is surfaced.
+   * Every strategy today is a 1-bar causal label, so purge/embargo are not needed for
+   * today's numbers — the knobs are correct-by-construction for k-step-label signals.
    * @param {number[]} positions full-history target weights
    * @param {number[]} prices    aligned close series
-   * @param {object} opts { folds, periodsPerYear, costBps, slippageBps }
+   * @param {object} opts { folds, periodsPerYear, costBps, slippageBps, purge, embargo }
    */
   function walkForward(positions, prices, opts = {}) {
     const folds = opts.folds || 5;
     const ppy = opts.periodsPerYear || 365;
+    // M4: purge/embargo affect only the IS statistic (not surfaced here) — accepted
+    // for parity, OOS invariant. Guard non-negative to mirror the Python ValueError.
+    const purge = opts.purge != null ? opts.purge : 0;
+    const embargo = opts.embargo != null ? opts.embargo : 0;
+    if (purge < 0 || embargo < 0) throw new RangeError('purge and embargo must be >= 0.');
+    // M2: optional full-history ETH-leg turnover, slice-aligned per fold (mirror of
+    // backtest.walk_forward threading extra_cost_turnover through to run per block).
+    const extra = opts.extraCostTurnover != null ? opts.extraCostTurnover : null;
     const n = Math.min(positions.length, prices.length);
     const out = { oosReturns: [], oosStats: null, oosPositions: [], oosPrices: [], foldSrs: [] };
     if (n < (folds + 1) * 2) return out;
@@ -783,7 +812,8 @@
       const a = edge(k), b = edge(k + 1);
       if (b <= a) continue;
       const bt = backtest(positions.slice(a, b), prices.slice(a, b),
-        { costBps: opts.costBps, slippageBps: opts.slippageBps, periodsPerYear: ppy });
+        { costBps: opts.costBps, slippageBps: opts.slippageBps, periodsPerYear: ppy,
+          extraCostTurnover: extra ? extra.slice(a, b) : undefined });
       for (let i = 0; i < bt.returns.length; i++) oos.push(bt.returns[i]);
       // Per-fold OOS per-period Sharpe — mirror of risk.summary's sharpe_per_period
       // convention (NaN when the fold is degenerate: < 2 finite returns or σ = 0).
@@ -945,10 +975,22 @@
   /**
    * Combinatorial Purged CV — the distribution of OOS Sharpe across time-block
    * subsets (mirrors backtest.cpcv). Returns { paths, nPaths, median, p25, p75, iqr }.
+   *
+   * M4 purge/embargo. opts.embargoPct (default 0.01) is the LEGACY fractional leading
+   * trim (each test group drops its first max(1, round(embargoPct·|blk|)) bars) — the
+   * pre-M4 default, preserved verbatim. opts.purge / opts.embargo (int, default 0) add
+   * the AFML ch.7 purge (extra leading bars) + embargo (trailing bars) per the same
+   * convention as walkForward; because positions are global and only test paths are
+   * scored, the observable effect is trimming test-block bars adjacent to the train
+   * blocks. Default purge=embargo=0 ⇒ only the embargoPct trim ⇒ byte-identical to pre-M4.
    */
   function cpcv(positions, prices, opts = {}) {
     const nBlocks = opts.nBlocks || 6, kTest = opts.kTest || 2;
-    const ppy = opts.periodsPerYear || 365, embargo = opts.embargo != null ? opts.embargo : 0.01;
+    const ppy = opts.periodsPerYear || 365;
+    const embargoPct = opts.embargoPct != null ? opts.embargoPct : 0.01;
+    const purge = opts.purge != null ? opts.purge : 0;
+    const embargo = opts.embargo != null ? opts.embargo : 0;
+    if (purge < 0 || embargo < 0) throw new RangeError('purge and embargo must be >= 0.');
     const n = Math.min(positions.length, prices.length);
     const out = { paths: [], nPaths: 0, median: NaN, p25: NaN, p75: NaN, iqr: NaN, min: NaN, max: NaN };
     if (nBlocks < 2 || kTest < 1 || kTest >= nBlocks || n < (nBlocks + 1) * 2) return out;
@@ -968,8 +1010,10 @@
       const idx = [];
       for (const bi of combos[ci]) {
         const blk = blocks[bi];
-        const drop = blk.length > 1 ? Math.min(blk.length - 1, Math.max(1, Math.round(embargo * blk.length))) : 0;
-        for (let j = drop; j < blk.length; j++) idx.push(blk[j]);
+        const fracDrop = blk.length > 1 ? Math.min(blk.length - 1, Math.max(1, Math.round(embargoPct * blk.length))) : 0;
+        const lead = fracDrop + purge;             // legacy trim + AFML leading purge
+        const hi = Math.max(lead, blk.length - embargo);  // AFML trailing embargo
+        for (let j = lead; j < hi; j++) idx.push(blk[j]);
       }
       if (idx.length < 2) continue;
       paths.push(sharpe(idx.map((j) => rets[j]), ppy));

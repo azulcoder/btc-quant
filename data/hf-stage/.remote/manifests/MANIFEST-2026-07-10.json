@@ -1,0 +1,72 @@
+{
+  "date": "2026-07-10",
+  "createdMs": 1783729209303,
+  "tool": "upload_hf.py",
+  "provenance": "keyless public market data recorded by btcquant/collector.py (DESIGN-orderflow-terminal.md \u00a73c) \u2014 event-time UTC day partitions; closed day files are immutable; gaps in ts_ms are honest collector downtime, never interpolated",
+  "entries": [
+    {
+      "table": "trades",
+      "rows": 2723288,
+      "ts_min": 1783641600019,
+      "ts_max": 1783727999797,
+      "bytes": 32962599,
+      "sha256": "ab617fa52f9be2f93584abd5acad85616aa7d08efd1edba6bd01eedfe4a9afe4"
+    },
+    {
+      "table": "liquidations",
+      "rows": 180,
+      "ts_min": 1783670534070,
+      "ts_max": 1783726796879,
+      "bytes": 4283,
+      "sha256": "a804e99b574931e0d6521c6680f9d54fd5980633949dc7f7fd4593c709539536"
+    },
+    {
+      "table": "depth_snapshots",
+      "rows": 112974,
+      "ts_min": 1783641600100,
+      "ts_max": 1783727999883,
+      "bytes": 22051679,
+      "sha256": "9bc3cc993e5ff0235e45804f91b8f73297cf21c4a62ca31af8f5c304f2fc3f32"
+    },
+    {
+      "table": "funding_mark",
+      "rows": 41197,
+      "ts_min": 1783641600510,
+      "ts_max": 1783727999610,
+      "bytes": 352623,
+      "sha256": "a40ce06e6d958db6315a73fd03a98340ef38935773f68e213c0b0fbe6aea78b5"
+    },
+    {
+      "table": "open_interest",
+      "rows": 34342,
+      "ts_min": 1783641600510,
+      "ts_max": 1783727999610,
+      "bytes": 129050,
+      "sha256": "e77708748f0518bc3b1bdc10e02554b16b9a3d20921476272bf44328745369d8"
+    },
+    {
+      "table": "crowding",
+      "rows": 711,
+      "ts_min": 1783641600000,
+      "ts_max": 1783727700000,
+      "bytes": 6175,
+      "sha256": "9ca4af345c2d0b28139ca8e524b9ac0a1b75e7c811c4caabff303ba929ba14d5"
+    },
+    {
+      "table": "dvol",
+      "rows": 660,
+      "ts_min": 1783642153346,
+      "ts_max": 1783727978890,
+      "bytes": 3540,
+      "sha256": "773d95a53c414b5797765719061795c85b11ee942ba765891307811acd42f0a0"
+    },
+    {
+      "table": "options_chain",
+      "rows": 11388,
+      "ts_min": 1783648367007,
+      "ts_max": 1783725387010,
+      "bytes": 171016,
+      "sha256": "e9bca97296fc8d2d8b6d2c95c1864750562e4ea6bcf38a096edc31cc39dc59f9"
+    }
+  ]
+}

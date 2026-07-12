@@ -476,6 +476,128 @@ def test_pairs_coint_strategy_within_unit_band():
 
 
 # --------------------------------------------------------------------------- #
+# M2 — two-leg pairs cost (BTC leg + beta-scaled ETH hedge) + M1 bfill leak    #
+# --------------------------------------------------------------------------- #
+def test_pairs_legs_is_single_source_of_beta_and_position():
+    """pairs_legs returns (state, beta_t) aligned to one index; the state is byte-for-
+    byte the pairs_coint / pairs_ou output (no re-derivation), and beta_t is finite
+    after the rolling warm-up."""
+    btc = _make_prices(n=300, seed=41)
+    rng = np.random.default_rng(43)
+    eth = pd.Series(btc.to_numpy() * 0.07 * np.exp(rng.normal(0, 0.01, len(btc))), index=btc.index)
+    for model, fn in (("coint", strategies.pairs_coint), ("ou", strategies.pairs_ou)):
+        pos, beta = strategies.pairs_legs(btc, eth, window=60, model=model)
+        assert pos.equals(fn(btc, eth, window=60)), f"pairs_legs {model} state must match {fn.__name__}"
+        assert pos.index.equals(beta.index)
+        assert np.isfinite(beta.to_numpy()[80:]).all()   # settled region, beta defined
+
+
+def test_pairs_entry_charges_both_legs_exactly_2x_at_beta_one():
+    """M2 (a): with beta ≡ 1 a single pairs entry charges the ETH leg identically to the
+    BTC leg → the two-leg cost base is EXACTLY 2× the single-leg one (charge on BOTH
+    legs' turnover)."""
+    px = _make_prices(n=120, seed=3)
+    pos = pd.Series(0.0, index=px.index)
+    pos.iloc[50:] = 1.0                                   # one 0→1 entry, held to the end
+    beta = pd.Series(1.0, index=px.index)
+    eth_turn = (beta * pos).diff().abs()                 # |Δ(beta·state)| == |Δ state| here
+    base = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0)
+    two = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0, extra_cost_turnover=eth_turn)
+    assert base["stats"]["total_turnover"] == pytest.approx(1.0)       # single entry
+    assert two["stats"]["total_turnover"] == pytest.approx(2.0)        # both legs, exact
+    # The extra cost is exactly the single entry's cost again → net return drops by 1×cost.
+    extra_cost = 12.0 / 10_000.0                          # (cost+slip) bps on 1 unit turnover
+    assert (base["returns"].sum() - two["returns"].sum()) == pytest.approx(extra_cost)
+
+
+def test_pairs_rolling_beta_drift_incurs_eth_leg_cost_with_unchanged_state():
+    """M2 (b): even with the BTC state held constant (no discrete trade), a drifting
+    hedge ratio rebalances the ETH notional every bar → the ETH leg still charges the
+    total variation of beta·state."""
+    px = _make_prices(n=100, seed=5)
+    pos = pd.Series(1.0, index=px.index)                 # always-in: BTC turnover = one entry only
+    beta = pd.Series(np.linspace(1.0, 2.0, len(px)), index=px.index)   # continuously drifting hedge
+    eth_turn = (beta * pos).diff().abs()
+    base = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0)
+    two = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0, extra_cost_turnover=eth_turn)
+    added_turnover = two["stats"]["total_turnover"] - base["stats"]["total_turnover"]
+    assert added_turnover > 0.0
+    assert added_turnover == pytest.approx(float(eth_turn.fillna(0.0).sum()))   # ≈ 1.0 (β: 1→2)
+
+
+def test_extra_cost_turnover_none_leaves_every_nonpairs_result_byte_identical():
+    """M2 (c) regression guard: extra_cost_turnover default (None) — and an all-zero
+    series — must leave every non-pairs backtest byte-for-byte unchanged."""
+    df = _make_ohlcv(n=300, seed=8)
+    px = df["close"]
+    cases = {
+        "buy_and_hold": strategies.buy_and_hold(df),
+        "ma_trend": strategies.ma_trend_filter(df, n=50),
+        "tsmom": strategies.tsmom(df, lookback=20),
+    }
+    zeros = pd.Series(0.0, index=px.index)
+    for name, pos in cases.items():
+        a = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0)
+        b = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0, extra_cost_turnover=None)
+        z = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0, extra_cost_turnover=zeros)
+        for other in (b, z):
+            assert np.array_equal(a["returns"].to_numpy(), other["returns"].to_numpy(), equal_nan=True), name
+            assert np.array_equal(a["equity"].to_numpy(), other["equity"].to_numpy(), equal_nan=True), name
+        assert a["stats"]["total_turnover"] == z["stats"]["total_turnover"], name
+
+
+def test_extra_cost_turnover_alignment_series_vs_positional_array():
+    """M2 adversarial: a pd.Series extra-cost is aligned by INDEX (reindex+fillna(0));
+    a raw positional array is aligned by POSITION and must match length exactly — a
+    length mismatch fails LOUDLY instead of silently dropping the whole leg to zero
+    (the pre-hardening bug: a RangeIndex array reindexed onto a DatetimeIndex → all-NaN
+    → 0 cost, a silent under-charge)."""
+    idx = pd.date_range("2021-01-01", periods=100, freq="D", tz="UTC")
+    px = _make_prices(n=100, seed=9)
+    px.index = idx
+    pos = pd.Series(np.where(np.arange(100) % 2 == 0, 1.0, 0.0), index=idx)
+    base = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0)
+
+    # (i) index-aligned Series charges the extra leg.
+    ser = pd.Series(0.5, index=idx)
+    r_ser = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0, extra_cost_turnover=ser)
+    assert r_ser["stats"]["total_turnover"] > base["stats"]["total_turnover"]
+
+    # (ii) a positional array of MATCHING length aligns by position (same as the Series).
+    r_arr = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0,
+                         extra_cost_turnover=np.full(100, 0.5))
+    assert r_arr["stats"]["total_turnover"] == r_ser["stats"]["total_turnover"]
+
+    # (iii) a positional array of the WRONG length raises loudly (no silent zero).
+    with pytest.raises(ValueError, match="extra_cost_turnover"):
+        backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0,
+                     extra_cost_turnover=np.full(37, 0.5))
+
+    # (iv) NaNs in the aligned Series never reach the charge (fillna(0)); result finite.
+    ser_nan = ser.copy(); ser_nan.iloc[:10] = np.nan
+    r_nan = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0, extra_cost_turnover=ser_nan)
+    assert np.isfinite(r_nan["equity"].iloc[-1])
+    assert np.isfinite(r_nan["stats"]["total_turnover"])
+
+
+def test_pairs_no_bfill_leak_leading_pre_eth_bars_stay_nan():
+    """M1 (d): when BTC history starts BEFORE ETH's first observation, ffill-only (the
+    audit M1 fix) leaves the leading pre-ETH region NaN so pairs_coint drops it — the
+    old trailing .bfill() would back-stamp ETH's first price there and fabricate a
+    spread (a look-back leak)."""
+    btc = _make_prices(n=200, seed=41)
+    first = 50
+    eth = pd.Series(btc.to_numpy()[first:] * 0.07, index=btc.index[first:])   # ETH exists only from bar 50
+    aligned_ffill = eth.reindex(btc.index).ffill()                            # audit M1: no bfill
+    aligned_bfill = eth.reindex(btc.index).ffill().bfill()                    # the OLD (leaky) behavior
+    assert aligned_ffill.iloc[:first].isna().all()          # fix: leading pre-ETH bars stay NaN
+    assert not aligned_bfill.iloc[:first].isna().any()      # old bug: back-stamped a fabricated price
+    # Downstream: no fabricated pairs position in the leading region.
+    pos = strategies.pairs_coint(btc, aligned_ffill, window=30).reindex(btc.index)
+    assert pos.iloc[:first].isna().all()
+
+
+# --------------------------------------------------------------------------- #
 # Part B research candidates (pre-registered; RESEARCH-partB-runlog.md)        #
 # --------------------------------------------------------------------------- #
 def test_ou_sigma_eq_finite_for_mean_reverting_inf_for_trending():
@@ -810,6 +932,109 @@ def test_cpcv_multipath_dispersion():
     assert cp["n_paths"] == math.comb(6, 2)                  # 15 paths
     assert math.isfinite(cp["median_sharpe"]) and cp["iqr"] >= 0.0
     assert cp["min"] <= cp["median_sharpe"] <= cp["max"]
+
+
+# --------------------------------------------------------------------------- #
+# M4 — purge / embargo / lockbox (default-OFF, correct-by-construction)         #
+# --------------------------------------------------------------------------- #
+def test_m4_purge_embargo_zero_is_byte_identical_golden():
+    """(a) purge=0, embargo=0 reproduces the pre-M4 walk_forward + cpcv numbers
+    BIT-for-BIT — both against the untouched no-arg call AND against pre-registered
+    golden constants (so a silent formula drift, not just a default flip, is caught)."""
+    px = _make_prices(n=600, seed=42)
+    wf_mp = lambda p: (p > p.rolling(50).mean()).astype(float)
+    cp_mp = lambda p: (p > p.rolling(30).mean()).astype(float)
+
+    # No-arg (pre-M4 signature) == explicit purge=0/embargo=0 == golden constants.
+    wf0 = backtest.walk_forward(wf_mp, px, n_splits=5)
+    wfz = backtest.walk_forward(wf_mp, px, n_splits=5, purge=0, embargo=0)
+    assert wf0["oos"]["sharpe"] == wfz["oos"]["sharpe"] == -0.6577099382791535
+    assert wf0["is_"]["sharpe"] == wfz["is_"]["sharpe"] == -0.5255985161946755
+
+    cp0 = backtest.cpcv(cp_mp, px, n_blocks=6, k_test=2)
+    cpz = backtest.cpcv(cp_mp, px, n_blocks=6, k_test=2, purge=0, embargo=0)
+    assert cp0["paths"] == cpz["paths"]
+    assert cp0["median_sharpe"] == cpz["median_sharpe"] == -0.26458498017492493
+    assert cp0["iqr"] == cpz["iqr"] == 0.6414388218458281
+    assert cp0["n_paths"] == cpz["n_paths"] == 15
+    # OOS headline is invariant to purge/embargo (they touch only the IS statistic).
+    wfp = backtest.walk_forward(wf_mp, px, n_splits=5, purge=7, embargo=5)
+    assert wfp["oos"]["sharpe"] == wf0["oos"]["sharpe"]
+
+
+def test_m4_purge_removes_exactly_k_train_bars_adjacent_to_test_start():
+    """(b) purge=k drops EXACTLY the k in-sample bars adjacent to each fold's test
+    start (an index mask on the per-fold IS statistic), leaving OOS untouched."""
+    px = _make_prices(n=600, seed=42)
+    mp = lambda p: (p > p.rolling(50).mean()).astype(float)
+    base = backtest.walk_forward(mp, px, n_splits=5, purge=0, embargo=0)
+    for k in (1, 3, 8):
+        purged = backtest.walk_forward(mp, px, n_splits=5, purge=k, embargo=0)
+        for fb, fp in zip(base["folds"], purged["folds"]):
+            assert fp["n_is"] == fb["n_is"] - k            # exactly k fewer IS bars
+        assert purged["oos"]["sharpe"] == base["oos"]["sharpe"]   # OOS invariant
+
+
+def test_m4_embargo_inserts_exactly_e_bar_gaps_in_later_folds():
+    """(c) embargo=e inserts an exactly e-bar gap for EACH prior test block that has
+    already re-entered a later fold's expanding IS window (a gap the anchored window
+    skips), OOS untouched. n=120, 5 splits, edges every 20 bars: fold k drops
+    e·(k-2) IS bars (folds 1-2 see no prior embargoed block yet)."""
+    idx = pd.date_range("2022-01-01", periods=120, freq="D", tz="UTC")
+    px = pd.Series(
+        20_000.0 * np.exp(np.cumsum(np.random.default_rng(3).normal(0.0008, 0.03, 120))),
+        index=idx,
+    )
+    mp = lambda p: pd.Series(1.0, index=p.index)
+    base = backtest.walk_forward(mp, px, n_splits=5, embargo=0)
+    e = 4
+    emb = backtest.walk_forward(mp, px, n_splits=5, embargo=e)
+    for k, (fb, fe) in enumerate(zip(base["folds"], emb["folds"]), start=1):
+        expected_gap = e * max(0, k - 2)                   # prior embargoed blocks in-window
+        assert fe["n_is"] == fb["n_is"] - expected_gap
+    assert emb["oos"]["sharpe"] == base["oos"]["sharpe"]   # OOS invariant
+
+
+def test_m4_purge_changes_is_stat_for_kstep_label_signal():
+    """(e) with purge>0 the reported IS statistic genuinely MOVES (the mask drops the
+    label-overlap bars) while the causal 1-bar OOS stays put — the machinery is live,
+    not inert, for the k-step-label signals arriving when MinBTL clears."""
+    px = _make_prices(n=400, seed=17)
+    # A synthetic k-step (k=5) forward-momentum LABEL turned into a position rule: the
+    # sign of the trailing 5-bar change (causal), the shape order-flow signals will take.
+    def kstep_signal(p):
+        return np.sign(p.pct_change(5)).fillna(0.0)
+    base = backtest.walk_forward(kstep_signal, px, n_splits=4, purge=0)
+    purged = backtest.walk_forward(kstep_signal, px, n_splits=4, purge=5)
+    assert purged["is_"]["sharpe"] != base["is_"]["sharpe"]        # IS stat moved
+    assert purged["oos"]["sharpe"] == base["oos"]["sharpe"]        # OOS untouched
+
+
+def test_m4_lockbox_flags_double_scored_slice():
+    """(d) LockBox is an evaluate-once ledger: a slice scored once passes
+    assert_scored_once; a second scoring is detectable (count rises, the assertion
+    raises), and an unscored slice also fails (a forgotten holdout is caught too)."""
+    lb = backtest.LockBox()
+    s, e = pd.Timestamp("2025-01-01"), pd.Timestamp("2025-06-30")
+
+    assert lb.was_scored(s, e) is False
+    with pytest.raises(AssertionError):
+        lb.assert_scored_once(s, e)               # never scored -> fails
+
+    assert lb.record(s, e) == 1
+    assert lb.was_scored(s, e) is True
+    lb.assert_scored_once(s, e)                    # scored exactly once -> ok
+
+    assert lb.record(s, e) == 2                    # a second peek...
+    assert lb.count(s, e) == 2
+    with pytest.raises(AssertionError):
+        lb.assert_scored_once(s, e)               # ...is now detectable
+
+    # An independent slice is tracked separately (no cross-contamination).
+    s2, e2 = pd.Timestamp("2024-01-01"), pd.Timestamp("2024-06-30")
+    lb.record(s2, e2)
+    lb.assert_scored_once(s2, e2)
+    assert lb.slices() == {(s, e): 2, (s2, e2): 1}
 
 
 # --------------------------------------------------------------------------- #

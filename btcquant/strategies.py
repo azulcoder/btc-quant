@@ -48,6 +48,7 @@ __all__ = [
     "carry",
     "pairs_coint",
     "pairs_ou",
+    "pairs_legs",
     "short_vol",
 ]
 
@@ -60,6 +61,30 @@ def _close(df: pd.DataFrame) -> pd.Series:
     if "close" not in df.columns:
         raise KeyError("strategy expects a 'close' column in the price DataFrame")
     return pd.Series(df["close"], dtype="float64")
+
+
+def _hedge_beta(btc: pd.Series, eth: pd.Series, window: int):
+    """THE single source of the pairs hedge ratio (audit M2 — no duplicated OLS).
+
+    Rolling-OLS hedge ratio ``beta_t = Cov(log_btc, log_eth) / Var(log_eth)`` over a
+    trailing ``window`` (intercept absorbed by the covariance form) and the resulting
+    ``spread_t = log(BTC_t) - beta_t * log(ETH_t)`` — all trailing only → no
+    look-ahead. Both :func:`pairs_coint`, :func:`pairs_ou` and :func:`pairs_legs`
+    route through here so the OLS lives in exactly ONE place and the ETH-leg cost
+    (M2) is charged on the *same* ``beta_t`` the position is built from.
+
+    Returns ``(common, log_btc, log_eth, beta, spread)`` on the shared index.
+    """
+    btc = pd.Series(btc, dtype="float64")
+    eth = pd.Series(eth, dtype="float64")
+    common = btc.index.intersection(eth.index)
+    log_btc = np.log(btc.reindex(common))
+    log_eth = np.log(eth.reindex(common))
+    var_eth = log_eth.rolling(window).var(ddof=1)
+    cov = log_btc.rolling(window).cov(log_eth)
+    beta = cov / var_eth
+    spread = log_btc - beta * log_eth
+    return common, log_btc, log_eth, beta, spread
 
 
 # --------------------------------------------------------------------------- #
@@ -570,19 +595,9 @@ def pairs_coint(
         ``pd.Series`` of target positions on the **BTC leg** in ``{-1, 0, +1}``
         (NaN during the rolling warm-up).
     """
-    btc = pd.Series(btc, dtype="float64")
-    eth = pd.Series(eth, dtype="float64")
-    common = btc.index.intersection(eth.index)
-    log_btc = np.log(btc.reindex(common))
-    log_eth = np.log(eth.reindex(common))
-
-    # Rolling OLS hedge ratio beta_t = Cov(log_btc, log_eth) / Var(log_eth) over a
-    # trailing window (intercept handled by the covariance form) — trailing only.
-    var_eth = log_eth.rolling(window).var(ddof=1)
-    cov = log_btc.rolling(window).cov(log_eth)
-    beta = cov / var_eth
-
-    spread = log_btc - beta * log_eth
+    # Rolling OLS hedge ratio beta_t + spread come from the single-source helper
+    # (_hedge_beta) so pairs_legs (M2 ETH-leg cost) charges the same beta_t.
+    _, log_btc, log_eth, beta, spread = _hedge_beta(btc, eth, window)
     z = features.zscore(spread, window=window)
 
     # Trailing half-life guard, evaluated bar-by-bar on the trailing spread window.
@@ -653,17 +668,9 @@ def pairs_ou(
     Returns BTC-leg target positions in ``{-1, 0, +1}`` (NaN during warm-up).
     Reference: Leung & Li (2015), *Optimal Mean Reversion Trading*; Krauss (2017).
     """
-    btc = pd.Series(btc, dtype="float64")
-    eth = pd.Series(eth, dtype="float64")
-    common = btc.index.intersection(eth.index)
-    log_btc = np.log(btc.reindex(common))
-    log_eth = np.log(eth.reindex(common))
-
-    var_eth = log_eth.rolling(window).var(ddof=1)
-    cov = log_btc.rolling(window).cov(log_eth)
-    beta = cov / var_eth
-
-    spread = log_btc - beta * log_eth
+    # Same single-source hedge ratio / spread as pairs_coint (_hedge_beta); only the
+    # deviation *normalizer* below (OU sigma_eq vs empirical z) is isolated.
+    _, log_btc, log_eth, beta, spread = _hedge_beta(btc, eth, window)
     roll_mean = spread.rolling(window).mean()
     spread_arr = spread.to_numpy()
     mean_arr = roll_mean.to_numpy()
@@ -705,6 +712,54 @@ def pairs_ou(
         pos[i] = state
 
     return pd.Series(pos, index=spread.index, name="pairs_ou")
+
+
+def pairs_legs(
+    btc: pd.Series,
+    eth: pd.Series,
+    window: int = 60,
+    entry: float = 2.0,
+    exit: float = 0.5,
+    stop: float = 4.0,
+    max_half_life: float = 60.0,
+    model: str = "coint",
+) -> tuple[pd.Series, pd.Series]:
+    """Return ``(position, beta_t)`` for the pairs trade — the BTC-leg target weight
+    AND the per-bar hedge ratio, aligned to the same index (audit M2).
+
+    A pairs position is TWO legs: the BTC leg (state in ``{-1,0,+1}``, from
+    :func:`pairs_coint` / :func:`pairs_ou`) and a ``beta_t``-scaled ETH hedge.
+    ``beta_t`` comes from the single-source :func:`_hedge_beta` (no duplicated OLS),
+    so a caller can price the ETH leg's turnover on exactly the ``beta_t`` the
+    signal was built from::
+
+        eth_notional_t   = beta_t * state_t          # ETH held, per bar
+        eth_leg_turnover = |Δ eth_notional_t|        # total variation → cost base
+
+    That total variation captures BOTH discrete entries/exits AND the continuous
+    rolling-beta rebalancing of the hedge each bar; it is fed to
+    :func:`btcquant.backtest.run` as ``extra_cost_turnover`` so the round-trip
+    charges ~``(1 + |beta|)`` (≈2×) the single-leg cost.
+
+    SCOPE RAIL (M2 is COST only): the backtest P&L stays the single-leg directional
+    ``traded_pos * asset_ret`` — the observation that a delta-neutral pairs P&L
+    should net the ETH leg's price move is a SEPARATE finding (audit M9) awaiting
+    its own greenlight; nothing here changes ``gross_returns``.
+
+    Parameters mirror :func:`pairs_coint`; ``model`` selects the normalizer
+    (``"coint"`` = empirical z-score, ``"ou"`` = OU sigma_eq).
+    """
+    if model == "ou":
+        pos = pairs_ou(btc, eth, window=window, entry=entry, exit=exit,
+                       stop=stop, max_half_life=max_half_life)
+    elif model == "coint":
+        pos = pairs_coint(btc, eth, window=window, entry=entry, exit=exit,
+                          stop=stop, max_half_life=max_half_life)
+    else:
+        raise ValueError(f"pairs_legs model must be 'coint' or 'ou', got {model!r}")
+    # ONE source of the OLS hedge ratio; align beta to the position index.
+    _, _, _, beta, _ = _hedge_beta(btc, eth, window)
+    return pos, beta.reindex(pos.index).rename("beta")
 
 
 # --------------------------------------------------------------------------- #

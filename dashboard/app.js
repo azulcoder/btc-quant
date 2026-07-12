@@ -665,18 +665,28 @@
     for (const key of keys) {
       try {
         let positions;
+        let extraCost;   // M2: pairs ETH-leg turnover (cost only); undefined for single-leg strategies
         if (key === 'pairs') {
           if (!state.eth || state.eth.close.length < 60) continue;
           const m = Math.min(o.close.length, state.eth.close.length);
           const r = Q.sigPairs(o.close.slice(-m), state.eth.close.slice(-m), { window: 60, entry: 2, exit: 0.5, stop: 4.0, maxHalfLife: 60 });
-          positions = new Array(o.close.length - m).fill(0).concat(r.positions);
+          const pad = new Array(o.close.length - m).fill(0);
+          positions = pad.concat(r.positions);
+          // ETH-leg turnover = total variation of the hedge notional |Δ(beta_t·state_t)|
+          // (mirror of strategies.pairs_legs) — charged on BOTH legs (M2). Same beta the
+          // signal is built from; P&L stays single-leg (M2 scope rail). state=0 ⇒ 0 notional.
+          const ethNotional = r.positions.map((s, i) =>
+            (Number.isFinite(s) && Number.isFinite(r.beta[i]) ? s * r.beta[i] : NaN));
+          const ethTurn = ethNotional.map((v, i) =>
+            (i === 0 ? NaN : Math.abs(v - ethNotional[i - 1])));
+          extraCost = pad.concat(ethTurn);
         } else {
           positions = STRATEGIES[key].build(o, p);
         }
         // In-sample full-history (for the IS Sharpe contrast) + walk-forward OOS (the rank basis).
-        const is = Q.backtest(positions, o.close, { costBps, slippageBps: slipBps, periodsPerYear: p });
+        const is = Q.backtest(positions, o.close, { costBps, slippageBps: slipBps, periodsPerYear: p, extraCostTurnover: extraCost });
         // No nTrials here: walkForward deflates by its own folds (M6 C3).
-        const wf = Q.walkForward(positions, o.close, { folds: 5, costBps, slippageBps: slipBps, periodsPerYear: p });
+        const wf = Q.walkForward(positions, o.close, { folds: 5, costBps, slippageBps: slipBps, periodsPerYear: p, extraCostTurnover: extraCost });
         // Tharp OOS expectancy / R-multiples on the held-out positions (vol-notional R, k=2σ;
         // RESEARCH-tharp-runlog.md). The OOS span is the trailing bars, so vol aligns by tail-slice.
         let expectancy = null;

@@ -15,7 +15,9 @@ const Q = require(path.join(__dirname, '..', 'dashboard', 'quant.js'));
 const fx = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const { close, positions, ppy, volWindow, k, sr, n, skew, kurt, nTrials, varTrialsSr,
         varN1, srMid, nMid, nTrialsMid, varMid, folds,
-        costBps, slipBps, fwd, strike, iv, t } = fx;
+        cpcvBlocks, cpcvKTest, cpcvPurge, cpcvEmbargo,
+        costBps, slipBps, fwd, strike, iv, t,
+        btcPairs, ethPairs, pairsWindow } = fx;
 
 const last = (a) => a[a.length - 1];
 const ret = Q.simpleReturns(close);
@@ -31,8 +33,22 @@ const bt = Q.backtest(positions, close, {
 // Walk-forward fold-V probe (M6 C2/C3): JS walkForward vs Python backtest.walk_forward
 // on the same fixture series — empirical ddof=1 fold-SR variance, folds-deflated DSR.
 const wf = Q.walkForward(positions, close, {
-  folds, costBps, slippageBps: slipBps, periodsPerYear: ppy,
+  folds, costBps, slippageBps: slipBps, periodsPerYear: ppy, purge: 0, embargo: 0,
 });
+// M4 CPCV probe: default (legacy embargoPct trim) + an int purge/embargo edge-trim run.
+const cp = Q.cpcv(positions, close, {
+  nBlocks: cpcvBlocks, kTest: cpcvKTest, costBps, slippageBps: slipBps, periodsPerYear: ppy });
+const cpPe = Q.cpcv(positions, close, {
+  nBlocks: cpcvBlocks, kTest: cpcvKTest, costBps, slippageBps: slipBps, periodsPerYear: ppy,
+  purge: cpcvPurge, embargo: cpcvEmbargo });
+// M2 pairs two-leg-cost probe: sigPairs exposes beta; ETH-leg turnover |Δ(beta·state)|
+// is fed to backtest as extraCostTurnover — mirror of strategies.pairs_legs + run().
+const pr = Q.sigPairs(btcPairs, ethPairs, { window: pairsWindow, entry: 2, exit: 0.5, stop: 4.0, maxHalfLife: 60 });
+const ethNotional = pr.positions.map((s, i) =>
+  (Number.isFinite(s) && Number.isFinite(pr.beta[i]) ? s * pr.beta[i] : NaN));
+const ethTurn = ethNotional.map((v, i) => (i === 0 ? NaN : Math.abs(v - ethNotional[i - 1])));
+const prNone = Q.backtest(pr.positions, btcPairs, { costBps, slippageBps: slipBps, periodsPerYear: ppy });
+const prExt = Q.backtest(pr.positions, btcPairs, { costBps, slippageBps: slipBps, periodsPerYear: ppy, extraCostTurnover: ethTurn });
 
 const out = {
   // numeric
@@ -84,6 +100,22 @@ const out = {
   wf_varTrialsSr: wf.oosStats ? wf.oosStats.varTrialsSr : NaN,
   wf_deflatedSharpe: wf.oosStats ? wf.oosStats.deflatedSharpe : NaN,
   wf_varFallback: wf.oosStats ? !!wf.oosStats.varFallback : null,
+  // M4 CPCV multi-path dispersion — mirror of backtest.cpcv (median_sharpe etc.)
+  cpcv_nPaths: cp.nPaths,
+  cpcv_median: cp.median,
+  cpcv_p25: cp.p25,
+  cpcv_p75: cp.p75,
+  cpcv_iqr: cp.iqr,
+  cpcv_min: cp.min,
+  cpcv_max: cp.max,
+  cpcv_pe_median: cpPe.median,
+  cpcv_pe_nPaths: cpPe.nPaths,
+  // M2 pairs two-leg cost — mirror of the Python pairs_legs + run() probe
+  pairs_beta_last: pr.beta[pr.beta.length - 1],
+  pairs_ethTurnover: ethTurn.reduce((a, v) => a + (Number.isFinite(v) ? v : 0), 0),
+  pairs_btcTurnover: prNone.stats.turnover,
+  pairs_totalTurnover: prExt.stats.turnover,
+  pairs_netEquity: prExt.equity[prExt.equity.length - 1],
 };
 
 process.stdout.write(JSON.stringify(out));
