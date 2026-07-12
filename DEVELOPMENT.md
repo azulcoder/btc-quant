@@ -99,10 +99,10 @@ in the docstring so a quant can audit.
 ## 4. Verification suite (run before every commit)
 
 ```bash
-python3 -m pytest -q                      # 173 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
+python3 -m pytest -q                      # 178 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
 node --check dashboard/app.js             # JS syntax (also quant.js, charts.js, livewire.js, terminal-*.js)
 node dashboard/app.js --check             # ppy guard: ppy()=365 (1d)/8760 (1h); no literal-365 at an annualization site
-python3 scripts/check_parity.py           # JS↔Python mirror parity (55 shared fields; the one rule)
+python3 scripts/check_parity.py           # JS↔Python mirror parity (63 shared fields; the one rule)
 node scripts/check_terminal.cjs           # orderflow terminal smoke: adapters+stores replayed over REAL captured WS frames (fixtures_ws.json)
 make verify-browser                       # L1: terminal.html?replay=1 in headless Chromium — render + zero-console-error gate + screenshots (needs playwright)
 make verify-wire                          # L2: ~45s live-wire invariants through the PRODUCTION adapters (exit 2 = offline, not a bug)
@@ -114,8 +114,11 @@ python3 scripts/compare.py --research     # + pre-registered candidate verdicts
 make test        # convenience targets: also  make compare / backtest / scan / fetch / dash / collector / install
 ```
 
-**CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the first three on every push/PR:
-`pytest`, `node --check` ×3, and `python scripts/check_parity.py`. A diverging mirror fails the build.
+**CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the build gates on every push/PR:
+`pytest`, `node --check` ×N, **`node dashboard/app.js --check`** (the annualization guard — closes
+audit M7; a non-zero exit fails the build), `python scripts/check_parity.py`, and
+`node scripts/check_terminal.cjs` (network-free terminal smoke). A diverging mirror or a resurfaced
+literal-365 fails the build.
 
 ### Reproducibility tooling (OPTIONAL — `requirements-dev.txt`, not the core)
 
@@ -156,9 +159,10 @@ was dividing the downside variance by the downside count instead of the full sam
   `wf_oosSharpe`/`wf_varTrialsSr`/`wf_deflatedSharpe`/`wf_varFallback` sit at ~6e-8 worst); Black-76
   **gamma/vega are exact** (they use `normPdf`/`exp`) while **delta agrees to ~7e-8** (JS `erf`
   approx); a full DSR computed from independently-estimated **skew/kurtosis agrees to ~1e-5** (JS
-  moment helpers vs scipy `bias=False`). Overall parity worst today: **~1.6e-7** (on `rsi`, 55
-  fields — +5 M2 two-leg pairs cost, +9 M4 CPCV dispersion). State the *real* tolerance; don't claim
-  bit-for-bit.
+  moment helpers vs scipy `bias=False`). Overall parity worst today: **~1.6e-7** (on `rsi`, 63
+  fields — +5 M2 two-leg pairs cost, +9 M4 CPCV dispersion, +2 M9 delta-neutral pairs P&L, +6 M8
+  options analytics [max_pain + gamma_concentration], the last 6 bit-exact |Δ|=0). State the *real*
+  tolerance; don't claim bit-for-bit.
 - **DSR convention (M6, binding — do not relitigate): V = the EMPIRICAL ddof=1 cross-trial variance
   of the per-period SRs whenever the trial SRs are in hand; N = 1 ≡ PSR and is LABELED
   `'PSR (single trial — no deflation)'` (`dsr_is_psr`/`dsrIsPsr` in stats).** Never reintroduce a
@@ -216,8 +220,20 @@ was dividing the downside variance by the downside count instead of the full sam
   source of `beta` (no duplicated OLS); `pairs_legs → (state, beta)` exposes it. `extra_cost_turnover`
   aligns a **`pd.Series` by index**, a **raw array by position (exact length)**, and **raises loudly**
   on a length mismatch — never pass a RangeIndex array against a DatetimeIndex (it would silently zero
-  the leg). SCOPE: P&L stays single-leg directional — netting the ETH leg's price move is the open **M9**
-  finding.
+  the leg).
+- **Pairs P&L is DELTA-NEUTRAL — the BTC-leg state earns the SPREAD, not a bare BTC move (audit M9,
+  completes M2).** Book `gross = traded_posₜ · (BTC_retₜ − hedge_returnₜ)` where
+  `hedge_returnₜ = beta_{t−1} · ETH_retₜ` — the SAME single-source `beta` the cost is charged on,
+  **1-bar-lagged** (`beta.shift(1)`, the identical no-look-ahead shift as the state), so the state
+  earns `BTC_ret − beta·ETH_ret ≈ Δlog-spread`. Threaded via `backtest.run(..., hedge_return=)` /
+  `walk_forward(..., hedge_return=)` and the `quant.js backtest`/`walkForward` `hedgeReturn` mirror.
+  **Default `None` ⇒ `gross = traded_pos · BTC_ret` EXACTLY as before ⇒ byte-identical for every
+  non-pairs strategy** (the subtraction path is never entered). `hedge_return` aligns exactly like
+  `extra_cost_turnover` (Series → reindex+`fillna(0)`; array → length-checked), so a warm-up /
+  degenerate-beta NaN bar nets a **zero** hedge, never a NaN into P&L. M2 (cost) + M9 (P&L) together
+  make the pairs trade coherently delta-neutral; both pairs DSRs went to 0.00 (still KILL, off the
+  board). Wiring lives in `compare.py._pairs_hedge_return` + `app.js`; `pairs_legs` is unchanged (the
+  ONE source of `(state, beta)`).
 - **Purge/embargo are default-OFF machinery for k-step labels (audit M4).** `walk_forward`/`cpcv`
   take `purge`/`embargo` as index masks on the per-fold **IN-SAMPLE** return series ONLY — **OOS is
   invariant**, and `purge=embargo=0` reproduces the pre-M4 engine **bit-for-bit** (pinned to golden
@@ -247,16 +263,19 @@ was dividing the downside variance by the downside count instead of the full sam
 - ~~M1-pairs bfill leak · M2 two-leg pairs cost · M4 purge/embargo/lockbox · M5 IC HAC~~ — **done
   (2026-07-12)**: M1-pairs dropped the `.bfill()` (ffill-only, no back-stamped pre-listing price);
   M2 charges the ETH hedge leg via `extra_cost_turnover` (single-source `_hedge_beta`/`pairs_legs`,
-  +5 parity fields, pairs DSR moved down, P&L still single-leg); M4 added default-OFF, byte-identical
-  purge/embargo + `LockBox` (+9 CPCV parity fields); M5 replaced the crude IC band with Newey-West
-  HAC at lag k-1 (`compare.py` prints NW t/p — board strategies still show NO significant OOS lead,
-  now stronger). See AUDIT_LOG.md (2026-07-12) and the four §5 gotchas.
-- **M9 — delta-neutral pairs P&L (NEW, needs greenlight)**: M2 charged both legs' *cost* but the
-  pairs backtest P&L is still single-leg directional (`traded_pos · BTC_ret`); a genuinely
-  delta-neutral pairs return should net the ETH leg's price move (`−beta·state · ETH_ret`), which
-  changes the pairs *return* series, not just cost. Deliberately deferred (M2 scope rail); do not
-  start without a before/after + sign-off. Also still open: M7 (app.js `--check` in CI), M8 (options
-  parity).
+  +5 parity fields, pairs DSR moved down, cost-only — P&L completed in M9); M4 added default-OFF,
+  byte-identical purge/embargo + `LockBox` (+9 CPCV parity fields); M5 replaced the crude IC band with
+  Newey-West HAC at lag k-1 (`compare.py` prints NW t/p — board strategies still show NO significant
+  OOS lead, now stronger). See AUDIT_LOG.md (2026-07-12) and the four §5 gotchas.
+- ~~M9 delta-neutral pairs P&L · M8 options parity · M7 annualization guard in CI~~ — **done
+  (2026-07-12)**: M9 books the pairs SPREAD return `traded_pos · (BTC_ret − beta_{t−1}·ETH_ret)` via
+  `backtest.run(..., hedge_return=)` (default `None` ⇒ non-pairs byte-identical), +2 parity fields —
+  both pairs DSRs collapsed to 0.00 (still KILL, off the board), non-pairs P&L byte-identical (only
+  the shared-V DSR shifts, M6 coupling); M8 pinned `max_pain` + `gamma_concentration` across the
+  mirror (+6 parity fields, bit-exact) so options parity now covers the greeks AND the two chain
+  analytics; M7 wired `node dashboard/app.js --check` into CI (the annualization guard bites on any
+  resurfaced literal-365). **All lettered audit findings (H1, M1–M9) are now CLOSED** — only Low/Info
+  remain. See AUDIT_LOG.md (2026-07-12) and the §5 gotchas.
 - **True bit-for-bit parity** — swap JS `normPpf` (Acklam) / `erf` for higher-order approximations to
   close the ~1e-8 / ~7e-8 gaps, if ever wanted.
 - ~~Commit the parity probes under `scripts/`/`tests/` for CI~~ — **done**: `scripts/check_parity.py` +

@@ -181,6 +181,27 @@ def main() -> int:
         # rebalancing of the hedge each bar (state=0 ⇒ 0 notional ⇒ no cost).
         return (beta_full * pos_full).diff().abs()
 
+    def _pairs_hedge_return(name: str) -> pd.Series | None:
+        """Delta-neutral hedge-leg return for a pairs strategy (audit M9). The
+        BTC-leg state earns the SPREAD return, so P&L must net the beta-scaled ETH
+        move: ``hedge_return_t = beta_{t-1}·eth_ret_t`` where ``beta`` is the SAME
+        single-source rolling hedge ratio (``strategies.pairs_legs``) the cost is
+        charged on, shifted one bar (``beta.shift(1)``) so it uses only the ratio the
+        position was decided on — no look-ahead, the same 1-bar shift as the state.
+        ``eth_ret`` is the engine's simple pct_change on the aligned ETH close (same
+        return convention as ``btc_ret`` inside ``run``). Fed to ``backtest.run`` as
+        ``hedge_return`` (P&L only; cost is the separate ``extra_cost_turnover``);
+        with M2's two-leg cost the trade is now coherently delta-neutral. Non-pairs ⇒
+        None ⇒ ``gross = traded_pos·btc_ret`` single-leg, byte-identical."""
+        if name not in ("pairs_coint", "pairs_ou") or eth_close is None:
+            return None
+        eth_aligned = eth_close.reindex(close.index).ffill()   # no bfill (audit M1)
+        model = "ou" if name == "pairs_ou" else "coint"
+        _, beta_full = strategies.pairs_legs(close, eth_aligned, model=model)
+        # r ≈ dlog for small moves: btc_ret - beta_{t-1}·eth_ret ≈ Δlog-spread, a
+        # return on the BTC-leg notional (the reference the state weight always used).
+        return beta_full.shift(1) * eth_aligned.pct_change()
+
     strat_list = RESEARCH_STRATS if args.research else SPOT_STRATS
     n_trials = len(strat_list)   # selection-count deflation (best of this many)
     oos_vol = features.realized_vol(features.simple_returns(close), 30, ppy)  # for Tharp R-multiples
@@ -190,7 +211,8 @@ def main() -> int:
             wf = backtest.walk_forward(_make_positions_fn(name, args, ppy, eth_close), close,
                                        n_splits=args.folds, cost_bps=args.cost_bps,
                                        slippage_bps=args.slippage_bps, periods_per_year=ppy,
-                                       extra_cost_turnover=_pairs_eth_leg_turnover(name))
+                                       extra_cost_turnover=_pairs_eth_leg_turnover(name),
+                                       hedge_return=_pairs_hedge_return(name))
             oos, is_ = wf["oos"], wf["is_"]
             oos_by_name[name] = wf["oos_returns"]
             # The leaderboard OOS DSR is deflated for N strategies (selection-count

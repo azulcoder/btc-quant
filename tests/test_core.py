@@ -598,6 +598,91 @@ def test_pairs_no_bfill_leak_leading_pre_eth_bars_stay_nan():
 
 
 # --------------------------------------------------------------------------- #
+# M9 — pairs delta-neutral P&L (the completion of M2: state earns the SPREAD)  #
+# --------------------------------------------------------------------------- #
+def test_m9_delta_neutral_identity_zero_spread_when_legs_move_together():
+    """M9 (a): when ETH tracks BTC exactly and beta ≡ 1, the spread return is 0 every
+    bar, so a delta-neutral pairs trade books ZERO gross P&L (constructed exact) — the
+    hedge leg cancels the directional BTC leg by construction."""
+    px = _make_prices(n=120, seed=17)
+    eth = px.copy()                                  # ETH identical ⇒ eth_ret == btc_ret
+    beta = pd.Series(1.0, index=px.index)
+    state = pd.Series(1.0, index=px.index)           # always long the spread
+    hedge_ret = beta.shift(1) * eth.pct_change()     # = beta_{t-1}·eth_ret_t = btc_ret_t
+    res = backtest.run(state, px, cost_bps=0.0, slippage_bps=0.0, hedge_return=hedge_ret)
+    # gross = state_{t-1}·(btc_ret - btc_ret) = 0 on every bar → the spread P&L vanishes.
+    assert np.allclose(res["gross_returns"].fillna(0.0).to_numpy(), 0.0, atol=1e-15)
+    assert res["equity"].iloc[-1] == pytest.approx(1.0, abs=1e-12)   # zero cost ⇒ flat equity
+
+
+def test_m9_hedge_return_none_leaves_every_nonpairs_result_byte_identical():
+    """M9 (b) regression guard: hedge_return default (None) and an explicit None must
+    leave EVERY non-pairs backtest — run AND walk_forward — byte-for-byte unchanged."""
+    df = _make_ohlcv(n=300, seed=8)
+    px = df["close"]
+    cases = {
+        "buy_and_hold": strategies.buy_and_hold(df),
+        "ma_trend": strategies.ma_trend_filter(df, n=50),
+        "tsmom": strategies.tsmom(df, lookback=20),
+    }
+    for name, pos in cases.items():
+        a = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0)
+        b = backtest.run(pos, px, cost_bps=10.0, slippage_bps=2.0, hedge_return=None)
+        for key in ("returns", "gross_returns", "equity", "turnover"):
+            assert np.array_equal(a[key].to_numpy(), b[key].to_numpy(), equal_nan=True), (name, key)
+    # walk_forward path: hedge_return=None must equal the no-arg OOS track record.
+    wa = backtest.walk_forward(lambda s: strategies.tsmom(pd.DataFrame({"close": s}), lookback=20),
+                               px, n_splits=5)
+    wb = backtest.walk_forward(lambda s: strategies.tsmom(pd.DataFrame({"close": s}), lookback=20),
+                               px, n_splits=5, hedge_return=None)
+    assert np.array_equal(wa["oos_returns"].to_numpy(), wb["oos_returns"].to_numpy(), equal_nan=True)
+
+
+def test_m9_eth_outrunning_btc_makes_long_spread_pnl_negative():
+    """M9 (c): BTC rises (+2%/bar) and ETH rises MORE (+5%/bar) with beta ≡ 1. A LONG-
+    spread state (long BTC leg / short ETH hedge) that looks POSITIVE single-leg turns
+    NEGATIVE once the faster ETH hedge nets in — proof the ETH leg now books into P&L."""
+    idx = pd.date_range("2021-01-01", periods=60, freq="D", tz="UTC")
+    btc = pd.Series(20_000.0 * (1.02 ** np.arange(60)), index=idx)   # +2%/bar
+    eth = pd.Series(1_000.0 * (1.05 ** np.arange(60)), index=idx)    # +5%/bar
+    beta = pd.Series(1.0, index=idx)
+    state = pd.Series(1.0, index=idx)                                # long the spread
+    hedge_ret = beta.shift(1) * eth.pct_change()
+    single = backtest.run(state, btc, cost_bps=0.0, slippage_bps=0.0)
+    dn = backtest.run(state, btc, cost_bps=0.0, slippage_bps=0.0, hedge_return=hedge_ret)
+    assert single["gross_returns"].fillna(0.0).sum() > 0.0          # bare directional long BTC: positive
+    g = dn["gross_returns"].dropna().to_numpy()
+    assert (g < 0.0).all()                                          # every active bar: 0.02 - 0.05 < 0
+    assert dn["gross_returns"].fillna(0.0).sum() < single["gross_returns"].fillna(0.0).sum()
+    assert dn["equity"].iloc[-1] < 1.0                              # the delta-neutral trade loses
+
+
+def test_m9_beta_shift_is_t_minus_1_no_lookahead():
+    """M9 (d): the hedge ratio is 1-bar-lagged (beta.shift(1)), the same no-look-ahead
+    shift as the state — a beta SPIKE at bar t may only affect P&L at t+1, never at t."""
+    idx = pd.date_range("2021-01-01", periods=40, freq="D", tz="UTC")
+    px = _make_prices(n=40, seed=21); px.index = idx
+    eth = _make_prices(n=40, seed=22); eth.index = idx
+    state = pd.Series(1.0, index=idx)
+    beta = pd.Series(1.0, index=idx)
+    t = 20
+    beta_spk = beta.copy(); beta_spk.iloc[t] = 9.0                  # a lone beta spike at bar t
+    eth_ret = eth.pct_change()
+    hedge_base = beta.shift(1) * eth_ret
+    hedge_spk = beta_spk.shift(1) * eth_ret
+    gb = backtest.run(state, px, cost_bps=0.0, slippage_bps=0.0,
+                      hedge_return=hedge_base)["gross_returns"].to_numpy()
+    gs = backtest.run(state, px, cost_bps=0.0, slippage_bps=0.0,
+                      hedge_return=hedge_spk)["gross_returns"].to_numpy()
+    assert gb[t] == pytest.approx(gs[t])                           # bar t: beta_{t-1} unchanged
+    assert gb[t + 1] != pytest.approx(gs[t + 1])                   # bar t+1: the lagged spike lands
+    mask = np.ones(len(gb), dtype=bool); mask[t + 1] = False       # every OTHER bar identical
+    fb = np.where(np.isnan(gb), 0.0, gb)
+    fs = np.where(np.isnan(gs), 0.0, gs)
+    assert np.array_equal(fb[mask], fs[mask])
+
+
+# --------------------------------------------------------------------------- #
 # Part B research candidates (pre-registered; RESEARCH-partB-runlog.md)        #
 # --------------------------------------------------------------------------- #
 def test_ou_sigma_eq_finite_for_mean_reverting_inf_for_trending():

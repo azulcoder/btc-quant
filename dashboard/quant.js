@@ -362,6 +362,11 @@
     // ETH-leg |Δ(beta·state)|) ADDED to the cost base. null/absent ⇒ byte-identical
     // single-leg cost for every non-pairs strategy.
     const extraCost = opts.extraCostTurnover != null ? opts.extraCostTurnover : null;
+    // M9 mirror of backtest.run: an OPTIONAL per-bar hedge-leg return (the pairs
+    // beta_{t-1}·eth_ret_t) SUBTRACTED from the asset return so the BTC-leg state
+    // earns the delta-neutral SPREAD return. null/absent ⇒ gross = pos·assetRet
+    // EXACTLY as before ⇒ byte-identical single-leg P&L for every non-pairs strategy.
+    const hedgeRet = opts.hedgeReturn != null ? opts.hedgeReturn : null;
 
     const n = Math.min(positions.length, prices.length);
     const assetRet = simpleReturns(prices.slice(0, n));
@@ -388,8 +393,11 @@
       const et = extraCost && Number.isFinite(extraCost[i]) ? extraCost[i] : 0;
       const costTo = to + et;
       costTurnover[i] = costTo;
-      grossReturns[i] = pos[i] * r;          // M2 scope rail: P&L stays single-leg
-      returns[i] = pos[i] * r - costTo * costRate;
+      // M9: net the hedge-leg return (0 when absent/NaN ⇒ single-leg, matching the
+      // Python reindex+fillna(0)); pos[i]·(assetRet - hedge) = delta-neutral spread P&L.
+      const h = hedgeRet && Number.isFinite(hedgeRet[i]) ? hedgeRet[i] : 0;
+      grossReturns[i] = pos[i] * (r - h);    // M9: delta-neutral (single-leg when h≡0)
+      returns[i] = pos[i] * (r - h) - costTo * costRate;
       prevPos = pos[i];
     }
 
@@ -802,6 +810,10 @@
     // M2: optional full-history ETH-leg turnover, slice-aligned per fold (mirror of
     // backtest.walk_forward threading extra_cost_turnover through to run per block).
     const extra = opts.extraCostTurnover != null ? opts.extraCostTurnover : null;
+    // M9: optional full-history hedge-leg return, slice-aligned per fold (mirror of
+    // backtest.walk_forward threading hedge_return through to run per block) — turns
+    // the booked P&L into the delta-neutral spread return. null ⇒ single-leg.
+    const hedge = opts.hedgeReturn != null ? opts.hedgeReturn : null;
     const n = Math.min(positions.length, prices.length);
     const out = { oosReturns: [], oosStats: null, oosPositions: [], oosPrices: [], foldSrs: [] };
     if (n < (folds + 1) * 2) return out;
@@ -813,7 +825,8 @@
       if (b <= a) continue;
       const bt = backtest(positions.slice(a, b), prices.slice(a, b),
         { costBps: opts.costBps, slippageBps: opts.slippageBps, periodsPerYear: ppy,
-          extraCostTurnover: extra ? extra.slice(a, b) : undefined });
+          extraCostTurnover: extra ? extra.slice(a, b) : undefined,
+          hedgeReturn: hedge ? hedge.slice(a, b) : undefined });
       for (let i = 0; i < bt.returns.length; i++) oos.push(bt.returns[i]);
       // Per-fold OOS per-period Sharpe — mirror of risk.summary's sharpe_per_period
       // convention (NaN when the fold is degenerate: < 2 finite returns or σ = 0).

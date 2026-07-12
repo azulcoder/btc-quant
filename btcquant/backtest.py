@@ -90,6 +90,7 @@ def run(
     n_trials: int = 1,
     var_trials_sr: Optional[float] = None,
     extra_cost_turnover: Optional[pd.Series] = None,
+    hedge_return: Optional[pd.Series] = None,
 ) -> dict:
     """Vectorized backtest of a target-position series against a price series.
 
@@ -141,6 +142,24 @@ def run(
         **Default ``None`` ⇒ byte-identical to the single-leg cost for every
         non-pairs strategy** (the addition path is never entered). This adds to the
         COST ONLY; ``gross_returns`` is untouched (audit M2 scope rail).
+    hedge_return : pd.Series, optional
+        An OPTIONAL per-bar **hedge-leg return** (aligned by index; reindexed +
+        ``fillna(0)`` here, symmetric with ``extra_cost_turnover``) SUBTRACTED from
+        the asset return before booking P&L — i.e. the gross return becomes
+        ``traded_pos * (asset_ret - hedge_return)`` instead of the single-leg
+        ``traded_pos * asset_ret``. It is the completion of the delta-neutral pairs
+        trade (audit M9): the BTC-leg state earns the **spread** return, not a bare
+        directional BTC move. Callers pass ``hedge_return_t = beta_{t-1} * eth_ret_t``
+        (the ``beta``-scaled ETH-leg return, the ETH price change the delta-neutral
+        hedge gives up/earns), where ``beta_{t-1}`` is the SAME 1-bar-lagged hedge
+        ratio the position was decided on — no look-ahead. Because ``r ≈ dlog`` for
+        small moves, ``asset_ret - hedge_return`` is the change in the log-spread the
+        strategy trades, expressed as a **return on the BTC-leg notional** — the same
+        reference the state weight (in ``[-1, 1]``) has always used. With M2's two-leg
+        turnover already charging cost on BOTH legs, threading this makes P&L AND cost
+        both two-leg = a coherent delta-neutral trade. **Default ``None`` ⇒
+        ``gross = traded_pos * asset_ret`` EXACTLY as today ⇒ byte-identical for every
+        non-pairs strategy** (the subtraction path is never entered).
 
     Returns
     -------
@@ -168,7 +187,26 @@ def run(
     traded_pos = pos.shift(1)
     _assert_no_lookahead(pos, traded_pos)
 
-    gross_returns = (traded_pos * asset_ret).rename("gross_returns")
+    # Single-leg directional P&L by default; delta-neutral spread P&L when a
+    # hedge-leg return is supplied (audit M9). ``hedge_return`` is aligned exactly
+    # like ``extra_cost_turnover`` (Series → reindex+fillna(0); positional array →
+    # length-checked) so a non-overlapping / warm-up bar nets ZERO hedge (never NaN
+    # reaching the multiply). None ⇒ the subtraction is skipped entirely ⇒ the gross
+    # is byte-identical to the pre-M9 single-leg product for every non-pairs run.
+    if hedge_return is not None:
+        if isinstance(hedge_return, pd.Series):
+            hedge = hedge_return.astype("float64").reindex(px.index).fillna(0.0)
+        else:
+            harr = np.asarray(hedge_return, dtype="float64")
+            if harr.ndim != 1 or harr.shape[0] != len(px):
+                raise ValueError(
+                    f"hedge_return positional length {getattr(harr, 'shape', None)} "
+                    f"!= position/price length {len(px)}; pass an index-aligned "
+                    f"pd.Series or a 1-D array of matching length.")
+            hedge = pd.Series(harr, index=px.index).fillna(0.0)
+        gross_returns = (traded_pos * (asset_ret - hedge)).rename("gross_returns")
+    else:
+        gross_returns = (traded_pos * asset_ret).rename("gross_returns")
 
     # Turnover = |Δ traded position|. The first traded bar's turnover is the cost
     # of establishing the opening position from flat (0).
@@ -362,6 +400,7 @@ def walk_forward(
     periods_per_year: int = 365,
     min_train: Optional[int] = None,
     extra_cost_turnover: Optional[pd.Series] = None,
+    hedge_return: Optional[pd.Series] = None,
     purge: int = 0,
     embargo: int = 0,
 ) -> dict:
@@ -405,6 +444,13 @@ def walk_forward(
         OOS blocks. ``run`` reindexes it to each block's own index (slice-aligned),
         so the fold edges / purge / embargo are untouched — this only enlarges the
         cost base. ``None`` ⇒ single-leg cost, byte-identical to before.
+    hedge_return : pd.Series, optional
+        A full-history hedge-leg return series (audit M9: the pairs
+        ``beta_{t-1}·eth_ret_t``) threaded to each fold's :func:`run` for BOTH the IS
+        and OOS blocks. ``run`` reindexes it to each block's own index (slice-aligned),
+        so the fold edges / purge / embargo are untouched — it turns the booked P&L
+        into the delta-neutral **spread** return. ``None`` ⇒ single-leg directional
+        P&L, byte-identical to before.
     purge : int, default 0
         AFML ch.7 purge: drop from each fold's **in-sample** set the last ``purge``
         bars adjacent to the test-block start — the bars whose forward label window
@@ -493,6 +539,7 @@ def walk_forward(
                 slippage_bps=slippage_bps,
                 periods_per_year=periods_per_year,
                 extra_cost_turnover=extra_cost_turnover,
+                hedge_return=hedge_return,
             )
             # Purge/embargo are index masks on the IS RETURN series (never the prices,
             # so run()'s pct_change is never taken across a masked gap). is_ret rows sit
@@ -520,6 +567,7 @@ def walk_forward(
             slippage_bps=slippage_bps,
             periods_per_year=periods_per_year,
             extra_cost_turnover=extra_cost_turnover,
+            hedge_return=hedge_return,
         )
         oos_returns_parts.append(oos_res["returns"])
         oos_pos_parts.append(oos_pos)

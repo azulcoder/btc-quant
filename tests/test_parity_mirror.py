@@ -57,9 +57,34 @@ def test_parity_harness_covers_unsaturated_and_walkforward_probes():
     js_src = open(os.path.join(ROOT, "scripts", "_parity_eval.cjs"), encoding="utf-8").read()
     for name in ("dsr_n1", "dsr_mid", "wf_varTrialsSr", "wf_deflatedSharpe", "wf_varFallback",
                  # M2 pairs two-leg-cost probe (the pairs path was UNPINNED before M2)
-                 "pairs_ethTurnover", "pairs_btcTurnover", "pairs_totalTurnover"):
+                 "pairs_ethTurnover", "pairs_btcTurnover", "pairs_totalTurnover",
+                 # M9 pairs delta-neutral P&L probe (completes M2: spread return + two-leg cost)
+                 "pairs_dnGrossSum", "pairs_dnNetEquity",
+                 # M8 options-parity probe (max_pain + gamma_concentration past the greeks)
+                 "mp_maxPain", "mp_pcOiRatio", "mp_forward",
+                 "gc_sum", "gc_dot", "gc_peakStrike"):
         assert name in py_src, f"{name} probe missing from check_parity.py"
         assert name in js_src, f"{name} probe missing from _parity_eval.cjs"
     # the anchor constants themselves (a joint drift must fail the pins, not parity)
     assert "0.8933576314257702" in py_src
     assert "0.6072585304659127" in py_src
+    # M8 options anchors — max_pain strike + total gamma density are pre-registered too
+    assert "64000.0" in py_src
+    assert "0.10701664008807263" in py_src
+
+
+def test_parity_options_fields_present_and_agree():
+    """M8: the new options-parity fields (max_pain + gamma_concentration) must be
+    computed on BOTH sides and agree — completing options parity past the Black-76
+    greeks. Runs the harness and asserts the M8 fields appear and parity holds."""
+    if shutil.which("node") is None:
+        pytest.skip("node not on PATH; parity runs in CI")
+    proc = subprocess.run([sys.executable, SCRIPT], capture_output=True, text=True)
+    if proc.returncode == 2:
+        pytest.skip("node unavailable at run time")
+    assert proc.returncode == 0, (
+        "M8 options parity FAILED:\n" + proc.stdout + "\n" + proc.stderr
+    )
+    for name in ("mp_maxPain", "mp_pcOiRatio", "mp_forward",
+                 "gc_sum", "gc_dot", "gc_peakStrike"):
+        assert name in proc.stdout, f"{name} missing from parity harness output"

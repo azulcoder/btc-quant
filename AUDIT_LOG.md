@@ -307,3 +307,131 @@ RULE is not engaged.
 **Status:** M1-pairs / M2 / M4 / M5 fixed + tested. Remaining audit findings: **M9** (delta-neutral
 pairs P&L — new, needs greenlight, above), M7 (app.js `--check` in CI), M8 (options parity),
 Low/Info.
+
+## 2026-07-12 — M9 / M8 / M7: delta-neutral pairs P&L, options parity closed, annualization guard in CI
+
+Three findings closed in one pass (each shipped with before/after + regression). Suite after:
+pytest **178** passed (was 173 at the M1/M2/M4/M5 close; +4 M9 delta-neutral P&L, +1 M8 options
+parity harness), `check_parity` **63** fields PASS (was 55; +2 M9 pairs P&L, +6 M8 options; worst
+|Δ| = **1.63e-07** unchanged — still the `rsi` field, pre-existing, untouched by this pass),
+`check_terminal` **46/46**, `node --check` all + `app.js --check` clean, `make verify-browser` L1
+exit-0 with **0 console / 0 page errors** (the pairs cost+P&L change lives on the analytics path;
+the terminal L1 surface is unaffected).
+
+### M9 (Medium) — pairs P&L was single-leg directional; the delta-neutral trade earns the SPREAD
+
+**Before:** M2 made the pairs *cost* two-leg (charging the beta-scaled ETH hedge) but left the
+booked P&L single-leg directional — `gross_returns = traded_posₜ · BTC_retₜ`. A delta-neutral
+long-spread holds a BTC leg AND a `beta_t`-scaled short-ETH hedge, so its true P&L is the **spread
+return**, not a bare BTC move: when ETH outruns BTC the hedge loses even as BTC rises. Cost was
+two-leg while P&L was one-leg — an incoherent trade that still credited the pairs strategies with
+BTC's directional drift.
+
+**After (shared Python + JS formula — THE ONE RULE engaged):** new optional
+`backtest.run(..., hedge_return=)` param (mirror `quant.js backtest` `opts.hedgeReturn`) **subtracts**
+a per-bar hedge-leg return from the asset return before booking P&L:
+`gross = traded_posₜ · (BTC_retₜ − hedge_returnₜ)`. Callers pass
+`hedge_returnₜ = beta_{t−1} · ETH_retₜ` — the SAME single-source rolling hedge ratio
+(`strategies.pairs_legs`) the cost is charged on, **1-bar-lagged** (`beta.shift(1)`, the same
+no-look-ahead shift as the state), so the BTC-leg state earns `BTC_ret − beta·ETH_ret ≈ Δlog-spread`,
+a return on the BTC-leg notional (the `[-1,1]` reference the state weight always used). Threaded
+per-fold through `walk_forward` (both IS and OOS blocks). `hedge_return` is aligned exactly like
+M2's `extra_cost_turnover` (Series → reindex+`fillna(0)`; positional array → length-checked), so a
+warm-up / non-overlapping / degenerate-beta bar nets a **zero** hedge, never a NaN into P&L.
+**Default `None` ⇒ `gross = traded_pos · BTC_ret` EXACTLY as before ⇒ byte-identical for every
+non-pairs strategy** (the subtraction path is never entered). `strategies.pairs_legs` is unchanged
+(still the ONE source of `(state, beta_t)`); `compare.py._pairs_hedge_return` and `app.js` do the
+wiring. **M2 (two-leg cost) + M9 (two-leg P&L) together make the pairs trade coherently
+delta-neutral for the first time.**
+
+**Before → after** (`compare.py --research`, real BTC/ETH, 2018-01-01→2026-07-12, N=8; BEFORE =
+single-leg P&L pinned by re-running the pre-M9 tree on the identical current data):
+
+```
+strategy       OOS DSR     OOS CAGR       OOS SR      IS SR        OOS MaxDD      #T
+pairs_coint    0.04→0.00   -0.12%→-1.43%   0.01→-0.59  0.01→-0.35  -13.84→-10.94  14→14
+pairs_ou       0.01→0.00   -7.41%→-4.38%  -0.22→-0.18 -0.03→-0.06  -54.09→-61.65  70→70
+```
+
+Both pairs DSRs collapse to **0.00** — still **KILL**, nowhere near the 0.95 bar, still off the
+public board. `#T` unchanged (M9 nets the ETH leg's *price* move into P&L; it does not change
+positions or trades). The kill verdicts are unchanged: `pairs_ou` (Part B) and every Tier-B/Tharp
+KILL hold; no verdict flipped upward.
+
+**Non-pairs P&L is byte-identical**; only the shared-V leaderboard DSR shifts — the documented M6
+cross-sectional coupling. When the pairs OOS SRs dropped, the empirical cross-trial variance rose
+`V 0.000602→0.000991`, so every OTHER strategy's leaderboard DSR moved **down** (tsmom 0.82→0.64,
+tsmom_dir 0.75→0.56, buy_and_hold 0.61→0.41, tsmom_ls 0.58→0.37, ma_trend 0.53→0.34) with **no
+upward flip and no rank change**. Their OOS SR/MaxDD are unchanged (tsmom 1.01 / -22.28%, tsmom_dir
+0.93 / -58.68%, b&h 0.79 / -76.85%). (A pre-existing ~0.01% CAGR flutter on a couple of rows —
+e.g. tsmom_dir 35.68↔35.69 — reproduces across two runs of the *identical* M9 tree, so it is
+float/data-refresh nondeterminism in the CAGR year-count, not an M9 effect.) The IC block is
+**unaffected** (M9 does not touch `ic.py`).
+
+**Tests:** `test_core.py` — `test_m9_delta_neutral_identity_zero_spread_when_legs_move_together`
+(ETH≡BTC, beta≡1 ⇒ spread return 0 every bar ⇒ zero gross, flat equity),
+`test_m9_hedge_return_none_leaves_every_nonpairs_result_byte_identical` (default AND explicit
+`None` leave `run` + `walk_forward` byte-for-byte unchanged for buy_and_hold/ma_trend/tsmom),
+`test_m9_eth_outrunning_btc_makes_long_spread_pnl_negative` (BTC +2%/bar, ETH +5%/bar, beta≡1: a
+long-spread that is positive single-leg turns negative once the faster ETH hedge nets in — every
+active bar 0.02−0.05<0, terminal equity <1),
+`test_m9_beta_shift_is_t_minus_1_no_lookahead` (a lone beta spike at bar t touches P&L only at
+t+1, every other bar identical). Parity: 2 new pinned fields (`pairs_dnGrossSum`,
+`pairs_dnNetEquity`) ≤1e-7.
+
+**Adversarial battery (all HELD):** (a) full non-pairs leaderboard rows byte-identical to the
+pre-M9 tree on identical data (verified by stash-and-rerun); (b) a degenerate/NaN hedge (NaN
+warm-up + a lone mid-series NaN, as a zero-variance beta would produce) nets **zero** on those
+bars — the gross NaN mask is identical to the no-hedge run, equity stays finite, no NaN reaches
+P&L; (c) the constructed ETH-outruns-BTC long spread loses (above); (d) no look-ahead (above);
+(e) Python↔JS pairs **net-P&L** parity on **3 random (btc,eth) fixtures** (seeds 101/202/303) —
+worst |Δ| = **8.57e-14** on net equity + gross-return sum, no NaN in either engine's gross.
+
+### M8 (Medium) — CLOSED: options parity now covers max_pain + gamma_concentration past the greeks
+
+**Before (residual after the Black-76 greeks pin):** `max_pain` and `gamma_concentration` had a live
+`quant.js` mirror (`Q.maxPain`, `Q.gammaConcentration`) and a Python source (`features.max_pain`,
+`features.gamma_concentration`) but **crossed the mirror UNPINNED** — only the Black-76 greeks
+(`b76_delta/gamma/vega`) were checked, so the two options analytics that reach the dashboard could
+have drifted silently.
+
+**After:** a FIXED synthetic single-expiry chain (6 strikes × {call,put}, each with
+`open_interest` + `iv`, one 65 000 underlying; `optNow` exactly 30 calendar days before the
+08:00-UTC `optExpiry` so `T = 30/365` matches the existing b76 probe) drives **6 new pinned parity
+fields**, additively (the M9 pairs P&L probes were untouched): `mp_maxPain` (argmin over strikes,
+tol 0), `mp_pcOiRatio`, `mp_forward`, `gc_sum` (total |gamma|·OI density), `gc_dot` (strike-weighted
+gamma profile), `gc_peakStrike` (densest-gamma strike). All 6 agree **bit-exact (|Δ| = 0)**. Two
+anchors are pre-registered in `PINS` so the engines cannot drift *together* and still pass:
+`mp_maxPain = 64000`, `gc_sum = 0.10701664008807263`.
+
+**Tests:** `test_parity_mirror.py::test_parity_options_fields_present_and_agree` (harness runs, the
+6 M8 fields present and agree) + the probe-presence + anchor-constant assertions in
+`test_parity_harness_covers_unsaturated_and_walkforward_probes`.
+
+**Adversarial battery (all HELD):** (a) **tie handling** — a symmetric chain whose pain is flat
+across inner strikes: Python `np.argmin` and JS strict-`<` both pick the SAME (lowest-strike)
+minimum, `62000` both sides; (b) **empty chain** — both engines return `max_pain = NaN`,
+`gc_sum = 0`, 0 strikes, no crash; (c) **one-strike chain** — both `65000`, `gc_sum` exact, 1
+strike; (d) **a second random chain** — `max_pain`/`pc_oi_ratio`/`gc_sum` all agree |Δ| = 0.
+
+### M7 (Medium) — CLOSED: the annualization guard `node dashboard/app.js --check` now runs in CI
+
+**Before:** `app.js`'s self-check (ppy() mirrors Python `_periods_per_year` = 365/8760, and no
+literal 365 survives at an annualization site — the exact sqrt(24) 1h mis-annualization bug that
+forced the 1h selector's removal) existed but was **not wired into CI**, so a regression could ship.
+
+**After:** a new step **"annualization guard (ppy() self-check)"** in `.github/workflows/ci.yml`,
+placed right after the `node --check` syntax block and before the JS↔Python parity step, running
+`node dashboard/app.js --check`. GitHub Actions fails the build on the guard's non-zero exit.
+
+**Adversarial (guard bites — HELD):** planting a literal `365` at a real annualization site
+(`Q.realizedVol(rets, 30, 365)` in place of `…, ppy())`) makes the guard print
+`SELF-CHECK FAIL (1): literal 365 at annualization site, app.js:794` and **exit 1** (CI would
+fail); reverting restores `SELF-CHECK PASS` / exit 0. `ci.yml` parses (pyyaml) and the guard runs
+clean locally (exit 0).
+
+**Status (audit roll-up):** M9 / M8 / M7 fixed + tested. **All lettered audit findings
+(H1, M1-carry, M1-pairs, M2, M3, M4, M5, M6, M7, M8, M9) are now CLOSED.** Remaining: Low/Info
+items only. The pairs trade is, for the first time, coherently delta-neutral in BOTH cost (M2) and
+P&L (M9); options parity is complete (greeks + max_pain + gamma_concentration); and the
+annualization guard is enforced in CI.

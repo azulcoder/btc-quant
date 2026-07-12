@@ -47,6 +47,12 @@ jobs:
           node --check dashboard/terminal-replay.js
           node --check dashboard/terminal.js
 
+      # Annualization guard: ppy()=365 for 1d / 8760 for 1h and no literal-365 at
+      # an annualization site — closes audit M7 (a sqrt(24) 1h mis-annualization
+      # regression previously slipped past CI).
+      - name: annualization guard (ppy() self-check)
+        run: node dashboard/app.js --check
+
       - name: JS<->Python parity (the one rule)
         run: python scripts/check_parity.py
 

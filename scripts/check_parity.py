@@ -74,6 +74,35 @@ def build_fixture() -> dict:
         # one option contract for Black-76 greeks (~30d)
         "fwd": 65000.0, "strike": 66000.0, "iv": 0.55, "t": 30.0 / 365.0,
         **_pairs_fixture(),
+        **_option_chain_fixture(),
+    }
+
+
+def _option_chain_fixture() -> dict:
+    """M8 options-parity probe: a FIXED synthetic single-expiry chain (6 strikes ×
+    {call, put}, each with open_interest + iv, one underlying) for a Python-vs-JS pin
+    on ``max_pain`` (argmin over strikes — an exact price match) and the
+    ``gamma_concentration`` profile (Black-76 |gamma|·OI density by strike). These two
+    analytics have a live quant.js mirror + Python source but crossed the mirror
+    UNPINNED before M8 (only the Black-76 greeks themselves were pinned). ``optNow`` is
+    exactly 30 calendar days before the 08:00-UTC ``optExpiry`` so ``T = 30/365`` matches
+    the Black-76 probe; the underlying is a single 65 000 mark so ``forward = 65 000``."""
+    strikes = [60000.0, 62000.0, 64000.0, 66000.0, 68000.0, 70000.0]
+    call_oi = [120.0, 200.0, 500.0, 640.0, 260.0, 150.0]
+    put_oi = [350.0, 300.0, 260.0, 180.0, 120.0, 90.0]
+    call_iv = [0.72, 0.66, 0.60, 0.56, 0.61, 0.67]
+    put_iv = [0.70, 0.64, 0.58, 0.55, 0.62, 0.69]
+    rows = []
+    for i, k in enumerate(strikes):
+        rows.append({"strike": k, "opt_type": "C", "open_interest": call_oi[i],
+                     "iv": call_iv[i], "underlying_price": 65000.0})
+        rows.append({"strike": k, "opt_type": "P", "open_interest": put_oi[i],
+                     "iv": put_iv[i], "underlying_price": 65000.0})
+    return {
+        "optChain": rows,
+        "optExpiry": "2026-01-31T08:00:00Z",
+        "optNow": "2026-01-01T08:00:00Z",
+        "optT": 30.0 / 365.0,
     }
 
 
@@ -142,6 +171,25 @@ def python_side(fx: dict) -> dict:
     pr_ext = backtest.run(pos_p, btc_p, cost_bps=fx["costBps"], slippage_bps=fx["slipBps"],
                           periods_per_year=ppy, extra_cost_turnover=eth_turn)
 
+    # M9 pairs delta-neutral P&L probe: the BTC-leg state earns the SPREAD return, so
+    # book gross = state·(btc_ret - beta_{t-1}·eth_ret) AND charge the two-leg cost.
+    # Pin the net-equity + gross-return sum vs the JS mirror (this closes M2's P&L gap).
+    hedge_ret = beta_p.shift(1) * eth_p.pct_change()
+    pr_dn = backtest.run(pos_p, btc_p, cost_bps=fx["costBps"], slippage_bps=fx["slipBps"],
+                         periods_per_year=ppy, extra_cost_turnover=eth_turn,
+                         hedge_return=hedge_ret)
+
+    # M8 options-parity probe: max_pain (argmin over strikes → exact price match) and
+    # the gamma_concentration profile (|gamma|·OI density) on the fixed synthetic chain.
+    # Both have a live quant.js mirror + Python source but crossed the mirror UNPINNED
+    # before M8. The chain rows serialize with the option feed's own column names.
+    oc = pd.DataFrame(fx["optChain"])
+    oc["expiry"] = fx["optExpiry"]
+    mp = features.max_pain(oc, fx["optExpiry"])
+    gc = features.gamma_concentration(oc, fx["optExpiry"], now=pd.Timestamp(fx["optNow"]))
+    gc_strikes = np.asarray(gc["strikes"], dtype=float)
+    gc_oi = np.asarray(gc["gamma_oi"], dtype=float)
+
     return {
         # numeric
         "mean": float(ret_clean.mean()),
@@ -186,6 +234,14 @@ def python_side(fx: dict) -> dict:
         "b76_delta": float(g["delta"]),
         "b76_gamma": float(g["gamma"]),
         "b76_vega": float(g["vega"]),
+        # M8 options analytics — max_pain + gamma_concentration (Python source-of-truth
+        # vs quant.js mirror), completing the options-parity coverage past the greeks.
+        "mp_maxPain": float(mp["max_pain"]),          # argmin over strikes — exact match
+        "mp_pcOiRatio": float(mp["pc_oi_ratio"]),
+        "mp_forward": float(mp["forward"]),
+        "gc_sum": float(gc_oi.sum()),                 # total |gamma|·OI density
+        "gc_dot": float((gc_strikes * gc_oi).sum()),  # strike-weighted profile shape
+        "gc_peakStrike": float(gc_strikes[int(np.argmax(gc_oi))]),  # densest-gamma strike
         # end-to-end engine
         "bt_sharpe": float(st["sharpe"]),
         "bt_maxDrawdown": float(st["max_drawdown"]),
@@ -212,6 +268,9 @@ def python_side(fx: dict) -> dict:
         "pairs_btcTurnover": float(pr_none["stats"]["total_turnover"]),
         "pairs_totalTurnover": float(pr_ext["stats"]["total_turnover"]),
         "pairs_netEquity": float(pr_ext["equity"].iloc[-1]),
+        # M9 delta-neutral P&L (spread return, two-leg cost) — the completion of M2
+        "pairs_dnGrossSum": float(pr_dn["gross_returns"].fillna(0.0).sum()),
+        "pairs_dnNetEquity": float(pr_dn["equity"].iloc[-1]),
     }
 
 
@@ -228,6 +287,8 @@ TOL = {
     "er_nTrades": 0, "er_expectancyR": 1e-12, "er_winRate": 1e-12,
     "er_payoffRatio": 1e-12, "er_sqn": 1e-12, "er_profitFactor": 1e-12,
     "b76_delta": 5e-7, "b76_gamma": 1e-9, "b76_vega": 1e-9,
+    "mp_maxPain": 0, "mp_pcOiRatio": 1e-12, "mp_forward": 1e-12,
+    "gc_sum": 1e-9, "gc_dot": 1e-7, "gc_peakStrike": 0,
     "bt_sharpe": 1e-9, "bt_maxDrawdown": 1e-12, "bt_deflatedSharpe": 1e-7,
     "wf_oosSharpe": 1e-9, "wf_varTrialsSr": 1e-9, "wf_deflatedSharpe": 1e-7,
     "wf_varFallback": 0,
@@ -236,6 +297,7 @@ TOL = {
     "cpcv_pe_median": 1e-9, "cpcv_pe_nPaths": 0,
     "pairs_beta_last": 1e-9, "pairs_ethTurnover": 1e-7, "pairs_btcTurnover": 1e-7,
     "pairs_totalTurnover": 1e-7, "pairs_netEquity": 1e-7,
+    "pairs_dnGrossSum": 1e-7, "pairs_dnNetEquity": 1e-7,
 }
 
 # M6 anchor pins: the PYTHON side must sit on these constants (they were computed
@@ -246,6 +308,10 @@ PINS = {
     "psr": (0.8933576314257702, 1e-7),
     "dsr_n1": (0.8933576314257702, 1e-7),   # == psr; ANY trial variance at N=1
     "dsr_mid": (0.6072585304659127, 1e-7),  # N=5, V=0.001, sr=0.05/period, n=500
+    # M8 options anchors: pre-registered so the two engines cannot drift TOGETHER and
+    # still pass — max_pain is the exact argmin strike, gc_sum the total gamma density.
+    "mp_maxPain": (64000.0, 1e-9),
+    "gc_sum": (0.10701664008807263, 1e-9),
 }
 
 

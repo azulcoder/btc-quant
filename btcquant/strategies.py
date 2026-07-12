@@ -741,10 +741,14 @@ def pairs_legs(
     :func:`btcquant.backtest.run` as ``extra_cost_turnover`` so the round-trip
     charges ~``(1 + |beta|)`` (≈2×) the single-leg cost.
 
-    SCOPE RAIL (M2 is COST only): the backtest P&L stays the single-leg directional
-    ``traded_pos * asset_ret`` — the observation that a delta-neutral pairs P&L
-    should net the ETH leg's price move is a SEPARATE finding (audit M9) awaiting
-    its own greenlight; nothing here changes ``gross_returns``.
+    DELTA-NEUTRAL P&L (audit M9, now shipped): the same ``beta_t`` this returns also
+    prices the P&L hedge leg. A caller books the coherent delta-neutral trade by
+    passing ``hedge_return_t = beta_{t-1}·eth_ret_t`` to
+    :func:`btcquant.backtest.run` as ``hedge_return`` (the 1-bar-lagged hedge ratio,
+    same no-look-ahead shift as the state), so the BTC-leg state earns the SPREAD
+    return ``asset_ret - hedge_return`` — P&L and cost are now BOTH two-leg. This
+    function is unchanged: it stays the single source of ``(state, beta_t)``; the P&L
+    wiring lives in ``run`` / ``compare.py`` (``None`` ⇒ single-leg, byte-identical).
 
     Parameters mirror :func:`pairs_coint`; ``model`` selects the normalizer
     (``"coint"`` = empirical z-score, ``"ou"`` = OU sigma_eq).

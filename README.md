@@ -91,30 +91,35 @@ case where the trial SRs genuinely don't exist:
 
 ```
 strategy            OOS CAGR   OOS SR    IS SR   OOS DSR  OOS MaxDD  beats B&H
-tsmom                 12.58%     1.01     1.29     0.94     -22.28%        yes
-buy_and_hold          34.58%     0.79     0.75     0.82     -76.85%        (baseline)
-tsmom_ls              12.58%     0.76     1.08     0.80     -24.70%        no
-ma_trend_filter       25.98%     0.72     0.91     0.76     -65.94%        no
-pairs_coint           -0.12%     0.01     0.01     0.12     -13.84%        no
+tsmom                 12.59%     1.01     1.29     0.75     -22.28%        yes
+buy_and_hold          34.63%     0.79     0.75     0.53     -76.85%        (baseline)
+tsmom_ls              12.60%     0.76     1.08     0.49     -24.70%        no
+ma_trend_filter       25.98%     0.72     0.91     0.45     -65.94%        no
+pairs_coint           -1.43%    -0.59    -0.35     0.00     -10.94%        no
 ```
 
 Read it straight: **every strategy's Sharpe decays in-sample → out-of-sample** (tsmom 1.29 → 1.01,
-ma_trend 0.91 → 0.72, pairs 0.01 → 0.01). On this long window `tsmom` tops the board and does beat
+ma_trend 0.91 → 0.72; pairs is now the true delta-neutral spread and loses outright, IS −0.35 →
+OOS −0.59). On this long window `tsmom` tops the board and does beat
 buy-and-hold — **but nothing clears OOS deflated Sharpe 0.95**, the threshold for "distinguishable
 from luck after deflating for the number of strategies tried." Even the winner is not significant:
-its DSR prints **0.94 ≤ 0.95** — no `*`. The other three trend/reversion strategies do not beat
+its DSR prints **0.75 ≤ 0.95** — no `*`. The other three trend/reversion strategies do not beat
 buy-and-hold net of cost out-of-sample, and the one that wins on return (buy-and-hold, +34% CAGR)
 does it with a −77% drawdown. That is the point, not a disappointment: most of what survives crypto
 OOS is risk-management, not alpha.
 
-**`pairs_coint` is now charged on both legs (audit M2).** A pairs trade holds a BTC leg *and* a
-`beta`-scaled ETH hedge that rebalances every bar, so the cost base is the total-variation turnover
-of **both** legs (`|Δ position|` + `|Δ(beta·state)|`), roughly `(1+|beta|)` ≈ 2× the old single-leg
-charge. That pushed the pairs row down — OOS CAGR `0.19% → −0.12%`, MaxDD `−12.54% → −13.84%`, OOS
-DSR `0.17 → 0.12` (research window `0.06 → 0.04`) — it never moved *up* toward the 0.95 bar. The P&L
-stays single-leg directional (M2 is cost-only; netting the ETH leg's price move is the open M9
-finding). The other rows' P&L is byte-identical; only their shared-`V` DSR shifts slightly because
-the cross-trial variance rises when the pairs Sharpes fall (the M6 deflation coupling).
+**`pairs_coint` is now a genuine delta-neutral spread — charged AND booked on both legs (audit M2 +
+M9).** A pairs trade holds a BTC leg *and* a `beta`-scaled ETH hedge that rebalances every bar. M2
+made the **cost** two-leg: the base is the total-variation turnover of **both** legs
+(`|Δ position|` + `|Δ(beta·state)|`), roughly `(1+|beta|)` ≈ 2× the old single-leg charge. M9 makes
+the **P&L** two-leg: the BTC-leg state earns the *spread* return `state·(BTC_ret − beta·ETH_ret)`
+(the hedge ratio 1-bar-lagged, same no-look-ahead shift as the state), not a bare directional BTC
+move — so when ETH outruns BTC the hedge loses even as BTC rises. With cost and P&L both two-leg the
+trade is delta-neutral for the first time, and it loses on its own merits: OOS CAGR `−0.12% →
+−1.43%`, OOS SR `0.01 → −0.59`, OOS DSR `0.12 → 0.00` (research window `0.04 → 0.00`) — it never
+moved *up* toward the 0.95 bar. The other rows' P&L is byte-identical; only their shared-`V` DSR
+shifts (tsmom `0.94 → 0.75`) because the cross-trial variance rises when the pairs Sharpes fall (the
+M6 deflation coupling), with no rank change.
 
 This is **window-dependent**, and the tool is honest about that too: on the dashboard's shorter
 default window buy-and-hold tops the board instead (trend-following had fewer clean cycles to catch),
@@ -181,8 +186,9 @@ OOS leaderboard row — one number, read from a single source, not a parallel re
 walk-forward cannot run (too little history, e.g. a thin pair), the panel degrades to "insufficient
 history for OOS" rather than silently falling back to the flattering in-sample figure. The dashboard
 mirrors the Python engine's formulas and agrees with it to ~1e-7 (the inverse-normal approximation,
-not bit-identical; `scripts/check_parity.py` pins 55 shared fields, including unsaturated deflated-
-Sharpe probes, the two-leg pairs cost base, and the CPCV multi-path dispersion); the engine is the
+not bit-identical; `scripts/check_parity.py` pins 63 shared fields, including unsaturated deflated-
+Sharpe probes, the two-leg pairs cost base + delta-neutral spread P&L, the options analytics
+(Black-76 greeks, max-pain, gamma concentration), and the CPCV multi-path dispersion); the engine is the
 source of truth. Deflated-Sharpe semantics are one binding
 convention across both engines (empirical cross-trial variance; N = 1 is labeled
 `PSR (single trial — no deflation)`) — see the M6 entry in [AUDIT_LOG.md](AUDIT_LOG.md).

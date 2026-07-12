@@ -17,7 +17,8 @@ const { close, positions, ppy, volWindow, k, sr, n, skew, kurt, nTrials, varTria
         varN1, srMid, nMid, nTrialsMid, varMid, folds,
         cpcvBlocks, cpcvKTest, cpcvPurge, cpcvEmbargo,
         costBps, slipBps, fwd, strike, iv, t,
-        btcPairs, ethPairs, pairsWindow } = fx;
+        btcPairs, ethPairs, pairsWindow,
+        optChain, optT } = fx;
 
 const last = (a) => a[a.length - 1];
 const ret = Q.simpleReturns(close);
@@ -49,6 +50,23 @@ const ethNotional = pr.positions.map((s, i) =>
 const ethTurn = ethNotional.map((v, i) => (i === 0 ? NaN : Math.abs(v - ethNotional[i - 1])));
 const prNone = Q.backtest(pr.positions, btcPairs, { costBps, slippageBps: slipBps, periodsPerYear: ppy });
 const prExt = Q.backtest(pr.positions, btcPairs, { costBps, slippageBps: slipBps, periodsPerYear: ppy, extraCostTurnover: ethTurn });
+// M9 delta-neutral P&L: gross = state·(btc_ret - beta_{t-1}·eth_ret), two-leg cost —
+// mirror of the Python pairs_legs + run(hedge_return=beta.shift(1)·eth_ret) probe.
+const ethRetP = Q.simpleReturns(ethPairs);
+const hedgeRetP = pr.beta.map((b, i) =>
+  (i > 0 && Number.isFinite(pr.beta[i - 1]) && Number.isFinite(ethRetP[i]) ? pr.beta[i - 1] * ethRetP[i] : NaN));
+const prDn = Q.backtest(pr.positions, btcPairs, { costBps, slippageBps: slipBps, periodsPerYear: ppy, extraCostTurnover: ethTurn, hedgeReturn: hedgeRetP });
+// M8 options-parity probe: max_pain + gamma_concentration on the fixed synthetic chain
+// — mirror of features.max_pain / features.gamma_concentration. The chain rows carry the
+// option feed's column names; map to the mirror's {strike,type,oi,iv,underlying} slice.
+const optSlice = optChain.map((r) => ({
+  strike: r.strike, type: r.opt_type, oi: r.open_interest, iv: r.iv, underlying: r.underlying_price }));
+const mp = Q.maxPain(optSlice);
+const gc = Q.gammaConcentration(optSlice, mp.forward, optT);  // fwd from the same slice, T = 30/365
+const gcSum = gc.gammaOi.reduce((a, v) => a + v, 0);
+const gcDot = gc.strikes.reduce((a, kk, i) => a + kk * gc.gammaOi[i], 0);
+let gcPeak = 0;
+for (let i = 1; i < gc.gammaOi.length; i++) if (gc.gammaOi[i] > gc.gammaOi[gcPeak]) gcPeak = i;
 
 const out = {
   // numeric
@@ -91,6 +109,13 @@ const out = {
   b76_delta: g.delta,
   b76_gamma: g.gamma,
   b76_vega: g.vega,
+  // M8 options analytics — max_pain + gamma_concentration (mirror of features.*)
+  mp_maxPain: mp.maxPain,
+  mp_pcOiRatio: mp.pcRatio,
+  mp_forward: mp.forward,
+  gc_sum: gcSum,
+  gc_dot: gcDot,
+  gc_peakStrike: gc.strikes[gcPeak],
   // end-to-end backtest stats (engine parity)
   bt_sharpe: bt.stats.sharpe,
   bt_maxDrawdown: bt.stats.maxDrawdown,
@@ -116,6 +141,9 @@ const out = {
   pairs_btcTurnover: prNone.stats.turnover,
   pairs_totalTurnover: prExt.stats.turnover,
   pairs_netEquity: prExt.equity[prExt.equity.length - 1],
+  // M9 delta-neutral P&L (spread return, two-leg cost) — the completion of M2
+  pairs_dnGrossSum: prDn.grossReturns.reduce((a, v) => a + (Number.isFinite(v) ? v : 0), 0),
+  pairs_dnNetEquity: prDn.equity[prDn.equity.length - 1],
 };
 
 process.stdout.write(JSON.stringify(out));

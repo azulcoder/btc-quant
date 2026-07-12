@@ -666,27 +666,39 @@
       try {
         let positions;
         let extraCost;   // M2: pairs ETH-leg turnover (cost only); undefined for single-leg strategies
+        let hedgeReturn; // M9: pairs delta-neutral hedge-leg return (P&L); undefined for single-leg
         if (key === 'pairs') {
           if (!state.eth || state.eth.close.length < 60) continue;
           const m = Math.min(o.close.length, state.eth.close.length);
-          const r = Q.sigPairs(o.close.slice(-m), state.eth.close.slice(-m), { window: 60, entry: 2, exit: 0.5, stop: 4.0, maxHalfLife: 60 });
+          const ethSlice = state.eth.close.slice(-m);
+          const r = Q.sigPairs(o.close.slice(-m), ethSlice, { window: 60, entry: 2, exit: 0.5, stop: 4.0, maxHalfLife: 60 });
           const pad = new Array(o.close.length - m).fill(0);
+          const padNaN = new Array(o.close.length - m).fill(NaN);
           positions = pad.concat(r.positions);
           // ETH-leg turnover = total variation of the hedge notional |Δ(beta_t·state_t)|
           // (mirror of strategies.pairs_legs) — charged on BOTH legs (M2). Same beta the
-          // signal is built from; P&L stays single-leg (M2 scope rail). state=0 ⇒ 0 notional.
+          // signal is built from. state=0 ⇒ 0 notional.
           const ethNotional = r.positions.map((s, i) =>
             (Number.isFinite(s) && Number.isFinite(r.beta[i]) ? s * r.beta[i] : NaN));
           const ethTurn = ethNotional.map((v, i) =>
             (i === 0 ? NaN : Math.abs(v - ethNotional[i - 1])));
           extraCost = pad.concat(ethTurn);
+          // M9: hedge-leg return = beta_{t-1}·eth_ret_t — the BTC-leg state earns the
+          // delta-neutral SPREAD return (mirror of compare.py _pairs_hedge_return). beta
+          // shifted one bar (no look-ahead, same shift as the state); eth_ret = simple
+          // pct_change on the aligned ETH close. P&L AND cost are now both two-leg.
+          const ethRet = Q.simpleReturns(ethSlice);
+          const hedgeSlice = r.beta.map((b, i) =>
+            (i > 0 && Number.isFinite(r.beta[i - 1]) && Number.isFinite(ethRet[i])
+              ? r.beta[i - 1] * ethRet[i] : NaN));
+          hedgeReturn = padNaN.concat(hedgeSlice);
         } else {
           positions = STRATEGIES[key].build(o, p);
         }
         // In-sample full-history (for the IS Sharpe contrast) + walk-forward OOS (the rank basis).
-        const is = Q.backtest(positions, o.close, { costBps, slippageBps: slipBps, periodsPerYear: p, extraCostTurnover: extraCost });
+        const is = Q.backtest(positions, o.close, { costBps, slippageBps: slipBps, periodsPerYear: p, extraCostTurnover: extraCost, hedgeReturn });
         // No nTrials here: walkForward deflates by its own folds (M6 C3).
-        const wf = Q.walkForward(positions, o.close, { folds: 5, costBps, slippageBps: slipBps, periodsPerYear: p, extraCostTurnover: extraCost });
+        const wf = Q.walkForward(positions, o.close, { folds: 5, costBps, slippageBps: slipBps, periodsPerYear: p, extraCostTurnover: extraCost, hedgeReturn });
         // Tharp OOS expectancy / R-multiples on the held-out positions (vol-notional R, k=2σ;
         // RESEARCH-tharp-runlog.md). The OOS span is the trailing bars, so vol aligns by tail-slice.
         let expectancy = null;
