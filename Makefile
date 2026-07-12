@@ -15,7 +15,7 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare scan test fetch dash collector collector-api verify-browser verify-wire check-ticks econ archive archive-dry archive-list hf-sync backfill-levels
+.PHONY: help install backtest compare dsr-ab scan test fetch dash collector collector-api verify-browser verify-wire check-ticks econ archive archive-dry archive-list hf-sync backfill-levels
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
@@ -23,11 +23,18 @@ help:
 	@echo "archive: archive-dry (export closed months to local parquet ONLY) | archive (export + upload to GitHub Releases + prune) | archive-list (what is offsite)"
 	@echo "hf:      hf-sync (closed day files -> HF dataset, verify on Hub, then delete local; ARGS=--dry-run to stage only, ARGS=--yes for cron)"
 	@echo "levels:  backfill-levels (archived HF days -> data/ticks/levels.jsonl registry; idempotent, never touches day files)"
+	@echo "dsr-ab:  A/B/B Deflated-Sharpe convention aid (production A vs B1=1/n vs B2=own Lo/Mertens V); ARGS=--research for N=8, --json"
 	@echo "strategies: buy_and_hold ma_trend_filter tsmom pairs_coint carry"
 	@echo "collector needs opt-in deps: pip install -r requirements-collector.txt"
 
 compare:
 	python3 scripts/compare.py --start $(START)
+
+# Non-destructive DSR convention decision aid. Reports production convention A
+# (empirical cross-strategy V) alongside B1 (1/n) and B2 (per-strategy Lo/Mertens V)
+# on the SAME OOS leaderboard, plus a coupling-sensitivity block. Production is UNCHANGED.
+dsr-ab:
+	python3 scripts/dsr_ab.py --start $(START) $(ARGS)
 
 install:
 	python3 -m pip install -r requirements.txt
