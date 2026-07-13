@@ -63,6 +63,7 @@ __all__ = [
     "kelly_fraction",
     "kelly",
     "probabilistic_sharpe_ratio",
+    "sharpe_estimator_variance",
     "deflated_sharpe_ratio",
     "min_backtest_length",
     "probability_of_backtest_overfitting",
@@ -318,6 +319,53 @@ def probabilistic_sharpe_ratio(
         return float("nan")
     z = (sr - sr_benchmark) * math.sqrt(n - 1) / math.sqrt(denom)
     return float(stats.norm.cdf(z))
+
+
+def sharpe_estimator_variance(sr: float, n: int, skew: float, kurt: float) -> float:
+    """Finite-sample variance of the Sharpe-ratio *estimator* — Lo (2002) / Mertens (2002).
+
+    The asymptotic variance of the sample Sharpe ratio ``SR_hat`` under non-normal
+    returns, with a skew/kurtosis correction::
+
+        Var(SR_hat) = (1 - skew*SR + ((kurt - 1) / 4) * SR^2) / (n - 1)
+
+    where ``kurt`` is the **non-excess** (raw/Pearson) kurtosis (3 for a normal) and
+    all inputs are on the same **per-period** frequency as ``n``. This is *exactly the
+    quantity inside the PSR denominator*: :func:`probabilistic_sharpe_ratio` scales
+    ``(SR - sr0)`` by ``sqrt(n - 1) / sqrt(1 - skew*SR + (kurt-1)/4*SR^2)``, i.e. it
+    divides by ``sqrt(Var(SR_hat))`` for this same variance — so
+    ``sharpe_estimator_variance(sr, n, skew, kurt)`` equals the PSR-denominator-implied
+    per-Sharpe variance.
+
+    Used as the **per-strategy own-Sharpe trial variance ``V``** fed to
+    :func:`deflated_sharpe_ratio` under the leaderboard's B2 convention (each
+    strategy's DSR judged against its own finite-sample sampling error, decoupled from
+    peers — the convention azul selected 2026-07-13, RESEARCH-dsr-convention.md).
+
+    Parameters
+    ----------
+    sr : float
+        Observed (per-period) Sharpe ratio ``SR_hat``.
+    n : int
+        Number of return observations.
+    skew : float
+        Sample skewness of returns.
+    kurt : float
+        Sample (non-excess) kurtosis of returns; pass 3.0 for Gaussian.
+
+    Returns
+    -------
+    float
+        The finite-sample Sharpe-estimator variance; ``np.nan`` for ``n < 2``.
+
+    References
+    ----------
+    Lo (2002), "The Statistics of Sharpe Ratios", *Financial Analysts Journal* 58(4).
+    Mertens (2002), "Comments on Variance of the IID estimator in Lo (2002)".
+    """
+    if n is None or n < 2:
+        return float("nan")
+    return float((1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr * sr) / (n - 1))
 
 
 def deflated_sharpe_ratio(

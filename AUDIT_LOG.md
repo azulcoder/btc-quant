@@ -435,3 +435,99 @@ clean locally (exit 0).
 items only. The pairs trade is, for the first time, coherently delta-neutral in BOTH cost (M2) and
 P&L (M9); options parity is complete (greeks + max_pain + gamma_concentration); and the
 annualization guard is enforced in CI.
+
+---
+
+## 2026-07-13 — M6-AMENDMENT: leaderboard trial-variance A → B2 (own-Sharpe, decoupled)
+
+**Decision (azul, 2026-07-13; `RESEARCH-dsr-convention.md`):** the `compare.py` leaderboard
+`OOS DSR` trial variance `V` switches from **convention A** — the empirical ddof=1 variance of
+the ranked strategies' OOS per-period Sharpes, one **shared cross-strategy scalar** (M6 clause
+**C3**) — to **convention B2**: each strategy's **own** finite-sample Sharpe-estimator variance
+`V_i = (1 − skew_i·SR_i + (kurt_i−1)/4·SR_i²)/(n_i − 1)` (Lo 2002 / Mertens 2002), i.e. *exactly
+the quantity already inside the PSR denominator*. New single source of truth
+`risk.sharpe_estimator_variance`; `compare.py` wires it per strategy, `dsr_ab.py` column **B2**
+delegates to it. **`N` (selection-count deflation) is unchanged at the number of ranked
+strategies.** This is a **partial supersede of C2/C3 for the leaderboard surface only**;
+`run`/`run_funding` and the PSR/DSR formulae are untouched.
+
+**WHY.** Under A a single peer's realized Sharpe reshapes the shared `V`, so **every other
+strategy's DSR moves** — a leaderboard DSR was not a property of that strategy alone. This
+coupling was surfaced concretely by **M9** (2026-07-12): when the delta-neutral pairs P&L dropped
+the pairs OOS SRs, the empirical cross-trial variance *rose* and shifted every non-pairs DSR
+(AUDIT_LOG 2026-07-12, "only the shared-V leaderboard DSR shifts"). B2 makes each strategy's DSR
+depend **only on its own returns** (decoupled — verified peer-invariant to Δ=0 below). Selection
+overfit is still guarded — the expected-max-of-`N` benchmark `sr0(V,N)` retains the `N` term, and
+**PBO (0.60) + MinBTL (2.85 yrs) are unchanged** and carry the cross-strategy selection honesty.
+
+**BEFORE (A, shared cross-strategy V) → AFTER (B2, per-strategy own-Sharpe V):**
+
+```
+RESEARCH leaderboard (compare.py --research, N=8, V_A=0.000994 shared → per-strategy V_B2≈0.0002–0.0004)
+strategy            OOS SR   DSR_A[before]   DSR_B2[after]
+tsmom                 1.01      0.644           0.907
+tsmom_voltarget       1.01      0.644           0.907
+tsmom_dir             0.93      0.555           0.852
+buy_and_hold          0.80      0.414           0.737
+tsmom_ls              0.76      0.372           0.726
+ma_trend_filter       0.71      0.338           0.662
+pairs_ou             -0.18      0.002           0.026
+pairs_coint          -0.59      0.000           0.001
+
+PUBLIC leaderboard (compare.py, N=5, V_A=0.001127 shared → per-strategy V_B2)
+strategy            OOS SR   DSR_A[before]   DSR_B2[after]
+tsmom                 1.01      0.754           0.945
+buy_and_hold          0.80      0.536           0.819
+tsmom_ls              0.76      0.492           0.807
+ma_trend_filter       0.71      0.446           0.750
+pairs_coint          -0.59      0.000           0.000
+
+Rank order IDENTICAL A vs B2; only the confidence LEVEL rescales. NO strategy crosses 0.95
+(public tsmom 0.9451 ≤ 0.95 ⇒ still no `*`). PBO 0.60 · MinBTL 2.85 yrs — unchanged.
+```
+
+**A-numbers in prior logs stay as the as-of-then record.** The M6 (2026-07-11) public "AFTER"
+DSRs (tsmom 0.946, b&h 0.83, …) and the M9 (2026-07-12) coupling note are the state *at those
+dates*; the DSR_A column above is the current post-M9 production A, immediately pre-switch. The
+`dsr_ab.py` **column A** continues to reproduce it via `compare._empirical_var_sr` (kept, no
+longer wired into the leaderboard).
+
+**Two DSR surfaces were ALWAYS separate and are UNCHANGED by this switch:**
+- **`walk_forward` folds-DSR** (`OOS DSR (folds)`, N = n_splits, V = empirical var of per-fold
+  SRs — M6 clause C3) — the research **kill-gate**. Re-verified `compare.py --research`
+  2026-07-13: every published verdict still **KILL** — Tier-B donchian/vwap_reversion/
+  ma_trend+fixedR/random_entry all ≤0.95; B1 tsmom_voltarget KILL (corr 1.00 dup clause);
+  B2 pairs_ou KILL (Δ<+0.05); Tharp sizing sweep unchanged. `backtest.py` was not touched.
+- **Dashboard fold-V surface** (`quant.js walkForward`, the 63 parity-pinned fields) — a
+  **different, already-decoupled** per-fold V. **No JS changed**; `check_parity` **63/63**,
+  worst |Δ| = **1.63e-07** (byte-identical to pre-switch). No parity re-pin.
+
+**Adversarial battery (all HELD; in-process, real data 2018-01-01→2026-07-13, 3116 bars):**
+- **(a) production == `dsr_ab` B2 to 1e-9** — computed both leaderboards in-process (not the 2dp
+  print): worst `|compare.OOS_DSR − dsr_ab.DSR_B2|` = **0.0e+00** across all 8 strategies (exact,
+  same `risk.sharpe_estimator_variance` V, same N, same `risk.deflated_sharpe_ratio`). `dsr_ab`
+  hand-formula self-check worst = 0.0e+00.
+- **(b) decoupling now in production** — perturbed `pairs_coint`'s OOS Sharpe (returns-level
+  additive drift; n/σ/skew/kurt held fixed) by ×1.5, ×0.5, ×3.0 and recomputed the `compare.py`
+  leaderboard: **every peer's DSR moved by exactly 0.0e+00** (bit-invariant). Contrast under the
+  retired convention A, same perturbation: worst peer moved **0.130** (coupled). This invariance
+  is the whole point of the switch.
+- **(c) `n<2` / single-strategy fallback** — `sharpe_estimator_variance(sr, n=1, …) = nan` ⇒ the
+  leaderboard loop falls back to `1/n_periods` with `var_fallback=True` and prints the
+  `null-variance fallback` caveat; DSR = nan (deflated `n<2`), **no crash**. `n=0` edge: no
+  `ZeroDivisionError`.
+- **(d)** parity **63/63**, worst |Δ| 1.63e-07 (unchanged); **(e)** folds-DSR kill-gate all KILL
+  (above).
+
+**Tests (+2 intentional, no regression):** `test_core.py` +
+`test_sharpe_estimator_variance_hand_pin_and_psr_denominator_identity` (exact pin
+0.0020378256513026052 + PSR-denominator round-trip + `n<2` nan) and
+`test_compare_leaderboard_uses_per_strategy_b2_variance_and_is_decoupled` (drives compare's exact
+loop; perturbing one strategy leaves peers bit-identical). `test_dsr_ab.py` cross-check rewritten
+to assert **production == B2** (was == A). Also fixed a stale defect: `dsr_ab.py` still printed
+"production stays A" in two places — re-pointed to B2.
+
+**Status:** pytest **185** (was 183; +2 intentional), `check_parity` **63/63** (worst |Δ|
+1.63e-07), `check_terminal` **46/46**, `make verify-browser` L1 exit-0. Python-only, as scoped —
+no JS mirror change, no parity re-pin. **M6 clauses C2/C3 amended for the leaderboard surface;
+all other M6 semantics stand.**

@@ -83,27 +83,30 @@ A backtest fit and scored on the same history flatters itself. The leaderboard i
 held-out block, score on the concatenated OOS returns (Bailey & López de Prado 2014). The drop from
 in-sample to out-of-sample Sharpe is the overfitting tell, and it is printed side by side.
 
-The honest result, from `compare.py` on the 2018→ daily history (N = 5 strategies). The deflation
-uses the **empirical cross-trial variance** (Bailey & López de Prado as written): V is the ddof=1
-variance of the N strategies' actual OOS per-period Sharpe ratios — measured from the board's own
-rows, never the skill-less `1/n` null, which is reserved (and printed as a caveat) for the rare
-case where the trial SRs genuinely don't exist:
+The honest result, from `compare.py` on the 2018→ daily history (N = 5 strategies). Since
+2026-07-13 the deflation uses each strategy's **own-Sharpe variance** — the finite-sample
+Lo (2002) / Mertens (2002) estimator `V_i = (1 − skew·SR + (kurt−1)/4·SR²)/(n−1)`, the exact
+quantity already inside the PSR denominator (convention **B2**, `RESEARCH-dsr-convention.md`).
+Each strategy's DSR now depends only on its *own* returns — a peer's Sharpe cannot move it — while
+**PBO and MinBTL carry the cross-strategy selection honesty**. (The older shared empirical
+cross-trial variance is retired for the leaderboard; `scripts/dsr_ab.py` still shows it as
+column A.)
 
 ```
 strategy            OOS CAGR   OOS SR    IS SR   OOS DSR  OOS MaxDD  beats B&H
-tsmom                 12.59%     1.01     1.29     0.75     -22.28%        yes
-buy_and_hold          34.63%     0.79     0.75     0.53     -76.85%        (baseline)
-tsmom_ls              12.60%     0.76     1.08     0.49     -24.70%        no
-ma_trend_filter       25.98%     0.72     0.91     0.45     -65.94%        no
+tsmom                 12.64%     1.01     1.29     0.95     -21.39%        yes
+buy_and_hold          34.99%     0.80     0.75     0.82     -76.04%        (baseline)
+tsmom_ls              12.59%     0.76     1.08     0.81     -24.68%        no
+ma_trend_filter       25.72%     0.71     0.91     0.75     -65.94%        no
 pairs_coint           -1.43%    -0.59    -0.35     0.00     -10.94%        no
 ```
 
 Read it straight: **every strategy's Sharpe decays in-sample → out-of-sample** (tsmom 1.29 → 1.01,
-ma_trend 0.91 → 0.72; pairs is now the true delta-neutral spread and loses outright, IS −0.35 →
+ma_trend 0.91 → 0.71; pairs is now the true delta-neutral spread and loses outright, IS −0.35 →
 OOS −0.59). On this long window `tsmom` tops the board and does beat
 buy-and-hold — **but nothing clears OOS deflated Sharpe 0.95**, the threshold for "distinguishable
 from luck after deflating for the number of strategies tried." Even the winner is not significant:
-its DSR prints **0.75 ≤ 0.95** — no `*`. The other three trend/reversion strategies do not beat
+its DSR prints **0.95 but is precisely 0.9451 ≤ 0.95** — no `*`. The other three trend/reversion strategies do not beat
 buy-and-hold net of cost out-of-sample, and the one that wins on return (buy-and-hold, +34% CAGR)
 does it with a −77% drawdown. That is the point, not a disappointment: most of what survives crypto
 OOS is risk-management, not alpha.
@@ -117,9 +120,10 @@ the **P&L** two-leg: the BTC-leg state earns the *spread* return `state·(BTC_re
 move — so when ETH outruns BTC the hedge loses even as BTC rises. With cost and P&L both two-leg the
 trade is delta-neutral for the first time, and it loses on its own merits: OOS CAGR `−0.12% →
 −1.43%`, OOS SR `0.01 → −0.59`, OOS DSR `0.12 → 0.00` (research window `0.04 → 0.00`) — it never
-moved *up* toward the 0.95 bar. The other rows' P&L is byte-identical; only their shared-`V` DSR
-shifts (tsmom `0.94 → 0.75`) because the cross-trial variance rises when the pairs Sharpes fall (the
-M6 deflation coupling), with no rank change.
+moved *up* toward the 0.95 bar. Under the current **B2** deflation the pairs collapse leaves every
+other row's DSR **untouched** — each strategy's DSR is a function of its own returns alone (this
+decoupling is exactly why B2 was adopted, 2026-07-13; before it, the shared cross-trial `V` coupled
+the whole board and a pairs move re-scaled every DSR). Rank order is unchanged either way.
 
 This is **window-dependent**, and the tool is honest about that too: on the dashboard's shorter
 default window buy-and-hold tops the board instead (trend-following had fewer clean cycles to catch),
@@ -165,11 +169,12 @@ were promoted — the full log is [RESEARCH-partB-runlog.md](RESEARCH-partB-runl
 
 - **B1, tsmom × vol-target** — *killed as a literal duplicate.* A vol-target overlay on directional
   momentum came back **correlation 1.00** with the board's already-vol-scaled `tsmom` (byte-identical
-  OOS rows, DSR 0.89). It improved on the *raw directional* baseline (0.82 → 0.89) but that strategy
+  OOS rows, DSR 0.91). It improved on the *raw directional* baseline (0.85 → 0.91) but that strategy
   already exists; a second copy only burns MinBTL headroom.
 - **B2, OU-reversion pairs** — *killed as "a model, not an edge."* `pairs_ou` changes exactly one
   thing versus the fixed-z `pairs_coint`: it normalizes the spread by the OU-model stationary σ
-  (`features.ou_sigma_eq`) instead of the empirical rolling std. OOS DSR **0.04 vs 0.07** (worse),
+  (`features.ou_sigma_eq`) instead of the empirical rolling std. OOS DSR **0.03 vs 0.00** — a Δ of
+  only +0.03, under the pre-registered +0.05 promotion bar (and PBO does not improve),
   max-DD −52% vs −15%. The fitted OU parameters are non-stationary in crypto, so the parametric model
   adds nothing — the simpler empirical z-score wins.
 - **B3, funding carry** — *descriptive only, by construction.* Carry is a funding-stream sleeve, not a
@@ -189,9 +194,14 @@ mirrors the Python engine's formulas and agrees with it to ~1e-7 (the inverse-no
 not bit-identical; `scripts/check_parity.py` pins 63 shared fields, including unsaturated deflated-
 Sharpe probes, the two-leg pairs cost base + delta-neutral spread P&L, the options analytics
 (Black-76 greeks, max-pain, gamma concentration), and the CPCV multi-path dispersion); the engine is the
-source of truth. Deflated-Sharpe semantics are one binding
-convention across both engines (empirical cross-trial variance; N = 1 is labeled
-`PSR (single trial — no deflation)`) — see the M6 entry in [AUDIT_LOG.md](AUDIT_LOG.md).
+source of truth. The dashboard's headline is a **walk-forward folds-DSR** (V = empirical variance
+of the per-fold OOS Sharpes) and the JS mirror matches it field-for-field — that surface is
+unchanged and stays parity-pinned. Note this is a **different** V from `compare.py`'s
+cross-strategy leaderboard, which since 2026-07-13 uses each strategy's own-Sharpe variance
+(convention B2); the two surfaces were always decoupled. PSR internals are one binding convention
+across both engines (per-period SR, `bias=False` non-excess kurtosis; N = 1 is labeled
+`PSR (single trial — no deflation)`) — see the M6 entry and the 2026-07-13 M6-AMENDMENT in
+[AUDIT_LOG.md](AUDIT_LOG.md).
 
 ## Honesty rails (non-negotiable)
 

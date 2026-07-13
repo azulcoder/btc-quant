@@ -2,12 +2,16 @@
 """dsr_ab.py — A/B/B decision aid: three Deflated-Sharpe *trial-variance* (V)
 conventions on the SAME out-of-sample leaderboard ``scripts/compare.py`` builds.
 
-**NON-DESTRUCTIVE.** Production DSR stays convention **A** (M6 — the empirical
-cross-strategy variance), UNCHANGED. Nothing here writes to compare.py / backtest.py
-/ risk.py. This tool only *reports* B1/B2 beside A and demonstrates, numerically,
-the one structural difference between them: **A couples strategies** (a change to
-any one peer's Sharpe shifts every other strategy's DSR through the shared V),
-while **B1/B2 are decoupled** (each strategy's DSR depends only on its own returns).
+**Production DSR is convention B2** (per-strategy own-Sharpe variance) since
+2026-07-13 (RESEARCH-dsr-convention.md) — column **B2** here reproduces the
+``scripts/compare.py`` leaderboard exactly (same ``risk.sharpe_estimator_variance`` V,
+same N, same ``risk.deflated_sharpe_ratio``; see ``--check-production``). Column **A**
+(the old empirical cross-strategy variance) is retained as the historical/reference
+comparison. This tool reports all three side by side and demonstrates, numerically, the
+one structural difference between them: **A couples strategies** (a change to any one
+peer's Sharpe shifts every other strategy's DSR through the shared V), while **B1/B2
+are decoupled** (each strategy's DSR depends only on its own returns) — which is exactly
+why B2 was adopted for production.
 
 The deflated Sharpe is (Bailey & López de Prado 2014):
 
@@ -18,17 +22,19 @@ The deflated Sharpe is (Bailey & López de Prado 2014):
 
 The three conventions differ ONLY in the trial variance V fed to sr0(V, N):
 
-  A  (PRODUCTION, COUPLED)  V = var(SR_1..SR_N, ddof=1), one shared scalar across
+  A  (HISTORICAL, COUPLED)  V = var(SR_1..SR_N, ddof=1), one shared scalar across
                             the N ranked strategies. A peer SR change shifts sr0 for
-                            EVERY strategy ⇒ every DSR_A moves. Exactly reproduces the
-                            compare.py leaderboard 'OOS DSR' column (same functions,
-                            same inputs) — see --check-production.
+                            EVERY strategy ⇒ every DSR_A moves. The pre-2026-07-13
+                            production convention, kept here as the reference column.
   B1 (DECOUPLED)            V = 1/n_periods — the asymptotic null (Lo 2002: Var(SR_hat)
                             → 1/n under SR=0, iid-normal). Depends only on strategy i.
-  B2 (DECOUPLED)            V = (1 - skew_i·SR_i + (kurt_i-1)/4·SR_i²)/(n_i-1) — the
+  B2 (PRODUCTION, DECOUPLED) V = (1 - skew_i·SR_i + (kurt_i-1)/4·SR_i²)/(n_i-1) — the
                             strategy's OWN Sharpe-estimator variance (Lo 2002 /
                             Mertens 2002 skew-kurt-corrected form, the exact quantity
-                            the PSR denominator already uses), plug-in moments.
+                            the PSR denominator already uses), via
+                            risk.sharpe_estimator_variance. Exactly reproduces the
+                            compare.py leaderboard 'OOS DSR' column — see
+                            --check-production.
 
 N (n_trials) is identical for all three columns (= number of strategies ranked in
 the run, matching compare.py's selection-count deflation); only V changes.
@@ -96,10 +102,12 @@ def v_b1(n: int) -> float:
 def v_b2(sr: float, n: int, skew: float, kurt: float) -> float:
     """Convention B2: the strategy's own Lo(2002)/Mertens(2002) skew-kurt-corrected
     Sharpe-estimator variance ``(1 - skew·SR + (kurt-1)/4·SR²)/(n-1)`` (decoupled) —
-    the same numerator the PSR denominator uses, divided by (n-1)."""
-    if n is None or n < 2:
-        return float("nan")
-    return (1.0 - skew * sr + (kurt - 1.0) / 4.0 * sr * sr) / (n - 1)
+    the same numerator the PSR denominator uses, divided by (n-1).
+
+    Delegates to ``risk.sharpe_estimator_variance`` — the SINGLE SOURCE OF TRUTH now
+    that B2 is the production leaderboard convention (compare.py wires the same function
+    into its OOS DSR). So this tool's DSR_B2 column == the production compare.py DSR."""
+    return risk.sharpe_estimator_variance(sr, n, skew, kurt)
 
 
 def _dsr_manual(sr: float, n: int, skew: float, kurt: float, N: int, V: float) -> float:
@@ -306,17 +314,20 @@ def coupling_experiment(stats: list[StratStat], n_trials: int, ppy: int,
 # --------------------------------------------------------------------------- #
 def check_production(rows: dict, args: argparse.Namespace, end_pin: str | None = None) -> dict:
     """Run scripts/compare.py as a subprocess with matching flags, parse its
-    leaderboard 'OOS DSR' column, and confirm every strategy's DSR_A agrees.
+    leaderboard 'OOS DSR' column, and confirm every strategy's DSR_B2 agrees.
 
-    Full-precision equality is guaranteed BY CONSTRUCTION — DSR_A calls the very
-    same ``risk.deflated_sharpe_ratio`` on the same walk-forward OOS stats with the
-    same ``compare._empirical_var_sr`` V and same N. This subprocess is an
+    Since 2026-07-13 (RESEARCH-dsr-convention.md) the production leaderboard uses the
+    **B2** convention (per-strategy own-Sharpe variance), so DSR_**B2** is the column
+    that must reproduce compare.py — not DSR_A (now the historical/reference column).
+    Full-precision equality is guaranteed BY CONSTRUCTION — DSR_B2 calls the very same
+    ``risk.deflated_sharpe_ratio`` on the same walk-forward OOS stats with the same
+    per-strategy ``risk.sharpe_estimator_variance`` V and same N. This subprocess is an
     end-to-end sanity gate on top of that. Two irreducible looseners apply: (1) the
-    leaderboard prints only 2 dp, and (2) the last daily bar for *today* is still
-    live, so a subprocess re-fetch can wiggle a (coupled) DSR by ~0.005 across a
-    rounding boundary. The gate therefore tolerates ``TOL`` (well below any real
-    wiring divergence, which would be O(0.1)); ``--end`` is pinned to the tool's
-    last bar to shrink that live-bar window. Returns the parsed comparison."""
+    leaderboard prints only 2 dp, and (2) the last daily bar for *today* is still live,
+    so a subprocess re-fetch can wiggle a DSR by ~0.005 across a rounding boundary. The
+    gate therefore tolerates ``TOL`` (well below any real wiring divergence, which would
+    be O(0.1)); ``--end`` is pinned to the tool's last bar to shrink that live-bar
+    window. Returns the parsed comparison."""
     TOL = 0.02
     cmd = [sys.executable, str(_HERE / "compare.py"), "--start", args.start,
            "--granularity", args.granularity, "--source", args.source,
@@ -354,12 +365,12 @@ def check_production(rows: dict, args: argparse.Namespace, end_pin: str | None =
     worst = 0.0
     checked = {}
     for name, r in rows.items():
-        if name in printed and isinstance(r["dsr_a"], (int, float)) and not math.isnan(r["dsr_a"]):
-            d = abs(round(r["dsr_a"], 2) - printed[name])
+        if name in printed and isinstance(r["dsr_b2"], (int, float)) and not math.isnan(r["dsr_b2"]):
+            d = abs(round(r["dsr_b2"], 2) - printed[name])
             worst = max(worst, d)
-            checked[name] = {"dsr_a": r["dsr_a"], "compare_printed": printed[name], "abs_2dp": d}
+            checked[name] = {"dsr_b2": r["dsr_b2"], "compare_printed": printed[name], "abs_2dp": d}
     ok = bool(checked) and worst < TOL + 1e-9
-    assert ok, (f"DSR_A disagrees with compare.py leaderboard: worst 2dp diff {worst} "
+    assert ok, (f"DSR_B2 disagrees with compare.py leaderboard: worst 2dp diff {worst} "
                 f"(> {TOL}; too large to be live-bar drift — a real wiring divergence)")
     return {"checked": checked, "worst_2dp": worst, "n_checked": len(checked), "tol": TOL}
 
@@ -383,19 +394,20 @@ def render(stats, n_trials, meta, rows, dmeta, coupling, prod_check, args) -> No
     print(f"\nbtc-quant DSR A/B decision aid | {board} | {args.symbol} {args.granularity} | "
           f"{meta['span']} | {meta['bars']} bars | {args.folds} folds | "
           f"cost {args.cost_bps}+{args.slippage_bps} bps/side")
-    print("NON-DESTRUCTIVE: production DSR is convention A and is UNCHANGED. B1/B2 are reported only.\n")
-    print(f"  A  (PRODUCTION, COUPLED)  V_A = var(SR_1..SR_N, ddof=1) = {_f(V_A, 6)}  (one shared scalar)"
+    print("Production DSR is convention B2 (per-strategy own-Sharpe variance) since 2026-07-13")
+    print("(RESEARCH-dsr-convention.md). A is now the historical/reference column; B1 is a sanity peer.\n")
+    print(f"  A  (HISTORICAL, COUPLED)  V_A = var(SR_1..SR_N, ddof=1) = {_f(V_A, 6)}  (one shared scalar)"
           + ("   ⚠ null-variance fallback (V=1/n)" if dmeta["fallback"] else ""))
     print( "                            → sr0 depends on ALL peers; perturbing any peer moves every DSR_A.")
     print( "  B1 (DECOUPLED)            V_B1 = 1/n_periods  (asymptotic SR=0 null; Lo 2002)  [per-strategy]")
-    print( "  B2 (DECOUPLED)            V_B2 = (1 - skew·SR + (kurt-1)/4·SR²)/(n-1)  (Lo 2002 / Mertens 2002")
+    print( "  B2 (PRODUCTION, DECOUPLED) V_B2 = (1 - skew·SR + (kurt-1)/4·SR²)/(n-1)  (Lo 2002 / Mertens 2002")
     print( "                            skew-kurt-corrected own-Sharpe variance; plug-in moments) [per-strategy]")
     print(f"  N (n_trials) = {n_trials} for ALL THREE columns (selection-count deflation); only V differs.\n")
 
     hdr = (f"{'strategy':<18}{'OOS SR':>8}{'DSR_A':>9}{'DSR_B1':>9}{'DSR_B2':>9}"
            f"{'n':>7}{'sr0_A':>9}{'V_B1':>10}{'V_B2':>10}")
     print("=" * len(hdr)); print(hdr)
-    print(f"{'(annualized→ )':<18}{'':>8}{'[prod]':>9}{'[1/n]':>9}{'[own]':>9}{'':>7}{'':>9}{'':>10}{'':>10}")
+    print(f"{'(annualized→ )':<18}{'':>8}{'[hist]':>9}{'[1/n]':>9}{'[prod]':>9}{'':>7}{'':>9}{'':>10}{'':>10}")
     print("-" * len(hdr))
     for name in order:
         r = rows[name]
@@ -405,10 +417,10 @@ def render(stats, n_trials, meta, rows, dmeta, coupling, prod_check, args) -> No
     for name, why in meta["skipped"]:
         print(f"  (skipped {name}: {why})")
     if prod_check is not None:
-        print(f"\n[check] DSR_A vs compare.py leaderboard: {prod_check['n_checked']} strategies, "
-              f"worst 2dp diff {prod_check['worst_2dp']:.4f} (< {prod_check['tol']} ✓) — column A "
-              f"reproduces production (full-precision equality by construction; residual is the live "
-              f"final-bar re-fetch).")
+        print(f"\n[check] DSR_B2 vs compare.py leaderboard: {prod_check['n_checked']} strategies, "
+              f"worst 2dp diff {prod_check['worst_2dp']:.4f} (< {prod_check['tol']} ✓) — column B2 "
+              f"reproduces production (B2 convention since 2026-07-13; full-precision equality by "
+              f"construction; residual is the live final-bar re-fetch).")
 
     # ── Coupling sensitivity ────────────────────────────────────────────────
     print("\n" + "─" * 78)
@@ -437,7 +449,9 @@ def render(stats, n_trials, meta, rows, dmeta, coupling, prod_check, args) -> No
     print("  DSR shifts — a leaderboard DSR is not a property of that strategy alone. Under B1/B2 the")
     print("  peer columns are BIT-IDENTICAL (Δ = 0) because each V uses only that strategy's own")
     print("  returns. Neither is 'right'; A answers 'best of THIS set', B1/B2 answer 'distinguishable")
-    print("  from luck on its own terms'. This tool is a decision aid — production stays A.\n")
+    print("  from luck on its own terms'. azul selected B2 for production on 2026-07-13 —")
+    print("  the leaderboard DSR is now decoupled (column B2 == compare.py); A is retained here")
+    print("  as the historical reference. See RESEARCH-dsr-convention.md.\n")
     print("  Bailey & López de Prado 2014 (DSR / expected-max-of-N benchmark); Lo 2002 (Sharpe-")
     print("  estimator variance); Mertens 2002 (skew-kurt-corrected Sharpe variance the PSR uses).\n")
 
@@ -466,7 +480,8 @@ def _json_payload(stats, n_trials, meta, rows, dmeta, coupling, prod_check) -> d
 def main() -> int:
     p = argparse.ArgumentParser(
         description="A/B/B decision aid: three DSR trial-variance conventions on the same OOS "
-                    "leaderboard. Non-destructive — production stays A. Research only.",
+                    "leaderboard. Production is B2 since 2026-07-13 (column B2 == compare.py); "
+                    "A is the historical reference. Research only.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--symbol", default="BTC-USD")
     p.add_argument("--eth-symbol", default="ETH-USD")

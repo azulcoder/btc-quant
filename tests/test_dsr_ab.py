@@ -3,10 +3,16 @@
 Deterministic, no network: a FIXED synthetic set of N=4 strategies with hand-chosen
 (SR, n, skew, kurt). What is asserted:
 
+Since 2026-07-13 (RESEARCH-dsr-convention.md) the PRODUCTION leaderboard convention is
+**B2** (per-strategy own-Sharpe variance); A is the historical/reference column.
+
 (a) ``sr0(V, N)`` matches an independent hand-computed value for each V convention
     (A shared, B1 = 1/n, B2 = own Lo/Mertens variance).
-(b) DSR_A equals ``risk.deflated_sharpe_ratio`` with the empirical cross-strategy V —
-    ties the tool's column A to the production function.
+(b) DSR_B2 equals ``risk.deflated_sharpe_ratio`` with the per-strategy own-Sharpe
+    variance ``risk.sharpe_estimator_variance`` — ties the tool's PRODUCTION column
+    (B2) to the production function; and ``v_b2`` delegates to that single source of
+    truth. DSR_A still equals the same function with the shared empirical V (the
+    historical column).
 (c) DECOUPLING (the core claim): perturbing strategy 4's SR changes EVERY DSR_A but
     leaves DSR_B1 and DSR_B2 for strategies 1–3 BIT-IDENTICAL (asserted to exactly 0).
 (d) B2 reduces to ~B1 when skew=0, kurt=3, SR=0 (sanity: V_B2 = 1/(n-1) ≈ 1/n).
@@ -78,18 +84,34 @@ def test_a_sr0_matches_hand_computed():
 
 
 # --------------------------------------------------------------------------- #
-# (b) DSR_A == production risk.deflated_sharpe_ratio(empirical V)              #
+# (b) PRODUCTION column is B2 == risk.deflated_sharpe_ratio(own-Sharpe V);      #
+#     A is the historical reference column (shared empirical V).                #
 # --------------------------------------------------------------------------- #
-def test_b_dsr_a_equals_production_deflated_sharpe():
+def test_b_dsr_b2_is_production_and_a_is_historical():
     st = _stats()
     n_trials = len(st)
     rows, meta = dsr_ab.compute_dsrs(st, n_trials)
+
+    # v_b2 delegates to the single source of truth (risk.sharpe_estimator_variance).
+    for s in st:
+        assert dsr_ab.v_b2(s.sr, s.n, s.skew, s.kurt) == \
+            risk.sharpe_estimator_variance(s.sr, s.n, s.skew, s.kurt)
+
+    # PRODUCTION (B2): each strategy's DSR_B2 == deflated_sharpe_ratio with its OWN
+    # per-strategy Sharpe-estimator variance — the exact wiring compare.py now ships.
+    for s in st:
+        own_v = risk.sharpe_estimator_variance(s.sr, s.n, s.skew, s.kurt)
+        expected_b2 = risk.deflated_sharpe_ratio(s.sr, s.n, s.skew, s.kurt, n_trials, own_v)
+        assert rows[s.name]["dsr_b2"] == expected_b2   # bit-identical: same fn, own V
+
+    # HISTORICAL (A): still the shared empirical cross-strategy V (the reference column).
     V_A, fb = dsr_ab.v_shared([s.sr for s in st])
     assert not fb
     assert meta["V_A"] == V_A
     for s in st:
-        expected = risk.deflated_sharpe_ratio(s.sr, s.n, s.skew, s.kurt, n_trials, V_A)
-        assert rows[s.name]["dsr_a"] == expected  # bit-identical: same function, same V
+        expected_a = risk.deflated_sharpe_ratio(s.sr, s.n, s.skew, s.kurt, n_trials, V_A)
+        assert rows[s.name]["dsr_a"] == expected_a     # bit-identical: same fn, shared V
+
     # The independent hand-formula self-check passes to 1e-9 for all three columns.
     assert dsr_ab._selfcheck_1e9(rows, n_trials) < 1e-9
 

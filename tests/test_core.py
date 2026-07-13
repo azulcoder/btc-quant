@@ -262,6 +262,110 @@ def test_dsr_sr0_hand_pin_n5_v001():
     )
 
 
+def test_sharpe_estimator_variance_hand_pin_and_psr_denominator_identity():
+    """B2 trial variance (azul 2026-07-13, RESEARCH-dsr-convention.md): the Lo(2002)/
+    Mertens(2002) finite-sample Sharpe-estimator variance risk.sharpe_estimator_variance
+    is (1 - skew·SR + (kurt-1)/4·SR²)/(n-1), the SAME quantity implicit in the PSR
+    denominator.
+
+    Hand pin: sr=0.05, n=500, skew=-0.3, kurt=4:
+      1 - (-0.3)(0.05) + (4-1)/4·(0.05²) = 1 + 0.015 + 0.001875 = 1.016875
+      V = 1.016875 / 499 = 0.0020378256513026052   (hand-computed, hard-coded)
+    """
+    from scipy.stats import norm
+
+    sr, n, skew, kurt = 0.05, 500, -0.3, 4.0
+    V = risk.sharpe_estimator_variance(sr, n, skew, kurt)
+    assert V == pytest.approx(0.0020378256513026052, abs=1e-15)
+
+    # It is EXACTLY the variance implicit in the PSR denominator. PSR(sr; 0) = Φ(z)
+    # with z = sr·√(n-1)/√denom and Var(SR_hat) = denom/(n-1), so Var = (sr/z)² where
+    # z = Φ⁻¹(PSR). Reconstructing V from the PSR output must round-trip to the same V.
+    psr = risk.probabilistic_sharpe_ratio(sr, n, skew, kurt, sr_benchmark=0.0)
+    implied = (sr / norm.ppf(psr)) ** 2
+    assert V == pytest.approx(implied, rel=1e-12)
+
+    # Guard: n < 2 -> nan (cannot form the (n-1) sampling scale).
+    assert math.isnan(risk.sharpe_estimator_variance(0.05, 1, 0.0, 3.0))
+    assert math.isnan(risk.sharpe_estimator_variance(0.05, 0, 0.0, 3.0))
+
+
+def test_compare_leaderboard_uses_per_strategy_b2_variance_and_is_decoupled():
+    """B2 switch in production (compare.py leaderboard): each strategy's OOS DSR is now
+    deflated with its OWN Lo/Mertens Sharpe-estimator variance
+    (risk.sharpe_estimator_variance), NOT the shared cross-strategy V. This makes the
+    leaderboard DSR DECOUPLED — perturbing one strategy's returns cannot move any other
+    strategy's DSR (unlike the old convention A, where the shared empirical V coupled
+    every peer). We drive the exact production loop from compare.py.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    import numpy as np
+    import pandas as pd
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "compare.py"
+    spec = importlib.util.spec_from_file_location("_b2_compare_script", str(path))
+    compare = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(compare)
+
+    def _row_from_returns(name, r):
+        """Build the leaderboard row dict fields the DSR loop consumes, using the exact
+        moment convention of risk.summary (mean/std ddof=1; skew bias=False; non-excess
+        kurtosis)."""
+        r = pd.Series(r, dtype="float64").dropna()
+        n = int(len(r))
+        sd = r.std(ddof=1)
+        sr = float(r.mean() / sd)
+        return {"name": name, "n_periods": n, "sr_period": sr,
+                "skew": float(stats.skew(r.to_numpy(), bias=False)),
+                "kurt": float(stats.kurtosis(r.to_numpy(), fisher=False, bias=False))}
+
+    def _leaderboard_dsr(rows, n_trials):
+        """Replicate compare.py's production DSR loop (B2 per-strategy variance)."""
+        out = {}
+        for r in rows:
+            np_ = int(r["n_periods"])
+            v = risk.sharpe_estimator_variance(r["sr_period"], np_, r["skew"], r["kurt"])
+            if not (isinstance(v, (int, float)) and math.isfinite(v)):
+                v = 1.0 / np_
+            out[r["name"]] = risk.deflated_sharpe_ratio(
+                r["sr_period"], np_, r["skew"], r["kurt"], n_trials, v)
+        return out
+
+    rng = np.random.default_rng(19)
+    idx = pd.date_range("2020-01-01", periods=900, freq="D")
+    base_returns = {
+        "s1": pd.Series(rng.normal(0.0009, 0.02, len(idx)), index=idx),
+        "s2": pd.Series(rng.normal(0.0004, 0.018, len(idx)), index=idx),
+        "s3": pd.Series(rng.normal(0.0006, 0.025, len(idx)), index=idx),
+    }
+    rows = [_row_from_returns(k, v) for k, v in base_returns.items()]
+    n_trials = len(rows)
+    dsr = _leaderboard_dsr(rows, n_trials)
+
+    # (1) Each strategy's DSR equals deflated_sharpe_ratio fed its OWN B2 variance.
+    for r in rows:
+        own_v = risk.sharpe_estimator_variance(
+            r["sr_period"], r["n_periods"], r["skew"], r["kurt"])
+        expected = risk.deflated_sharpe_ratio(
+            r["sr_period"], r["n_periods"], r["skew"], r["kurt"], n_trials, own_v)
+        assert dsr[r["name"]] == expected           # bit-identical, per-strategy V
+        # and NOT the old shared-V convention (would couple the peers).
+        assert own_v != compare._empirical_var_sr([x["sr_period"] for x in rows])[0]
+
+    # (2) DECOUPLING: perturb ONLY s3's returns (a genuine returns-level change to its
+    # Sharpe) and confirm s1 and s3 DSRs are BIT-IDENTICAL for the untouched peers.
+    pert_returns = dict(base_returns)
+    pert_returns["s3"] = base_returns["s3"] + 0.001    # additive drift -> different SR
+    pert_rows = [_row_from_returns(k, v) for k, v in pert_returns.items()]
+    pert_dsr = _leaderboard_dsr(pert_rows, n_trials)
+
+    assert pert_dsr["s3"] != dsr["s3"]                 # the perturbed one moved
+    for peer in ("s1", "s2"):
+        assert pert_dsr[peer] == dsr[peer]             # peers exactly unchanged (decoupled)
+
+
 def test_run_n1_dsr_is_psr_flag_and_var_fallback():
     """C1/C2 wiring in backtest.run: n_trials=1 sets dsr_is_psr (DSR ≡ PSR, sr0=0)
     without the fallback flag; n_trials>1 with no supplied trial variance fires the

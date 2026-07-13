@@ -1,9 +1,14 @@
 # Deflated-Sharpe trial-variance convention — run-log (decision aid)
 
-Research only. Not financial advice. A backtest is not a forecast. This log is a
-**non-destructive** decision aid: the production DSR convention stays **A** (M6 —
-empirical cross-strategy variance) and is UNCHANGED. `compare.py` / `backtest.py` /
-`risk.py` are not touched. `scripts/dsr_ab.py` only *reports* B1/B2 beside A.
+Research only. Not financial advice. A backtest is not a forecast. This log was the
+decision aid that framed the choice between conventions A, B1 and B2 for the `compare.py`
+leaderboard trial variance `V`.
+
+> **DECISION (2026-07-13): azul chose B2.** Production is now convention **B2** (per-strategy
+> own-Sharpe variance). The A/B tables below are preserved verbatim as the **decision record**
+> (the state as-of the choice). See the [Decision (2026-07-13)](#decision-2026-07-13) section
+> at the end for what shipped. The original framing in this section — "production stays A,
+> non-destructive" — describes the log *before* the decision and is retained for provenance.
 
 Reproduce:
 
@@ -244,3 +249,47 @@ from the printed per-strategy `SR/n/skew/kurt`:
 References: Bailey & López de Prado 2014 (Deflated Sharpe / expected-max-of-N benchmark,
 *JPM* 40(5); SSRN 2460551); Lo 2002 (Sharpe-ratio estimator variance, *FAJ*); Mertens
 2002 (skew-kurtosis-corrected Sharpe variance — the form the repo PSR denominator uses).
+
+---
+
+## Decision (2026-07-13)
+
+**azul chose B2.** The `compare.py` leaderboard `OOS DSR` trial variance is now the
+**per-strategy own-Sharpe variance** `V_i = (1 − skew_i·SR_i + (kurt_i−1)/4·SR_i²)/(n_i − 1)`
+(Lo 2002 / Mertens 2002) — the exact quantity already inside the PSR denominator — replacing
+convention A (the shared empirical cross-strategy variance of the ranked SRs). `N`
+(selection-count deflation) is unchanged. The A/B/B2 tables above stay as the **decision
+record** — the numbers on which the call was made.
+
+**Why B2.** Under A a single peer's realized Sharpe reshapes the shared `V`, so every other
+strategy's DSR moves — a leaderboard DSR was not a property of that strategy alone (the coupling
+measured in *"Coupling sensitivity"* above, and surfaced concretely by M9 when the delta-neutral
+pairs P&L dropped the pairs SRs and shifted the whole board). B2 makes each DSR depend only on
+its own returns (decoupled — peers verified bit-invariant, Δ=0). Selection overfit is still
+guarded: `sr0(V,N)` keeps the expected-max-of-`N` term, and **PBO + MinBTL** carry the
+cross-strategy honesty.
+
+**What shipped (Python-only, as scoped).**
+- `btcquant/risk.py` — new `sharpe_estimator_variance(sr, n, skew, kurt)` (single source of
+  truth; cross-referenced to `probabilistic_sharpe_ratio`; `n<2 → nan`).
+- `scripts/compare.py` — leaderboard DSR loop computes `V` per strategy via
+  `risk.sharpe_estimator_variance`; a non-finite `V` (`n<2`) falls back to `1/n` with the
+  `var_fallback` caveat. `_empirical_var_sr` kept (no longer wired in) for `dsr_ab.py` column A.
+- `scripts/dsr_ab.py` — column **B2** delegates to `risk.sharpe_estimator_variance`; the
+  `--check-production` cross-check now asserts **DSR_B2 == compare.py** (was DSR_A); A relabeled
+  historical/reference.
+- `tests/` — `+2` intentional (own-Sharpe hand-pin + PSR-denominator identity + `n<2` guard;
+  leaderboard-decoupling test). `pytest` **185**.
+
+**Surfaces NOT touched (were always separate from the leaderboard cross-strategy `V`).**
+- `walk_forward` folds-DSR (`OOS DSR (folds)`, the research kill-gate) — `backtest.py` unchanged;
+  every published Tier-B / Tharp / Part-B **KILL** verdict re-verified still KILL on
+  `compare.py --research` (2026-07-13).
+- Dashboard fold-V surface (`quant.js walkForward`, the 63 parity-pinned fields) — **no JS
+  changed**; `check_parity` **63/63**, worst |Δ| 1.63e-07 (byte-identical). No parity re-pin.
+
+**Verified after the switch:** `compare.py` leaderboard `OOS DSR` == `dsr_ab.py` `DSR_B2`
+to **0.0e+00** in-process (all 8 research strategies); decoupling confirmed (perturbing
+`pairs_coint` moves every peer's leaderboard DSR by exactly 0, vs 0.130 under the retired A);
+`n<2` fallback fires with no crash. Rank order identical A vs B2; **no strategy crosses 0.95**
+(public tsmom 0.9451). Full write-up: AUDIT_LOG.md M6-AMENDMENT (2026-07-13).

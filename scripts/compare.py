@@ -50,12 +50,17 @@ def _fmt(v: object, pct: bool = False, dp: int = 2) -> str:
 
 
 def _empirical_var_sr(srs: list) -> tuple[float, bool]:
-    """M6 C2/C3 leaderboard trial variance: the EMPIRICAL variance (ddof=1) of the
-    ranked strategies' OOS per-period Sharpe ratios (they are all in rows — computed,
-    not assumed). Returns ``(V, fallback)``; ``fallback=True`` (V=nan) only when fewer
-    than 2 finite SRs are in hand, in which case callers fall back to the 1/n_periods
-    null and MUST print the caveat 'null-variance fallback — deflation may be under-
-    or over-stated'."""
+    """The EMPIRICAL variance (ddof=1) of the ranked strategies' OOS per-period Sharpe
+    ratios (the old M6 'convention A' shared cross-strategy trial variance). Returns
+    ``(V, fallback)``; ``fallback=True`` (V=nan) only when fewer than 2 finite SRs are
+    in hand, in which case callers fall back to the 1/n_periods null and MUST print the
+    caveat 'null-variance fallback — deflation may be under- or over-stated'.
+
+    NOTE (2026-07-13, B2 switch — RESEARCH-dsr-convention.md): this shared, peer-COUPLED
+    variance is **no longer wired into the leaderboard DSR** (which now uses the
+    per-strategy own-Sharpe variance ``risk.sharpe_estimator_variance`` — convention B2,
+    decoupled). It is KEPT here because ``scripts/dsr_ab.py``'s column A (the historical
+    reference comparison) delegates to it; do not remove."""
     finite = [float(s) for s in srs
               if isinstance(s, (int, float)) and math.isfinite(float(s))]
     if len(finite) < 2:
@@ -243,13 +248,22 @@ def main() -> int:
             rows.append({"name": name, "err": str(exc)[:60]})
 
     ok = [r for r in rows if "err" not in r]
-    # ── Leaderboard DSR (M6 C1-C3): N = strategies ranked in this run; V = the
-    # empirical (ddof=1) variance of their OOS per-period Sharpe ratios. The
-    # 1/n_periods null fires ONLY if <2 finite SRs exist, with the printed caveat.
-    var_lb, var_fallback = _empirical_var_sr([r["sr_period"] for r in ok])
+    # ── Leaderboard DSR (B2 convention, azul 2026-07-13 — RESEARCH-dsr-convention.md):
+    # N = strategies ranked in this run (selection-count deflation, UNCHANGED); V is now
+    # the PER-STRATEGY own-Sharpe finite-sample variance (Lo 2002 / Mertens 2002 — the
+    # same quantity inside the PSR denominator), risk.sharpe_estimator_variance. This is
+    # DECOUPLED: each strategy's DSR depends only on its own returns, not on any peer's
+    # realized Sharpe (unlike the old shared cross-strategy V = _empirical_var_sr, which
+    # is no longer wired in here — it stays in the file only for dsr_ab.py's column A).
+    # Guard: a non-finite B2 variance (n<2) falls back to the 1/n_periods null with the
+    # printed 'null-variance fallback' caveat.
+    var_fallback = False
     for r in ok:
         np_ = int(r["n_periods"])
-        v = var_lb if not var_fallback else (1.0 / np_ if np_ > 0 else float("nan"))
+        v = risk.sharpe_estimator_variance(r["sr_period"], np_, r["skew"], r["kurt"])
+        if not (isinstance(v, (int, float)) and math.isfinite(v)):
+            v = 1.0 / np_ if np_ > 0 else float("nan")
+            var_fallback = True
         r["oos_dsr"] = risk.deflated_sharpe_ratio(
             r["sr_period"], np_, r["skew"], r["kurt"], n_trials, v)
     ok.sort(key=lambda r: (r["oos_dsr"] if isinstance(r["oos_dsr"], (int, float))
@@ -270,9 +284,10 @@ def main() -> int:
     print(f"\nbtc-quant OOS leaderboard | {args.symbol} {args.granularity} | {span} | {bars} bars | "
           f"{args.folds} walk-forward folds | cost {args.cost_bps}+{args.slippage_bps} bps/side | "
           f"N={n_trials} trials")
-    print(f"DSR convention (M6): leaderboard 'OOS DSR' uses N={n_trials} strategy trials, "
-          f"V = {_fmt(var_lb, dp=6)} empirical across N strategy trials (ddof=1 var of the OOS "
-          f"per-period SRs); research sweeps use folds-as-trials, labeled 'OOS DSR (folds)'."
+    print(f"DSR convention: leaderboard 'OOS DSR' uses N={n_trials} strategy trials, "
+          f"V = per-strategy own-Sharpe variance (Lo 2002 / Mertens 2002; decoupled — the B2 "
+          f"convention azul selected 2026-07-13, RESEARCH-dsr-convention.md); research sweeps "
+          f"still use folds-as-trials, labeled 'OOS DSR (folds)'."
           + ("\n  ⚠ null-variance fallback — deflation may be under- or over-stated"
              if var_fallback else "") + "\n")
     hdr = (f"{'strategy':<18}{'OOS CAGR':>10}{'OOS SR':>9}{'IS SR':>9}{'OOS DSR':>10}"

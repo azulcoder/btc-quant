@@ -99,7 +99,7 @@ in the docstring so a quant can audit.
 ## 4. Verification suite (run before every commit)
 
 ```bash
-python3 -m pytest -q                      # 178 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
+python3 -m pytest -q                      # 185 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
 node --check dashboard/app.js             # JS syntax (also quant.js, charts.js, livewire.js, terminal-*.js)
 node dashboard/app.js --check             # ppy guard: ppy()=365 (1d)/8760 (1h); no literal-365 at an annualization site
 python3 scripts/check_parity.py           # JS↔Python mirror parity (63 shared fields; the one rule)
@@ -163,15 +163,29 @@ was dividing the downside variance by the downside count instead of the full sam
   fields — +5 M2 two-leg pairs cost, +9 M4 CPCV dispersion, +2 M9 delta-neutral pairs P&L, +6 M8
   options analytics [max_pain + gamma_concentration], the last 6 bit-exact |Δ|=0). State the *real*
   tolerance; don't claim bit-for-bit.
-- **DSR convention (M6, binding — do not relitigate): V = the EMPIRICAL ddof=1 cross-trial variance
-  of the per-period SRs whenever the trial SRs are in hand; N = 1 ≡ PSR and is LABELED
-  `'PSR (single trial — no deflation)'` (`dsr_is_psr`/`dsrIsPsr` in stats).** Never reintroduce a
-  silent `1/n`-only variance (nor a `max(V, 1/n)` floor — the convention is honest in BOTH
-  directions); the `1/n` null is a *flagged fallback* (`var_fallback`) with a printed caveat, legal
-  only when trial SRs genuinely don't exist. Cautionary tale: the JS mirror fed N=1 through
+- **DSR trial-variance V by surface — there are THREE and they are NOT interchangeable (M6 +
+  M6-AMENDMENT 2026-07-13, binding — do not relitigate):**
+  1. **`compare.py` cross-strategy leaderboard** — since 2026-07-13 V is **per-strategy own-Sharpe
+     variance** `risk.sharpe_estimator_variance(sr, n, skew, kurt) = (1 − skew·SR + (kurt−1)/4·SR²)
+     /(n−1)` (Lo 2002 / Mertens 2002, convention **B2**). Each strategy's DSR depends only on its
+     own returns — **decoupled**. The old shared cross-strategy `V = _empirical_var_sr(SRs)`
+     (convention A, which coupled the whole board) was **retired here on 2026-07-13**; the function
+     is kept ONLY because `scripts/dsr_ab.py` column A (a historical reference) delegates to it. Do
+     NOT re-wire `_empirical_var_sr` into the leaderboard.
+  2. **`walk_forward` folds-DSR** (`OOS DSR (folds)`, the research kill-gate) — V = EMPIRICAL ddof=1
+     variance of the per-FOLD OOS SRs, N = n_splits. **Unchanged**; this is a different surface from
+     the leaderboard and always was.
+  3. **Dashboard headline DSR** (`quant.js walkForward`) — the per-fold V mirror, the 63
+     parity-pinned fields. **Unchanged; no JS moved in the B2 switch, no parity re-pin.**
+  `dsr_ab.py` is the A/B/B2 side-by-side comparison tool. N = 1 ≡ PSR everywhere and is LABELED
+  `'PSR (single trial — no deflation)'` (`dsr_is_psr`/`dsrIsPsr`). Never reintroduce a silent
+  `1/n`-only variance (nor a `max(V, 1/n)` floor); the `1/n` null is a *flagged fallback*
+  (`var_fallback`) with a printed caveat, legal only when the trial variance genuinely can't be
+  computed (e.g. B2 with `n<2`). Cautionary tale: the JS mirror once fed N=1 through
   `normPpf(1 − 1/1) = −Inf` and **returned DSR = 1.0 identically for ~8 months** — any strategy,
   even a losing one, scored 100% significant at N=1 — and the then-saturated parity pins (both
-  tails ≈ 0) couldn't see it. Keep the unsaturated pins; full post-mortem in AUDIT_LOG.md (M6).
+  tails ≈ 0) couldn't see it. Keep the unsaturated pins; full post-mortem in AUDIT_LOG.md (M6 +
+  M6-AMENDMENT).
 - **Deribit ticker endpoint is `public/ticker`, NOT `get_ticker`** (the latter returns "Method not
   found"). `get_book_summary_by_currency` has **no greeks** and **`mark_iv` only** (no bid/ask IV) —
   hence client-side Black-76 (validated against `public/ticker` greeks).
@@ -257,9 +271,13 @@ was dividing the downside variance by the downside count instead of the full sam
   literal duplicate of the board's vol-scaled tsmom, corr 1.00; B2 OU-pairs = "model, not edge"; B3
   carry = OOS-insufficient). Re-judge only through the harness on OOS DSR / PBO.
 - ~~DSR-convention unification~~ — **done (M6, 2026-07-11)**: one binding convention (C1–C5) across
-  every Python and JS DSR call site — empirical cross-trial V, N by surface (leaderboard =
-  strategies, walk-forward = folds), N=1 labeled as PSR, flagged 1/n fallback only — with
-  unsaturated parity pins and hand-pinned tests. See AUDIT_LOG.md (M6) and the §5 gotcha.
+  every Python and JS DSR call site — N by surface (leaderboard = strategies, walk-forward = folds),
+  N=1 labeled as PSR, flagged 1/n fallback only — with unsaturated parity pins and hand-pinned tests.
+  **Amended 2026-07-13 (M6-AMENDMENT):** azul switched the `compare.py` cross-strategy leaderboard V
+  from the shared empirical cross-trial variance (A) to the **per-strategy own-Sharpe variance**
+  (B2, `risk.sharpe_estimator_variance`) — decoupling each DSR from its peers' returns. Python-only;
+  the walk-forward folds-DSR and the dashboard parity surface were untouched. See AUDIT_LOG.md
+  (M6 + M6-AMENDMENT) and the §5 gotcha.
 - ~~M1-pairs bfill leak · M2 two-leg pairs cost · M4 purge/embargo/lockbox · M5 IC HAC~~ — **done
   (2026-07-12)**: M1-pairs dropped the `.bfill()` (ffill-only, no back-stamped pre-listing price);
   M2 charges the ETH hedge leg via `extra_cost_turnover` (single-source `_hedge_beta`/`pairs_legs`,
@@ -271,7 +289,8 @@ was dividing the downside variance by the downside count instead of the full sam
   (2026-07-12)**: M9 books the pairs SPREAD return `traded_pos · (BTC_ret − beta_{t−1}·ETH_ret)` via
   `backtest.run(..., hedge_return=)` (default `None` ⇒ non-pairs byte-identical), +2 parity fields —
   both pairs DSRs collapsed to 0.00 (still KILL, off the board), non-pairs P&L byte-identical (only
-  the shared-V DSR shifts, M6 coupling); M8 pinned `max_pain` + `gamma_concentration` across the
+  the shared-V DSR shifted then — the M6 coupling, since retired by the 2026-07-13 B2 switch); M8
+  pinned `max_pain` + `gamma_concentration` across the
   mirror (+6 parity fields, bit-exact) so options parity now covers the greeks AND the two chain
   analytics; M7 wired `node dashboard/app.js --check` into CI (the annualization guard bites on any
   resurfaced literal-365). **All lettered audit findings (H1, M1–M9) are now CLOSED** — only Low/Info
