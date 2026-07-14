@@ -290,6 +290,105 @@ def test_sharpe_estimator_variance_hand_pin_and_psr_denominator_identity():
     assert math.isnan(risk.sharpe_estimator_variance(0.05, 0, 0.0, 3.0))
 
 
+# --------------------------------------------------------------------------- #
+# 3c. False Strategy Theorem (FST) — Bailey & López de Prado 2014             #
+# --------------------------------------------------------------------------- #
+def test_expected_max_sharpe_hand_pins_and_n1_zero():
+    """expected_max_sharpe_ratio hand pins (V=1 → the raw E[max_N] of N standard
+    normals) and the N<2 → 0 special case.
+
+    E[max_5]  = (1-γ)·Φ⁻¹(0.8) + γ·Φ⁻¹(1-1/(5e))  = 1.1925940010147893
+    E[max_10] = (1-γ)·Φ⁻¹(0.9) + γ·Φ⁻¹(1-1/(10e)) = 1.57459830134575
+    (γ = 0.5772156649015329; hand-computed, hard-coded)."""
+    assert risk.expected_max_sharpe_ratio(5, 1.0) == pytest.approx(
+        1.1925940010147893, abs=1e-12)
+    assert risk.expected_max_sharpe_ratio(10, 1.0) == pytest.approx(
+        1.57459830134575, abs=1e-12)
+    # N < 2 ⟹ 0.0 for ANY variance (a single trial has no selection to inflate).
+    assert risk.expected_max_sharpe_ratio(1, 1.0) == 0.0
+    assert risk.expected_max_sharpe_ratio(1, 123.456) == 0.0
+    assert risk.expected_max_sharpe_ratio(0, 1.0) == 0.0
+    # sqrt(V) scaling: V=0.001 at N=5 is the sr0 used in the DSR mid pin.
+    assert risk.expected_max_sharpe_ratio(5, 0.001) == pytest.approx(
+        0.03771313367059893, abs=1e-15)
+
+
+def test_expected_max_refactor_is_byte_identical_regression():
+    """REFACTOR guard: deflated_sharpe_ratio and min_backtest_length now CALL
+    expected_max_sharpe_ratio instead of the two inline closed forms. The numeric
+    results must be byte-identical to the pre-refactor values on fixed cases."""
+    # Three fixed DSR cases (the same ones the mid/N1 pins exercise), hard-coded to the
+    # pre-refactor outputs computed from the old inline formula.
+    assert risk.deflated_sharpe_ratio(0.05, 500, -0.3, 4.0, 5, 0.001) == (
+        0.6072585304659127)                                   # N=5, V=0.001 (mid)
+    assert risk.deflated_sharpe_ratio(0.08, 250, -0.3, 4.0, 1, 123.456) == (
+        0.8933576314257702)                                   # N=1 special case ≡ PSR(0)
+    assert risk.deflated_sharpe_ratio(0.10, 100, 0.0, 3.0, 10, 1.0) == (
+        8.334245390506071e-49)                                # N=10, V=1 (deep tail)
+    # And MinBTL is byte-identical on fixed N (2·ln N / E[max_N]).
+    assert risk.min_backtest_length(10) == 2.9246635043694797
+    assert risk.min_backtest_length(2) == 2.6672055927365106
+
+
+def test_false_strategy_threshold_fixed_point_recovers_prob():
+    """false_strategy_threshold inverts the PSR: re-feeding sr* into
+    probabilistic_sharpe_ratio against the SAME expected-max benchmark must recover
+    EXACTLY prob (the fixed point closes). Hand pin at N=5, V=0.001, n=500."""
+    N, V, n, sk, ku, prob = 5, 0.001, 500, -0.3, 4.0, 0.95
+    sr_star = risk.false_strategy_threshold(N, V, n, sk, ku, prob)
+    assert sr_star == pytest.approx(0.11292934779100049, abs=1e-9)
+    sr0 = risk.expected_max_sharpe_ratio(N, V)
+    round_trip = risk.probabilistic_sharpe_ratio(sr_star, n, sk, ku, sr_benchmark=sr0)
+    assert round_trip == pytest.approx(prob, abs=1e-6)
+    # sr* sits ABOVE the skill-less benchmark (you must beat luck to clear the hurdle).
+    assert sr_star > sr0
+    # Guards: N<2 or n<2 → nan; prob out of (0,1) → nan.
+    assert math.isnan(risk.false_strategy_threshold(1, V, n, sk, ku, prob))
+    assert math.isnan(risk.false_strategy_threshold(N, V, 1, sk, ku, prob))
+    assert math.isnan(risk.false_strategy_threshold(N, V, n, sk, ku, 1.0))
+
+
+def test_effective_number_of_trials_participation_ratio():
+    """effective_number_of_trials = eigenvalue participation ratio of corr(R).
+
+    2 identical + 2 independent columns (built from the exactly-orthogonal
+    discrete-Fourier basis) → correlation matrix [[1,1,0,0],[1,1,0,0],[0,0,1,0],
+    [0,0,0,1]], eigenvalues [0,1,1,2], N_eff = (Σλ)²/Σλ² = 16/6 = 8/3."""
+    t = np.arange(240)
+    a = np.sin(2 * np.pi * t / 240)           # col 0
+    b = np.cos(2 * np.pi * t / 240)           # ⊥ a
+    c = np.sin(4 * np.pi * t / 240)           # ⊥ a, ⊥ b
+    M = np.column_stack([a, a, b, c])
+    assert risk.effective_number_of_trials(M) == pytest.approx(8.0 / 3.0, abs=1e-9)
+
+    # N identical columns collapse to N_eff ≈ 1 (one non-zero eigenvalue).
+    assert risk.effective_number_of_trials(np.column_stack([a] * 5)) == pytest.approx(
+        1.0, abs=1e-9)
+
+    # N independent columns → N_eff ≈ N (flat spectrum). Large T for a tight sample corr.
+    rng = np.random.default_rng(1)
+    R = rng.standard_normal((6000, 4))
+    n_eff = risk.effective_number_of_trials(R)
+    assert 3.6 < n_eff <= 4.0                  # clamped to [1, ncols]
+
+    # Guards: <2 usable cols → the usable-col count; a constant column is dropped.
+    two = np.column_stack([a, np.zeros(240)])  # one varying, one constant
+    assert risk.effective_number_of_trials(two) == 1.0
+
+
+def test_probability_false_strategy_is_one_minus_dsr():
+    """probability_false_strategy = 1 - PSR(max_sharpe; sr0=expected_max) — the
+    family-wise P that the best-of-N is a false positive. Hand pin at the mid case."""
+    args = (0.05, 5, 0.001, 500, -0.3, 4.0)   # (max_sr, N, V, n, skew, kurt)
+    p_false = risk.probability_false_strategy(*args)
+    # Exactly 1 - the DSR (same inputs), and pinned to 1 - dsr_mid.
+    dsr = risk.deflated_sharpe_ratio(0.05, 500, -0.3, 4.0, 5, 0.001)
+    assert p_false == pytest.approx(1.0 - dsr, abs=1e-15)
+    assert p_false == pytest.approx(0.3927414695340873, abs=1e-9)
+    # Guard: degenerate trial input → nan (never a fake 0 or 1).
+    assert math.isnan(risk.probability_false_strategy(0.05, 5, -1.0, 500, -0.3, 4.0))
+
+
 def test_compare_leaderboard_uses_per_strategy_b2_variance_and_is_decoupled():
     """B2 switch in production (compare.py leaderboard): each strategy's OOS DSR is now
     deflated with its OWN Lo/Mertens Sharpe-estimator variance

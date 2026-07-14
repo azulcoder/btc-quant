@@ -36,3 +36,4 @@ reports/verify/
 # machine-local, re-fetchable, never committed.
 dashboard/econ_calendar.json
 data/hf-stage/manifests/
+data/hf-stage/

@@ -62,7 +62,10 @@ def test_parity_harness_covers_unsaturated_and_walkforward_probes():
                  "pairs_dnGrossSum", "pairs_dnNetEquity",
                  # M8 options-parity probe (max_pain + gamma_concentration past the greeks)
                  "mp_maxPain", "mp_pcOiRatio", "mp_forward",
-                 "gc_sum", "gc_dot", "gc_peakStrike"):
+                 "gc_sum", "gc_dot", "gc_peakStrike",
+                 # FST (False Strategy Theorem, Bailey-LdP 2014) probes — the expected-max
+                 # refactor + the new surfaced diagnostics (threshold, N_eff, P(false)).
+                 "emaxN5", "emaxN10", "fstThreshold", "neffTrials", "probFalseStrategy"):
         assert name in py_src, f"{name} probe missing from check_parity.py"
         assert name in js_src, f"{name} probe missing from _parity_eval.cjs"
     # the anchor constants themselves (a joint drift must fail the pins, not parity)
@@ -71,6 +74,13 @@ def test_parity_harness_covers_unsaturated_and_walkforward_probes():
     # M8 options anchors — max_pain strike + total gamma density are pre-registered too
     assert "64000.0" in py_src
     assert "0.10701664008807263" in py_src
+    # FST anchors — expected-max at N=5/N=10, the false-strategy threshold, N_eff=8/3,
+    # and P(false); pre-registered so a joint Python↔JS drift fails the pins, not parity.
+    assert "1.1925940010147893" in py_src
+    assert "1.57459830134575" in py_src
+    assert "0.11292934779100049" in py_src
+    assert "2.6666666666666665" in py_src
+    assert "0.3927414695340873" in py_src
 
 
 def test_parity_options_fields_present_and_agree():

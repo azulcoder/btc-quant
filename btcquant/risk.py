@@ -64,8 +64,12 @@ __all__ = [
     "kelly",
     "probabilistic_sharpe_ratio",
     "sharpe_estimator_variance",
+    "expected_max_sharpe_ratio",
     "deflated_sharpe_ratio",
     "min_backtest_length",
+    "false_strategy_threshold",
+    "effective_number_of_trials",
+    "probability_false_strategy",
     "probability_of_backtest_overfitting",
     "trade_ledger",
     "expectancy_report",
@@ -368,6 +372,59 @@ def sharpe_estimator_variance(sr: float, n: int, skew: float, kurt: float) -> fl
     return float((1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr * sr) / (n - 1))
 
 
+# Euler-Mascheroni constant — the Gumbel expected-max coefficient (Bailey-LdP 2014).
+_EULER_GAMMA = 0.5772156649015329
+
+
+def expected_max_sharpe_ratio(n_trials: int, var_trials_sr: float = 1.0) -> float:
+    """Expected maximum (per-period) Sharpe of ``N`` skill-less trials — Bailey & López
+    de Prado (2014), the False Strategy Theorem core.
+
+    The expected maximum of ``N`` independent standard-normal draws is, to a Gumbel
+    approximation::
+
+        E[max_N] = (1 - gamma) * Phi^{-1}(1 - 1/N) + gamma * Phi^{-1}(1 - 1/(N*e))
+
+    with ``gamma`` the Euler-Mascheroni constant and ``e`` Euler's number. Scaled by the
+    cross-trial Sharpe dispersion ``sqrt(var_trials_sr)`` this is the **skill-less
+    benchmark ``sr0``** the Deflated Sharpe (and Minimum Backtest Length) deflate
+    against: pick the best of ``N`` random configurations and you should *expect* this
+    Sharpe from noise alone.
+
+    ``N < 2`` returns ``0.0`` (a single trial has no selection to inflate → ``sr0 = 0``).
+
+    This is the single source of truth for the expected-max benchmark: both
+    :func:`deflated_sharpe_ratio` (which scales by ``sqrt(var_trials_sr)``) and
+    :func:`min_backtest_length` (which uses the unit-variance ``E[max_N]``) call it,
+    replacing the two inline duplications that previously lived in each — the numeric
+    results are byte-identical (``var_trials_sr=1.0`` gives ``sqrt(1)=1`` exactly).
+
+    Parameters
+    ----------
+    n_trials : int
+        Number ``N`` of independent trials searched.
+    var_trials_sr : float, default 1.0
+        Variance of the (per-period) Sharpe ratios across the ``N`` trials. The
+        default 1.0 recovers the raw expected-max ``E[max_N]`` (standard normals).
+
+    Returns
+    -------
+    float
+        The expected maximum (per-period) Sharpe ``sr0``; ``0.0`` for ``N < 2``.
+
+    Reference
+    ---------
+    Bailey & López de Prado (2014), "The Deflated Sharpe Ratio", *Journal of Portfolio
+    Management* 40(5):94-107; SSRN 2460551.
+    """
+    if n_trials is None or n_trials < 2:
+        return 0.0
+    z1 = stats.norm.ppf(1.0 - 1.0 / n_trials)
+    z2 = stats.norm.ppf(1.0 - 1.0 / (n_trials * math.e))
+    expected_max_z = (1.0 - _EULER_GAMMA) * z1 + _EULER_GAMMA * z2
+    return float(math.sqrt(var_trials_sr) * expected_max_z)
+
+
 def deflated_sharpe_ratio(
     sr: float,
     n: int,
@@ -426,17 +483,9 @@ def deflated_sharpe_ratio(
     if np.isnan(var_trials_sr):
         return float("nan")
 
-    gamma = 0.5772156649015329  # Euler-Mascheroni constant
-    if n_trials == 1:
-        # A single trial: no selection inflation, benchmark is 0.
-        sr0 = 0.0
-    else:
-        e = math.e
-        z1 = stats.norm.ppf(1.0 - 1.0 / n_trials)
-        z2 = stats.norm.ppf(1.0 - 1.0 / (n_trials * e))
-        expected_max_z = (1.0 - gamma) * z1 + gamma * z2
-        sr0 = math.sqrt(var_trials_sr) * expected_max_z
-
+    # sr0 = expected max Sharpe of N skill-less trials (the single shared source of
+    # truth — was inline-duplicated here and in min_backtest_length). N=1 ⟹ sr0=0.
+    sr0 = expected_max_sharpe_ratio(n_trials, var_trials_sr)
     return probabilistic_sharpe_ratio(sr, n, skew, kurt, sr_benchmark=sr0)
 
 
@@ -463,13 +512,188 @@ def min_backtest_length(n_trials: int) -> float:
     """
     if n_trials is None or n_trials < 2:
         return float("nan")
-    gamma = 0.5772156649015329
-    z1 = stats.norm.ppf(1.0 - 1.0 / n_trials)
-    z2 = stats.norm.ppf(1.0 - 1.0 / (n_trials * math.e))
-    expected_max = (1.0 - gamma) * z1 + gamma * z2
+    # E[max_N] of N unit-variance (standard-normal) trials — the shared expected-max
+    # benchmark (var_trials_sr=1.0 ⟹ sqrt(1)=1, so this is byte-identical to the old
+    # inline closed form that lived here before the refactor).
+    expected_max = expected_max_sharpe_ratio(n_trials, 1.0)
     if expected_max <= 0 or np.isnan(expected_max):
         return float("nan")
     return float(2.0 * math.log(n_trials) / expected_max)
+
+
+def false_strategy_threshold(
+    n_trials: int,
+    var_trials_sr: float,
+    n_periods: int,
+    skew: float,
+    kurt: float,
+    prob: float = 0.95,
+) -> float:
+    """The (per-period) Sharpe you must **exceed** to reject the false-strategy null at
+    confidence ``prob``, given ``N`` trials — the False Strategy Theorem hurdle
+    (Bailey & López de Prado 2014).
+
+    Inverts the Probabilistic Sharpe Ratio against the expected-max benchmark:
+    :func:`deflated_sharpe_ratio` is ``PSR(sr; sr0 = expected_max)``; the threshold
+    ``sr*`` is the observed Sharpe at which that DSR equals ``prob``. Setting
+    ``PSR(sr*) = prob`` and solving for ``sr*``::
+
+        sr* = sr0 + Phi^{-1}(prob) * sqrt(1 - skew*sr* + (kurt-1)/4 * sr*^2)
+                    / sqrt(n_periods - 1)
+
+    The PSR denominator depends on ``sr*`` itself (the Lo/Mertens finite-sample Sharpe
+    variance), so this is a fixed point. We iterate from ``sr0`` (whose own moments give
+    a fine 1-step approximation, but the fixed point is exact); ~30 iterations converge
+    to machine precision for realistic inputs.
+
+    Interpretation: "the Sharpe you must exceed to reject the false-strategy null at
+    ``prob``, given ``N`` trials". Below ``sr*`` the best-of-``N`` is statistically
+    indistinguishable from the luckiest of ``N`` skill-less strategies.
+
+    Parameters
+    ----------
+    n_trials : int
+        Number ``N`` of trials searched (``N >= 2``; else ``nan``).
+    var_trials_sr : float
+        Variance of the per-period Sharpe ratios across the ``N`` trials (sets the
+        expected-max benchmark ``sr0``).
+    n_periods : int
+        Number of return observations (``>= 2``; else ``nan``).
+    skew, kurt : float
+        Sample skewness and **non-excess** kurtosis of the selected strategy's returns
+        (pass 3.0 for Gaussian) — they shape the finite-sample Sharpe variance.
+    prob : float, default 0.95
+        Confidence at which to reject the null.
+
+    Returns
+    -------
+    float
+        The minimum per-period Sharpe ``sr*`` (annualize by ``* sqrt(periods_per_year)``
+        for reporting). ``nan`` on degenerate input.
+
+    Reference
+    ---------
+    Bailey & López de Prado (2014), "The Deflated Sharpe Ratio", SSRN 2460551.
+    """
+    if (n_trials is None or n_trials < 2 or n_periods is None or n_periods < 2
+            or var_trials_sr is None or var_trials_sr < 0 or np.isnan(var_trials_sr)):
+        return float("nan")
+    if not (0.0 < prob < 1.0):
+        return float("nan")
+    sr0 = expected_max_sharpe_ratio(n_trials, var_trials_sr)
+    z = stats.norm.ppf(prob)
+    scale = math.sqrt(n_periods - 1)
+    sr = sr0  # seed the fixed point at the benchmark
+    for _ in range(30):
+        denom = 1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr * sr
+        if denom <= 0 or np.isnan(denom):
+            return float("nan")
+        sr = sr0 + z * math.sqrt(denom) / scale
+    return float(sr)
+
+
+def effective_number_of_trials(returns_matrix) -> float:
+    """Effective number of *independent* trials ``N_eff`` from a returns matrix — the
+    eigenvalue **participation ratio** of the trials' correlation matrix (Bailey & López
+    de Prado; Harvey, Liu & Zhu 2016, multiple testing under correlation).
+
+    Naively counting ``N`` strategies over-states the search when the strategies are
+    correlated (e.g. a momentum config and its vol-targeted twin are ~1.0 correlated —
+    they are not two independent bets). The participation ratio of the eigenvalues
+    ``lambda`` of the correlation matrix ``C = corr(returns_matrix)``::
+
+        N_eff = (sum lambda)^2 / sum(lambda^2)
+
+    collapses correlated columns: ``N`` identical trials ⟹ ``N_eff ≈ 1`` (one non-zero
+    eigenvalue), ``N`` independent trials ⟹ ``N_eff ≈ N`` (a flat spectrum).
+
+    Parameters
+    ----------
+    returns_matrix : array-like, shape (T, N)
+        Per-period returns, rows = aligned time, columns = the ``N`` trials/strategies.
+
+    Returns
+    -------
+    float
+        ``N_eff`` clamped to ``[1, n_usable_cols]``. All-NaN / constant (zero-variance)
+        columns are dropped first (their correlation is undefined); ``< 2`` usable
+        columns returns the usable-column count (nothing to deflate).
+
+    Reference
+    ---------
+    Bailey & López de Prado (2014), SSRN 2460551; Harvey, Liu & Zhu (2016), "…and the
+    Cross-Section of Expected Returns", *Review of Financial Studies* 29(1):5-68.
+    """
+    M = np.asarray(returns_matrix, dtype=float)
+    if M.ndim != 2 or M.shape[1] < 1:
+        return float("nan")
+    ncols = M.shape[1]
+    # Drop all-NaN or constant (zero-variance) columns: their correlation is undefined
+    # (0/0) and a constant trial carries no information to (de)count.
+    keep = []
+    for c in range(ncols):
+        col = M[:, c]
+        finite = col[np.isfinite(col)]
+        if finite.size >= 2 and np.nanstd(finite) > 0:
+            keep.append(c)
+    if len(keep) < 2:
+        return float(max(1, len(keep)))
+    sub = M[:, keep]
+    # Pairwise-complete not needed: rows with any NaN would poison corrcoef, so drop
+    # them (align to the common finite window, as PBO/leaderboard already do upstream).
+    sub = sub[np.isfinite(sub).all(axis=1)]
+    if sub.shape[0] < 2:
+        return float(len(keep))
+    corr = np.corrcoef(sub, rowvar=False)
+    lam = np.linalg.eigvalsh(corr)
+    denom = float(np.sum(lam * lam))
+    if denom <= 0 or np.isnan(denom):
+        return float(len(keep))
+    n_eff = float(np.sum(lam)) ** 2 / denom
+    return float(min(max(n_eff, 1.0), len(keep)))
+
+
+def probability_false_strategy(
+    max_sharpe_per_period: float,
+    n_trials: int,
+    var_trials_sr: float,
+    n_periods: int,
+    skew: float,
+    kurt: float,
+) -> float:
+    """Family-wise probability that the **best-of-``N``** strategy is a false positive —
+    the complement of the Deflated Sharpe (Bailey & López de Prado 2014)::
+
+        P(false) = 1 - PSR(max_sharpe ; sr0 = expected_max(N, var_trials_sr))
+
+    i.e. the probability that the selected strategy's Sharpe does **not** exceed what the
+    luckiest of ``N`` skill-less trials would produce. Near 0 ⟹ the winner is unlikely to
+    be noise; near 1 ⟹ the best of ``N`` is indistinguishable from selection luck.
+
+    Parameters
+    ----------
+    max_sharpe_per_period : float
+        The selected (best) strategy's per-period Sharpe.
+    n_trials, var_trials_sr : int, float
+        Trials searched and their cross-trial Sharpe variance (set ``sr0``).
+    n_periods, skew, kurt : int, float, float
+        Sample length and (non-excess) moments feeding the PSR.
+
+    Returns
+    -------
+    float
+        ``P(false) in [0, 1]``; ``nan`` on degenerate input.
+
+    Reference
+    ---------
+    Bailey & López de Prado (2014), SSRN 2460551.
+    """
+    dsr = deflated_sharpe_ratio(
+        max_sharpe_per_period, n_periods, skew, kurt, n_trials, var_trials_sr
+    )
+    if dsr is None or np.isnan(dsr):
+        return float("nan")
+    return float(1.0 - dsr)
 
 
 def probability_of_backtest_overfitting(returns_matrix, n_blocks: int = 8) -> dict:

@@ -88,6 +88,12 @@ The honest result, from `compare.py` on the 2018→ daily history (N = 5 strateg
 Lo (2002) / Mertens (2002) estimator `V_i = (1 − skew·SR + (kurt−1)/4·SR²)/(n−1)`, the exact
 quantity already inside the PSR denominator (convention **B2**, `RESEARCH-dsr-convention.md`).
 Each strategy's DSR now depends only on its *own* returns — a peer's Sharpe cannot move it — while
+Beside them the leaderboard prints a **False-strategy diagnostics** block (Bailey–López de
+Prado 2014): the explicit **Sharpe hurdle** a strategy must clear to escape the luck-of-N
+null, the **effective number of independent trials** `N_eff` (the board's eight rows are
+only ~3 independent bets — the `tsmom` cluster is corr ≈ 1.00), and `P(top strategy is a
+false positive)`. It is diagnostic-only; see [RESEARCH-false-strategy-runlog.md](RESEARCH-false-strategy-runlog.md).
+
 **PBO and MinBTL carry the cross-strategy selection honesty**. (The older shared empirical
 cross-trial variance is retired for the leaderboard; `scripts/dsr_ab.py` still shows it as
 column A.)

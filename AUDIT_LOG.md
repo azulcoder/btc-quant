@@ -531,3 +531,25 @@ to assert **production == B2** (was == A). Also fixed a stale defect: `dsr_ab.py
 1.63e-07), `check_terminal` **46/46**, `make verify-browser` L1 exit-0. Python-only, as scoped —
 no JS mirror change, no parity re-pin. **M6 clauses C2/C3 amended for the leaderboard surface;
 all other M6 semantics stand.**
+
+## 2026-07-14 — False Strategy Theorem diagnostics (do-now honesty math; frontier roadmap #1)
+
+**Added (not a fix — a rail-respecting capability):** the leaderboard now prints a
+False-strategy diagnostics block (Bailey–López de Prado 2014) beside PBO/MinBTL. New in
+`btcquant/risk.py` (mirrored in `dashboard/quant.js`, parity-pinned, hand-tested):
+`expected_max_sharpe_ratio` (the `sr0` core **factored out** of the two inline copies in
+`deflated_sharpe_ratio` + `min_backtest_length` — regression-tested byte-identical),
+`false_strategy_threshold` (the explicit Sharpe hurdle; PSR fixed point → prob), 
+`effective_number_of_trials` (`N_eff` = eigenvalue participation ratio of the trials'
+correlation matrix; Harvey-Liu-Zhu 2016), `probability_false_strategy` (family-wise
+P(best is false)).
+
+**Finding:** the board has **N=8 nominal but N_eff ≈ 2.95** independent trials (the
+`tsmom`/`tsmom_voltarget`/`tsmom_dir` cluster is corr ≈ 1.00). The 95% false-strategy
+hurdle is Sharpe **1.13 under naive N=8** but **0.91 under N_eff** — the top strategy's
+0.98 fails the former, clears the latter. Whether it reads as a false strategy flips on the
+trial-count convention. Surfaced as a DIAGNOSTIC; production DSR `N` unchanged. Pre-registers
+a methodology question (N vs N_eff), the sibling of the A→B2 `V` decision — see
+[RESEARCH-false-strategy-runlog.md](RESEARCH-false-strategy-runlog.md).
+
+**Rails:** no edge claim → no MinBTL / pre-registration. pytest 185→190, parity 63→68 fields.

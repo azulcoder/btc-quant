@@ -290,13 +290,35 @@
     return normCdf(((sr - srBenchmark) * Math.sqrt(n - 1)) / denom);
   }
 
+  // Euler–Mascheroni constant — the Gumbel expected-max coefficient (Bailey-LdP 2014).
+  const EULER_GAMMA = 0.5772156649015329;
+
+  /**
+   * Expected maximum (per-period) Sharpe of `nTrials` skill-less trials — Bailey &
+   * López de Prado (2014), the False Strategy Theorem core. Mirror of
+   * risk.expected_max_sharpe_ratio:
+   *   E[max_N] = (1-γ)·Φ⁻¹(1-1/N) + γ·Φ⁻¹(1-1/(N·e)), scaled by √varTrialsSr.
+   * N < 2 ⟹ 0 (a single trial has no selection to inflate). This is the ONE shared
+   * source of the expected-max benchmark — deflatedSharpe and minBacktestLength both
+   * call it (byte-identical: varTrialsSr=1 ⟹ √1 = 1 exactly).
+   * @param {number} nTrials number of trials searched
+   * @param {number} varTrialsSr cross-trial per-period SR variance (default 1)
+   */
+  function expectedMaxSharpeRatio(nTrials, varTrialsSr = 1) {
+    if (!(nTrials >= 2)) return 0;
+    return Math.sqrt(varTrialsSr)
+      * ((1 - EULER_GAMMA) * normPpf(1 - 1 / nTrials)
+         + EULER_GAMMA * normPpf(1 - 1 / (nTrials * Math.E)));
+  }
+
   /**
    * Deflated Sharpe Ratio — Bailey & López de Prado (2014).
    * Benchmarks the observed SR against the *expected maximum* SR of `nTrials`
    * skill-less strategies, then runs PSR against that inflated benchmark.
    * This is the headline honesty metric: significance when DSR > 0.95.
    * Exact mirror of risk.deflated_sharpe_ratio (M6 C1/C4/C5), incl. the guards
-   * (nTrials < 1 or negative/NaN varTrialsSr → NaN) and the N=1 special case.
+   * (nTrials < 1 or negative/NaN varTrialsSr → NaN) and the N=1 special case
+   * (sr0 = expectedMaxSharpeRatio returns 0 for N<2 — the single shared benchmark).
    * @param {number} sr observed per-period Sharpe (NOT annualized)
    * @param {number} n number of observations
    * @param {number} nTrials number of independent configurations tried
@@ -305,31 +327,91 @@
   function deflatedSharpe(sr, n, skew, kurt, nTrials = 1, varTrialsSr = 1) {
     // Mirror the Python guards: degenerate trial inputs are NaN, never a fake 1.0.
     if (!(nTrials >= 1) || varTrialsSr == null || Number.isNaN(varTrialsSr) || varTrialsSr < 0) return NaN;
-    const gamma = 0.5772156649015329; // Euler–Mascheroni, full double precision (M6 C1)
-    let sr0;
-    if (nTrials === 1) {
-      // M6 C1: a single trial has no selection to deflate — sr0 = 0, so
-      // DSR ≡ PSR(sr, n, skew, kurt, 0). Display surfaces must label this
-      // 'PSR (single trial — no deflation)' (see stats.dsrIsPsr).
-      //
-      // BUG HISTORY (fixed 2026-07-11, M6 JS-parity wave): the pre-M6 mirror fed
-      // N=1 straight through the Gumbel expected-max formula below, hitting
-      // normPpf(1 - 1/1) = normPpf(0) = -Infinity, so sr0 = -Inf and this
-      // function returned 1.0 IDENTICALLY for ANY (sr, n, skew, kurt) — a
-      // fabricated 100% significance for exactly the "no search happened" case.
-      // Python's risk.deflated_sharpe_ratio always special-cased N=1 to sr0 = 0;
-      // the mirror now matches (unsaturated pin `dsr_n1` in scripts/check_parity.py).
-      sr0 = 0;
-    } else {
-      // Expected max of N standard normals (Gumbel approximation), scaled by the
-      // cross-trial SR dispersion. No max(varTrialsSr, 1e-12) floor — M6 C2 keeps
-      // V honest in BOTH directions (V = 0 legitimately means sr0 = 0), matching
-      // Python byte-for-byte semantics.
-      const e = Math.E;
-      sr0 = Math.sqrt(varTrialsSr)
-        * ((1 - gamma) * normPpf(1 - 1 / nTrials) + gamma * normPpf(1 - 1 / (nTrials * e)));
-    }
+    // sr0 = expected max of N skill-less trials (shared source of truth). N=1 ⟹ 0, so
+    // DSR ≡ PSR(sr, n, skew, kurt, 0) — surfaces label it 'PSR (single trial)'.
+    // BUG HISTORY (fixed 2026-07-11): the pre-M6 mirror fed N=1 through normPpf(0) =
+    // -Infinity and returned 1.0 identically; the N<2 → 0 branch inside
+    // expectedMaxSharpeRatio is what prevents that (unsaturated pin `dsr_n1`).
+    const sr0 = expectedMaxSharpeRatio(nTrials, varTrialsSr);
     return probabilisticSharpe(sr, n, skew, kurt, sr0);
+  }
+
+  /**
+   * False-strategy hurdle — the (per-period) Sharpe you must EXCEED to reject the
+   * false-strategy null at `prob`, given N trials (Bailey-LdP 2014). Mirror of
+   * risk.false_strategy_threshold: inverts PSR against the expected-max benchmark,
+   *   sr* = sr0 + Φ⁻¹(prob)·√(1 - skew·sr* + (kurt-1)/4·sr*²)/√(n-1),
+   * a fixed point (the denominator depends on sr*) — iterate ~30× from sr0.
+   */
+  function falseStrategyThreshold(nTrials, varTrialsSr, nPeriods, skew, kurt, prob = 0.95) {
+    if (!(nTrials >= 2) || !(nPeriods >= 2) || varTrialsSr == null
+        || Number.isNaN(varTrialsSr) || varTrialsSr < 0 || !(prob > 0 && prob < 1)) return NaN;
+    const sr0 = expectedMaxSharpeRatio(nTrials, varTrialsSr);
+    const z = normPpf(prob);
+    const scale = Math.sqrt(nPeriods - 1);
+    let sr = sr0;
+    for (let i = 0; i < 30; i++) {
+      const denom = 1 - skew * sr + ((kurt - 1) / 4) * sr * sr;
+      if (!(denom > 0)) return NaN;
+      sr = sr0 + z * Math.sqrt(denom) / scale;
+    }
+    return sr;
+  }
+
+  /**
+   * Effective number of INDEPENDENT trials N_eff — the eigenvalue participation ratio
+   * of the trials' correlation matrix (Bailey-LdP; Harvey-Liu-Zhu 2016). Mirror of
+   * risk.effective_number_of_trials. `matrix` is an array of columns (each column =
+   * one trial's return series), like pbo(). N_eff = (Σλ)²/Σλ²; for a symmetric
+   * correlation matrix this equals trace(C)²/‖C‖_F² = N²/Σ_ij C_ij² EXACTLY (Σλ = trace,
+   * Σλ² = Σ_ij C_ij²) — the same participation ratio without shipping an eigensolver.
+   * N identical cols ⟹ ~1, N independent ⟹ ~N. Constant/all-NaN columns dropped.
+   */
+  function effectiveNumberOfTrials(matrix) {
+    if (!Array.isArray(matrix) || matrix.length < 1) return NaN;
+    // Drop constant / all-NaN columns (undefined correlation), then align to the rows
+    // finite across ALL kept columns (mirror of the Python dropna-rows step).
+    const kept = matrix.filter((col) => {
+      const fin = col.filter(Number.isFinite);
+      return fin.length >= 2 && std(fin, 0) > 0;
+    });
+    if (kept.length < 2) return Math.max(1, kept.length);
+    const T = Math.min.apply(null, kept.map((c) => c.length));
+    const rows = [];
+    for (let t = 0; t < T; t++) {
+      if (kept.every((c) => Number.isFinite(c[t]))) rows.push(t);
+    }
+    if (rows.length < 2) return kept.length;
+    const K = kept.length;
+    // Column means/stds over the common finite rows (population std, as np.corrcoef).
+    const mu = kept.map((c) => { let s = 0; for (const t of rows) s += c[t]; return s / rows.length; });
+    const sd = kept.map((c, j) => { let s = 0; for (const t of rows) s += (c[t] - mu[j]) * (c[t] - mu[j]); return Math.sqrt(s / rows.length); });
+    // Σ_ij C_ij²: diagonal contributes K (unit self-correlation); off-diagonals the
+    // squared Pearson correlations. N_eff = K² / Σ_ij C_ij² (= participation ratio).
+    let fro = K; // K diagonal 1's
+    for (let i = 0; i < K; i++) {
+      for (let j = i + 1; j < K; j++) {
+        if (!(sd[i] > 0 && sd[j] > 0)) continue;
+        let cov = 0;
+        for (const t of rows) cov += (kept[i][t] - mu[i]) * (kept[j][t] - mu[j]);
+        cov /= rows.length;
+        const c = cov / (sd[i] * sd[j]);
+        fro += 2 * c * c; // symmetric: C_ij² and C_ji²
+      }
+    }
+    if (!(fro > 0)) return K;
+    const nEff = (K * K) / fro;
+    return Math.min(Math.max(nEff, 1), K);
+  }
+
+  /**
+   * Family-wise probability that the BEST-of-N strategy is a false positive — the
+   * complement of the Deflated Sharpe (Bailey-LdP 2014). Mirror of
+   * risk.probability_false_strategy: 1 - PSR(maxSharpe; sr0 = expectedMax(N, V)).
+   */
+  function probabilityFalseStrategy(maxSharpePerPeriod, nTrials, varTrialsSr, nPeriods, skew, kurt) {
+    const dsr = deflatedSharpe(maxSharpePerPeriod, nPeriods, skew, kurt, nTrials, varTrialsSr);
+    return Number.isNaN(dsr) ? NaN : 1 - dsr;
   }
 
   // ─── backtest.py mirror ───────────────────────────────────────────────
@@ -976,12 +1058,12 @@
     return out;
   }
 
-  /** Minimum Backtest Length (years) — Bailey et al. 2014; brief §3 form 2·ln(N)/E[max_N]. */
+  /** Minimum Backtest Length (years) — Bailey et al. 2014; brief §3 form 2·ln(N)/E[max_N].
+   *  E[max_N] is the shared expectedMaxSharpeRatio(N, 1) (unit variance ⟹ √1 = 1, so this
+   *  is byte-identical to the old inline Gumbel form that lived here before the refactor). */
   function minBacktestLength(nTrials) {
     if (!(nTrials >= 2)) return NaN;
-    const gamma = 0.5772156649015329;
-    const z1 = normPpf(1 - 1 / nTrials), z2 = normPpf(1 - 1 / (nTrials * Math.E));
-    const emax = (1 - gamma) * z1 + gamma * z2;
+    const emax = expectedMaxSharpeRatio(nTrials, 1);
     return emax > 0 ? (2 * Math.log(nTrials)) / emax : NaN;
   }
 
@@ -1047,7 +1129,8 @@
     simpleReturns, logReturns, realizedVol, sma, ema, momentum, zscore, rsi,
     drawdownSeries, maxDrawdown, sharpe, rollingSharpe, sortino, cagr, hitRate,
     // risk
-    probabilisticSharpe, deflatedSharpe,
+    probabilisticSharpe, expectedMaxSharpeRatio, deflatedSharpe,
+    falseStrategyThreshold, effectiveNumberOfTrials, probabilityFalseStrategy,
     // backtest
     backtest, compound, computeStats,
     // OOS validation harness

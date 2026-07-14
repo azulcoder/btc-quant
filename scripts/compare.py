@@ -272,6 +272,7 @@ def main() -> int:
 
     # PBO across the OOS-returns matrix (cross-strategy selection overfit).
     pbo = {"pbo": float("nan"), "n_combos": 0}
+    mat = None
     if len(oos_by_name) >= 2:
         mat = pd.concat(oos_by_name, axis=1).dropna()
         if mat.shape[0] > 8 and mat.shape[1] >= 2:
@@ -319,6 +320,45 @@ def main() -> int:
     short = isinstance(minbtl, float) and not math.isnan(minbtl) and years < minbtl
     print(f"MinBTL for N={n_trials}: {_fmt(minbtl)} yrs vs {years:.1f} yrs of data"
           + ("   ⚠ UNDER-POWERED: history shorter than MinBTL" if short else "   (ok)"))
+
+    # ── False-strategy diagnostics (FST — Bailey & López de Prado 2014) ──────────────
+    # ADDITIVE HONESTY READOUT, not a change to the production DSR. Computed from the SAME
+    # OOS-returns matrix used for PBO (mat) and the top leaderboard row. Three surfaced
+    # numbers: (1) N_eff, the eigenvalue participation ratio of the strategies' correlation
+    # matrix — the naive N over-counts trials when strategies are ~collinear (tsmom and its
+    # vol-targeted / directional twins run ~corr 1.0, so they are NOT independent bets);
+    # (2) the per-period false-strategy THRESHOLD (Sharpe you must exceed to reject the
+    # false-strategy null at 95%), annualized, under BOTH the naive N and round(N_eff);
+    # (3) P(the top strategy is a false positive) = 1 - DSR of the best row.
+    # NOTE: this is DIAGNOSTIC ONLY. The leaderboard 'OOS DSR' column above is UNCHANGED —
+    # N stays the literal strategy count; substituting N_eff would be a separate, explicit
+    # methodology decision (it would RAISE every DSR by lowering the skill-less benchmark).
+    if ok and mat is not None and mat.shape[1] >= 2:
+        top = ok[0]                                  # best row (already DSR-sorted)
+        n_best = int(top.get("n_periods", 0))
+        sk_best = float(top.get("skew", float("nan")))
+        ku_best = float(top.get("kurt", float("nan")))
+        sr_best = float(top.get("sr_period", float("nan")))
+        # V = the top strategy's OWN Lo/Mertens Sharpe-estimator variance (the same B2
+        # quantity that deflated its DSR), with the 1/n_periods null fallback.
+        v_best = risk.sharpe_estimator_variance(sr_best, n_best, sk_best, ku_best)
+        if not (isinstance(v_best, (int, float)) and math.isfinite(v_best)):
+            v_best = 1.0 / n_best if n_best > 0 else float("nan")
+        n_eff = risk.effective_number_of_trials(mat.to_numpy())
+        n_eff_round = int(round(n_eff)) if math.isfinite(n_eff) else n_trials
+        sqp = math.sqrt(ppy)
+        thr_naive = risk.false_strategy_threshold(n_trials, v_best, n_best, sk_best, ku_best, 0.95)
+        thr_eff = risk.false_strategy_threshold(n_eff_round, v_best, n_best, sk_best, ku_best, 0.95)
+        p_false = risk.probability_false_strategy(sr_best, n_trials, v_best, n_best, sk_best, ku_best)
+        thr_naive_ann = thr_naive * sqp if isinstance(thr_naive, float) and math.isfinite(thr_naive) else float("nan")
+        thr_eff_ann = thr_eff * sqp if isinstance(thr_eff, float) and math.isfinite(thr_eff) else float("nan")
+        top_sr_ann = sr_best * sqp if math.isfinite(sr_best) else float("nan")
+        print(f"\nFalse-strategy hurdle (95%, on '{top['name']}'): annualized OOS Sharpe > "
+              f"{_fmt(thr_naive_ann)} (naive N={n_trials}) / {_fmt(thr_eff_ann)} "
+              f"(effective N_eff={_fmt(n_eff)}); top OOS Sharpe = {_fmt(top_sr_ann)}.")
+        pf_pct = f"{p_false*100:.1f}%" if isinstance(p_false, float) and math.isfinite(p_false) else "n/a"
+        print(f"P(top strategy is a false positive) = {pf_pct}   "
+              f"[= 1 - DSR of the best row; DIAGNOSTIC — the leaderboard DSR is unchanged].")
 
     # ── Lead-time IC: does the OOS signal actually LEAD returns? ──────────────────
     # M5 wiring: the crude fixed band (|IC| > 1.96·√(k/N)) is GONE — significance is now

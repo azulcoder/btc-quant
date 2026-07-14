@@ -14,7 +14,7 @@ const Q = require(path.join(__dirname, '..', 'dashboard', 'quant.js'));
 
 const fx = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const { close, positions, ppy, volWindow, k, sr, n, skew, kurt, nTrials, varTrialsSr,
-        varN1, srMid, nMid, nTrialsMid, varMid, folds,
+        varN1, srMid, nMid, nTrialsMid, varMid, folds, neffCols,
         cpcvBlocks, cpcvKTest, cpcvPurge, cpcvEmbargo,
         costBps, slipBps, fwd, strike, iv, t,
         btcPairs, ethPairs, pairsWindow,
@@ -98,6 +98,13 @@ const out = {
   dsr_n1: Q.deflatedSharpe(sr, n, skew, kurt, 1, varN1),
   dsr_mid: Q.deflatedSharpe(srMid, nMid, skew, kurt, nTrialsMid, varMid),
   minBTL: Q.minBacktestLength(nTrials),
+  // FST (False Strategy Theorem, Bailey-LdP 2014) — mirror of risk.expected_max_sharpe_ratio /
+  // false_strategy_threshold / effective_number_of_trials / probability_false_strategy.
+  emaxN5: Q.expectedMaxSharpeRatio(5, 1),
+  emaxN10: Q.expectedMaxSharpeRatio(10, 1),
+  fstThreshold: Q.falseStrategyThreshold(nTrialsMid, varMid, nMid, skew, kurt, 0.95),
+  neffTrials: Q.effectiveNumberOfTrials(neffCols),  // columns (2 identical + 2 independent)
+  probFalseStrategy: Q.probabilityFalseStrategy(srMid, nTrialsMid, varMid, nMid, skew, kurt),
   // Tharp eval layer (camelCase -> snake_case mapped on the Python side)
   er_nTrades: er.nTrades,
   er_expectancyR: er.expectancyR,

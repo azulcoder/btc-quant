@@ -64,6 +64,13 @@ def build_fixture() -> dict:
         #   dsr_mid — N=5, V=0.001, sr=0.05/period, n=500 → ≈ 0.6073 (mid-range).
         "varN1": 123.456,
         "srMid": 0.05, "nMid": 500, "nTrialsMid": 5, "varMid": 0.001,
+        # FST (False Strategy Theorem, Bailey-LdP 2014) probes. expected_max at two N;
+        # the per-period false-strategy THRESHOLD (fixed point) + P(best is false) reuse
+        # the mid case (nTrialsMid/varMid/nMid/srMid/skew/kurt). effective_number_of_trials
+        # runs on a fixed 4-col matrix (2 identical + 2 independent columns built from the
+        # discrete-Fourier basis so the columns are EXACTLY orthogonal): correlation matrix
+        # [[1,1,0,0],[1,1,0,0],[0,0,1,0],[0,0,0,1]] → eigenvalues [0,1,1,2] → N_eff = 8/3.
+        **_neff_fixture(),
         # walk-forward fold-V probe (M6 C2/C3): folds-as-trials on the fixture series
         "folds": 5,
         # M4 CPCV probe: cpcv was ABSENT from the harness before M4. Pin the multi-path
@@ -104,6 +111,20 @@ def _option_chain_fixture() -> dict:
         "optNow": "2026-01-01T08:00:00Z",
         "optT": 30.0 / 365.0,
     }
+
+
+def _neff_fixture() -> dict:
+    """FST effective_number_of_trials probe: a fixed 4-column matrix with 2 IDENTICAL and
+    2 INDEPENDENT columns. Built from the discrete-Fourier basis (sin/cos over a full
+    period are exactly orthogonal), so the sample correlation matrix is
+    [[1,1,0,0],[1,1,0,0],[0,0,1,0],[0,0,0,1]] with eigenvalues [0,1,1,2] and the
+    participation ratio N_eff = (Σλ)²/Σλ² = 4²/6 = 8/3. Passed as a list of COLUMNS
+    (matrix like pbo); the Python side transposes to (T, N)."""
+    tt = np.arange(240)
+    a = np.sin(2.0 * np.pi * tt / 240.0)      # col 0
+    b = np.cos(2.0 * np.pi * tt / 240.0)      # col 2 (⊥ a)
+    c = np.sin(4.0 * np.pi * tt / 240.0)      # col 3 (⊥ a, ⊥ b)
+    return {"neffCols": [a.tolist(), a.tolist(), b.tolist(), c.tolist()]}
 
 
 def _pairs_fixture() -> dict:
@@ -223,6 +244,15 @@ def python_side(fx: dict) -> dict:
         "dsr_mid": float(risk.deflated_sharpe_ratio(fx["srMid"], fx["nMid"], fx["skew"],
                                                     fx["kurt"], fx["nTrialsMid"], fx["varMid"])),
         "minBTL": float(risk.min_backtest_length(fx["nTrials"])),
+        # FST (False Strategy Theorem, Bailey-LdP 2014) — new surfaced diagnostics.
+        "emaxN5": float(risk.expected_max_sharpe_ratio(5, 1.0)),
+        "emaxN10": float(risk.expected_max_sharpe_ratio(10, 1.0)),
+        "fstThreshold": float(risk.false_strategy_threshold(
+            fx["nTrialsMid"], fx["varMid"], fx["nMid"], fx["skew"], fx["kurt"], 0.95)),
+        "neffTrials": float(risk.effective_number_of_trials(
+            np.asarray(fx["neffCols"], dtype=float).T)),
+        "probFalseStrategy": float(risk.probability_false_strategy(
+            fx["srMid"], fx["nTrialsMid"], fx["varMid"], fx["nMid"], fx["skew"], fx["kurt"])),
         # Tharp eval layer
         "er_nTrades": int(er["n_trades"]),
         "er_expectancyR": float(er["expectancy_r"]),
@@ -284,6 +314,8 @@ TOL = {
     "zscore_last": 1e-12, "rsi_last": 1e-6, "maxDrawdown": 1e-12,
     "sharpe": 1e-12, "sortino": 1e-12, "cagr": 1e-12, "hitRate": 1e-12,
     "psr": 1e-7, "dsr": 1e-7, "dsr_n1": 1e-7, "dsr_mid": 1e-7, "minBTL": 1e-9,
+    "emaxN5": 1e-7, "emaxN10": 1e-7, "fstThreshold": 1e-7, "neffTrials": 1e-7,
+    "probFalseStrategy": 1e-7,
     "er_nTrades": 0, "er_expectancyR": 1e-12, "er_winRate": 1e-12,
     "er_payoffRatio": 1e-12, "er_sqn": 1e-12, "er_profitFactor": 1e-12,
     "b76_delta": 5e-7, "b76_gamma": 1e-9, "b76_vega": 1e-9,
@@ -308,6 +340,15 @@ PINS = {
     "psr": (0.8933576314257702, 1e-7),
     "dsr_n1": (0.8933576314257702, 1e-7),   # == psr; ANY trial variance at N=1
     "dsr_mid": (0.6072585304659127, 1e-7),  # N=5, V=0.001, sr=0.05/period, n=500
+    # FST anchors (Bailey-LdP 2014) — pre-registered from the closed form so the two
+    # engines cannot drift TOGETHER and still pass. emax at N=5/N=10 (V=1); the per-period
+    # false-strategy threshold re-feeds into PSR to give EXACTLY 0.95 (asserted below);
+    # N_eff = 8/3 for the 2-identical+2-independent matrix; P(false) = 1 - dsr_mid.
+    "emaxN5": (1.1925940010147893, 1e-7),
+    "emaxN10": (1.57459830134575, 1e-7),
+    "fstThreshold": (0.11292934779100049, 1e-7),
+    "neffTrials": (2.6666666666666665, 1e-7),
+    "probFalseStrategy": (0.3927414695340873, 1e-7),
     # M8 options anchors: pre-registered so the two engines cannot drift TOGETHER and
     # still pass — max_pain is the exact argmin strike, gc_sum the total gamma density.
     "mp_maxPain": (64000.0, 1e-9),
@@ -341,6 +382,13 @@ def main() -> int:
                  if not math.isclose(py[name], want, rel_tol=tol, abs_tol=tol)]
     if py["dsr_n1"] != py["psr"]:
         pin_fails.append("dsr_n1 != psr (C1 identity: N=1 ⟹ DSR ≡ PSR(0))")
+    # FST identity: the false-strategy threshold, re-fed into PSR against the same
+    # expected-max benchmark, must recover EXACTLY prob=0.95 (the fixed point closes).
+    _fst_sr0 = risk.expected_max_sharpe_ratio(fx["nTrialsMid"], fx["varMid"])
+    _fst_psr = risk.probabilistic_sharpe_ratio(
+        py["fstThreshold"], fx["nMid"], fx["skew"], fx["kurt"], sr_benchmark=_fst_sr0)
+    if not math.isclose(_fst_psr, 0.95, rel_tol=1e-9, abs_tol=1e-9):
+        pin_fails.append(f"PSR(fstThreshold; sr0) = {_fst_psr!r} != 0.95 (fixed point)")
     if pin_fails:
         for f in pin_fails:
             print(f"PIN FAIL — {f}")
