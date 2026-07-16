@@ -15,6 +15,7 @@ const Q = require(path.join(__dirname, '..', 'dashboard', 'quant.js'));
 const fx = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const { close, positions, ppy, volWindow, k, sr, n, skew, kurt, nTrials, varTrialsSr,
         varN1, srMid, nMid, nTrialsMid, varMid, folds, neffCols,
+        hbSharpes, hbVariances, hbNeff,
         cpcvBlocks, cpcvKTest, cpcvPurge, cpcvEmbargo,
         costBps, slipBps, fwd, strike, iv, t,
         btcPairs, ethPairs, pairsWindow,
@@ -59,6 +60,10 @@ const prDn = Q.backtest(pr.positions, btcPairs, { costBps, slippageBps: slipBps,
 // M8 options-parity probe: max_pain + gamma_concentration on the fixed synthetic chain
 // — mirror of features.max_pain / features.gamma_concentration. The chain rows carry the
 // option feed's column names; map to the mirror's {strike,type,oi,iv,underlying} slice.
+// Hierarchical-Bayes shrinkage probe (frontier #3): standard (df = k-1) run + the
+// correlation-aware DL variant (df = hbNeff - 1) on the fixed k=4 synthetic family.
+const hb = Q.hierarchicalBayesSharpe(hbSharpes, hbVariances);
+const hbN = Q.hierarchicalBayesSharpe(hbSharpes, hbVariances, hbNeff);
 const optSlice = optChain.map((r) => ({
   strike: r.strike, type: r.opt_type, oi: r.open_interest, iv: r.iv, underlying: r.underlying_price }));
 const mp = Q.maxPain(optSlice);
@@ -105,6 +110,15 @@ const out = {
   fstThreshold: Q.falseStrategyThreshold(nTrialsMid, varMid, nMid, skew, kurt, 0.95),
   neffTrials: Q.effectiveNumberOfTrials(neffCols),  // columns (2 identical + 2 independent)
   probFalseStrategy: Q.probabilityFalseStrategy(srMid, nTrialsMid, varMid, nMid, skew, kurt),
+  // Hierarchical-Bayes shrinkage (frontier #3) — mirror of risk.hierarchical_bayes_sharpe
+  // on the fixed k=4 family; the shrunk/B/p vectors are compared ELEMENTWISE by the
+  // Python side, and hb_neffTau pins the correlation-aware DL variant (df = hbNeff - 1).
+  hb_mu: hb.mu,
+  hb_tau: hb.tau,
+  hb_shrunk: hb.shrunk,
+  hb_shrinkFactor: hb.shrinkFactor,
+  hb_pSkill: hb.pSkill,
+  hb_neffTau: hbN.tau,
   // Tharp eval layer (camelCase -> snake_case mapped on the Python side)
   er_nTrades: er.nTrades,
   er_expectancyR: er.expectancyR,

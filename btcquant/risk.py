@@ -70,6 +70,7 @@ __all__ = [
     "false_strategy_threshold",
     "effective_number_of_trials",
     "probability_false_strategy",
+    "hierarchical_bayes_sharpe",
     "probability_of_backtest_overfitting",
     "trade_ledger",
     "expectancy_report",
@@ -694,6 +695,171 @@ def probability_false_strategy(
     if dsr is None or np.isnan(dsr):
         return float("nan")
     return float(1.0 - dsr)
+
+
+def hierarchical_bayes_sharpe(sharpes, variances, effective_n=None) -> dict:
+    """Empirical-Bayes hierarchical shrinkage of a family of Sharpe ratios — the
+    Bayesian sibling of the Deflated Sharpe / False-Strategy Theorem view of the SAME
+    winner's-curse / multiple-testing problem.
+
+    COMPLEMENTARY DIAGNOSTIC, NOT a replacement for the production Deflated Sharpe (which
+    stays the headline, unchanged). Where the DSR/FST deflate the *best-of-N* Sharpe
+    frequentistly (benchmark = expected max of N skill-less trials), this places a normal
+    prior over the family of true per-strategy Sharpes and returns each strategy's
+    *posterior mean* — pulling extreme in-sample Sharpes toward the pooled population
+    mean by exactly the amount the data's own dispersion warrants. The two views should
+    broadly AGREE: a Sharpe that the DSR flags as likely-noise is one this model shrinks
+    hard toward the pool.
+
+    The normal-normal hierarchical model (Efron-Morris / James-Stein; Gelman *BDA*):
+
+        SR_i | theta_i ~ Normal(theta_i, sigma_i^2)      (likelihood; sigma_i^2 known)
+        theta_i        ~ Normal(mu, tau^2)               (prior over true Sharpes)
+
+    is solved in **empirical Bayes** closed form — the hyperparameters ``(mu, tau^2)`` are
+    plugged at their point estimates rather than integrated, giving a fast, MCMC-free,
+    JS-mirrorable approximation to the full hierarchical posterior. The remaining step (a
+    fully Bayesian, correlation-aware model that also integrates hyperparameter
+    uncertainty) requires MCMC and is out of scope here; the optional ``effective_n``
+    argument is a first-order, correlation-aware correction to ``tau^2`` in that spirit.
+
+    UNIFICATION. This closes two loops the repo already opened:
+
+    * the **A-vs-B2 variance choice** (RESEARCH-dsr-convention.md): the within-strategy
+      ``sigma_i^2`` here is exactly the B2 own-Sharpe likelihood precision
+      (:func:`sharpe_estimator_variance`), while the between-strategy ``tau^2`` is a
+      *principled, estimated* cross-strategy dispersion ``V`` (rather than a picked one);
+    * the **N_eff correlation finding** (:func:`effective_number_of_trials`): pass it as
+      ``effective_n`` and the DerSimonian-Laird ``tau^2`` deflates ``Q`` by
+      ``(N_eff - 1)`` instead of ``(k - 1)`` — correlated strategies count as fewer
+      independent observations, WIDENING the estimated population spread.
+
+    Steps (all in **per-period** Sharpe units — the caller annualizes for display only):
+
+        w_i      = 1 / sigma_i^2                              (fixed-effect weights)
+        muHat    = sum(w_i SR_i) / sum(w_i)                   (fixed-effect mean)
+        Q        = sum(w_i (SR_i - muHat)^2)                  (weighted heterogeneity)
+        c        = sum(w_i) - sum(w_i^2) / sum(w_i)
+        tauHat2  = max(0, (Q - (k - 1)) / c)                  (DerSimonian-Laird 1986;
+                   with effective_n:  (Q - (N_eff - 1)) / c)  correlation-aware variant)
+        wStar_i  = 1 / (sigma_i^2 + tauHat2)                  (random-effects weights)
+        muStar   = sum(wStar_i SR_i) / sum(wStar_i)           (pooled population mean)
+        B_i      = sigma_i^2 / (sigma_i^2 + tauHat2)          (shrinkage factor in [0,1])
+        thetaHat = B_i muStar + (1 - B_i) SR_i                (posterior mean = shrunk SR)
+        v_i      = sigma_i^2 tauHat2 / (sigma_i^2 + tauHat2)  (posterior variance)
+        CI 95%   = thetaHat +/- 1.96 sqrt(v_i)
+        p_skill  = Phi(thetaHat / sqrt(v_i))                  (posterior P(true SR > 0))
+
+    Edge cases:
+
+    * ``k < 2`` — nothing to pool: return the raw Sharpes (``B_i = 0``, ``thetaHat = SR_i``,
+      ``tau = 0``, posterior sd ``= sigma_i`` so the CI/``p_skill`` reflect the raw
+      likelihood alone).
+    * ``tauHat2 == 0`` (no detectable heterogeneity; also the identical-``SR`` case) —
+      full pooling: every ``thetaHat == muStar``, ``B_i == 1``, ``v_i == 0``; ``p_skill``
+      collapses to the sign of ``muStar`` (1 if > 0, 0 if < 0, 0.5 if exactly 0) and the
+      CI to the point ``muStar``.
+
+    Parameters
+    ----------
+    sharpes : array-like of float
+        The ``k`` per-period Sharpe ratios ``SR_i``.
+    variances : array-like of float
+        Their sampling variances ``sigma_i^2`` — pass the B2 own-Sharpe variances from
+        :func:`sharpe_estimator_variance` (``(1 - skew*SR + (kurt-1)/4*SR^2) / (n-1)``),
+        the same likelihood precision the leaderboard DSR uses. Same length as ``sharpes``.
+    effective_n : float, optional
+        If given, the DerSimonian-Laird ``tau^2`` deflates ``Q`` by ``(effective_n - 1)``
+        instead of ``(k - 1)`` — the correlation-aware variant. Because ``N_eff <= k``,
+        this yields a ``tau^2`` at least as large (a wider population spread ⟹ less
+        shrinkage). Default ``None`` uses the standard ``k - 1``.
+
+    Returns
+    -------
+    dict
+        All per-period (caller annualizes by ``* sqrt(ppy)`` for display):
+        ``mu`` (pooled population mean muStar), ``tau`` (sqrt tauHat2), ``shrunk``
+        (list of thetaHat_i), ``shrink_factor`` (list of B_i in [0,1]), ``post_sd``
+        (list of sqrt v_i), ``ci_low`` / ``ci_high`` (list, 95% credible), ``p_skill``
+        (list of Phi(thetaHat_i / sqrt v_i)).
+
+    References
+    ----------
+    Efron & Morris (1975), "Data Analysis Using Stein's Estimator and its
+    Generalizations", *JASA* 70(350):311-319.
+    James & Stein (1961), "Estimation with Quadratic Loss", *Proc. 4th Berkeley Symp.*
+    DerSimonian & Laird (1986), "Meta-analysis in clinical trials", *Controlled Clinical
+    Trials* 7(3):177-188 (the ``tau^2`` moment estimator).
+    Gelman et al., *Bayesian Data Analysis* 3rd ed., ch. 5 (hierarchical normal model).
+    """
+    sr = [float(x) for x in sharpes]
+    sig2 = [float(x) for x in variances]
+    k = len(sr)
+    if len(sig2) != k:
+        raise ValueError("sharpes and variances must have the same length")
+
+    # k < 2 (or a non-finite / non-positive variance anywhere) ⟹ no pooling: raw SRs
+    # with their own likelihood as the posterior (B_i = 0, tau = 0).
+    finite_ok = all(math.isfinite(s) and math.isfinite(v) and v > 0
+                    for s, v in zip(sr, sig2))
+    if k < 2 or not finite_ok:
+        mu = sr[0] if k == 1 else float("nan")
+        post_sd = [math.sqrt(v) if math.isfinite(v) and v > 0 else float("nan") for v in sig2]
+        return {
+            "mu": float(mu),
+            "tau": 0.0,
+            "shrunk": [float(s) for s in sr],
+            "shrink_factor": [0.0] * k,
+            "post_sd": post_sd,
+            "ci_low": [s - 1.96 * sd for s, sd in zip(sr, post_sd)],
+            "ci_high": [s + 1.96 * sd for s, sd in zip(sr, post_sd)],
+            "p_skill": [float(stats.norm.cdf(s / sd)) if math.isfinite(sd) and sd > 0
+                        else float("nan") for s, sd in zip(sr, post_sd)],
+        }
+
+    w = [1.0 / v for v in sig2]
+    sw = sum(w)
+    mu_hat = sum(wi * si for wi, si in zip(w, sr)) / sw
+    Q = sum(wi * (si - mu_hat) ** 2 for wi, si in zip(w, sr))
+    c = sw - sum(wi * wi for wi in w) / sw
+    # DerSimonian-Laird moment estimator; the correlation-aware variant deflates Q by
+    # (N_eff - 1) instead of (k - 1). N_eff <= k ⟹ a LARGER tau^2 (wider spread).
+    df = (float(effective_n) - 1.0) if effective_n is not None else (k - 1.0)
+    tau2 = max(0.0, (Q - df) / c) if c > 0 else 0.0
+    tau = math.sqrt(tau2)
+
+    w_star = [1.0 / (v + tau2) for v in sig2]
+    sws = sum(w_star)
+    mu_star = sum(ws * si for ws, si in zip(w_star, sr)) / sws
+
+    shrunk, shrink_factor, post_sd, ci_low, ci_high, p_skill = [], [], [], [], [], []
+    for si, v in zip(sr, sig2):
+        b = v / (v + tau2)                      # shrinkage factor in [0, 1]
+        theta = b * mu_star + (1.0 - b) * si    # posterior mean (== shrunk SR)
+        v_post = v * tau2 / (v + tau2)          # posterior variance (0 when tau2 == 0)
+        sd = math.sqrt(v_post)
+        shrink_factor.append(float(b))
+        shrunk.append(float(theta))
+        post_sd.append(float(sd))
+        ci_low.append(float(theta - 1.96 * sd))
+        ci_high.append(float(theta + 1.96 * sd))
+        if sd > 0:
+            p_skill.append(float(stats.norm.cdf(theta / sd)))
+        else:
+            # Full pooling (tau2 == 0): the posterior collapses to mu_star; P(SR>0) is
+            # the sign of the pooled mean (a tiny-epsilon limit), 0.5 at exactly 0.
+            p_skill.append(1.0 if theta > 0 else (0.0 if theta < 0 else 0.5))
+
+    return {
+        "mu": float(mu_star),
+        "tau": float(tau),
+        "shrunk": shrunk,
+        "shrink_factor": shrink_factor,
+        "post_sd": post_sd,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "p_skill": p_skill,
+    }
 
 
 def probability_of_backtest_overfitting(returns_matrix, n_blocks: int = 8) -> dict:

@@ -389,6 +389,151 @@ def test_probability_false_strategy_is_one_minus_dsr():
     assert math.isnan(risk.probability_false_strategy(0.05, 5, -1.0, 500, -0.3, 4.0))
 
 
+# --------------------------------------------------------------------------- #
+# 3d. Hierarchical-Bayes Sharpe shrinkage (frontier #3 — EB normal-normal)    #
+#     Efron-Morris 1975 / James-Stein 1961; DerSimonian-Laird 1986 tau^2.     #
+#     COMPLEMENTARY diagnostic — the production DSR is unchanged.             #
+# --------------------------------------------------------------------------- #
+def test_hb_shrinkage_identity_and_b_in_unit_interval():
+    """(a) The classic shrinkage identity thetaHat_i = B_i·mu + (1-B_i)·SR_i must
+    close exactly from the returned pieces, with every B_i in [0, 1]."""
+    srs = [0.10, 0.02, -0.03, 0.06]
+    vs = [0.002, 0.004, 0.003, 0.005]
+    hb = risk.hierarchical_bayes_sharpe(srs, vs)
+    for th, b, s in zip(hb["shrunk"], hb["shrink_factor"], srs):
+        assert 0.0 <= b <= 1.0
+        assert th == pytest.approx(b * hb["mu"] + (1.0 - b) * s, abs=1e-15)
+    # tau^2 > 0 here ⟹ partial pooling: every shrunk SR sits strictly BETWEEN its raw
+    # value and the pooled mean (never overshoots either).
+    for th, s in zip(hb["shrunk"], srs):
+        lo, hi = min(s, hb["mu"]), max(s, hb["mu"])
+        assert lo <= th <= hi
+
+
+def test_hb_identical_sharpes_full_pooling():
+    """(b) All SR_i identical ⟹ Q = 0 ⟹ tauHat2 = 0 ⟹ FULL pooling: every
+    thetaHat == mu (== the common SR), B_i == 1, posterior sd 0, p_skill = sign(mu)."""
+    srs = [0.05, 0.05, 0.05]
+    vs = [0.002, 0.004, 0.003]
+    hb = risk.hierarchical_bayes_sharpe(srs, vs)
+    assert hb["tau"] == 0.0
+    assert hb["mu"] == pytest.approx(0.05, abs=1e-15)
+    for th, b, sd, p, lo, hi in zip(hb["shrunk"], hb["shrink_factor"], hb["post_sd"],
+                                    hb["p_skill"], hb["ci_low"], hb["ci_high"]):
+        assert th == pytest.approx(hb["mu"], abs=1e-15)
+        assert b == 1.0
+        assert sd == 0.0
+        assert p == 1.0                      # mu > 0 ⟹ tiny-epsilon limit is 1
+        assert lo == th and hi == th         # CI collapses to the point mu
+    # Negative common SR ⟹ p_skill 0 (the sign, not a fake 0.5).
+    hb_neg = risk.hierarchical_bayes_sharpe([-0.05, -0.05, -0.05], vs)
+    assert all(p == 0.0 for p in hb_neg["p_skill"])
+
+
+def test_hb_dispersed_precise_sharpes_barely_shrink():
+    """(c) Large tau^2 regime: very dispersed SRs measured very precisely (tiny
+    sigma_i^2) ⟹ B_i ≈ 0 ⟹ the shrunk Sharpes stay ≈ raw (the data dominate the
+    prior — James-Stein does NOT flatten genuinely different, well-measured means)."""
+    srs = [0.50, -0.40, 0.30, -0.20]
+    vs = [1e-6] * 4
+    hb = risk.hierarchical_bayes_sharpe(srs, vs)
+    assert hb["tau"] > 0.1                   # wide estimated population spread
+    for th, b, s in zip(hb["shrunk"], hb["shrink_factor"], srs):
+        assert b < 1e-4
+        assert th == pytest.approx(s, abs=1e-4)
+
+
+def test_hb_dersimonian_laird_tau2_hand_computed():
+    """(d) DL tau^2 on a KNOWN k=2 example, fully hand-computed:
+    SR = [0.3, 0.1], sigma^2 = [0.01, 0.02] ⟹ w = [100, 50], sum w = 150,
+    muHat = (30+5)/150 = 7/30; Q = 100·(0.3-7/30)² + 50·(0.1-7/30)² = 4/3;
+    c = 150 - (100²+50²)/150 = 200/3; tauHat2 = (4/3 - 1)/(200/3) = 0.005.
+    Then B = [0.01/0.015, 0.02/0.025] = [2/3, 0.8]; wStar = [200/3, 40];
+    muStar = (20+4)/(320/3) = 0.225; theta = [0.25, 0.20];
+    v = [0.01·0.005/0.015, 0.02·0.005/0.025] = [1/300, 0.004]."""
+    hb = risk.hierarchical_bayes_sharpe([0.3, 0.1], [0.01, 0.02])
+    assert hb["tau"] ** 2 == pytest.approx(0.005, abs=1e-15)
+    assert hb["mu"] == pytest.approx(0.225, abs=1e-15)
+    assert hb["shrink_factor"][0] == pytest.approx(2.0 / 3.0, abs=1e-15)
+    assert hb["shrink_factor"][1] == pytest.approx(0.8, abs=1e-15)
+    assert hb["shrunk"][0] == pytest.approx(0.25, abs=1e-15)
+    assert hb["shrunk"][1] == pytest.approx(0.20, abs=1e-15)
+    assert hb["post_sd"][0] == pytest.approx(math.sqrt(1.0 / 300.0), abs=1e-15)
+    assert hb["post_sd"][1] == pytest.approx(math.sqrt(0.004), abs=1e-15)
+
+
+def test_hb_posterior_probability_and_credible_interval():
+    """(e) p_skill_i = Phi(thetaHat_i / post_sd_i) and the 95% credible interval is
+    thetaHat_i ± 1.96·post_sd_i — recomputed from the returned pieces."""
+    from scipy.stats import norm
+
+    hb = risk.hierarchical_bayes_sharpe([0.10, 0.02, -0.03, 0.06],
+                                        [0.002, 0.004, 0.003, 0.005])
+    for th, sd, p, lo, hi in zip(hb["shrunk"], hb["post_sd"], hb["p_skill"],
+                                 hb["ci_low"], hb["ci_high"]):
+        assert sd > 0
+        assert p == pytest.approx(float(norm.cdf(th / sd)), abs=1e-12)
+        assert lo == pytest.approx(th - 1.96 * sd, abs=1e-15)
+        assert hi == pytest.approx(th + 1.96 * sd, abs=1e-15)
+
+
+def test_hb_effective_n_widens_tau_and_lessens_shrinkage():
+    """(f) The correlation-aware variant: effective_n < k deflates Q by (N_eff - 1)
+    instead of (k - 1) ⟹ a strictly LARGER tau^2 (correlated strategies are fewer
+    independent observations, so the population spread estimate widens) ⟹ smaller
+    B_i (less shrinkage)."""
+    srs = [0.10, 0.02, -0.03, 0.06]
+    vs = [0.002, 0.004, 0.003, 0.005]
+    std = risk.hierarchical_bayes_sharpe(srs, vs)                    # df = k-1 = 3
+    eff = risk.hierarchical_bayes_sharpe(srs, vs, effective_n=2.5)   # df = 1.5
+    assert eff["tau"] > std["tau"]
+    for b_eff, b_std in zip(eff["shrink_factor"], std["shrink_factor"]):
+        assert b_eff < b_std
+    # effective_n == k reproduces the default exactly (df identical).
+    same = risk.hierarchical_bayes_sharpe(srs, vs, effective_n=4)
+    assert same["tau"] == std["tau"]
+    assert same["shrunk"] == std["shrunk"]
+
+
+def test_hb_winner_shrinks_most_under_equal_variances():
+    """(g) Monotonicity / winner's curse: with EQUAL variances every B_i is the same,
+    so the absolute pull |thetaHat_i - SR_i| = B·|mu - SR_i| is largest for the
+    strategy farthest from the pool — here the top raw SR. The winner takes the
+    biggest haircut; no lower-ranked strategy is pulled harder."""
+    srs = [0.20, 0.05, 0.03, 0.01]
+    vs = [0.003] * 4
+    hb = risk.hierarchical_bayes_sharpe(srs, vs)
+    assert len(set(round(b, 15) for b in hb["shrink_factor"])) == 1   # equal B_i
+    pulls = [abs(th - s) for th, s in zip(hb["shrunk"], srs)]
+    i_top = srs.index(max(srs))
+    assert all(pulls[i_top] >= p for p in pulls)
+    # And the winner is pulled DOWN (toward mu), never up.
+    assert hb["shrunk"][i_top] < srs[i_top]
+
+
+def test_hb_guards_k1_and_bad_variance_return_raw():
+    """Edge guards: k < 2 (nothing to pool) and any non-finite/non-positive variance
+    degrade to the RAW Sharpes with B_i = 0, tau = 0 and the raw likelihood as the
+    posterior (CI/p_skill from sigma_i alone)."""
+    from scipy.stats import norm
+
+    one = risk.hierarchical_bayes_sharpe([0.08], [0.002])
+    assert one["tau"] == 0.0 and one["mu"] == 0.08
+    assert one["shrunk"] == [0.08] and one["shrink_factor"] == [0.0]
+    assert one["post_sd"][0] == pytest.approx(math.sqrt(0.002), abs=1e-15)
+    assert one["p_skill"][0] == pytest.approx(
+        float(norm.cdf(0.08 / math.sqrt(0.002))), abs=1e-12)
+
+    bad = risk.hierarchical_bayes_sharpe([0.08, 0.02], [0.002, 0.0])   # sigma^2 = 0
+    assert bad["tau"] == 0.0
+    assert bad["shrunk"] == [0.08, 0.02]
+    assert bad["shrink_factor"] == [0.0, 0.0]
+    assert math.isnan(bad["post_sd"][1]) and math.isnan(bad["p_skill"][1])
+
+    with pytest.raises(ValueError):
+        risk.hierarchical_bayes_sharpe([0.1, 0.2], [0.01])             # length mismatch
+
+
 def test_compare_leaderboard_uses_per_strategy_b2_variance_and_is_decoupled():
     """B2 switch in production (compare.py leaderboard): each strategy's OOS DSR is now
     deflated with its OWN Lo/Mertens Sharpe-estimator variance

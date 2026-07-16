@@ -71,6 +71,15 @@ def build_fixture() -> dict:
         # discrete-Fourier basis so the columns are EXACTLY orthogonal): correlation matrix
         # [[1,1,0,0],[1,1,0,0],[0,0,1,0],[0,0,0,1]] → eigenvalues [0,1,1,2] → N_eff = 8/3.
         **_neff_fixture(),
+        # Hierarchical-Bayes shrinkage probe (frontier #3 — Efron-Morris / James-Stein;
+        # DerSimonian-Laird tau^2): a FIXED synthetic family of k=4 strategies with
+        # chosen per-period Sharpes and chosen B2-style sampling variances sigma_i^2
+        # (fixed literals so BOTH engines evaluate the same inputs; in production the
+        # variances come from risk.sharpe_estimator_variance). hbNeff = 2.5 < k probes
+        # the correlation-aware tau^2 variant (df = N_eff - 1 ⟹ a LARGER tau^2).
+        "hbSharpes": [0.10, 0.02, -0.03, 0.06],
+        "hbVariances": [0.002, 0.004, 0.003, 0.005],
+        "hbNeff": 2.5,
         # walk-forward fold-V probe (M6 C2/C3): folds-as-trials on the fixture series
         "folds": 5,
         # M4 CPCV probe: cpcv was ABSENT from the harness before M4. Pin the multi-path
@@ -141,6 +150,24 @@ def _pairs_fixture() -> dict:
         sp[i] = 0.7 * sp[i - 1] + noise[i]
     eth = btc * 0.07 * np.exp(sp)
     return {"btcPairs": btc.tolist(), "ethPairs": eth.tolist(), "pairsWindow": 30}
+
+
+def _hb_fields(fx: dict) -> dict:
+    """Hierarchical-Bayes probe fields (Python side). One standard (df = k-1) run —
+    mu, tau, and the full shrunk / shrink_factor / p_skill vectors — plus the tau of
+    the correlation-aware variant (df = hbNeff - 1), which must exceed the standard
+    tau (N_eff < k widens the estimated population spread)."""
+    hb = risk.hierarchical_bayes_sharpe(fx["hbSharpes"], fx["hbVariances"])
+    hbn = risk.hierarchical_bayes_sharpe(fx["hbSharpes"], fx["hbVariances"],
+                                         effective_n=fx["hbNeff"])
+    return {
+        "hb_mu": float(hb["mu"]),
+        "hb_tau": float(hb["tau"]),
+        "hb_shrunk": [float(x) for x in hb["shrunk"]],
+        "hb_shrinkFactor": [float(x) for x in hb["shrink_factor"]],
+        "hb_pSkill": [float(x) for x in hb["p_skill"]],
+        "hb_neffTau": float(hbn["tau"]),
+    }
 
 
 def python_side(fx: dict) -> dict:
@@ -253,6 +280,11 @@ def python_side(fx: dict) -> dict:
             np.asarray(fx["neffCols"], dtype=float).T)),
         "probFalseStrategy": float(risk.probability_false_strategy(
             fx["srMid"], fx["nTrialsMid"], fx["varMid"], fx["nMid"], fx["skew"], fx["kurt"])),
+        # Hierarchical-Bayes shrinkage (frontier #3) — risk.hierarchical_bayes_sharpe vs
+        # the quant.js hierarchicalBayesSharpe mirror on the fixed k=4 family. mu/tau are
+        # scalars; shrunk/B/p are compared ELEMENTWISE (each of the k=4 values must
+        # agree). hb_neffTau pins the correlation-aware DL variant (df = hbNeff - 1).
+        **_hb_fields(fx),
         # Tharp eval layer
         "er_nTrades": int(er["n_trades"]),
         "er_expectancyR": float(er["expectancy_r"]),
@@ -316,6 +348,11 @@ TOL = {
     "psr": 1e-7, "dsr": 1e-7, "dsr_n1": 1e-7, "dsr_mid": 1e-7, "minBTL": 1e-9,
     "emaxN5": 1e-7, "emaxN10": 1e-7, "fstThreshold": 1e-7, "neffTrials": 1e-7,
     "probFalseStrategy": 1e-7,
+    # Hierarchical-Bayes shrinkage (frontier #3). mu/tau/shrunk/B are pure arithmetic
+    # (same left-to-right summation order both sides); p_skill crosses the erf-based
+    # JS normCdf ⟹ the documented 1e-7. Vector fields compare elementwise.
+    "hb_mu": 1e-9, "hb_tau": 1e-9, "hb_shrunk": 1e-9, "hb_shrinkFactor": 1e-9,
+    "hb_pSkill": 1e-7, "hb_neffTau": 1e-9,
     "er_nTrades": 0, "er_expectancyR": 1e-12, "er_winRate": 1e-12,
     "er_payoffRatio": 1e-12, "er_sqn": 1e-12, "er_profitFactor": 1e-12,
     "b76_delta": 5e-7, "b76_gamma": 1e-9, "b76_vega": 1e-9,
@@ -353,10 +390,22 @@ PINS = {
     # still pass — max_pain is the exact argmin strike, gc_sum the total gamma density.
     "mp_maxPain": (64000.0, 1e-9),
     "gc_sum": (0.10701664008807263, 1e-9),
+    # Hierarchical-Bayes anchors (frontier #3) — the pooled mean and between-strategy
+    # tau on the fixed k=4 family, pre-registered from the closed form (DerSimonian-
+    # Laird tau^2 then random-effects pooling), plus the correlation-aware variant's
+    # tau (df = 2.5 - 1 ⟹ larger than hb_tau — asserted as an identity below too).
+    "hb_mu": (0.042615507958796955, 1e-9),
+    "hb_tau": (0.025259219485448958, 1e-9),
+    "hb_neffTau": (0.04758979651558059, 1e-9),
 }
 
 
 def _agree(a, b, tol) -> bool:
+    if isinstance(a, (list, tuple)) or isinstance(b, (list, tuple)):
+        # vector fields (the HB shrunk/B/p arrays): every element must agree.
+        return (isinstance(a, (list, tuple)) and isinstance(b, (list, tuple))
+                and len(a) == len(b)
+                and all(_agree(x, y, tol) for x, y in zip(a, b)))
     if isinstance(a, bool) or isinstance(b, bool):
         return a == b
     fa, fb = float(a), float(b)
@@ -389,6 +438,17 @@ def main() -> int:
         py["fstThreshold"], fx["nMid"], fx["skew"], fx["kurt"], sr_benchmark=_fst_sr0)
     if not math.isclose(_fst_psr, 0.95, rel_tol=1e-9, abs_tol=1e-9):
         pin_fails.append(f"PSR(fstThreshold; sr0) = {_fst_psr!r} != 0.95 (fixed point)")
+    # HB identities: (1) the correlation-aware tau (df = N_eff - 1 < k - 1) must EXCEED
+    # the standard tau — correlated trials widen the estimated population spread;
+    # (2) the classic shrinkage identity thetaHat = B·mu + (1-B)·SR must close exactly.
+    if not py["hb_neffTau"] > py["hb_tau"]:
+        pin_fails.append(f"hb_neffTau {py['hb_neffTau']!r} !> hb_tau {py['hb_tau']!r} "
+                         "(N_eff < k must WIDEN tau)")
+    fx_sr = fx["hbSharpes"]
+    for _i, (_th, _b, _s) in enumerate(zip(py["hb_shrunk"], py["hb_shrinkFactor"], fx_sr)):
+        if not math.isclose(_th, _b * py["hb_mu"] + (1.0 - _b) * _s,
+                            rel_tol=1e-12, abs_tol=1e-12):
+            pin_fails.append(f"hb shrinkage identity broken at i={_i}")
     if pin_fails:
         for f in pin_fails:
             print(f"PIN FAIL — {f}")
@@ -417,6 +477,22 @@ def main() -> int:
     for name in names:
         a, b = py[name], js.get(name)
         ok = _agree(a, b, TOL[name])
+        if isinstance(a, (list, tuple)):
+            # vector field (HB shrunk/B/p): report the worst elementwise |Δ| and the
+            # first element on each side (the full vectors are asserted in _agree).
+            try:
+                d = max(abs(float(x) - float(y)) for x, y in zip(a, b))
+            except (TypeError, ValueError):
+                d = float("nan")
+            if not math.isnan(d):
+                worst = max(worst, d)
+            if not ok:
+                fails.append(name)
+            fa = float(a[0]) if a else float("nan")
+            fb = float(b[0]) if isinstance(b, (list, tuple)) and b else float("nan")
+            print(f"{name:<{width}}  {fa:>13.8g} ×{len(a)}  {fb:>13.8g} ×{len(a)}  "
+                  f"{d:>10.2e}  {'✓' if ok else '✗ FAIL'}")
+            continue
         try:
             d = abs(float(a) - float(b))
             if not math.isnan(d):

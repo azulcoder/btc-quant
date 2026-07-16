@@ -414,6 +414,78 @@
     return Number.isNaN(dsr) ? NaN : 1 - dsr;
   }
 
+  /**
+   * Empirical-Bayes hierarchical shrinkage of a family of Sharpe ratios — the Bayesian
+   * sibling of the Deflated Sharpe / FST view of the SAME winner's-curse problem.
+   * COMPLEMENTARY DIAGNOSTIC, not a replacement for the production DSR. Exact mirror of
+   * risk.hierarchical_bayes_sharpe (Efron-Morris 1975 / James-Stein 1961; DerSimonian-
+   * Laird 1986 for tau^2; Gelman BDA). Empirical Bayes = hyperparameters (mu, tau^2)
+   * plugged at their point estimates, a closed-form (no-MCMC) approximation to the full
+   * hierarchical posterior. All inputs/outputs are per-period (caller annualizes).
+   *
+   *   w_i=1/sigma_i^2; muHat=Σw·SR/Σw; Q=Σw(SR-muHat)^2; c=Σw - Σw^2/Σw;
+   *   tauHat2=max(0,(Q-(k-1))/c)  [or (Q-(N_eff-1))/c with effectiveN — correlation-aware,
+   *   a LARGER tau^2 since N_eff≤k]; wStar=1/(sigma^2+tauHat2); muStar=ΣwStar·SR/ΣwStar;
+   *   B_i=sigma^2/(sigma^2+tauHat2); thetaHat=B·muStar+(1-B)·SR; v_i=sigma^2·tauHat2/(sigma^2+tauHat2);
+   *   CI=thetaHat±1.96√v; p_skill=Φ(thetaHat/√v).
+   *
+   * Edge cases mirror Python: k<2 or any non-finite/≤0 variance ⟹ raw (B=0, tau=0,
+   * postSd=sigma); tauHat2==0 (identical SRs / no heterogeneity) ⟹ full pooling
+   * (thetaHat==muStar, B=1, v=0, p_skill=sign(muStar)).
+   * @param {number[]} sharpes per-period Sharpe ratios SR_i
+   * @param {number[]} variances sampling variances sigma_i^2 (B2 sharpeEstimatorVariance)
+   * @param {number} [effectiveN] optional correlation-aware d.o.f. (N_eff) for tau^2
+   */
+  function hierarchicalBayesSharpe(sharpes, variances, effectiveN) {
+    const sr = sharpes.map(Number);
+    const sig2 = variances.map(Number);
+    const k = sr.length;
+    if (sig2.length !== k) throw new Error('sharpes and variances must have the same length');
+    const finiteOk = sr.every((s, i) => Number.isFinite(s) && Number.isFinite(sig2[i]) && sig2[i] > 0);
+    if (k < 2 || !finiteOk) {
+      const mu = k === 1 ? sr[0] : NaN;
+      const postSd = sig2.map((v) => (Number.isFinite(v) && v > 0 ? Math.sqrt(v) : NaN));
+      return {
+        mu,
+        tau: 0,
+        shrunk: sr.slice(),
+        shrinkFactor: sr.map(() => 0),
+        postSd,
+        ciLow: sr.map((s, i) => s - 1.96 * postSd[i]),
+        ciHigh: sr.map((s, i) => s + 1.96 * postSd[i]),
+        pSkill: sr.map((s, i) => (Number.isFinite(postSd[i]) && postSd[i] > 0 ? normCdf(s / postSd[i]) : NaN)),
+      };
+    }
+    const w = sig2.map((v) => 1 / v);
+    const sw = w.reduce((a, v) => a + v, 0);
+    const muHat = sr.reduce((a, s, i) => a + w[i] * s, 0) / sw;
+    const Q = sr.reduce((a, s, i) => a + w[i] * (s - muHat) * (s - muHat), 0);
+    const c = sw - w.reduce((a, v) => a + v * v, 0) / sw;
+    // DerSimonian-Laird; effectiveN (N_eff ≤ k) deflates Q by (N_eff-1) ⟹ larger tau^2.
+    const df = effectiveN != null ? Number(effectiveN) - 1 : k - 1;
+    const tau2 = c > 0 ? Math.max(0, (Q - df) / c) : 0;
+    const tau = Math.sqrt(tau2);
+    const wStar = sig2.map((v) => 1 / (v + tau2));
+    const sws = wStar.reduce((a, v) => a + v, 0);
+    const muStar = sr.reduce((a, s, i) => a + wStar[i] * s, 0) / sws;
+    const shrunk = [], shrinkFactor = [], postSd = [], ciLow = [], ciHigh = [], pSkill = [];
+    for (let i = 0; i < k; i++) {
+      const v = sig2[i];
+      const b = v / (v + tau2);                     // shrinkage factor in [0,1]
+      const theta = b * muStar + (1 - b) * sr[i];   // posterior mean (== shrunk SR)
+      const vPost = (v * tau2) / (v + tau2);         // posterior variance (0 when tau2==0)
+      const sd = Math.sqrt(vPost);
+      shrinkFactor.push(b);
+      shrunk.push(theta);
+      postSd.push(sd);
+      ciLow.push(theta - 1.96 * sd);
+      ciHigh.push(theta + 1.96 * sd);
+      // Full pooling (tau2==0): posterior collapses to muStar; P(SR>0) = sign of theta.
+      pSkill.push(sd > 0 ? normCdf(theta / sd) : (theta > 0 ? 1 : (theta < 0 ? 0 : 0.5)));
+    }
+    return { mu: muStar, tau, shrunk, shrinkFactor, postSd, ciLow, ciHigh, pSkill };
+  }
+
   // ─── backtest.py mirror ───────────────────────────────────────────────
 
   /**
@@ -1131,6 +1203,7 @@
     // risk
     probabilisticSharpe, expectedMaxSharpeRatio, deflatedSharpe,
     falseStrategyThreshold, effectiveNumberOfTrials, probabilityFalseStrategy,
+    hierarchicalBayesSharpe,
     // backtest
     backtest, compound, computeStats,
     // OOS validation harness

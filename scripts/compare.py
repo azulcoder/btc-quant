@@ -264,6 +264,7 @@ def main() -> int:
         if not (isinstance(v, (int, float)) and math.isfinite(v)):
             v = 1.0 / np_ if np_ > 0 else float("nan")
             var_fallback = True
+        r["b2_var"] = float(v)   # stashed: the HB shrinkage block reuses this sigma_i^2
         r["oos_dsr"] = risk.deflated_sharpe_ratio(
             r["sr_period"], np_, r["skew"], r["kurt"], n_trials, v)
     ok.sort(key=lambda r: (r["oos_dsr"] if isinstance(r["oos_dsr"], (int, float))
@@ -333,6 +334,7 @@ def main() -> int:
     # NOTE: this is DIAGNOSTIC ONLY. The leaderboard 'OOS DSR' column above is UNCHANGED —
     # N stays the literal strategy count; substituting N_eff would be a separate, explicit
     # methodology decision (it would RAISE every DSR by lowering the skill-less benchmark).
+    n_eff = float("nan")   # hoisted: the HB shrinkage block below reuses this N_eff
     if ok and mat is not None and mat.shape[1] >= 2:
         top = ok[0]                                  # best row (already DSR-sorted)
         n_best = int(top.get("n_periods", 0))
@@ -359,6 +361,49 @@ def main() -> int:
         pf_pct = f"{p_false*100:.1f}%" if isinstance(p_false, float) and math.isfinite(p_false) else "n/a"
         print(f"P(top strategy is a false positive) = {pf_pct}   "
               f"[= 1 - DSR of the best row; DIAGNOSTIC — the leaderboard DSR is unchanged].")
+
+    # ── Hierarchical-Bayes Sharpe shrinkage (frontier #3 — Efron-Morris / James-Stein;
+    # DerSimonian-Laird tau^2; Gelman BDA ch.5) ───────────────────────────────────────
+    # COMPLEMENTARY DIAGNOSTIC, not a change to the production DSR (the leaderboard
+    # column above is UNCHANGED). This is the Bayesian sibling of the DSR/FST frequentist
+    # view of the SAME winner's-curse problem, and the two should broadly agree: a Sharpe
+    # the DSR flags as likely-noise is one this model shrinks hard toward the pool.
+    # Inputs are the SAME leaderboard rows: SR_i = each row's per-period OOS Sharpe,
+    # sigma_i^2 = its B2 own-Sharpe variance (risk.sharpe_estimator_variance — the exact
+    # likelihood precision the leaderboard DSR used, stashed as r["b2_var"]), and
+    # effective_n = the N_eff already computed above (correlation-aware tau^2: correlated
+    # strategies count as fewer independent observations, WIDENING the population spread).
+    # Everything is estimated per-period; annualization (× sqrt(ppy)) is display-only.
+    if len(ok) >= 2:
+        hb_eff = float(n_eff) if math.isfinite(n_eff) else None
+        hb = risk.hierarchical_bayes_sharpe(
+            [float(r["sr_period"]) for r in ok],
+            [float(r["b2_var"]) for r in ok],
+            effective_n=hb_eff,
+        )
+        sqp = math.sqrt(ppy)
+        eff_lbl = f"df = N_eff-1 = {n_eff - 1:.2f} (correlation-aware)" if hb_eff is not None \
+            else f"df = k-1 = {len(ok) - 1}"
+        print(f"\nHIERARCHICAL-BAYES SHRINKAGE (empirical-Bayes normal-normal, DL tau^2, "
+              f"{eff_lbl}; DIAGNOSTIC — leaderboard DSR unchanged):")
+        hb_hdr = (f"  {'strategy':<18}{'raw ann.SR':>11}{'shrunk ann.SR':>14}"
+                  f"{'shrink%':>9}{'P(skill>0)':>12}")
+        print(hb_hdr); print("  " + "-" * (len(hb_hdr) - 2))
+        for i, r in enumerate(ok):
+            raw_ann = float(r["sr_period"]) * sqp
+            print(f"  {r['name']:<18}{_fmt(raw_ann):>11}{_fmt(hb['shrunk'][i] * sqp):>14}"
+                  f"{_fmt(hb['shrink_factor'][i] * 100, dp=1):>9}"
+                  f"{_fmt(hb['p_skill'][i]):>12}")
+        # Winner's-curse readout: the raw top Sharpe vs its posterior mean (the haircut).
+        i_top = max(range(len(ok)), key=lambda j: float(ok[j]["sr_period"])
+                    if math.isfinite(float(ok[j]["sr_period"])) else -9e9)
+        raw_top = float(ok[i_top]["sr_period"]) * sqp
+        shr_top = hb["shrunk"][i_top] * sqp
+        print(f"  WINNER'S CURSE: top raw ann. Sharpe {_fmt(raw_top)} ('{ok[i_top]['name']}') "
+              f"→ shrunk {_fmt(shr_top)} (Bayesian haircut {_fmt(raw_top - shr_top)}).")
+        print(f"  Population (annualized): mu = {_fmt(hb['mu'] * sqp)}, tau = {_fmt(hb['tau'] * sqp)} "
+              f"[mu ≈ what an average strategy from this family truly earns; tau ≈ how much "
+              f"true skill plausibly varies across it].")
 
     # ── Lead-time IC: does the OOS signal actually LEAD returns? ──────────────────
     # M5 wiring: the crude fixed band (|IC| > 1.96·√(k/N)) is GONE — significance is now

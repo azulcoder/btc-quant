@@ -65,7 +65,11 @@ def test_parity_harness_covers_unsaturated_and_walkforward_probes():
                  "gc_sum", "gc_dot", "gc_peakStrike",
                  # FST (False Strategy Theorem, Bailey-LdP 2014) probes — the expected-max
                  # refactor + the new surfaced diagnostics (threshold, N_eff, P(false)).
-                 "emaxN5", "emaxN10", "fstThreshold", "neffTrials", "probFalseStrategy"):
+                 "emaxN5", "emaxN10", "fstThreshold", "neffTrials", "probFalseStrategy",
+                 # Hierarchical-Bayes shrinkage probes (frontier #3) — mu/tau scalars,
+                 # the ELEMENTWISE shrunk/B/p vectors, and the correlation-aware tau.
+                 "hb_mu", "hb_tau", "hb_shrunk", "hb_shrinkFactor", "hb_pSkill",
+                 "hb_neffTau"):
         assert name in py_src, f"{name} probe missing from check_parity.py"
         assert name in js_src, f"{name} probe missing from _parity_eval.cjs"
     # the anchor constants themselves (a joint drift must fail the pins, not parity)
@@ -81,6 +85,12 @@ def test_parity_harness_covers_unsaturated_and_walkforward_probes():
     assert "0.11292934779100049" in py_src
     assert "2.6666666666666665" in py_src
     assert "0.3927414695340873" in py_src
+    # Hierarchical-Bayes anchors — the pooled mu, the DL tau, and the correlation-aware
+    # tau (df = N_eff-1) on the fixed k=4 family; pre-registered so a joint Python↔JS
+    # drift fails the pins, not parity.
+    assert "0.042615507958796955" in py_src
+    assert "0.025259219485448958" in py_src
+    assert "0.04758979651558059" in py_src
 
 
 def test_parity_options_fields_present_and_agree():

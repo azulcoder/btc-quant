@@ -553,3 +553,20 @@ a methodology question (N vs N_eff), the sibling of the A→B2 `V` decision — 
 [RESEARCH-false-strategy-runlog.md](RESEARCH-false-strategy-runlog.md).
 
 **Rails:** no edge claim → no MinBTL / pre-registration. pytest 185→190, parity 63→68 fields.
+
+## 2026-07-16 — Hierarchical-Bayes Sharpe shrinkage (frontier roadmap #3; do-now honesty math)
+
+**Added:** `risk.hierarchical_bayes_sharpe` (empirical-Bayes normal-normal; James-Stein /
+Efron-Morris; DerSimonian–Laird `τ²` with the correlation-aware `df = N_eff − 1` variant),
+mirrored in `quant.js`, parity-pinned (68→74 fields), printed as a diagnostic block in
+`compare.py` beside PBO/MinBTL/FST. **Unifies the two open methodology questions in one
+model**: the B2 own-Sharpe variance is the likelihood precision, the cross-strategy spread
+enters as `τ²` (the principled form of convention A), and `N_eff` sets its df.
+
+**Key numbers (research board):** winner's-curse haircut on the top strategy: raw ann.
+Sharpe 0.96 → shrunk 0.85; family `μ = 0.51`, `τ = 0.64`; `P(skill>0)`: tsmom 1.00,
+pairs_ou 0.49 (pure noise), pairs_coint 0.04. Bayesian and frequentist (DSR/FST) views
+agree — see [RESEARCH-hierarchical-bayes-runlog.md](RESEARCH-hierarchical-bayes-runlog.md).
+
+**Rails:** diagnostic-only (leaderboard DSR byte-unchanged); no edge claim → no MinBTL /
+pre-registration. Hand-checked DL case to 1e-9. pytest 190→198, parity 68→74.

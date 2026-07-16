@@ -88,7 +88,7 @@ The honest result, from `compare.py` on the 2018→ daily history (N = 5 strateg
 Lo (2002) / Mertens (2002) estimator `V_i = (1 − skew·SR + (kurt−1)/4·SR²)/(n−1)`, the exact
 quantity already inside the PSR denominator (convention **B2**, `RESEARCH-dsr-convention.md`).
 Each strategy's DSR now depends only on its *own* returns — a peer's Sharpe cannot move it — while
-Beside them the leaderboard prints a **False-strategy diagnostics** block (Bailey–López de
+The **hierarchical-Bayes shrinkage** block (Efron–Morris empirical Bayes, correlation-aware DerSimonian–Laird) then gives the Bayesian view of the same winner's curse: each strategy's posterior (*shrunk*) Sharpe and `P(skill>0)` — the frequentist and Bayesian machines agree ([RESEARCH-hierarchical-bayes-runlog.md](RESEARCH-hierarchical-bayes-runlog.md)). Beside them the leaderboard prints a **False-strategy diagnostics** block (Bailey–López de
 Prado 2014): the explicit **Sharpe hurdle** a strategy must clear to escape the luck-of-N
 null, the **effective number of independent trials** `N_eff` (the board's eight rows are
 only ~3 independent bets — the `tsmom` cluster is corr ≈ 1.00), and `P(top strategy is a
