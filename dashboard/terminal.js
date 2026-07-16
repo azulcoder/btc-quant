@@ -501,7 +501,12 @@
       + '(deterministic L1 harness: no network beyond the local fixture file). '
       + 'Nothing is fabricated to fill this panel (§0.7).</div>';
     for (const id of ['view-hist', 'view-tpo', 'view-klinevp', 'view-farb', 'view-macro']) {
-      $(id).innerHTML = NOTE;
+      const el = $(id);
+      el.innerHTML = NOTE;
+      // Presentation only: a note-only panel renders compact (.panel--empty,
+      // terminal.css) — the honest note stays visible, just not full-height.
+      const panel = el.closest('.panel');
+      if (panel) panel.classList.add('panel--empty');
     }
     $('hist-replay-controls').hidden = true;
     for (const id of ['set-hist-interval', 'set-hist-sma20', 'set-hist-sma50', 'set-hist-sma200', 'set-hist-ha', 'set-tpo-session']) {
@@ -724,7 +729,11 @@
       + '(deterministic L1 harness: no network beyond the local fixture file). '
       + 'Nothing is fabricated to fill this panel (§0.7).</div>';
     for (const id of ['view-screener', 'view-rsi', 'view-options', 'view-whale']) {
-      $(id).innerHTML = NOTE4;
+      const el = $(id);
+      el.innerHTML = NOTE4;
+      // Presentation only: note-only panel → compact (.panel--empty).
+      const panel = el.closest('.panel');
+      if (panel) panel.classList.add('panel--empty');
     }
     for (const id of ['set-scr-top', 'rsi-refresh', 'set-opt-expiry']) {
       $(id).disabled = true;
@@ -1017,7 +1026,11 @@
       + 'disabled in replay (deterministic L1 harness: no network / machine-local state beyond the fixture '
       + 'file). Nothing is fabricated to fill this panel (§0.7).</div>';
     for (const id of ['view-polymarket', 'view-news', 'view-econ']) {
-      $(id).innerHTML = NOTE5;
+      const el = $(id);
+      el.innerHTML = NOTE5;
+      // Presentation only: note-only panel → compact (.panel--empty).
+      const panel = el.closest('.panel');
+      if (panel) panel.classList.add('panel--empty');
     }
   } else {
     polyView = V.PolymarketView();
@@ -1518,7 +1531,11 @@
       + 'the live book sampler; the deterministic L1 harness allows no network beyond the fixture file. '
       + 'Nothing is fabricated to fill these panels (§0.7).</div>';
     for (const id of ['view-auction', 'view-levels', 'view-micro']) {
-      $(id).innerHTML = NOTE_I1;
+      const el = $(id);
+      el.innerHTML = NOTE_I1;
+      // Presentation only: note-only panel → compact (.panel--empty).
+      const panel = el.closest('.panel');
+      if (panel) panel.classList.add('panel--empty');
     }
     for (const id of ['set-auction-src', 'set-auction-mode', 'set-auction-comp', 'set-auction-days',
       'set-levels-draw', 'set-vwap-on', 'set-vwap-anchor', 'set-vwap-ts']) {

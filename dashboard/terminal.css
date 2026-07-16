@@ -6,19 +6,150 @@
    values (same practice as styles.css's own flashUp/flashDown keyframes).
    Data/numbers are monospace tabular (ladder/tape density), prose stays Inter. */
 
-/* ─── §0.1 permanent honesty banner (static HTML, styled like warn chrome) ── */
+/* ─── §0.1 permanent honesty banner — ONE compact bar (presentation pass):
+   the NOT-FINANCIAL-ADVICE disclaimer (bold, left) and the research-context
+   sentence (muted, right, ellipsized — full text in the DOM + title tooltip)
+   share a single ~36px strip instead of two stacked banners. In replay,
+   terminal-replay.js prepends its .replay-flag span as the banner's first
+   child — styled below as a distinct chip at the far left (the harness
+   asserts 'REPLAY MODE' in .term-banner text + .replay-flag count == 1;
+   text_content reads the DOM, so the visual ellipsis hides nothing). ─────── */
 .term-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
   background: var(--warn-bg);
   color: var(--warn-fg);
   border-bottom: 1px solid var(--border);
-  text-align: center;
   font-size: var(--fs-xs);
-  font-weight: 600;
   letter-spacing: 0.03em;
-  padding: var(--sp-1) var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);   /* ≈36px tall with 11px text */
+  min-height: 36px;
+}
+/* Scoped override of styles.css's block .disclaimer — same text, inline now. */
+.term-banner .disclaimer {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--warn-fg);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  flex: none;
+}
+.term-banner .banner-ctx {
+  margin-left: auto;
+  min-width: 0;
+  flex: 0 1 auto;
+  font-weight: 400;
+  opacity: 0.75;                       /* muted variant of the warn hue — no new color */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Replay honesty flag (inserted by terminal-replay.js as firstChild): a
+   distinct chip at the far left. Ellipsized visually; the full sentence stays
+   in the DOM for the harness's 'REPLAY MODE' text assertion. */
+.term-banner .replay-flag {
+  flex: none;
+  order: -1;
+  max-width: 300px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--warn-fg);
+  border-radius: var(--radius);
+  background: var(--warn-fg);
+  color: var(--warn-bg);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 header.topbar .subtitle { color: var(--muted); font-size: var(--fs-sm); font-weight: 400; }
+
+/* ─── Quiet chrome buttons (presentation pass): terminal buttons are bordered
+   ghosts with an accent hover — not the analytics page's amber CTAs. :where()
+   keeps specificity at (0,1,0), so the component button styles further down
+   (.whale-rm, .jour-form button, …) still win their own overrides. The pause
+   button keeps a touch of emphasis below — it is a state toggle. ──────────── */
+.term-main :where(button) {
+  background: var(--bg-panel-2);
+  color: var(--fg);
+  font-weight: 600;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.term-main :where(button):hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  filter: none;
+}
+.term-main :where(button):disabled {
+  color: var(--g-400);
+  border-color: var(--border);
+  cursor: default;
+}
+#set-pause { border-color: var(--accent); color: var(--accent); font-weight: 700; min-width: 84px; }
+#set-pause:hover { background: var(--warn-bg); }
+#set-pause[aria-pressed="true"] { background: var(--accent); color: #07101f; }
+
+/* ─── Status-chip taxonomy (presentation pass): ONE short chip per panel
+   header from a fixed set — descriptive / heuristic / estimated / cited /
+   journal (+ the replay flags) — one consistent style per status, existing
+   tokens only. The long source/formula text lives in .panel-src below. ───── */
+.signal-tag { flex: none; }
+.signal-tag.st-desc { color: var(--muted);   border: 1px solid var(--g-400);   background: transparent; }
+.signal-tag.st-heur { color: var(--warn-fg); border: 1px solid var(--warn-fg); background: var(--warn-bg); }
+.signal-tag.st-est  { color: var(--warn-fg); border: 1px solid var(--warn-fg); background: transparent; }
+.signal-tag.st-cite { color: var(--accent-2); border: 1px solid var(--accent-2); background: transparent; }
+.signal-tag.st-jour { color: var(--c1);      border: 1px solid var(--c1);      background: transparent; }
+
+/* One-line muted SOURCE line under each panel title: the re-homed long
+   source/formula text (nothing deleted — full text also rides the title
+   tooltip). Honesty fragments inside it wear .src-flag (warn hue) and sit
+   FIRST in the line so the ellipsis can never swallow them. */
+.panel-src {
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: calc(-1 * var(--sp-3) + 3px) 0 var(--sp-2);   /* tucks under the h2 hairline */
+}
+.panel-src .src-flag { color: var(--warn-fg); }
+
+/* ─── Caption system (presentation pass): first sentence visible on ONE line,
+   the rest inside an inline <details> — no caption text deleted; honesty
+   fragments that must stay visible ride the lead (.hint-flag, warn hue). ─── */
+.hint .hint-lead {
+  display: inline-block;
+  max-width: calc(100% - 56px);        /* room for the 'more…' toggle */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+.hint .hint-flag { color: var(--warn-fg); }
+details.hint-more { display: inline-block; vertical-align: bottom; }
+details.hint-more[open] { display: block; }
+details.hint-more > summary {
+  list-style: none;
+  cursor: pointer;
+  color: var(--g-400);
+  /* The DOM text stays 'more…'; the ::after swap below renders 'less' while
+     open without touching the text node. */
+  font-size: 0;
+}
+details.hint-more > summary::after { content: 'more…'; font-size: var(--fs-xs); }
+details.hint-more[open] > summary::after { content: 'less'; }
+details.hint-more > summary::-webkit-details-marker { display: none; }
+details.hint-more > summary:hover { color: var(--accent); }
+details.hint-more[open] > summary { color: var(--accent); }
+details.hint-more .hint-rest { display: inline; }
 
 /* ─── Page grid (§4 + §4b layout: stats strip / fp | mid | right /
    heat | right (heatmap wide under the footprint row; the right column —
@@ -33,18 +164,26 @@ main.term-main {
   gap: var(--sp-2);
   grid-template-columns: minmax(0, 2.1fr) minmax(300px, 1fr) minmax(290px, 1fr);
   grid-template-rows: auto;   /* every row sizes to content — no fixed row heights */
+  /* hd-* rows = the section eyebrow labels (presentation pass) — they carry
+     data-sec, so a collapsed section hides its eyebrow and the named row
+     collapses to zero height with it. */
   grid-template-areas:
     "stats stats  stats"
+    "hd-of hd-of  hd-of"
     "fp    mid    right"
     "heat  heat   right"
     "cvd   cvd    cvd"
+    "hd-st hd-st  hd-st"
     "hist  hist   tpo"
     "vp    farb   macro"
+    "hd-au hd-au  hd-au"
     "auct  auct   lvls"
     "micro micro  lvls"
+    "hd-in hd-in  hd-in"
     "scr   rsi    rsi"
     "opts  opts   conf"
     "whale alerts alerts"
+    "hd-pf hd-pf  hd-pf"
     "jour  jour   cal"
     "poly  news   econ"
     "set   set    set";
@@ -99,6 +238,29 @@ main.term-main {
 .area-news { grid-area: news; }
 .area-econ { grid-area: econ; }
 
+/* ─── Section eyebrow labels (presentation pass): a quiet uppercase mono
+   label + hairline rule at each section boundary — the ORDERFLOW/STRUCTURE/…
+   anchors get visible presence and a consistent ~28px vertical rhythm.
+   Tokens only; hidden with their section via the [data-sec][hidden] rule. ── */
+.hd-of { grid-area: hd-of; }
+.hd-st { grid-area: hd-st; }
+.hd-au { grid-area: hd-au; }
+.hd-in { grid-area: hd-in; }
+.hd-pf { grid-area: hd-pf; }
+.sec-hdr {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);             /* + the 8px grid gaps ≈ 28px between sections */
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--g-400);
+}
+.sec-hdr::after { content: ''; flex: 1 1 auto; border-top: 1px solid var(--border); }
+
 /* §4e.1 collapse: terminal.js sets [hidden] on every [data-sec] element of a
    collapsed section. Some of those elements carry display:flex/grid rules
    that would silently defeat the [hidden] UA default — force it. Collapse
@@ -125,10 +287,11 @@ main.term-main {
   main.term-main {
     grid-template-columns: 1fr;
     grid-template-areas:
-      "stats" "fp" "mid" "right" "heat" "cvd"
-      "hist" "tpo" "vp" "farb" "macro"
-      "auct" "lvls" "micro"
-      "scr" "rsi" "opts" "conf" "whale" "alerts" "set";
+      "stats" "hd-of" "fp" "mid" "right" "heat" "cvd"
+      "hd-st" "hist" "tpo" "vp" "farb" "macro"
+      "hd-au" "auct" "lvls" "micro"
+      "hd-in" "scr" "rsi" "opts" "conf" "whale" "alerts"
+      "hd-pf" "jour" "cal" "poly" "news" "econ" "set";
   }
   .fp-wrap { min-height: 460px; }
   .agg-wrap { min-height: 260px; }
@@ -184,6 +347,7 @@ main.term-main {
 }
 .heat-controls select { min-width: 84px; padding: 1px 4px; font-size: var(--fs-xs); }
 .heat-controls input[type="checkbox"] { vertical-align: middle; margin: 0 0 0 3px; }
+.heat-controls button { font-size: var(--fs-xs); padding: 1px 6px; text-transform: none; letter-spacing: 0; }
 
 /* Shared canvas-panel legend (agg book; CVD has its own overlay variant). */
 .term-legend {
@@ -229,7 +393,29 @@ main.term-main {
   border-radius: var(--radius);
   overflow: hidden;
 }
-.tstat { background: var(--bg-panel); padding: var(--sp-1) var(--sp-2); min-width: 0; }
+/* Uniform 13px top padding reserves a thin eyebrow lane in EVERY cell so the
+   venue tags below never collide with the k/v rows and all cells stay
+   baseline-aligned. */
+.tstat { background: var(--bg-panel); padding: 13px var(--sp-2) var(--sp-1); min-width: 0; position: relative; }
+/* Venue grouping (presentation pass): the first cell of each venue cluster
+   carries a tiny eyebrow tag + a 2px inset separator — same grid, same ids,
+   same values; grouping is markup/CSS chrome only. */
+.tstat.grp-first { box-shadow: inset 2px 0 0 var(--grid); }
+.tstat .vgrp {
+  position: absolute;
+  top: 3px;
+  left: var(--sp-2);
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--g-400);
+  text-transform: uppercase;
+  pointer-events: none;
+}
+/* Absent values ('—', e.g. the REST-fed binancef cells in replay) render
+   dimmed rather than ragged — same value, quieter ink. */
+.tstat .v.na { color: var(--g-400); font-weight: 400; }
 .tstat .k {
   display: block;
   color: var(--muted);
@@ -1027,3 +1213,94 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .micro-strip { margin-bottom: var(--sp-1); }
 .micro-cell { min-width: 0; }
 .micro-pane { height: 150px; position: relative; background: var(--bg); border-radius: var(--radius); }
+
+/* ═══ Empty-state collapse (presentation pass) ══════════════════════════════
+   A panel whose body currently shows ONLY its honest disabled/awaiting note
+   renders COMPACT: header + status chip + source line + the note as a quiet
+   strip — the body stops reserving its full data height. The .panel--empty
+   class is toggled EXCLUSIVELY by the pre-existing empty/disabled branches
+   (terminal-views.js setPanelEmpty + the terminal.js replay-note loops); the
+   moment real data arrives the class drops and every wrap returns to the
+   exact sizes above. Honesty rails intact: the note text stays visible —
+   nothing is hidden, only un-reserved.
+
+   Kept LAST in this sheet on purpose: these rules must win specificity ties
+   against the wrap/canvas rules above.
+
+   Canvas wraps collapse to a 44px strip (canvas notes draw at y ≤ 30), and
+   .term-canvas goes absolute inside them — an in-flow canvas in an auto-
+   height wrap would re-trigger the measured-size feedback loop documented at
+   .fp-wrap (620px → ~3000px runaway). ═══════════════════════════════════ */
+.panel--empty .fp-wrap,
+.panel--empty .agg-wrap,
+.panel--empty .heat-wrap,
+.panel--empty .liqheat-wrap,
+.panel--empty .hist-wrap,
+.panel--empty .tpo-wrap,
+.panel--empty .vp-wrap,
+.panel--empty .scr-wrap,
+.panel--empty .rsi-wrap,
+.panel--empty .auction-wrap,
+.panel--empty .opt-cv,
+.panel--empty .micro-pane {
+  flex: 0 0 auto;
+  height: auto;
+  min-height: 44px;
+}
+.panel--empty .fp-wrap > .term-canvas,
+.panel--empty .heat-wrap > .term-canvas,
+.panel--empty .agg-wrap > .agg-canvas,
+.panel--empty .auction-wrap > .term-canvas,
+.panel--empty .term-canvas {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%;
+  height: 100%;
+}
+/* Lists whose fixed/min heights exist for data density: the honest note
+   needs none of it. (Detections is the deliberate exception below.) */
+.panel--empty .tape-list,
+.panel--empty .liq-list,
+.panel--empty .lvls-list,
+.panel--empty .jour-list,
+.panel--empty .whale-list,
+.panel--empty .alert-feed,
+.panel--empty .news-list,
+.panel--empty .econ-list {
+  height: auto;
+  min-height: 0;
+  max-height: none;
+}
+/* Column-header rows above an empty list are noise — hidden while empty
+   (they return with the first data row; the note itself stays). */
+.panel--empty .tape-head,
+.panel--empty .liq-head,
+.panel--empty .det-head,
+.panel--empty .lvls-head,
+.panel--empty .jour-head,
+.panel--empty .whale-head {
+  display: none;
+}
+/* An empty GRID panel stops stretching to its row partner's height — a short
+   quiet panel next to a tall live one beats a bordered box of black void.
+   Direct grid children only: panels inside the .term-col flex columns keep
+   their column behavior (align-self there would shrink their WIDTH). */
+.term-main > .panel--empty { align-self: start; }
+/* The right column's detections panel stays the column's flex-fill even when
+   empty (removing it would trade panel-internal space for raw page void
+   under the column); only its note gets the quiet-strip treatment. */
+.area-right > .panel--empty:last-child { flex: 1 1 auto; }
+.panel--empty .det-list { min-height: 44px; }
+/* The honest note itself: a quiet inline strip instead of a floating line. */
+.panel--empty .chart-na {
+  padding: var(--sp-2);
+  margin: 0;
+  background: var(--bg-panel-2);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+.panel--empty .det-list .chart-na { margin: auto 0; }

@@ -175,6 +175,23 @@
     ));
   }
 
+  /** PRESENTATION-ONLY empty-state hook: a panel whose body is showing ONLY
+   *  its honest empty/awaiting note renders compact via the .panel--empty
+   *  class (terminal.css). Toggled EXCLUSIVELY from the views' pre-existing
+   *  empty/data branches — no new state logic, and the note itself stays
+   *  visible either way (§0 honesty rails untouched). Returns true when the
+   *  class actually CHANGED so canvas views can re-measure their (now
+   *  differently sized) box once before drawing into it. */
+  function setPanelEmpty(el, empty) {
+    if (!el || !el.closest) return false;
+    const panel = el.closest('.panel');
+    if (!panel || !panel.classList) return false;
+    const want = !!empty;
+    if (panel.classList.contains('panel--empty') === want) return false;
+    panel.classList.toggle('panel--empty', want);
+    return true;
+  }
+
   // ═══ FootprintView — bid×ask cells per price per bar + VP gutter + CVD ═══
   //
   // Canvas layout (all CSS px):
@@ -402,10 +419,14 @@
       const bars = slice.bars || [];
       const tick = slice.tickSize || 1;
       if (!bars.length) {
+        // Empty-state collapse: box size changed → re-fit once, then draw the
+        // same honest note into the compact strip (presentation only).
+        if (setPanelEmpty(root, true)) { draw(slice); return; }
         font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
         ctx.fillText('waiting for live trades — footprint renders only what arrives this session (§0.7)', 10, 18);
         return;
       }
+      if (setPanelEmpty(root, false)) { draw(slice); return; }   // data arrived → restore full box, re-fit once
 
       // Visible window: as many most-recent bars as fit at ≥ BAR_W_MIN each.
       const plotW = w - GUT_VP - GUT_AXIS;
@@ -874,6 +895,7 @@
     function render(slice) {
       if (!list) return;
       const trades = (slice.trades || []).slice(0, MAX_ROWS);
+      setPanelEmpty(root, !trades.length);   // presentation-only compact toggle
       if (!trades.length) {
         list.innerHTML = '<div class="chart-na">no prints yet (or none clear the filter) — the tape shows only trades that arrived this session.</div>';
         return;
@@ -948,10 +970,12 @@
       }
 
       if (!bids.length && !asks.length) {
+        if (setPanelEmpty(root, true)) { render(slice); return; }   // compact box → re-fit once
         ctx.fillStyle = p.muted; ctx.textAlign = 'left'; ctx.font = '11px ' + cssVar('--mono', 'monospace');
         ctx.fillText('waiting for depth…', 10, 16);
         return;
       }
+      if (setPanelEmpty(root, false)) { render(slice); return; }    // data arrived → restore, re-fit once
 
       // Fixed CENTER PRICE GUTTER (visual-defect fix): price labels used to
       // draw at the bars' inner edge — i.e. ON TOP of the stacked segments —
@@ -960,7 +984,7 @@
       // the gutter is bar-free by construction: bid prices live in its left
       // half, ask prices in its right half, and nothing ever paints under
       // them. Rows still pair by RANK (see view header note).
-      const centerX = w / 2, PRICE_GUT = 104;   // 52px/side fits '$xxx,xxx' at 9px mono
+      const centerX = w / 2, PRICE_GUT = 116;   // 58px/side: '$xxx,xxx' at 9px mono + breathing room from the bars
       const bidEdge = centerX - PRICE_GUT / 2;  // bid bars grow LEFT from here
       const askEdge = centerX + PRICE_GUT / 2;  // ask bars grow RIGHT from here
       const halfW = bidEdge;                    // usable bar+curve span per side
@@ -977,10 +1001,16 @@
       const cumScale = (halfW - 4) / cumMax;
 
       // Gutter edge hairlines (replace the old single center divider): they
-      // frame the price lane so it reads as chrome, not data.
+      // frame the price lane so it reads as chrome, not data. A thin CENTER
+      // hairline additionally splits the bid-price and ask-price label
+      // columns inside the gutter (fainter than the edges — pure chrome).
       ctx.strokeStyle = p.border;
       ctx.beginPath(); ctx.moveTo(bidEdge + 0.5, 0); ctx.lineTo(bidEdge + 0.5, h); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(askEdge - 0.5, 0); ctx.lineTo(askEdge - 0.5, h); ctx.stroke();
+      ctx.save();
+      ctx.strokeStyle = rgba(p.grid, 0.7);
+      ctx.beginPath(); ctx.moveTo(centerX + 0.5, 0); ctx.lineTo(centerX + 0.5, h); ctx.stroke();
+      ctx.restore();
 
       // Collision skip for price labels: 9px mono needs ~12px of row to stay
       // apart, so label every row only when rowH ≥ 12, else every OTHER row
@@ -1009,9 +1039,11 @@
           cumPts.push([isBid ? bidEdge - cum * cumScale : askEdge + cum * cumScale, y + rowH / 2]);
           // Price in the CENTER GUTTER (side-colored — plus side POSITION as
           // the redundant cue), thinned by priceStep so labels never touch.
+          // 6px off the center hairline; the widened gutter keeps the label's
+          // far end a clear ~3px further from the bar tips than before.
           if (rowH >= 11 && i % priceStep === 0) {
             ctx.fillStyle = sideCol; ctx.textAlign = isBid ? 'right' : 'left';
-            ctx.fillText(fmtUsd(r.price), isBid ? centerX - 4 : centerX + 4, y + rowH / 2);
+            ctx.fillText(fmtUsd(r.price), isBid ? centerX - 6 : centerX + 6, y + rowH / 2);
           }
           // Qty at the bar END (just past the tip, in empty space) — only
           // when the bar is long enough (≥28px) that the label reads as
@@ -1063,11 +1095,15 @@
     const cells = {};   // key → value <span>
     const chips = {};   // ex → { el, text }
 
-    function mkStat(grid, key, label, title) {
+    /** grp (optional, presentation only): venue-eyebrow tag rendered on the
+     *  FIRST cell of each venue cluster (BYBIT / SESSION / BINANCEF) — same
+     *  grid, same keys, same values; grouping is chrome around them. */
+    function mkStat(grid, key, label, title, grp) {
       const d = document.createElement('div');
-      d.className = 'tstat';
+      d.className = 'tstat' + (grp ? ' grp-first' : '');
       d.title = title || '';
-      d.innerHTML = '<span class="k">' + label + '</span><span class="v num">—</span>';
+      d.innerHTML = (grp ? '<span class="vgrp">' + grp + '</span>' : '')
+        + '<span class="k">' + label + '</span><span class="v num">—</span>';
       grid.appendChild(d);
       cells[key] = d.lastChild;
     }
@@ -1092,15 +1128,15 @@
 
       const grid = document.createElement('div');
       grid.className = 'term-stats';
-      mkStat(grid, 'mark', 'mark (bybit)', 'Bybit perp mark price');
+      mkStat(grid, 'mark', 'mark (bybit)', 'Bybit perp mark price', 'bybit');
       mkStat(grid, 'index', 'index (bybit)', 'Bybit index price');
       mkStat(grid, 'basis', 'basis', '(mark − index) / index · 1e4, basis points');
       mkStat(grid, 'funding', 'funding / next', 'Current funding rate + countdown to next funding');
       mkStat(grid, 'oi', 'OI (bybit)', 'Open interest, BTC');
       mkStat(grid, 'oiUsd', 'OI $ @ mark', 'Open interest × mark price (USD)');
-      mkStat(grid, 'hi', 'session high', 'Highest Bybit perp print since page open — session-local, no backfill (§0.7)');
+      mkStat(grid, 'hi', 'session high', 'Highest Bybit perp print since page open — session-local, no backfill (§0.7)', 'session');
       mkStat(grid, 'lo', 'session low', 'Lowest Bybit perp print since page open');
-      mkStat(grid, 'bnFunding', 'funding (binancef)', 'Binance Futures funding (REST poll, 5s)');
+      mkStat(grid, 'bnFunding', 'funding (binancef)', 'Binance Futures funding (REST poll, 5s)', 'binancef');
       mkStat(grid, 'bnBasis', 'basis (binancef)', 'Binance Futures (mark − index) / index · 1e4');
       mkStat(grid, 'bnOi', 'OI (binancef)', 'Binance Futures open interest, BTC (REST poll, 60s)');
       root.appendChild(grid);
@@ -1111,7 +1147,8 @@
     function render(slice) {
       const set = (k, v, cls) => {
         cells[k].textContent = v;
-        cells[k].className = 'v num' + (cls ? ' ' + cls : '');
+        // '.na' = absent value ('—') → dimmed ink, not ragged (presentation).
+        cells[k].className = 'v num' + (cls ? ' ' + cls : '') + (v === '—' ? ' na' : '');
       };
       const bp = (m) => (m && Number.isFinite(m.mark) && Number.isFinite(m.index) && m.index !== 0)
         ? ((m.mark - m.index) / m.index) * 1e4 : NaN;
@@ -1206,6 +1243,7 @@
       bs[0].textContent = fmtCompactUsd(slice.sum1m || 0);
       bs[1].textContent = fmtCompactUsd(slice.sum5m || 0);
       const recent = (slice.recent || []).slice(0, MAX_ROWS);
+      setPanelEmpty(root, !recent.length);   // presentation-only compact toggle
       if (!recent.length) {
         list.innerHTML = '<div class="chart-na">no liquidations seen this session — only what actually printed on the wire is shown (§0.7).</div>';
         return;
@@ -1294,10 +1332,12 @@
       const tick = slice.tickSize || 1;
       const range = slice.range || { min: NaN, max: NaN };
       if (!samples.length || !Number.isFinite(range.min) || !Number.isFinite(range.max)) {
+        if (setPanelEmpty(root, true)) { draw(slice); return; }   // compact box → re-fit once
         font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
         ctx.fillText('waiting for book history — one real ladder per second, event-time gated; nothing is backfilled (§0.7)', 10, 18);
         return;
       }
+      if (setPanelEmpty(root, false)) { draw(slice); return; }    // data arrived → restore, re-fit once
 
       const plotW = w - GUT_AXIS, plotH = h - ROW_TIME;
       const nRows = Math.round((range.max - range.min) / tick) + 1;
@@ -1575,11 +1615,13 @@
       const mark = slice.mark;
       const tick = slice.tickSize || 1;
       if (!est || !Number.isFinite(mark)) {
+        if (setPanelEmpty(root, true)) { draw(slice); return; }   // compact box → re-fit once
         font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
         ctx.fillText('waiting for model inputs (bybit mark + session volume profile)…', 10, 30);
         drawBadge(ctx, w, p);
         return;
       }
+      if (setPanelEmpty(root, false)) { draw(slice); return; }    // data arrived → restore, re-fit once
 
       // Y window (see view header note). Default 'pct6' = mark ± 6% — a FIXED
       // window around the one real anchor (mark), NEVER derived from the band
@@ -1720,6 +1762,7 @@
     function render(slice) {
       if (!list) return;
       const evs = (slice.events || []).slice().reverse().slice(0, MAX_ROWS);
+      setPanelEmpty(root, !evs.length);   // presentation-only compact toggle (panel keeps its column flex-fill)
       if (!evs.length) {
         list.innerHTML = '<div class="chart-na">no heuristic flags this session — flags mark book patterns '
           + '<i>consistent with</i> spoofing/icebergs, never proof (intent is unobservable from public L2).</div>';
@@ -2177,10 +2220,12 @@
       const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
 
       if (!sessions || !sessions.length) {
+        if (setPanelEmpty(root, true)) { draw(); return; }   // compact box → re-fit once
         font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
         ctx.fillText('awaiting 30m kline history (bybit REST)…', 10, 18);
         return;
       }
+      if (setPanelEmpty(root, false)) { draw(); return; }    // data arrived → restore, re-fit once
       let s = null;
       for (const cand of sessions) if (cand.date === selDate) { s = cand; break; }
       if (!s) s = sessions[0];
@@ -2320,11 +2365,13 @@
 
       const vp = slice.vp;
       if (!vp || !vp.levels || !vp.levels.length) {
+        if (setPanelEmpty(root, true)) { render(slice); return; }   // compact box → re-fit once
         font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
         ctx.fillText('awaiting kline history for the composite profile…', 10, 30);
         drawWarnBadge(ctx, w, 'bar-range approximation');
         return;
       }
+      if (setPanelEmpty(root, false)) { render(slice); return; }    // data arrived → restore, re-fit once
       const levels = vp.levels;   // price-ASCENDING (buildKlineVp contract)
       const lo = levels[0].price, hi = levels[levels.length - 1].price;
       const span = Math.max(hi - lo, 1e-9);
@@ -2650,11 +2697,13 @@
         pts.push(r);
       }
       if (!pts.length) {
+        if (setPanelEmpty(root, true)) { draw(slice); return; }   // compact box → re-fit once
         font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
         ctx.fillText('awaiting bybit tickers (REST, 30s poll — one call carries the whole linear universe)…', 10, 18);
         hits = [];
         return;
       }
+      if (setPanelEmpty(root, false)) { draw(slice); return; }    // data arrived → restore, re-fit once
 
       // Axis ranges: data-driven, FORCED to include 0 on both axes — the
       // 0/0 quadrant cross IS the read (up-and-above-VWAP vs the rest) —
@@ -2834,6 +2883,7 @@
       for (const v of [0, 30, 50, 70, 100]) ctx.fillText(String(v), X(v), h - PAD.b / 2);
 
       if (!items.length) {
+        if (setPanelEmpty(root, true)) { draw(slice); return; }   // compact box → re-fit once
         font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
         ctx.fillText(slice.total
           ? 'loading 1h klines… (' + slice.loaded + '/' + slice.total + ' — partial state shown as it arrives)'
@@ -2841,6 +2891,7 @@
         hits = [];
         return;
       }
+      if (setPanelEmpty(root, false)) { draw(slice); return; }    // data arrived → restore, re-fit once
 
       let tMax = 0;
       for (const it of items) if (Number.isFinite(it.turnover24h) && it.turnover24h > tMax) tMax = it.turnover24h;
@@ -3281,10 +3332,12 @@
       const chain = slice.chain;
       const p = pal();
       if (!chain || !Array.isArray(chain.rows) || !chain.rows.length) {
+        if (setPanelEmpty(root, true)) { redraw(); return; }   // compact boxes → re-fit once
         statsEl.innerHTML = '<div class="chart-na">awaiting Deribit chain (REST, 60s poll — mark-only book summary)…</div>';
         for (const k in cv) blank(cv[k], 'awaiting chain…', p);
         return;
       }
+      if (setPanelEmpty(root, false)) { redraw(); return; }    // data arrived → restore, re-fit once
       const nowTs = Number.isFinite(slice.nowTs) ? slice.nowTs : NaN;
       const exps = groupChain(chain, Number.isFinite(nowTs) ? nowTs : 0);
       syncSelect(exps);
@@ -3396,6 +3449,7 @@
         ? 'downloading leaderboard (~33 MB)…'
         : (slice.note || '');
       const entries = slice.entries || [];
+      setPanelEmpty(root, !entries.length);   // presentation-only compact toggle (controls stay usable)
       if (!entries.length) {
         list.innerHTML = '<div class="chart-na">no addresses watched — add a 0x… address or use the discover button '
           + '(it states its 33 MB cost up front).</div>';
@@ -3619,6 +3673,7 @@
     function render(slice) {
       if (!rowsEl) return;
       const conf = slice.conf;
+      setPanelEmpty(root, !conf);   // presentation-only compact toggle
       if (!conf) {
         rowsEl.innerHTML = '<div class="chart-na">accruing live reads — the board evaluates every 5s of event time.</div>';
         tallyEl.textContent = '';
@@ -3795,6 +3850,7 @@
           + (st && st.excluded ? ' (' + st.excluded + ' logged row(s) excluded: riskUsd ≤ 0)' : '') + '</span>';
       }
       const trades = (slice.trades || []).slice().sort((a, b) => (b.tsClose || 0) - (a.tsClose || 0));
+      setPanelEmpty(root, !trades.length);   // presentation-only compact toggle (the log form stays usable)
       if (!trades.length) {
         listEl.innerHTML = '<div class="chart-na">no journaled trades — this panel records YOUR trades only (manual log; nothing is imported from the feeds).</div>';
       } else {
@@ -3865,6 +3921,7 @@
       const cal = slice.cal || { daily: {}, weekly: {}, monthly: {}, hourly: {} };
       const p = pal();
       const dayKeys = Object.keys(cal.daily);
+      setPanelEmpty(root, !dayKeys.length);   // presentation-only compact toggle
       if (!dayKeys.length) {
         gridEl.innerHTML = '<div class="chart-na">no journaled R yet — the calendar fills in as you log closed trades.</div>';
         barsEl.innerHTML = '';
@@ -3953,6 +4010,7 @@
     function render(slice) {
       if (!listEl) return;
       const evs = slice.events;
+      setPanelEmpty(root, !evs || !evs.length);   // presentation-only compact toggle
       if (!evs) {
         listEl.innerHTML = '<div class="chart-na">awaiting Polymarket events (60s poll; route /events?tag_slug=bitcoin — the only server-side filter that works, §4e).</div>';
         return;
@@ -4003,6 +4061,7 @@
     function render(slice) {
       if (!listEl) return;
       const items = slice.items;
+      setPanelEmpty(root, !items || !items.length);   // presentation-only compact toggle
       if (!items) {
         listEl.innerHTML = '<div class="chart-na">awaiting Tree of Alpha headlines (30s poll).</div>';
         return;
@@ -4053,6 +4112,7 @@
     function render(slice) {
       if (!listEl) return;
       const d = slice.data;
+      setPanelEmpty(root, !d);   // presentation-only compact toggle
       if (!d) {
         // §4e honest-absence note: the browser CANNOT fetch faireconomy
         // directly (no CORS header) — the local mirror is the design, and
@@ -4219,10 +4279,12 @@
       const prof = slice.profile;
       renderLegend(p, slice.bucketLabels);
       if (!prof || !prof.levels || !prof.levels.length) {
+        if (setPanelEmpty(root, true)) { draw(slice); return; }   // compact box → re-fit once
         font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
         ctx.fillText(slice.note || 'no profile loaded', 10, 18);
         return;
       }
+      if (setPanelEmpty(root, false)) { draw(slice); return; }    // data arrived → restore, re-fit once
       const levels = prof.levels;   // ascending lvl (endpoint + client agg both sort)
       const tick = slice.tick || 10;
       const lo = levels[0].lvl, hi = levels[levels.length - 1].lvl;
@@ -4416,6 +4478,7 @@
     function render(slice) {
       if (!list) return;
       const days = slice.days;
+      setPanelEmpty(root, !days || !days.length);   // presentation-only compact toggle
       if (!days) {
         list.innerHTML = '<div class="chart-na">' + esc(slice.note || 'awaiting /v1/levels…') + '</div>';
         return;
