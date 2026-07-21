@@ -40,7 +40,7 @@ if str(_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
-from btcquant import backtest, data, report, strategies, tracking  # noqa: E402
+from btcquant import backtest, data, report, risk, strategies, tracking  # noqa: E402
 
 # Strategies this CLI can build (short_vol is a documented data-less stub and is
 # intentionally excluded — it raises NotImplementedError by design).
@@ -278,6 +278,16 @@ def _print_stats_table(strat_name: str, strat_stats: dict, bh_stats: dict) -> No
     # M6 C1: at N=1 the DSR is *identically* the PSR (sr0 = 0) — label it honestly.
     strat_is_psr = bool(strat_stats.get("dsr_is_psr"))
     dsr_label = "PSR (single trial — no deflation)" if strat_is_psr else "Deflated Sharpe *"
+    # EVT tail rows (frontier #2): the label carries the strategy column's fitted GPD
+    # shape xi so the tail-index is visible in the table itself; NaN-safe (xi=n/a when
+    # the fit was thin/degenerate, and _fmt renders the NaN VaR/ES cells as n/a).
+    evt_xi = strat_stats.get("evt_xi", float("nan"))
+    try:
+        evt_xi = float(evt_xi)
+    except (TypeError, ValueError):
+        evt_xi = float("nan")
+    evt_label = f"EVT VaR 99% (POT-GPD, xi={evt_xi:.2f})" if not math.isnan(evt_xi) \
+        else "EVT VaR 99% (POT-GPD, xi=n/a)"
     rows = [
         ("CAGR", "cagr", True, 2),
         ("Sharpe (net, ann.)", "sharpe", False, 3),
@@ -290,13 +300,15 @@ def _print_stats_table(strat_name: str, strat_stats: dict, bh_stats: dict) -> No
         ("Hit rate", "hit_rate", True, 1),
         ("VaR 5%", "var_5pct", True, 2),
         ("CVaR 5%", "cvar_5pct", True, 2),
+        (evt_label, "evt_var", True, 2),
+        ("EVT ES 99%", "evt_cvar", True, 2),
         ("Skew", "skew", False, 3),
         ("Kurtosis", "kurtosis", False, 3),
         ("Trades", "trades", False, 0),
         ("Terminal equity (x)", "terminal_equity", False, 2),
     ]
 
-    label_w = max(22, len(dsr_label) + 2)
+    label_w = max(22, len(dsr_label) + 2, len(evt_label) + 2)
     col_w = 16
     header = f"{'metric':<{label_w}}{strat_name:>{col_w}}{'buy_and_hold':>{col_w}}"
     print("=" * len(header))
@@ -331,6 +343,14 @@ def _print_stats_table(strat_name: str, strat_stats: dict, bh_stats: dict) -> No
         # M6 C2: the 1/n null variance stood in for the (unavailable) trial SRs.
         print("  ⚠ null-variance fallback — deflation may be under- or over-stated "
               "(trial SRs not supplied; V = 1/n_periods null).")
+    if not math.isnan(evt_xi):
+        print("  EVT rows: GPD fit (PWM, Hosking-Wallis 1987) to losses beyond the "
+              f"{float(strat_stats.get('evt_threshold_q', 0.95)):.0%} loss quantile "
+              f"(POT, McNeil-Frey-Embrechts 2005 ch.7); n_exceed="
+              f"{strat_stats.get('evt_n_exceed', 'n/a')}. xi > 0 = heavier than "
+              "exponential; a risk MEASUREMENT, not an edge claim.")
+    elif "evt_var" in strat_stats:
+        print(f"  EVT rows n/a: {strat_stats.get('evt_note') or 'tail fit unavailable'}.")
     print(f"  Costs ON: {cost:.1f} bps fee + {slip:.1f} bps slippage per unit turnover (one-way).")
     print("  NOT FINANCIAL ADVICE - backtest != forecast.")
 
@@ -380,6 +400,14 @@ def main(argv: list[str] | None = None) -> int:
         periods_per_year=ppy,
         n_trials=1,
     )
+
+    # EVT POT-GPD tail (frontier #2): fit the 99% tail VaR/ES on the NET returns of
+    # both columns and inject as stats.evt_* — the table rows read them and
+    # report.to_dashboard_json passes them straight through to the dashboard JSON.
+    # Single formula source: risk.evt_pot_tail (mirrored + parity-pinned in quant.js).
+    for _res in (result, bh_result):
+        _evt = risk.evt_pot_tail(_res["returns"])
+        _res["stats"].update({f"evt_{_k}": _v for _k, _v in _evt.items()})
 
     start = prices.index[0]
     end = prices.index[-1]

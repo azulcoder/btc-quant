@@ -29,7 +29,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from . import features
+from . import features, risk
 
 __all__ = ["tearsheet", "to_dashboard_json", "export_json"]
 
@@ -247,6 +247,14 @@ def to_dashboard_json(
     gross = pd.Series(result.get("gross_returns", returns), dtype="float64")
     turnover = pd.Series(result.get("turnover", pd.Series(dtype="float64")), dtype="float64")
     stats = dict(result.get("stats", {}))
+
+    # EVT POT-GPD tail (frontier #2): guarantee every exported payload carries the
+    # stats.evt_* fields (xi/beta/u/var/cvar/...) even when the caller didn't inject
+    # them — computed here from the same net returns, via the ONE formula source
+    # (risk.evt_pot_tail; mirrored + parity-pinned in dashboard/quant.js). Callers
+    # that already stamped evt_* (scripts/run_backtest.py) are passed through as-is.
+    if "evt_var" not in stats:
+        stats.update({f"evt_{k}": v for k, v in risk.evt_pot_tail(returns).items()})
 
     # JSON-sanitize the stats dict (NaN/inf -> null; numpy scalars -> python).
     # Booleans pass through as JSON booleans (M6 C1: ``dsr_is_psr`` tells the

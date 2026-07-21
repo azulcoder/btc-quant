@@ -60,6 +60,7 @@ __all__ = [
     "hit_rate",
     "var",
     "cvar",
+    "evt_pot_tail",
     "kelly_fraction",
     "kelly",
     "probabilistic_sharpe_ratio",
@@ -232,6 +233,168 @@ def cvar(returns: pd.Series, alpha: float = 0.05) -> float:
     if len(tail) == 0:
         return float(v)
     return float(tail.mean())
+
+
+# Minimum number of exceedances to attempt a GPD fit. Below ~30 the PWM shape
+# estimator's sampling error dominates (its sd at n_u=30 is ~0.2 for realistic
+# xi — wider than the whole "thin vs fat tail" question), so reporting a fitted
+# xi would be noise dressed as measurement. Honest answer: NaN + the count.
+_POT_MIN_EXCEEDANCES = 30
+
+
+def _gpd_pwm(excesses) -> tuple:
+    """Closed-form GPD(xi, beta) fit by probability-weighted moments — Hosking &
+    Wallis (1987). Deterministic and JS-mirrorable (no optimizer).
+
+    PWM convention (documented because it is the exact contract the JS mirror
+    keeps): with the excesses sorted **ascending** ``y_(0) <= ... <= y_(m-1)``,
+
+        b0 = mean(y)                                  (= alpha_0 = E[Y])
+        b1 = (1/m) * sum_i ((m-1-i)/(m-1)) * y_(i)    (= alpha_1 = E[Y*(1-F(Y))])
+
+    i.e. ``b1`` is the *unbiased plotting-position estimator of the (1-F)-weighted
+    PWM* — the largest excess gets weight 0, the smallest weight 1. (The mirrored
+    F-weighted variant ``i/(m-1)`` makes ``b0 - 2*b1`` negative for every sample,
+    so the closed forms below would be degenerate always; the (1-F) weighting is
+    the one Hosking-Wallis eq. for the GPD actually uses.) Then::
+
+        xi   = 2 - b0 / (b0 - 2*b1)
+        beta = 2 * b0 * b1 / (b0 - 2*b1)
+
+    (Hosking & Wallis 1987 state these with k = -xi.) Verified numerically: on
+    GPD(0.3, 0.02) samples this recovers both parameters and agrees with the
+    scipy ``genpareto`` MLE (see tests). Guard: ``b0 - 2*b1 <= 0`` (degenerate,
+    cannot happen for a genuine GPD sample with xi < 1 in expectation) -> NaNs.
+
+    Reference: Hosking & Wallis (1987), "Parameter and Quantile Estimation for
+    the Generalized Pareto Distribution", *Technometrics* 29(3):339-349.
+    """
+    y = np.sort(np.asarray(excesses, dtype="float64"))
+    m = int(y.size)
+    if m < 2:
+        return float("nan"), float("nan")
+    b0 = float(y.mean())
+    w = (m - 1.0 - np.arange(m)) / (m - 1.0)     # (1-F) plotting positions, ascending y
+    b1 = float(np.sum(w * y) / m)
+    d = b0 - 2.0 * b1
+    if not math.isfinite(d) or d <= 0:
+        return float("nan"), float("nan")
+    return float(2.0 - b0 / d), float(2.0 * b0 * b1 / d)
+
+
+def _gpd_pot_var(xi: float, beta: float, u: float, fu: float, alpha: float) -> float:
+    """POT tail quantile (in LOSS units) — McNeil, Frey & Embrechts (2005) eq. 7.18::
+
+        VaR_alpha = u + (beta/xi) * ( ((1-alpha)/Fu)^(-xi) - 1 )     (xi != 0)
+
+    with the xi -> 0 (exponential-tail) limit ``u + beta * ln(Fu/(1-alpha))``
+    taken analytically for ``|xi| < 1e-9`` (the two branches agree to ~1e-10
+    at the switch point — continuity is asserted in tests)."""
+    if abs(xi) < 1e-9:
+        return u + beta * math.log(fu / (1.0 - alpha))
+    return u + (beta / xi) * (((1.0 - alpha) / fu) ** (-xi) - 1.0)
+
+
+def evt_pot_tail(returns: pd.Series, threshold_q: float = 0.95, alpha: float = 0.99) -> dict:
+    """EVT Peaks-Over-Threshold tail VaR/ES — GPD fit to threshold exceedances.
+
+    RISK MEASUREMENT, not an edge claim: the empirical ``var``/``cvar`` read the
+    handful of worst observed bars; this fits a Generalized Pareto Distribution to
+    *all* losses beyond a high threshold and extrapolates the tail the sample has
+    barely seen. The Pickands-Balkema-de Haan theorem is the licence: for a wide
+    class of distributions the conditional excess distribution over a high
+    threshold converges to a GPD, so the fit is theory-grounded rather than a
+    curve choice. On fat-tailed BTC returns the EVT 99% VaR/ES typically sit
+    beyond the empirical quantile — that gap is the honest headline.
+
+    Method (deterministic, closed-form, mirrored in ``dashboard/quant.js``):
+
+    1. Work on LOSSES ``x = -returns`` (non-finite dropped). Threshold ``u`` =
+       the ``threshold_q`` empirical quantile of the losses (linear-interpolation
+       quantile, numpy default — the JS mirror implements the same rule).
+    2. Exceedances ``y_i = x_i - u`` for ``x_i > u`` (strict); ``n_u`` of them.
+       Fewer than 30 -> all-NaN result with ``n_exceed`` reported (see
+       ``_POT_MIN_EXCEEDANCES`` for the floor rationale).
+    3. Fit GPD(xi, beta) to ``y`` by probability-weighted moments
+       (:func:`_gpd_pwm`, Hosking-Wallis 1987 — the exact weight convention is
+       documented there and kept identical in JS).
+    4. Tail quantities with ``Fu = n_u / n`` (McNeil-Frey-Embrechts 2005, §7.2)::
+
+           VaR_a = u + (beta/xi) * ( ((1-a)/Fu)^(-xi) - 1 )    (xi->0 limit branch)
+           ES_a  = (VaR_a + beta - xi*u) / (1 - xi)            (xi < 1; else NaN,
+                                                                mean is infinite)
+
+    Sign convention: ``var`` / ``cvar`` are returned as **signed returns**
+    (negative = loss), the same orientation as :func:`var` / :func:`cvar`, so
+    ``evt_pot_tail(r, alpha=0.99)['var']`` is directly comparable to
+    ``var(r, alpha=0.01)``. Internally ``u``/``beta`` are in positive LOSS units
+    (``u = 0.03`` means the threshold is a -3% bar) and are reported as such.
+
+    Parameters
+    ----------
+    returns : pd.Series
+        Per-period simple returns (per-period, NOT annualized).
+    threshold_q : float, default 0.95
+        Loss quantile used as the POT threshold ``u`` (0.95 = fit the worst 5%).
+    alpha : float, default 0.99
+        Tail confidence for VaR/ES. Must satisfy ``1 - alpha <= Fu`` (the GPD
+        only models the region beyond ``u``; asking for a quantile *inside* the
+        empirical body would silently extrapolate backwards -> NaN + note).
+
+    Returns
+    -------
+    dict
+        ``{xi, beta, u, n_exceed, n, var, cvar, threshold_q, alpha,
+        method: 'pot-gpd-pwm', note}`` — NaNs (with ``note``) on any degenerate
+        branch; ``cvar`` NaN with finite ``var`` when ``xi >= 1`` (ES infinite).
+
+    References
+    ----------
+    McNeil, Frey & Embrechts (2005), *Quantitative Risk Management*, ch. 7.
+    Balkema & de Haan (1974); Pickands (1975) — the GPD limit theorem.
+    Hosking & Wallis (1987), *Technometrics* 29(3):339-349 — PWM estimation.
+    """
+    r = pd.Series(returns, dtype="float64").to_numpy()
+    x = -r[np.isfinite(r)]                       # LOSSES: positive = a losing period
+    n = int(x.size)
+    out = {
+        "xi": float("nan"), "beta": float("nan"), "u": float("nan"),
+        "n_exceed": 0, "n": n, "var": float("nan"), "cvar": float("nan"),
+        "threshold_q": float(threshold_q), "alpha": float(alpha),
+        "method": "pot-gpd-pwm", "note": "",
+    }
+    if n == 0:
+        out["note"] = "empty input"
+        return out
+    u = float(np.quantile(x, threshold_q))
+    y = x[x > u] - u
+    n_u = int(y.size)
+    out["n_exceed"] = n_u
+    if n_u < _POT_MIN_EXCEEDANCES:
+        out["note"] = (f"only {n_u} exceedances above the threshold_q={threshold_q:g} "
+                       f"loss quantile (< {_POT_MIN_EXCEEDANCES}) — too few to fit a tail")
+        return out
+    out["u"] = u
+    fu = n_u / n
+    if (1.0 - alpha) > fu:
+        # The GPD models the tail BEYOND u only; alpha inside the empirical body
+        # would extrapolate the fit backwards into data it never saw.
+        out["note"] = (f"alpha={alpha:g} lies inside the empirical body "
+                       f"(1-alpha > Fu={fu:g}) — POT is only valid beyond u")
+        return out
+    xi, beta = _gpd_pwm(y)
+    if not (math.isfinite(xi) and math.isfinite(beta) and beta > 0):
+        out["note"] = "degenerate PWM fit (b0 - 2*b1 <= 0)"
+        return out
+    out["xi"], out["beta"] = xi, beta
+    var_loss = _gpd_pot_var(xi, beta, u, fu, alpha)
+    out["var"] = -var_loss                       # signed-return orientation (see docstring)
+    if xi >= 1.0:
+        # GPD mean is infinite for xi >= 1 -> ES diverges. NaN, never a fake number.
+        out["note"] = "xi >= 1: GPD mean infinite — ES undefined (VaR still reported)"
+        return out
+    out["cvar"] = -((var_loss + beta - xi * u) / (1.0 - xi))
+    return out
 
 
 # --------------------------------------------------------------------------- #

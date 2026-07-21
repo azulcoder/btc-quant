@@ -69,7 +69,10 @@ def test_parity_harness_covers_unsaturated_and_walkforward_probes():
                  # Hierarchical-Bayes shrinkage probes (frontier #3) — mu/tau scalars,
                  # the ELEMENTWISE shrunk/B/p vectors, and the correlation-aware tau.
                  "hb_mu", "hb_tau", "hb_shrunk", "hb_shrinkFactor", "hb_pSkill",
-                 "hb_neffTau"):
+                 "hb_neffTau",
+                 # EVT POT-GPD tail probes (frontier #2) — the PWM fit (xi/beta), the
+                 # threshold u, and the 99% tail VaR/ES on the fixed LCG series.
+                 "evt_xi", "evt_beta", "evt_u", "evt_var", "evt_cvar"):
         assert name in py_src, f"{name} probe missing from check_parity.py"
         assert name in js_src, f"{name} probe missing from _parity_eval.cjs"
     # the anchor constants themselves (a joint drift must fail the pins, not parity)
@@ -91,6 +94,11 @@ def test_parity_harness_covers_unsaturated_and_walkforward_probes():
     assert "0.042615507958796955" in py_src
     assert "0.025259219485448958" in py_src
     assert "0.04758979651558059" in py_src
+    # EVT POT-GPD anchors (frontier #2) — the PWM shape xi and the 99% tail VaR on the
+    # fixed LCG fat-tailed series; pre-registered so a joint Python↔JS drift (e.g. both
+    # sides flipping the PWM weight convention) fails the pins, not parity.
+    assert "0.2483976106087591" in py_src
+    assert "-0.0876387597442414" in py_src
 
 
 def test_parity_options_fields_present_and_agree():

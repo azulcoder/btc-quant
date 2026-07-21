@@ -22,13 +22,14 @@ What is asserted
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 import pandas as pd
 import pytest
 from scipy import stats
 
-from btcquant import backtest, data, features, risk, strategies
+from btcquant import backtest, data, features, report, risk, strategies
 
 
 # --------------------------------------------------------------------------- #
@@ -1609,6 +1610,174 @@ def test_tier_b_candidates_unit_band_and_causal():
     a = np.nan_to_num(full.iloc[60:k - 1].to_numpy(), nan=-9.0)
     b = np.nan_to_num(pref.iloc[60:k - 1].to_numpy(), nan=-9.0)
     assert np.allclose(a, b)
+
+
+# --------------------------------------------------------------------------- #
+# EVT POT-GPD tail risk (frontier #2 — McNeil-Frey-Embrechts ch.7;             #
+# Pickands-Balkema-de Haan; Hosking-Wallis 1987 PWM)                           #
+# --------------------------------------------------------------------------- #
+_BTC_DAILY_CSV = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "coinbase_BTC-USD_1d.csv",
+)
+
+
+def _gpd_sample(xi_true: float, beta_true: float, n: int, seed: int) -> np.ndarray:
+    """Exact GPD draws via the inverse CDF: y = beta/xi * ((1-U)^(-xi) - 1)."""
+    u = np.random.default_rng(seed).uniform(size=n)
+    return beta_true / xi_true * ((1.0 - u) ** (-xi_true) - 1.0)
+
+
+def test_evt_pwm_recovers_synthetic_gpd_parameters():
+    """(a) PWM parameter recovery. Losses are u0 + GPD(xi=0.3, beta=0.02) draws
+    (n=5000, inverse-CDF from a seeded uniform); with threshold_q=0.05 the fitted
+    threshold u_hat sits just above u0, and by GPD threshold-stability the excesses
+    over u_hat are exactly GPD(xi, beta + xi*(u_hat - u0)). PWM must recover xi
+    within +/-0.08 and beta within 20% (both of beta_true and of the
+    stability-adjusted target — the tighter, first-principles-correct one)."""
+    y = _gpd_sample(0.3, 0.02, 5000, seed=314)
+    returns = pd.Series(-(0.05 + y))                     # all-loss series, u0 = 0.05
+    evt = risk.evt_pot_tail(returns, threshold_q=0.05, alpha=0.99)
+    assert evt["n_exceed"] == 4750                       # 95% of the sample exceeds u
+    assert abs(evt["xi"] - 0.3) <= 0.08
+    beta_target = 0.02 + 0.3 * (evt["u"] - 0.05)         # threshold-stability shift
+    assert abs(evt["beta"] / 0.02 - 1.0) <= 0.20
+    assert abs(evt["beta"] / beta_target - 1.0) <= 0.10
+    assert evt["method"] == "pot-gpd-pwm"
+
+
+def test_evt_pwm_agrees_with_scipy_mle():
+    """(b) Independent-estimator cross-check: the closed-form PWM fit and the scipy
+    ``genpareto`` MLE (floc=0) must agree on xi within a loose 0.1 at n=2000 —
+    validating the PWM without making scipy part of the production formula."""
+    y = _gpd_sample(0.3, 0.02, 2000, seed=271)
+    xi_pwm, beta_pwm = risk._gpd_pwm(y)
+    xi_mle, _loc, beta_mle = stats.genpareto.fit(y, floc=0)
+    assert abs(xi_pwm - xi_mle) < 0.1
+    assert abs(beta_pwm / beta_mle - 1.0) < 0.2
+
+
+def test_evt_var_es_hand_pinned_uniform_tail():
+    """(c) Fully hand-derived pin. Series: 760 bars at return -0.02 and 40 tail bars
+    at -(0.021 + 0.001*i), i=0..39 (n=800). With threshold_q=0.9 the loss-quantile
+    index h=(n-1)*0.9=719.1 falls inside the tied 0.02 block, so u = 0.02 EXACTLY and
+    the excesses are the arithmetic set y_(i) = 0.001*(i+1), i=0..39. By hand:
+
+        b0 = mean(y) = 0.001*(41/2)            = 0.0205
+        b1 = (1/40)*sum((39-i)/39 * y_(i))
+           = 0.001/1560 * sum_{j=1..40}(40-j)j = 0.001*10660/1560 = 0.001*41/6
+        d  = b0 - 2*b1 = 0.001*(41/2 - 41/3)   = 0.001*41/6
+        xi = 2 - b0/d  = 2 - (41/2)/(41/6)     = 2 - 3 = -1     (uniform tail == GPD
+        beta = 2*b0*b1/d = 2*b0 = 0.041                          with xi = -1)
+
+    Tail quantities with Fu = 40/800 = 0.05, alpha = 0.99, (1-alpha)/Fu = 0.2:
+
+        VaR = u + (beta/xi)*((0.2)^(-xi) - 1) = 0.02 - 0.041*(0.2 - 1) = 0.0528
+        ES  = (VaR + beta - xi*u)/(1 - xi) = (0.0528 + 0.041 + 0.02)/2 = 0.0569
+
+    returned in the signed-return orientation: var = -0.0528, cvar = -0.0569."""
+    returns = pd.Series([-0.02] * 760 + [-(0.021 + 0.001 * i) for i in range(40)])
+    evt = risk.evt_pot_tail(returns, threshold_q=0.9, alpha=0.99)
+    assert evt["n_exceed"] == 40 and evt["n"] == 800
+    assert evt["u"] == pytest.approx(0.02, abs=1e-15)
+    assert evt["xi"] == pytest.approx(-1.0, abs=1e-12)
+    assert evt["beta"] == pytest.approx(0.041, abs=1e-12)
+    assert evt["var"] == pytest.approx(-0.0528, abs=1e-12)
+    assert evt["cvar"] == pytest.approx(-0.0569, abs=1e-12)
+
+
+def test_evt_es_dominates_var_on_fat_tail():
+    """(d) Coherence: whenever both are finite the ES sits at or below the VaR in the
+    signed-return orientation (the mean of the tail beyond a quantile is worse than
+    the quantile). Student-t(3) returns — a genuinely fat tail (xi_true = 1/3)."""
+    rng = np.random.default_rng(99)
+    returns = pd.Series(0.02 * rng.standard_t(3, size=3000))
+    evt = risk.evt_pot_tail(returns)
+    assert math.isfinite(evt["var"]) and math.isfinite(evt["cvar"])
+    assert evt["cvar"] <= evt["var"] < 0
+    assert evt["xi"] > 0.0                       # t(3) tail reads as heavy
+
+
+def test_evt_too_few_exceedances_is_honest_nan():
+    """(e) n=400 at threshold_q=0.95 leaves only 20 exceedances (< the 30 floor):
+    the result must be all-NaN with the exceedance count reported — a refusal to
+    dress sampling noise up as a tail measurement."""
+    rng = np.random.default_rng(5)
+    returns = pd.Series(rng.normal(0.0, 0.02, 400))
+    evt = risk.evt_pot_tail(returns)
+    assert evt["n_exceed"] == 20 and evt["n"] == 400
+    for key in ("xi", "beta", "u", "var", "cvar"):
+        assert math.isnan(evt[key]), f"{key} should be NaN with 20 exceedances"
+    assert "too few" in evt["note"]
+
+
+def test_evt_exponential_tail_xi_near_zero_and_limit_branch():
+    """(f) Exponential exceedances (the xi = 0 boundary case, by memorylessness exact
+    at ANY threshold): the fitted xi must sit near 0. The xi->0 limit branch of the
+    tail quantile is pinned by hand — VaR = u + beta*ln(Fu/(1-alpha)) — and must be
+    continuous with the power branch at the 1e-9 switch point."""
+    rng = np.random.default_rng(17)
+    returns = pd.Series(-(0.03 + rng.exponential(0.02, size=5000)))
+    evt = risk.evt_pot_tail(returns, threshold_q=0.05, alpha=0.99)
+    assert abs(evt["xi"]) < 0.08                          # exponential tail -> xi ~ 0
+    # Hand pin of the limit branch: u=0.03, beta=0.02, Fu=0.05, alpha=0.99 ->
+    # VaR = 0.03 + 0.02*ln(0.05/0.01) = 0.03 + 0.02*ln(5) = 0.062188758248682.
+    lim = risk._gpd_pot_var(0.0, 0.02, 0.03, 0.05, 0.99)
+    assert lim == pytest.approx(0.03 + 0.02 * math.log(5.0), abs=1e-15)
+    # Continuity across the branch switch: |xi| = 1e-10 (limit branch) and
+    # xi = 1e-8 (power branch) must agree with the analytic limit.
+    assert risk._gpd_pot_var(1e-10, 0.02, 0.03, 0.05, 0.99) == pytest.approx(lim, abs=1e-12)
+    assert risk._gpd_pot_var(1e-8, 0.02, 0.03, 0.05, 0.99) == pytest.approx(lim, abs=1e-8)
+
+
+def test_evt_sign_convention_matches_historical_var():
+    """(g) Orientation contract: evt_pot_tail(alpha=0.99)['var'/'cvar'] carry the SAME
+    signed-return orientation as risk.var/risk.cvar at alpha=0.01, and on Gaussian
+    data (where the empirical quantile is reliable) the magnitudes agree closely."""
+    rng = np.random.default_rng(23)
+    returns = pd.Series(rng.normal(0.0, 0.02, 4000))
+    evt = risk.evt_pot_tail(returns, threshold_q=0.95, alpha=0.99)
+    hist_var = risk.var(returns, alpha=0.01)
+    hist_cvar = risk.cvar(returns, alpha=0.01)
+    assert evt["var"] < 0 and hist_var < 0                # same (negative) orientation
+    assert evt["cvar"] < 0 and hist_cvar < 0
+    assert 0.8 < evt["var"] / hist_var < 1.25             # comparable magnitude
+    assert 0.8 < evt["cvar"] / hist_cvar < 1.25
+    assert evt["xi"] < 0.3                                # Gaussian: no heavy tail
+
+
+@pytest.mark.skipif(not os.path.exists(_BTC_DAILY_CSV),
+                    reason="committed BTC daily CSV not present")
+def test_evt_real_btc_daily_fat_tail():
+    """(h) Real-data smoke on the committed (offline, no-network) BTC-USD daily CSV:
+    the loss tail must fit with a POSITIVE xi (BTC's documented fat tail — heavier
+    than exponential), a coherent ES >= VaR, and a magnitude in the same regime as
+    the historical 99% quantile (with n≈3100 the empirical VaR99 still has ~31 obs
+    behind it, so the two SHOULD roughly agree here; EVT earns its keep further out
+    in the tail where the empirical quantile runs out of data)."""
+    df = pd.read_csv(_BTC_DAILY_CSV, index_col=0, parse_dates=True)
+    returns = df["close"].pct_change().dropna()
+    evt = risk.evt_pot_tail(returns)
+    assert evt["n_exceed"] >= 100                         # plenty of tail to fit
+    assert math.isfinite(evt["xi"]) and 0.0 < evt["xi"] < 1.0
+    assert evt["cvar"] <= evt["var"] < 0
+    hist_var = risk.var(returns, alpha=0.01)
+    assert 0.5 < evt["var"] / hist_var < 2.0              # same regime as empirical
+
+
+def test_evt_fields_flow_to_dashboard_json(tmp_path):
+    """(i) Wiring: report.to_dashboard_json must stamp stats.evt_* (via the ONE
+    formula source risk.evt_pot_tail) when the caller didn't inject them, and the
+    exported values equal a direct call on the same net returns."""
+    prices = _make_prices(n=900, seed=3)
+    res = backtest.run(strategies.buy_and_hold(pd.DataFrame({"close": prices})), prices)
+    payload = report.to_dashboard_json(res, str(tmp_path / "evt.json"), prices=prices)
+    st = payload["stats"]
+    direct = risk.evt_pot_tail(res["returns"])
+    assert st["evt_method"] == "pot-gpd-pwm"
+    for key in ("xi", "beta", "u", "var", "cvar"):
+        assert st[f"evt_{key}"] == pytest.approx(direct[key], abs=1e-12)
+    assert isinstance(st["evt_n_exceed"], int) and st["evt_n_exceed"] == direct["n_exceed"]
 
 
 def test_run_funding_books_funding_accrual_not_spot_price():

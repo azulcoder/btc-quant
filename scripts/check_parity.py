@@ -80,6 +80,9 @@ def build_fixture() -> dict:
         "hbSharpes": [0.10, 0.02, -0.03, 0.06],
         "hbVariances": [0.002, 0.004, 0.003, 0.005],
         "hbNeff": 2.5,
+        # EVT POT-GPD tail probe (frontier #2 — McNeil-Frey-Embrechts ch.7;
+        # Hosking-Wallis 1987 PWM): a FIXED fat-tailed series, see _evt_fixture.
+        **_evt_fixture(),
         # walk-forward fold-V probe (M6 C2/C3): folds-as-trials on the fixture series
         "folds": 5,
         # M4 CPCV probe: cpcv was ABSENT from the harness before M4. Pin the multi-path
@@ -136,6 +139,28 @@ def _neff_fixture() -> dict:
     return {"neffCols": [a.tolist(), a.tolist(), b.tolist(), c.tolist()]}
 
 
+def _evt_fixture() -> dict:
+    """EVT POT-GPD probe (frontier #2): a FIXED synthetic fat-tailed return series for
+    the ``risk.evt_pot_tail`` vs ``Quant.evtPotTail`` parity pin (xi, beta, u, var,
+    cvar). Built from a deterministic 32-bit LCG (Numerical Recipes constants) — no
+    numpy RNG, so the anchor constants in ``PINS`` cannot move with a generator
+    version. Magnitudes come from the GPD inverse-CDF with xi0=0.25, beta0=0.01 and
+    the sign alternates, so the LOSS tail above any threshold u is exactly
+    GPD(xi0, beta0 + xi0*u) (GPD threshold-stability) — the PWM fit lands at
+    xi ≈ 0.248 on this draw (n_u = 50; the ±0.2-ish sampling noise at that count is
+    exactly why evt_pot_tail refuses to fit below 30 exceedances). The series itself
+    is serialized into the fixture JSON, so both engines consume identical floats."""
+    xi0, beta0 = 0.25, 0.01
+    s = 2718281828                     # seed (chosen so the fitted xi sits near xi0)
+    out = []
+    for i in range(1000):
+        s = (1664525 * s + 1013904223) % 4294967296          # NR 32-bit LCG
+        u = (s + 0.5) / 4294967296.0                          # uniform in (0, 1)
+        mag = beta0 / xi0 * ((1.0 - u) ** (-xi0) - 1.0)       # GPD inverse-CDF
+        out.append(mag if i % 2 == 0 else -mag)
+    return {"evtReturns": out, "evtThresholdQ": 0.95, "evtAlpha": 0.99}
+
+
 def _pairs_fixture() -> dict:
     """M2 pairs two-leg-cost probe: a fixed synthetic (btc, eth) with a mean-reverting
     log-spread (so the z-score fades actually trade), for a Python-vs-JS parity pin on
@@ -181,6 +206,11 @@ def python_side(fx: dict) -> dict:
     vol = features.realized_vol(ret, fx["volWindow"], ppy)
 
     er = risk.expectancy_report(pos, close, vol, periods_per_year=ppy, k=fx["k"])
+
+    # EVT POT-GPD tail probe (frontier #2): the PWM fit + tail quantities on the fixed
+    # fat-tailed LCG series — risk.evt_pot_tail vs the Quant.evtPotTail mirror.
+    evt = risk.evt_pot_tail(pd.Series(fx["evtReturns"]),
+                            threshold_q=fx["evtThresholdQ"], alpha=fx["evtAlpha"])
     g = features.black76_greeks(fx["fwd"], fx["strike"], fx["iv"], fx["t"], "C", 0.0)
     run = backtest.run(pos, close, cost_bps=fx["costBps"], slippage_bps=fx["slipBps"],
                        periods_per_year=ppy, n_trials=fx["nTrials"],
@@ -285,6 +315,13 @@ def python_side(fx: dict) -> dict:
         # scalars; shrunk/B/p are compared ELEMENTWISE (each of the k=4 values must
         # agree). hb_neffTau pins the correlation-aware DL variant (df = hbNeff - 1).
         **_hb_fields(fx),
+        # EVT POT-GPD tail (frontier #2) — risk.evt_pot_tail vs Quant.evtPotTail on the
+        # fixed LCG fat-tailed series (var/cvar in the signed-return orientation).
+        "evt_xi": float(evt["xi"]),
+        "evt_beta": float(evt["beta"]),
+        "evt_u": float(evt["u"]),
+        "evt_var": float(evt["var"]),
+        "evt_cvar": float(evt["cvar"]),
         # Tharp eval layer
         "er_nTrades": int(er["n_trades"]),
         "er_expectancyR": float(er["expectancy_r"]),
@@ -353,6 +390,10 @@ TOL = {
     # JS normCdf ⟹ the documented 1e-7. Vector fields compare elementwise.
     "hb_mu": 1e-9, "hb_tau": 1e-9, "hb_shrunk": 1e-9, "hb_shrinkFactor": 1e-9,
     "hb_pSkill": 1e-7, "hb_neffTau": 1e-9,
+    # EVT POT-GPD tail (frontier #2): the sort + quantile interpolation + PWM sums are
+    # the same arithmetic on both sides; 1e-7 absorbs the numpy-pairwise vs JS-sequential
+    # summation difference in b0/b1 (observed |Δ| = 0 on the fixture).
+    "evt_xi": 1e-7, "evt_beta": 1e-7, "evt_u": 1e-7, "evt_var": 1e-7, "evt_cvar": 1e-7,
     "er_nTrades": 0, "er_expectancyR": 1e-12, "er_winRate": 1e-12,
     "er_payoffRatio": 1e-12, "er_sqn": 1e-12, "er_profitFactor": 1e-12,
     "b76_delta": 5e-7, "b76_gamma": 1e-9, "b76_vega": 1e-9,
@@ -397,6 +438,12 @@ PINS = {
     "hb_mu": (0.042615507958796955, 1e-9),
     "hb_tau": (0.025259219485448958, 1e-9),
     "hb_neffTau": (0.04758979651558059, 1e-9),
+    # EVT POT-GPD anchors (frontier #2) — the PWM shape and the 99% tail VaR on the
+    # fixed LCG series, pre-registered so a joint Python↔JS drift (e.g. both sides
+    # flipping the PWM weight convention) fails the pins, not parity. The fitted
+    # xi ≈ 0.248 sits near the generator's true xi0 = 0.25 (n_u = 50 draw).
+    "evt_xi": (0.2483976106087591, 1e-9),
+    "evt_var": (-0.0876387597442414, 1e-9),
 }
 
 
@@ -449,6 +496,12 @@ def main() -> int:
         if not math.isclose(_th, _b * py["hb_mu"] + (1.0 - _b) * _s,
                             rel_tol=1e-12, abs_tol=1e-12):
             pin_fails.append(f"hb shrinkage identity broken at i={_i}")
+    # EVT identity: ES must dominate VaR (both are signed returns, so the ES sits at or
+    # below the VaR: cvar <= var < 0 on this loss-tailed fixture) — coherence of the
+    # expected-shortfall (McNeil-Frey-Embrechts ch.6/7).
+    if not (py["evt_cvar"] <= py["evt_var"] < 0):
+        pin_fails.append(f"EVT ES does not dominate VaR: cvar={py['evt_cvar']!r} "
+                         f"var={py['evt_var']!r} (expected cvar <= var < 0)")
     if pin_fails:
         for f in pin_fails:
             print(f"PIN FAIL — {f}")

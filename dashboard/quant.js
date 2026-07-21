@@ -415,6 +415,79 @@
   }
 
   /**
+   * EVT Peaks-Over-Threshold tail VaR/ES — GPD fit by probability-weighted moments.
+   * Exact mirror of risk.evt_pot_tail (Python is the source of truth; parity-pinned on a
+   * fixed fat-tailed series). RISK MEASUREMENT, not an edge claim: fits a Generalized
+   * Pareto Distribution (Pickands-Balkema-de Haan limit) to the losses beyond the
+   * `thresholdQ` loss quantile and extrapolates the 99% tail (McNeil-Frey-Embrechts
+   * 2005 ch.7; Hosking-Wallis 1987 for the closed-form PWM fit).
+   *
+   * Mirrored contract (keep IDENTICAL to Python — every branch):
+   *  - losses x = -r, non-finite dropped; u = linear-interpolation empirical quantile
+   *    (numpy default) of the losses at thresholdQ; exceedances y = x - u for x > u.
+   *  - n_u < 30 → all-NaN + nExceed (too few exceedances to fit a tail honestly).
+   *  - PWM, ascending-sorted y with (1-F) plotting positions (the Hosking-Wallis
+   *    alpha_1 convention — largest excess gets weight 0):
+   *      b0 = mean(y);  b1 = (1/m)·Σ ((m-1-i)/(m-1))·y_(i)
+   *      xi = 2 - b0/(b0-2b1);  beta = 2·b0·b1/(b0-2b1);  b0-2b1 <= 0 → degenerate NaN.
+   *  - VaR_a = u + (beta/xi)·(((1-a)/Fu)^(-xi) - 1), Fu = n_u/n; |xi| < 1e-9 uses the
+   *    exponential-limit branch u + beta·ln(Fu/(1-a)). ES = (VaR+beta-xi·u)/(1-xi),
+   *    NaN when xi >= 1 (infinite mean). 1-a > Fu → NaN (alpha inside the body).
+   *  - SIGN: var/cvar returned as signed returns (negative = loss), same orientation
+   *    as risk.var/risk.cvar; u/beta stay in positive LOSS units.
+   * @param {number[]} returns per-period simple returns
+   * @param {number} thresholdQ loss quantile for the POT threshold (default 0.95)
+   * @param {number} alpha tail confidence for VaR/ES (default 0.99)
+   */
+  function evtPotTail(returns, thresholdQ = 0.95, alpha = 0.99) {
+    const x = [];
+    for (const r of returns) if (Number.isFinite(r)) x.push(-r);   // losses
+    const n = x.length;
+    const out = { xi: NaN, beta: NaN, u: NaN, nExceed: 0, n, var: NaN, cvar: NaN,
+                  thresholdQ, alpha, method: 'pot-gpd-pwm', note: '' };
+    if (!n) { out.note = 'empty input'; return out; }
+    x.sort((a, b) => a - b);
+    // u = linear-interpolation quantile of the losses (numpy default convention).
+    const h = (n - 1) * thresholdQ;
+    const lo = Math.floor(h), hi = Math.ceil(h);
+    const u = lo === hi ? x[lo] : x[lo] + (x[hi] - x[lo]) * (h - lo);
+    const y = [];                                  // exceedances, already ascending
+    for (const v of x) if (v > u) y.push(v - u);
+    const nU = y.length;
+    out.nExceed = nU;
+    if (nU < 30) {                                 // mirror of _POT_MIN_EXCEEDANCES
+      out.note = `only ${nU} exceedances above the thresholdQ=${thresholdQ} loss quantile (< 30) — too few to fit a tail`;
+      return out;
+    }
+    out.u = u;
+    const fu = nU / n;
+    if ((1 - alpha) > fu) {
+      out.note = `alpha=${alpha} lies inside the empirical body (1-alpha > Fu=${fu}) — POT is only valid beyond u`;
+      return out;
+    }
+    // PWM (Hosking-Wallis 1987) — (1-F) plotting-position weights on ascending y.
+    let s0 = 0, s1 = 0;
+    for (let i = 0; i < nU; i++) { s0 += y[i]; s1 += ((nU - 1 - i) / (nU - 1)) * y[i]; }
+    const b0 = s0 / nU, b1 = s1 / nU;
+    const d = b0 - 2 * b1;
+    if (!(d > 0)) { out.note = 'degenerate PWM fit (b0 - 2*b1 <= 0)'; return out; }
+    const xi = 2 - b0 / d;
+    const beta = (2 * b0 * b1) / d;
+    if (!(Number.isFinite(xi) && beta > 0)) { out.note = 'degenerate PWM fit (b0 - 2*b1 <= 0)'; return out; }
+    out.xi = xi; out.beta = beta;
+    const varLoss = Math.abs(xi) < 1e-9
+      ? u + beta * Math.log(fu / (1 - alpha))       // xi→0 exponential-tail limit
+      : u + (beta / xi) * (Math.pow((1 - alpha) / fu, -xi) - 1);
+    out.var = -varLoss;                             // signed-return orientation
+    if (xi >= 1) {
+      out.note = 'xi >= 1: GPD mean infinite — ES undefined (VaR still reported)';
+      return out;
+    }
+    out.cvar = -((varLoss + beta - xi * u) / (1 - xi));
+    return out;
+  }
+
+  /**
    * Empirical-Bayes hierarchical shrinkage of a family of Sharpe ratios — the Bayesian
    * sibling of the Deflated Sharpe / FST view of the SAME winner's-curse problem.
    * COMPLEMENTARY DIAGNOSTIC, not a replacement for the production DSR. Exact mirror of
@@ -1203,7 +1276,7 @@
     // risk
     probabilisticSharpe, expectedMaxSharpeRatio, deflatedSharpe,
     falseStrategyThreshold, effectiveNumberOfTrials, probabilityFalseStrategy,
-    hierarchicalBayesSharpe,
+    hierarchicalBayesSharpe, evtPotTail,
     // backtest
     backtest, compound, computeStats,
     // OOS validation harness

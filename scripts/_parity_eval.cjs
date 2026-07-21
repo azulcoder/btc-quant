@@ -19,6 +19,7 @@ const { close, positions, ppy, volWindow, k, sr, n, skew, kurt, nTrials, varTria
         cpcvBlocks, cpcvKTest, cpcvPurge, cpcvEmbargo,
         costBps, slipBps, fwd, strike, iv, t,
         btcPairs, ethPairs, pairsWindow,
+        evtReturns, evtThresholdQ, evtAlpha,
         optChain, optT } = fx;
 
 const last = (a) => a[a.length - 1];
@@ -28,6 +29,9 @@ const eq = Q.compound(ret.map((x) => (Number.isFinite(x) ? x : 0)));
 const vol = Q.realizedVol(ret, volWindow, ppy);
 
 const er = Q.expectancyReport(positions, close, vol, ppy, k);
+// EVT POT-GPD tail probe (frontier #2): PWM fit + 99% tail on the fixed LCG series —
+// mirror of risk.evt_pot_tail (same quantile rule, same (1-F) PWM weights, same guards).
+const evt = Q.evtPotTail(evtReturns, evtThresholdQ, evtAlpha);
 const g = Q.black76Greeks(fwd, strike, iv, t, 'C', 0);
 const bt = Q.backtest(positions, close, {
   costBps, slippageBps: slipBps, periodsPerYear: ppy, nTrials, varTrialsSr,
@@ -119,6 +123,12 @@ const out = {
   hb_shrinkFactor: hb.shrinkFactor,
   hb_pSkill: hb.pSkill,
   hb_neffTau: hbN.tau,
+  // EVT POT-GPD tail (frontier #2) — mirror of risk.evt_pot_tail on the LCG series
+  evt_xi: evt.xi,
+  evt_beta: evt.beta,
+  evt_u: evt.u,
+  evt_var: evt.var,
+  evt_cvar: evt.cvar,
   // Tharp eval layer (camelCase -> snake_case mapped on the Python side)
   er_nTrades: er.nTrades,
   er_expectancyR: er.expectancyR,

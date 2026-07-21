@@ -570,3 +570,13 @@ agree — see [RESEARCH-hierarchical-bayes-runlog.md](RESEARCH-hierarchical-baye
 
 **Rails:** diagnostic-only (leaderboard DSR byte-unchanged); no edge claim → no MinBTL /
 pre-registration. Hand-checked DL case to 1e-9. pytest 190→198, parity 68→74.
+
+## 2026-07-21 — EVT POT-GPD tail VaR/ES (frontier roadmap #2; do-now risk measurement)
+
+**Added:** `risk.evt_pot_tail` + `Quant.evtPotTail` (PWM fit — closed-form, bit-identical
+across the mirror, parity-pinned 74→79; scipy MLE as test-side cross-check only). BTC
+daily: ξ=0.172; EVT vs historical agree at 99% (cross-validation), diverge at 99.9%
+(−17.7% vs −14.9% — the empirical quantile rests on 3 obs there). Spec's PWM weight
+convention was wrong (E[Y·F], always-degenerate); implementation follows Hosking–Wallis
+`E[Y(1−F)]`, verified vs MLE. Guards: <30 exceedances → NaN; ξ≥1 → ES NaN. Sign matches
+`risk.var/cvar`. See RESEARCH-evt-runlog.md. pytest 207, parity 79.

@@ -99,10 +99,10 @@ in the docstring so a quant can audit.
 ## 4. Verification suite (run before every commit)
 
 ```bash
-python3 -m pytest -q                      # 198 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
+python3 -m pytest -q                      # 207 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
 node --check dashboard/app.js             # JS syntax (also quant.js, charts.js, livewire.js, terminal-*.js)
 node dashboard/app.js --check             # ppy guard: ppy()=365 (1d)/8760 (1h); no literal-365 at an annualization site
-python3 scripts/check_parity.py           # JS↔Python mirror parity (74 shared fields; the one rule)
+python3 scripts/check_parity.py           # JS↔Python mirror parity (79 shared fields; the one rule)
 node scripts/check_terminal.cjs           # orderflow terminal smoke: adapters+stores replayed over REAL captured WS frames (fixtures_ws.json)
 make verify-browser                       # L1: terminal.html?replay=1 in headless Chromium — render + zero-console-error gate + screenshots (needs playwright)
 make verify-wire                          # L2: ~45s live-wire invariants through the PRODUCTION adapters (exit 2 = offline, not a bug)

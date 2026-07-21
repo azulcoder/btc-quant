@@ -362,6 +362,28 @@
       `Cached ${o.source} ${state.gran} bars (last ${Math.min(o.close.length, 240)} shown) + live Coinbase tick on the current bar · markers/lines from "${(STRATEGIES[key] || {}).label || key}". Illustrative ±2-bar-ATR stop/target — a visual risk frame, NOT a live order.`);
   }
 
+  // EVT tail-risk stat cells (frontier #2). index.html predates this metric, so the
+  // two cells are injected once into the Performance grid at runtime — same markup and
+  // classes as the static cells; the 'POT-GPD · PWM' tag names the estimator honestly
+  // (Peaks-Over-Threshold GPD, probability-weighted-moments fit — see quant.js).
+  function ensureEvtStatCells() {
+    if ($('stat-evt-var')) return;
+    const kurt = $('stat-kurt');
+    const grid = kurt ? kurt.closest('.stats-grid') : null;
+    if (!grid) return;
+    const mk = (label, vid, vsHtml) => {
+      const div = document.createElement('div');
+      div.className = 'stat';
+      div.innerHTML = '<span class="k">' + label + '</span>'
+        + '<span class="v" id="' + vid + '">—</span>'
+        + '<span class="vs">' + vsHtml + '</span>';
+      return div;
+    };
+    grid.appendChild(mk('EVT VaR 99%', 'stat-evt-var',
+      'POT-GPD · PWM · <span id="stat-evt-xi">ξ —</span>'));
+    grid.appendChild(mk('EVT ES 99%', 'stat-evt-es', 'POT-GPD · PWM'));
+  }
+
   function renderStats(bt, key, p, oos) {
     const s = bt.stats;
     setText('stat-net-cagr', pct(s.cagr));
@@ -377,6 +399,16 @@
     setText('stat-trades', String(bt.trades));
     setText('stat-skew', num(s.skew));
     setText('stat-kurt', num(s.kurtosis));
+
+    // EVT tail risk (frontier #2): POT-GPD 99% VaR/ES on the SAME net returns as the
+    // descriptive stats above — quant.js mirror of risk.evt_pot_tail (parity-pinned).
+    // A risk MEASUREMENT (how fat is the loss tail), never an edge claim. NaN (thin
+    // tail / short history / degenerate fit) honestly renders as an em-dash.
+    ensureEvtStatCells();
+    const evt = Q.evtPotTail(bt.returns, 0.95, 0.99);
+    setText('stat-evt-var', pct(evt.var));
+    setText('stat-evt-es', pct(evt.cvar));
+    setText('stat-evt-xi', 'ξ ' + num(evt.xi));
 
     // ── The honest headline: walk-forward OUT-OF-SAMPLE deflated Sharpe, read straight from
     // the leaderboard's per-strategy map (single source of truth). The IS→OOS Sharpe pair
