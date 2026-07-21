@@ -437,13 +437,23 @@ def sec_integrity(con, present: set, window_start: int) -> dict:
     # (c) NULL / NaN / <=0 in value columns anywhere (whole store — corruption
     # does not expire with the window). The collector normalizers float() real
     # wire fields, so an impossible value can only be a bug or file damage: FAIL.
+    #
+    # DOCUMENTED EXEMPTION (§0.7 no-invention, collector v2): the OKX funding
+    # endpoint carries NO mark/index price, so normalize_okx_funding stores
+    # NULL there BY DESIGN rather than inventing one — those NULLs are honest
+    # absence, not corruption, and must not FAIL the store. (funding_rate was
+    # never in this positive-value check — it is legitimately negative; this
+    # exemption changes nothing about it.) First seen live 2026-07-21: 1,360
+    # flagged cells, all okx mark/index — a checker false-positive on the
+    # repo's own documented design.
     bad_total = 0
     bad_detail: dict[str, int] = {}
     for table, cols in _POSITIVE_COLS.items():
         if table not in present:
             continue
+        exempt = " AND exchange <> 'okx'" if table == "funding_mark" else ""
         checks = " + ".join(
-            f'count(*) FILTER (WHERE "{c}" IS NULL OR isnan("{c}") OR "{c}" <= 0)'
+            f'count(*) FILTER (WHERE ("{c}" IS NULL OR isnan("{c}") OR "{c}" <= 0){exempt})'
             for c in cols  # "index" is a keyword — quote every column uniformly
         )
         n_bad = con.execute(f"SELECT {checks} FROM {table}").fetchone()[0]

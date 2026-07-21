@@ -181,3 +181,30 @@ def test_info_verdict_never_outranks(tmp_path, capsys):
     report = _run_json(root, capsys)
     assert report["overall"] in ("OK", "WARN")
     assert report["sections"][5]["name"] == "research readiness"
+
+
+def test_okx_null_mark_index_exempt_but_other_venues_still_fail(tmp_path):
+    """§0.7 no-invention: OKX funding rows carry NULL mark/index BY DESIGN and
+    must not FAIL integrity; the same NULL on any other venue is still a bug.
+    Regression for the 2026-07-21 live false-positive (1,360 okx cells)."""
+    import importlib.util
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("check_ticks", repo / "scripts" / "check_ticks.py")
+    ct = importlib.util.module_from_spec(spec); spec.loader.exec_module(ct)
+    import duckdb
+    from btcquant import collector
+
+    db = tmp_path / "d.duckdb"
+    con = collector.open_db(db)
+    con.execute("INSERT INTO funding_mark VALUES ('okx','BTC-USDT-SWAP',1000,NULL,NULL,0.0001,2000)")
+    con.execute("INSERT INTO funding_mark VALUES ('bybit','BTCUSDT',1000,50000.0,50010.0,0.0001,2000)")
+    con.close()
+    rep = ct.sec_integrity(duckdb.connect(str(db), read_only=True), {'funding_mark'}, 0)
+    assert rep["data"]["bad_values"]["funding_mark"] == 0, "okx NULLs must be exempt"
+
+    con = duckdb.connect(str(db))
+    con.execute("INSERT INTO funding_mark VALUES ('bybit','BTCUSDT',3000,NULL,50010.0,0.0001,4000)")
+    con.close()
+    rep2 = ct.sec_integrity(duckdb.connect(str(db), read_only=True), {'funding_mark'}, 0)
+    assert rep2["data"]["bad_values"]["funding_mark"] == 1, "non-okx NULL must still count"
