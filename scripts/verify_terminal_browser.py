@@ -58,6 +58,14 @@ PANELS = {
     "detections": "#view-detect",
     "cvd": "#view-cvd",
     "header": "#view-header",
+    # T-1 (§4g) Trader's Edge panels. tapeint/basis carry replay data (trades /
+    # tickers frames); walls/vpin/keylevels legitimately render their honest
+    # empty notes in a short replay — the screenshot proves the note, not data.
+    "tapeint": "#view-tapeint",
+    "walls": "#view-walls",
+    "vpin": "#view-vpin",
+    "keylevels": "#view-keylevels",
+    "basis": "#view-basis",
 }
 
 READY_TIMEOUT_MS = 45_000  # replay deals ~4 frames/s; heatSamples>=3 needs ~10s
@@ -80,10 +88,13 @@ READY_JS = (
 # the pointer hovers. Judging each canvas alone would fail those by-design
 # blank overlays; what matters visually is the composite at each screen rect,
 # so canvases sharing a bounding rect are sampled together (non-bg if ANY
-# opaque layer differs). Stacks under 4000 css-px² are skipped: the only such
-# element is lightweight-charts' ~80x28 corner stub between the price and time
-# axes, which the library legitimately never paints — every data-bearing
-# canvas in the terminal is far larger.
+# opaque layer differs). Stacks under 4000 css-px² are reported but not
+# judged. Two elements land there, both legitimately blank at times:
+# lightweight-charts' ~80x28 corner stub between the price and time axes
+# (never painted by the library), and the T-1 tape-intensity sparkline
+# (120x16), which is empty until the first COMPLETED 10 s bucket — a short
+# replay may honestly have none at judge time. The t0/t1 panel screenshots
+# stay the visual witness for these small canvases.
 CANVAS_JS = """
 () => {
   const m = getComputedStyle(document.body).backgroundColor
@@ -255,8 +266,12 @@ def main() -> int:
         if not counts:
             fails.append("counts: __BTCQ_TERMINAL_DEBUG missing")
         else:
+            # T-1 (§4g): basisPoints ≥ 1 — the fixture tickers frames carry
+            # mark+index, so BasisSeries must have accrued. walls/vpin/tapeint
+            # buckets are NOT asserted: a short replay honestly leaves them 0.
             mins = {"tapeRows": 1, "ladderRows": 1, "cvdPoints": 1,
-                    "heatSamples": 3, "aggLevels": 1, "footprintBars": 1}
+                    "heatSamples": 3, "aggLevels": 1, "footprintBars": 1,
+                    "basisPoints": 1}
             bad = [k for k, lo in mins.items() if not (counts.get(k, 0) >= lo)]
             if bad:
                 fails.append(f"counts below minimum {bad}: {counts}")
@@ -288,7 +303,8 @@ def main() -> int:
         for c in page.evaluate(CANVAS_JS):
             label = f"[{c['id']}] {c['w']}x{c['h']} ({c['layers']} layer(s))"
             if c.get("skipped"):
-                print(f"SKIP canvas {label}: vendor corner stub below judged size")
+                print(f"SKIP canvas {label}: below judged size — lw-charts corner stub or "
+                      "tapeint sparkline (legitimately blank at times; screenshots are the witness)")
             elif c["nonBgPct"] is None:
                 fails.append(f"canvas {label}: {c.get('note', 'unreadable')}")
             elif c["nonBgPct"] <= 2.0:

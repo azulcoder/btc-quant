@@ -176,9 +176,11 @@ main.term-main {
     "hd-st hd-st  hd-st"
     "hist  hist   tpo"
     "vp    farb   macro"
+    "basis basis  basis"
     "hd-au hd-au  hd-au"
+    "klev  klev   klev"
     "auct  auct   lvls"
-    "micro micro  lvls"
+    "micro vpin   lvls"
     "hd-in hd-in  hd-in"
     "scr   rsi    rsi"
     "opts  opts   conf"
@@ -229,6 +231,10 @@ main.term-main {
 .area-auct  { grid-area: auct; }
 .area-lvls  { grid-area: lvls; }
 .area-micro { grid-area: micro; }
+/* T-1 (§4g) panels. */
+.area-basis { grid-area: basis; }
+.area-klev  { grid-area: klev; }
+.area-vpin  { grid-area: vpin; }
 /* O-5 PORTFOLIO section (§4e): row A = journal (~2/3) + calendar (~1/3);
    row B = polymarket | news | econ thirds (same column-template approximation
    as the O-3/O-4 rows above). */
@@ -288,8 +294,8 @@ main.term-main {
     grid-template-columns: 1fr;
     grid-template-areas:
       "stats" "hd-of" "fp" "mid" "right" "heat" "cvd"
-      "hd-st" "hist" "tpo" "vp" "farb" "macro"
-      "hd-au" "auct" "lvls" "micro"
+      "hd-st" "hist" "tpo" "vp" "farb" "macro" "basis"
+      "hd-au" "klev" "auct" "lvls" "micro" "vpin"
       "hd-in" "scr" "rsi" "opts" "conf" "whale" "alerts"
       "hd-pf" "jour" "cal" "poly" "news" "econ" "set";
   }
@@ -1214,6 +1220,154 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .micro-cell { min-width: 0; }
 .micro-pane { height: 150px; position: relative; background: var(--bg); border-radius: var(--radius); }
 
+/* ─── T-1 (§4g): symbol picker + workspace select (topbar chrome) ────────── */
+.sym-picker { position: relative; display: flex; align-items: center; }
+#sym-btn { font-size: var(--fs-sm); padding: 3px 10px; color: var(--fg); }
+/* Replay disables the picker (fixtures are recorded BTCUSDT frames) — it must
+   LOOK disabled next to the live toolbar buttons. Needs the id selector: the
+   #sym-btn color above outranks any .ux-btn:disabled rule, and the generic
+   disabled rule is scoped to .term-main (the topbar sits outside it). */
+#sym-btn:disabled, #sym-btn:disabled:hover { color: var(--g-400); border-color: var(--border); cursor: default; }
+.sym-pop {
+  position: absolute;
+  top: calc(100% + 4px); left: 0;
+  z-index: 60;
+  width: 300px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  padding: var(--sp-1);
+}
+.sym-pop input {
+  width: 100%;
+  background: var(--bg-panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  padding: 4px 8px;
+}
+.sym-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; max-height: 320px; overflow-y: auto; }
+.sym-list li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: var(--sp-2);
+  padding: 3px 8px;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.sym-list li:hover, .sym-list li.sel { background: var(--bg-hover); box-shadow: inset 2px 0 0 var(--accent-2); }
+.sym-list li .s-sym { color: var(--fg); font-weight: 600; }
+.sym-list li .s-px, .sym-list li .s-to { color: var(--muted); text-align: right; }
+.sym-list li.cur .s-sym { color: var(--accent); }
+.sym-list .sym-note { color: var(--muted); cursor: default; grid-template-columns: 1fr; }
+.ws-label { color: var(--g-400); font-family: var(--mono); font-size: var(--fs-xs); }
+.ws-sel { min-width: 118px; font-size: var(--fs-xs); padding: 2px 4px; }
+
+/* ─── T-1 (§4g): tape-intensity gauge strip (tape panel header) ──────────── */
+.ti-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  padding: 2px 0 var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--sp-1);
+}
+.ti-strip b { color: var(--fg); font-weight: 600; }
+/* z chip: quiet at |z|<2, warn ink beyond — a burst is worth an eye, not a
+   trade (the title says so); the number itself is the non-color cue. */
+.ti-z { padding: 0 5px; border-radius: 3px; border: 1px solid var(--g-400); color: var(--muted); }
+.ti-z.hot { border-color: var(--warn-fg); color: var(--warn-fg); }
+.ti-spark { flex: none; width: 120px; height: 16px; display: block; }
+.ti-note { color: var(--g-400); }
+
+/* ─── T-1 (§4g): walls ledger table (det-row family) ─────────────────────── */
+.walls-wrap { display: flex; flex-direction: column; }
+.walls-list { max-height: 220px; overflow-y: auto; }
+.walls-row {
+  display: grid;
+  grid-template-columns: 56px 34px 1fr 72px 64px;
+  gap: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums slashed-zero;
+  padding: 1px 2px;
+  align-items: baseline;
+}
+.walls-head {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 2px;
+  margin-bottom: 2px;
+}
+.walls-row .ts { color: var(--muted); }
+.walls-row .px, .walls-row .qty { text-align: right; }
+.walls-row .side.bid { color: var(--up); }
+.walls-row .side.ask { color: var(--down); }
+/* Status badges: standing = quiet outline (a fact, not an alert); pulled =
+   accent (the book withdrew it); filled = accent-2 (price took it). Text is
+   the non-color cue. */
+.wall-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 0 4px;
+  border-radius: 3px;
+  text-align: center;
+  border: 1px solid var(--g-400);
+  color: var(--muted);
+}
+.wall-badge.pulled { border-color: var(--accent); color: var(--accent); }
+.wall-badge.filled { border-color: var(--accent-2); color: var(--accent-2); }
+
+/* ─── T-1 (§4g): key-levels strip ────────────────────────────────────────── */
+.klev-wrap { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-2); align-items: center; }
+.klev-chip {
+  display: inline-flex;
+  gap: 6px;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 7px;
+}
+.klev-chip .k { color: var(--g-400); text-transform: uppercase; font-size: 10px; }
+.klev-chip .v { color: var(--fg); font-weight: 600; }
+.klev-chip.poc .k, .klev-chip.naked .k { color: var(--accent); }
+.klev-chip.ib .k { color: var(--accent-2); }
+.klev-note { font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); }
+
+/* ─── T-1 (§4g): VPIN panel ──────────────────────────────────────────────── */
+.vpin-wrap { display: flex; flex-direction: column; gap: var(--sp-1); }
+.vpin-strip { display: flex; gap: var(--sp-3); align-items: baseline; font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); flex-wrap: wrap; }
+.vpin-strip .vpin-val { font-size: var(--fs-lg); font-weight: 600; color: var(--fg); }
+.vpin-canvas-box { height: 120px; position: relative; background: var(--bg); border-radius: var(--radius); }
+.vpin-canvas-box > .term-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+
+/* ─── T-1 (§4g): basis + funding mini-chart (two panes, own scales) ──────── */
+.basis-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); min-width: 0; }
+.basis-wrap > .chart-na { grid-column: 1 / -1; }   /* the honest empty note spans both pane columns */
+.basis-cell { min-width: 0; }
+.basis-pane { height: 150px; position: relative; background: var(--bg); border-radius: var(--radius); }
+@media (max-width: 1100px) {
+  .basis-wrap { grid-template-columns: 1fr; }
+}
+
 /* ═══ Empty-state collapse (presentation pass) ══════════════════════════════
    A panel whose body currently shows ONLY its honest disabled/awaiting note
    renders COMPACT: header + status chip + source line + the note as a quiet
@@ -1242,6 +1396,8 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .panel--empty .rsi-wrap,
 .panel--empty .auction-wrap,
 .panel--empty .opt-cv,
+.panel--empty .vpin-canvas-box,
+.panel--empty .basis-pane,
 .panel--empty .micro-pane {
   flex: 0 0 auto;
   height: auto;
@@ -1262,6 +1418,7 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .panel--empty .tape-list,
 .panel--empty .liq-list,
 .panel--empty .lvls-list,
+.panel--empty .walls-list,
 .panel--empty .jour-list,
 .panel--empty .whale-list,
 .panel--empty .alert-feed,
@@ -1277,6 +1434,7 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .panel--empty .liq-head,
 .panel--empty .det-head,
 .panel--empty .lvls-head,
+.panel--empty .walls-head,
 .panel--empty .jour-head,
 .panel--empty .whale-head {
   display: none;

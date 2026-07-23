@@ -12,8 +12,10 @@ un-validated). **O-5 shipped 2026-07-05** (§4e portfolio & research — trade j
 returns, Polymarket crowd-implied panel, ToA news feed, local-mirror econ calendar
 (`make econ` — faireconomy has no CORS), + the elite pass: sticky section nav w/
 persisted collapse, hidden-tab/offscreen paint gating (ingestion never pauses), and
-`check_terminal.cjs` (46 groups) promoted to a CI build gate). **The terminal feature
-plan (§5) is complete** — further work follows the DEVELOPMENT.md §6 greenlight ritual.
+`check_terminal.cjs` (55 groups) promoted to a CI build gate). **The terminal feature
+plan (§5) is complete** — further work follows the DEVELOPMENT.md §6 greenlight ritual;
+the T-1 Trader's Edge pass (§4g) added multi-symbol + the delta/intensity/walls/VPIN/
+opening-type/key-levels/basis surfaces on top of it.
 
 Provenance: feature surface adapted from [Cryexc](https://cryexc.josedonato.com/) (José
 Donato's free orderflow terminal — footprint, DOM, heatmaps, TPO, whale/options flow;
@@ -616,6 +618,75 @@ can load ANY ARCHIVED day straight from the HF dataset in-browser (CORS proven),
 labeled `archived day · hf dataset`; if vendoring proves unsound the agent reports
 and the feature defers — no half-measures on the public page.
 
+## 4g. T-1 contracts — Trader's Edge (binding)
+
+Greenlit 2026-07-22. Everything live-descriptive (§0.1); heuristics labeled; citations
+on-panel; the collector still records BTCUSDT only, so store-backed surfaces state that
+honestly when another symbol is selected.
+
+**Multi-symbol (the headline).** `SYM` becomes a runtime setting (persisted; default
+BTCUSDT). Symbol picker fed by the EXISTING `fetchBybitAllTickers` universe (top-N by
+turnover + search). On switch: all WS legs close and re-subscribe with venue ids derived
+by the SAME mapping the collector uses (base = strip USDT: bybit/binancef `<B>USDT`,
+okx `<B>-USDT-SWAP`, coinbase `<B>-USD`); a leg whose mapping is unknown/unreachable for
+that symbol degrades honestly (chip 'no <venue> leg for <sym>'). Session stores REBUILD
+on switch (a new symbol is a new session — same honest-restart rule as tick-size
+changes, stated in the settings hint). Store-backed panels (auction profile, levels,
+BYOD replay) render their compact honest note when sym ≠ BTCUSDT ('collector records
+BTCUSDT only'). binance leg keeps its REST-only reality (§0.2).
+
+**Delta pro (FootprintStore additions, pure).** Track running intra-bar delta →
+`deltaMin`/`deltaMax` per bar; `deltaPct = delta/totalVol`; **unfinished auction**
+flags: a FINISHED bar whose extreme price level (high for up-extreme, low for
+down-extreme) printed BOTH buy and sell volume — the auction did not finish there
+(classic orderflow marker; Dalton-adjacent, comment the rule). New footer row toggle in
+FootprintView (Δmin/Δmax + Δ%) and ⌟ markers at unfinished extremes.
+
+**TapeIntensityStore (pure).** Rolling windows (10 s / 60 s, event-ts): trades/sec,
+notional/sec, and a z-score vs the session baseline (Welford over per-10s samples).
+Gauge + 60-sample sparkline in the tape panel header. Descriptive; burst ≠ signal.
+
+**Key-levels strip + live IB.** From `/v1/levels` (registry): prior-day H/L/C, POC,
+VAH/VAL, naked POCs (age), weekly open (derived from registry rows — the Monday row's
+open, comment the convention). Live session adds the Initial Balance (first 2×30 min
+UTC range) once elapsed. Rendered as (a) a compact strip panel and (b) optional
+horizontal markers on the footprint canvas (toggle, default on). BTC-only via registry —
+honest note otherwise.
+
+**WallsLedger (pure).** From DepthHistory samples: a level whose resting qty ≥ K×p95
+(K=4 default) sustained ≥ M samples (M=5) enters the ledger {price, side, firstTs,
+maxQty, lastTs, status}; status flips to 'pulled' when it vanishes while price is > 1
+tick away (ties to the spoof detector's rule family — cross-reference, do not merge) or
+'filled' when price trades through it. Ring 50. Panel table, newest-first, status
+badges. Label: descriptive book-history bookkeeping, not intent.
+
+**VpinStore (pure, cited).** Volume-synchronized buckets (bucket volume V = configurable,
+default session-volume/50 re-estimated hourly): per bucket |buyVol − sellVol|/V using
+the REAL aggressor flags (state on-panel that this is *better-informed* than the
+original BVC approximation — Easley, López de Prado & O'Hara 2012 — and cite the
+Andersen–Bondarenko critique: VPIN's toxicity interpretation is CONTESTED; we show the
+series, not a claim). VPIN = mean over last 50 buckets; sparkline + current value.
+
+**OpeningTypeClassifier (pure, rule-based, AMT).** After the first 60 min UTC: classify
+open-drive (one-directional, < 20% retrace of open range), open-test-drive (probe one
+side ≤ 30 min then drive opposite beyond open), open-rejection-reverse (drive then full
+reverse through open), else open-auction (rotational). Cite Dalton, *Mind over Markets*;
+label 'descriptive session read — not a signal'. Shown in the session strip.
+
+**BasisSeries.** Ring of (ts, basis_bp, funding_rate) from the EXISTING 1 s mark events →
+two-pane mini chart (basis bp; funding) in STRUCTURE. No new feeds.
+
+**UX.** ⌘K command palette on the terminal (mirror index.html §5.1 idiom): jump to
+section/panel, switch symbol (fuzzy over the universe), toggle sections, switch
+workspace. Three named workspace presets = persisted collapsed-set combos
+(ORDERFLOW-focus / AUCTION-focus / ALL) + the user's custom state as 'last'.
+
+**check_terminal groups (mandatory adds):** footprint deltaMin/Max + unfinished-auction
+rule on constructed bars; TapeIntensity window math + z; WallsLedger enter/pull/fill
+transitions; VPIN bucket math on constructed trades (hand-computed); OpeningType all
+four classes on constructed opens; venue-id derivation (BTCUSDT/ETHUSDT/1000PEPEUSDT —
+the last has NO coinbase mapping → leg skipped honestly); BasisSeries ring.
+
 ## 5. CryExc → btc-quant feature map & phase plan
 
 | # | CryExc view | Phase | Rail notes |
@@ -669,7 +740,8 @@ prevent AC sleep. `make check-ticks` weekly is the standing quality ritual.
 Layer 0 (static, every commit): `python -m pytest` (incl. collector tests; network-free);
 `node --check` on every dashboard JS file; `node scripts/check_terminal.cjs` (fixture
 smoke: adapters + stores + O-3/O-4 normalizers/builders replayed over the REAL captured
-frames/responses, 46 assertion groups — a CI build gate since O-5, §4e.3).
+frames/responses, 55 assertion groups incl. the T-1 §4g adds — a CI build gate since
+O-5, §4e.3).
 
 - **L1 — deterministic browser harness** (`make verify-browser`,
   `scripts/verify_terminal_browser.py`): serves the repo, opens
@@ -679,7 +751,12 @@ frames/responses, 46 assertion groups — a CI build gate since O-5, §4e.3).
   gains a REPLAY MODE flag (never masquerades as live, §0). Asserts: zero console/page
   errors, 4/4 chips, store counts advancing, every canvas non-blank, honesty flags
   present; writes before/after screenshots to `reports/verify/` (gitignored). This is
-  how UI changes are SEEN without waiting for a human browser pass.
+  how UI changes are SEEN without waiting for a human browser pass. Stated scope
+  limit: L1 loads and screenshots, it drives no interactions — the ⌘K palette,
+  workspace presets, and the symbol-picker popover (disabled in replay by design, so
+  live-only) have no automated witness; the short fixture also cannot produce a
+  finished-bar ⌟ marker, a walls entry, or a VPIN bucket (honestly empty there;
+  their logic is covered at L0). An interaction pass is future work.
 - **L2 — live-wire invariants** (`make verify-wire`, `scripts/verify_wire_live.mjs`,
   zero-dep node): drives the PRODUCTION adapter/store modules from the real endpoints
   for ~45 s; checks books never crossed, venue mids coherent (≤80 bp), event-ts sane,

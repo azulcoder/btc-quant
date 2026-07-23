@@ -257,6 +257,14 @@
   // the bid one tick lower, so buy(p) vs sell(p−tick) compares like-for-like.
   // Flags are computed ONLY when a bar finishes — flags on a half-formed bar
   // flicker and invite reading signal into incomplete prints.
+  //
+  // T-1 delta-pro additions (§4g): the running intra-bar delta PATH (signed
+  // qty accumulated trade-by-trade, starting at 0 each bar) is tracked as it
+  // forms → per-bar deltaMin/deltaMax (the path's extremes, both anchored at
+  // 0 — a bar whose delta only ever rose has deltaMin 0, not the first
+  // trade's value). deltaPct = delta/totalVol ∈ [−1, 1] (0 when totalVol is
+  // 0 — a ratio over no volume is "no read" and renders neutral). Unfinished-
+  // auction flags follow the finished-bar-only discipline above.
   function FootprintStore(opts) {
     const o = opts || {};
     const barMs = finiteOr(o.barMs, 60000);
@@ -277,6 +285,7 @@
         idx, t: idx * barMs,
         o: firstPrice, h: firstPrice, l: firstPrice, c: firstPrice,
         buyVol: 0, sellVol: 0,
+        runDelta: 0, dMin: 0, dMax: 0, // intra-bar delta path (§4g), 0-anchored
         levels: new Map(), // snapped price → {buy, sell}
       };
     }
@@ -302,11 +311,31 @@
             && row.sell >= imbK * (above ? above.buy : 0);
         }
       }
+      // Unfinished-auction flags (§4g), finished bars only (same discipline as
+      // the imbalance flags above). The classic orderflow marker, Dalton-
+      // adjacent (Mind over Markets' "unfinished business" at an extreme,
+      // read here from footprint prints instead of TPO singles): a CLEAN
+      // extreme prints one side only — at the high the last business is
+      // buyers lifting offers, at the low sellers hitting bids. If the
+      // extreme level printed BOTH buy AND sell volume, two-sided trade was
+      // still being done when price turned — the auction did not finish its
+      // business there. Descriptive marker by convention; conventionally such
+      // extremes get revisited, but that is a trader's read, not a claim.
+      let unfinishedHigh = false, unfinishedLow = false;
+      if (isFinished && levels.length) {
+        const top = levels[0], bot = levels[levels.length - 1]; // desc order
+        unfinishedHigh = top.buy > 0 && top.sell > 0;
+        unfinishedLow = bot.buy > 0 && bot.sell > 0;
+      }
+      const delta = bar.buyVol - bar.sellVol;
+      const totalVol = bar.buyVol + bar.sellVol;
       return {
         t: bar.t, o: bar.o, h: bar.h, l: bar.l, c: bar.c,
         buyVol: bar.buyVol, sellVol: bar.sellVol,
-        delta: bar.buyVol - bar.sellVol,
-        totalVol: bar.buyVol + bar.sellVol,
+        delta, totalVol,
+        deltaMin: bar.dMin, deltaMax: bar.dMax,
+        deltaPct: totalVol > 0 ? delta / totalVol : 0,
+        unfinishedHigh, unfinishedLow,
         levels, finished: isFinished,
       };
     }
@@ -332,8 +361,12 @@
       const lp = snapTick(t.price, tickSize, false);
       let cell = cur.levels.get(lp);
       if (!cell) { cell = { buy: 0, sell: 0 }; cur.levels.set(lp, cell); }
-      if (t.aggressorBuy) { cell.buy += t.qty; cur.buyVol += t.qty; }
-      else { cell.sell += t.qty; cur.sellVol += t.qty; }
+      if (t.aggressorBuy) { cell.buy += t.qty; cur.buyVol += t.qty; cur.runDelta += t.qty; }
+      else { cell.sell += t.qty; cur.sellVol += t.qty; cur.runDelta -= t.qty; }
+      // One trade moves the delta path in exactly one direction — else-if is
+      // exhaustive here, not an optimization shortcut.
+      if (cur.runDelta < cur.dMin) cur.dMin = cur.runDelta;
+      else if (cur.runDelta > cur.dMax) cur.dMax = cur.runDelta;
     }
 
     /** The open bar's snapshot (imbalance flags all false — not final), or null. */
@@ -2572,6 +2605,455 @@
     return out;
   }
 
+  // ════════ T-1 (§4g) — Trader's Edge stores: pure, event-time driven ══════
+  //
+  // §4g rails, restated where they bite: everything below is DESCRIPTIVE
+  // (§0.1 — nothing feeds a signal or the OOS harness); every threshold is a
+  // labeled CONVENTION, not a validated parameter; citations ride the code
+  // that implements the cited statistic. Same two rails as every store above:
+  // zero DOM, zero Date.now() — event ts is the only clock.
+
+  // ─── TapeIntensityStore() — tape speed windows + session z (§4g) ─────────
+  //
+  // push(ts, notional) per trade (ts = event epoch ms; notional = price·qty
+  // USD — one unit across venues, CvdStore precedent). Keeps:
+  //   - rolling 10 s / 60 s windows → trades/sec + notional/sec, anchored at
+  //     the NEWEST push's ts (LiqStore's event-time anchor: frozen during a
+  //     quiet spell is honest under replay — a wall clock would poison it);
+  //   - a session baseline of COMPLETED per-10s bucket trade counts via the
+  //     Welford one-pass update (same recurrence as AnchoredVwap, unweighted)
+  //     → z-score of the CURRENT rolling-10s trade count vs that baseline
+  //     (identical 10 s spans, so counts compare like-for-like);
+  //   - ring(60) of completed per-10s notional samples for the sparkline
+  //     (~10 min of tape speed).
+  // Buckets close on EVENT TIME only, FootprintStore's rule: a bucket with
+  // zero trades never exists — after a quiet gap the next print jumps the
+  // bucket index and no zero samples are synthesized (gaps are gaps, §0.7;
+  // consequence stated: the baseline is over buckets that actually printed,
+  // so it reads "how fast is the tape when it moves", not wall-time average).
+  // z stays 0 (not NaN) below 5 baseline samples or at zero variance — a
+  // stated convention of THIS implementation (§4g pins no such number; the
+  // panel hint states it): 0 renders the gauge calm while the baseline
+  // forms — a deliberate, stated exception to the NaN-for-unknown house
+  // convention.
+  //
+  // Window prune is a head-index deque over one shared event array — O(1)
+  // amortized per push (each event enters and leaves each window once); the
+  // consumed head is compacted away once it grows past a fixed slack. Late
+  // prints (ts before the open bucket's start) are DROPPED, FootprintStore's
+  // rule; stray in-bucket ts inversions just evict late (detector precedent).
+  function TapeIntensityStore() {
+    const W10 = 10000, W60 = 60000;   // the §4g windows
+    const BUCKET = 10000;             // baseline sample span = the 10 s window
+    const MIN_BASELINE = 5;           // stated convention: z = 0 until ≥5 completed samples
+    const spark = makeRing(60);       // completed {ts, notional} per-10s samples
+
+    let evs = [];                     // shared deque: {ts, notional}, ts-ascending
+    let head10 = 0, head60 = 0;       // window head indexes into evs
+    let n10 = 0, n60 = 0;             // running notional sums per window
+    let bStart = NaN;                 // open bucket's start ts (NaN = none yet)
+    let bCount = 0, bNotional = 0;    // open bucket accumulators
+    let wN = 0, wMean = 0, wM2 = 0;   // Welford over completed bucket counts
+
+    function completeBucket() {
+      wN++;
+      const d = bCount - wMean;
+      wMean += d / wN;
+      wM2 += d * (bCount - wMean);
+      spark.push({ ts: bStart, notional: bNotional });
+    }
+
+    /** Ingest one trade. Non-finite / non-positive notional → dropped. */
+    function push(ts, notional) {
+      if (!Number.isFinite(ts) || !Number.isFinite(notional) || notional <= 0) return;
+      if (Number.isFinite(bStart)) {
+        if (ts < bStart) return; // late print — see header
+        if (ts >= bStart + BUCKET) {
+          completeBucket();
+          bStart = Math.floor(ts / BUCKET) * BUCKET; // jump — no zero buckets
+          bCount = 0; bNotional = 0;
+        }
+      } else {
+        bStart = Math.floor(ts / BUCKET) * BUCKET;
+      }
+      bCount++; bNotional += notional;
+
+      evs.push({ ts, notional });
+      n10 += notional; n60 += notional;
+      // Prune both windows to (ts − W, ts] — the LiqStore half-open window.
+      while (head60 < evs.length && evs[head60].ts <= ts - W60) { n60 -= evs[head60].notional; head60++; }
+      while (head10 < evs.length && evs[head10].ts <= ts - W10) { n10 -= evs[head10].notional; head10++; }
+      if (head60 > 2048) { // compact the consumed head — O(1) amortized
+        evs = evs.slice(head60);
+        head10 -= head60; head60 = 0;
+      }
+    }
+
+    /** {tradesPerSec10, notionalPerSec10, tradesPerSec60, notionalPerSec60,
+     *  z, baselineN} at the newest event's anchor. Empty store → all-zero
+     *  (an untouched tape genuinely has rate 0 — not an unknown). */
+    function stats() {
+      const c10 = evs.length - head10, c60 = evs.length - head60;
+      let z = 0;
+      if (wN >= MIN_BASELINE) {
+        const sd = Math.sqrt(wM2 / (wN - 1)); // sample stdev ddof=1 (quant.js std)
+        if (sd > 0) z = (c10 - wMean) / sd;
+      }
+      return {
+        tradesPerSec10: c10 / 10, notionalPerSec10: n10 / 10,
+        tradesPerSec60: c60 / 60, notionalPerSec60: n60 / 60,
+        z, baselineN: wN,
+      };
+    }
+
+    /** Completed per-10s samples, oldest→newest, ≤60 — the sparkline feed. */
+    function sparkline() { return spark.toArray(); }
+
+    return { push, stats, sparkline };
+  }
+
+  // ─── WallsLedger({k, m, max}) — big-level book history ledger (§4g) ──────
+  //
+  // DESCRIPTIVE BOOK-HISTORY BOOKKEEPING, NOT INTENT (§4g label, kept on the
+  // panel): the ledger records what unusually large resting levels DID —
+  // entered the book, got pulled, or traded through — and claims nothing
+  // about why. It cross-references the SpoofIcebergDetector's rule family
+  // (its spoof-pull is the same "big level vanished untraded" observation
+  // under extra time/coverage constraints) but is deliberately NOT merged
+  // with it: the detector emits pattern-consistent-with-spoofing events, the
+  // ledger keeps a neutral history of every wall regardless of lifetime.
+  //
+  // Caller contract (terminal.js feeds from the same grouped ladder cadence
+  // as DepthHistoryStore): one update() per sample for every level worth
+  // reporting — including a qty-0 (or shrunk) update for a level previously
+  // tracked, which is how disappearance is observed. `p95qty` is the
+  // caller's p95 of ladder level sizes (the baseline; p95 not median so one
+  // whale neighbor cannot hide a wall — same argument as the detector's
+  // median, one notch stricter), `ticksFromMid` the level's distance from
+  // mid in ticks. `midPrice` is accepted for signature parity with §4g and
+  // is informational only — the pull rule keys off ticksFromMid.
+  //
+  // Rules (K=4, M=5 — §4g conventions, constructor-overridable):
+  //   - ENTER: qty ≥ K·p95 sustained over ≥ M CONSECUTIVE samples → ledger
+  //     entry {price, side, firstTs, lastTs, maxQty, status:'standing'}.
+  //     A sub-threshold sample resets the streak — M−1 never enters.
+  //   - PULLED: a standing wall's level vanishes (update below threshold)
+  //     while MORE than 1 tick from mid — it left without price ever getting
+  //     there, so it cannot have traded. Book fact, not intent.
+  //   - Vanish AT/WITHIN 1 tick of mid is AMBIGUOUS (it may be mid-fill):
+  //     status stays 'standing' and only markTrade() may flip it to
+  //     'filled' — we refuse to guess between fill and pull (honest degrade).
+  //   - FILLED: markTrade(ts, price) crossed the level (price ≤ wall for
+  //     bids, ≥ for asks — a print AT the level is the wall trading).
+  // Ring 50, list() newest-first (feed-view convention).
+  function WallsLedger(opts) {
+    const o = opts || {};
+    const K = posOr(o.k, 4);
+    const M = Math.max(1, Math.floor(finiteOr(o.m, 5)));
+    const ring = makeRing(finiteOr(o.max, 50));
+    // side@price → {streak, firstTs, maxQty, entry|null} for live candidates.
+    // Bounded by the ladder the caller reports (≤ levels per sample) — a
+    // broken streak or resolved wall deletes its key immediately.
+    const track = new Map();
+
+    const keyOf = (side, price) => side + '@' + roundPx(price);
+
+    /** One level observation from one depth sample — see caller contract. */
+    function update(ts, side, price, qty, p95qty, ticksFromMid, midPrice) {
+      void midPrice; // informational only — see caller contract above
+      if (!Number.isFinite(ts) || !Number.isFinite(price) || !Number.isFinite(qty)) return;
+      if (side !== 'bid' && side !== 'ask') return;
+      if (!Number.isFinite(p95qty) || p95qty <= 0) return; // no baseline → no wall judgment
+      const key = keyOf(side, price);
+      const st = track.get(key);
+
+      if (qty > 0 && qty >= K * p95qty) { // wall-sized this sample
+        if (!st) {
+          track.set(key, { streak: 1, firstTs: ts, maxQty: qty, entry: null });
+          if (M <= 1) enter(track.get(key), side, price, ts);
+          return;
+        }
+        st.streak++;
+        if (qty > st.maxQty) st.maxQty = qty;
+        if (st.entry) { st.entry.lastTs = ts; st.entry.maxQty = st.maxQty; }
+        else if (st.streak >= M) enter(st, side, price, ts);
+        return;
+      }
+
+      // Below threshold: streak broken / wall gone. Resolve then forget.
+      if (!st) return;
+      if (st.entry && st.entry.status === 'standing'
+          && Number.isFinite(ticksFromMid) && ticksFromMid > 1) {
+        st.entry.status = 'pulled'; // > 1 tick out — price never got there
+        st.entry.lastTs = ts;
+      }
+      // ≤ 1 tick from mid (or unknown distance): ambiguous — stays
+      // 'standing' until a markTrade() cross confirms 'filled' (see header).
+      track.delete(key);
+    }
+
+    function enter(st, side, price, ts) {
+      st.entry = {
+        price: roundPx(price), side,
+        firstTs: st.firstTs, lastTs: ts, maxQty: st.maxQty, status: 'standing',
+      };
+      ring.push(st.entry);
+    }
+
+    /** A trade print — flips standing walls the price crossed to 'filled'.
+     *  Also drops their live tracking: a wall that re-forms at the same
+     *  price after being eaten is a NEW wall and re-earns its M samples. */
+    function markTrade(ts, price) {
+      if (!Number.isFinite(ts) || !Number.isFinite(price)) return;
+      for (const e of ring.toArray()) {
+        if (e.status !== 'standing') continue;
+        const crossed = e.side === 'bid' ? price <= e.price : price >= e.price;
+        if (!crossed) continue;
+        e.status = 'filled';
+        e.lastTs = ts;
+        track.delete(keyOf(e.side, e.price));
+      }
+    }
+
+    /** Ledger entries NEWEST-FIRST, ≤50 (feed-view convention). */
+    function list() { return ring.toArray().reverse(); }
+
+    return { update, markTrade, list };
+  }
+
+  // ─── VpinStore(bucketVol) — volume-synchronized flow imbalance (§4g) ─────
+  //
+  // CITATION (§4g mandatory): D. Easley, M. López de Prado & M. O'Hara
+  // (2012), "Flow Toxicity and Liquidity in a High-Frequency World", Review
+  // of Financial Studies 25(5) — VPIN: trades are grouped into equal-VOLUME
+  // buckets (the volume clock), each completed bucket contributes
+  // |buyVol − sellVol| / V, and VPIN is the mean over recent buckets.
+  //
+  // Two departures from the paper, both STATED:
+  //   - We classify with the REAL per-trade aggressor flags (§0.6 normalized
+  //     taker side) — BETTER-INFORMED than the paper's Bulk Volume
+  //     Classification, which infers sides probabilistically from price
+  //     changes because their futures feed lacked trade signs. Same
+  //     statistic, strictly better input; stated, not oversold.
+  //   - The TOXICITY INTERPRETATION IS CONTESTED: Andersen & Bondarenko
+  //     (2014, Journal of Financial Markets) show VPIN's predictive content
+  //     is largely explained by trading intensity/volatility and dispute the
+  //     flash-crash early-warning claim. We show the series; we do not claim
+  //     toxicity. Descriptive only (§0.1).
+  //
+  // push(ts, qty, isBuy) splits a trade that straddles a bucket boundary
+  // EXACTLY: the boundary slice completes the bucket, the remainder opens
+  // the next (looping — one print can span several buckets). The live
+  // caller arms V ≈ session-volume/50 re-estimated hourly (§4g);
+  // setBucketVol(v) re-arms FUTURE buckets only — completed buckets keep
+  // the V they were measured at (their |Δ|/V is never restated), and a
+  // partially-filled bucket completes at its armed V (changing the boundary
+  // mid-fill would make the split ill-defined). An EMPTY in-progress bucket
+  // re-arms immediately (nothing measured yet — it IS a future bucket).
+  function VpinStore(bucketVol) {
+    let curV = posOr(bucketVol, 50); // base-asset units; caller arms the real V
+    let nextV = curV;
+    let buy = 0, sell = 0;           // open bucket accumulators
+    const ring = makeRing(50);       // §4g: last 50 completed {ts, imb}
+
+    /** Ingest one trade's (qty, side); ts stamps any bucket it completes. */
+    function push(ts, qty, isBuy) {
+      if (!Number.isFinite(ts) || !Number.isFinite(qty) || qty <= 0) return;
+      let rem = qty;
+      while (rem > 0) {
+        const space = curV - buy - sell;
+        if (rem >= space) { // fills (or exactly closes) the bucket — split here
+          if (isBuy) buy += space; else sell += space;
+          ring.push({ ts, imb: Math.abs(buy - sell) / curV });
+          rem -= space;
+          buy = 0; sell = 0; curV = nextV;
+        } else {
+          if (isBuy) buy += rem; else sell += rem;
+          rem = 0;
+        }
+      }
+    }
+
+    /** Mean |Δ|/V over the retained completed buckets; null until the first
+     *  bucket completes (no estimate is null, never a fabricated 0). */
+    function vpin() {
+      const all = ring.toArray();
+      if (!all.length) return null;
+      let s = 0;
+      for (const b of all) s += b.imb;
+      return s / all.length;
+    }
+
+    /** Completed buckets oldest→newest, ≤50 — the sparkline feed. */
+    function buckets() { return ring.toArray(); }
+
+    /** Re-arm FUTURE buckets at v — see header for what "future" means. */
+    function setBucketVol(v) {
+      if (!Number.isFinite(v) || v <= 0) return;
+      nextV = v;
+      if (buy + sell === 0) curV = v; // empty open bucket is a future bucket
+    }
+
+    return { push, vpin, buckets, setBucketVol, get bucketVol() { return curV; } };
+  }
+
+  // ─── OpeningTypeClassifier(openTs) — AMT opening-type read (§4g) ─────────
+  //
+  // CITATION (§4g mandatory): J. Dalton, Mind over Markets — the four classic
+  // opening types (open-drive, open-test-drive, open-rejection-reverse,
+  // open-auction). DESCRIPTIVE SESSION READ — NOT A SIGNAL (§0.1; the label
+  // rides every classify() result). Dalton's types are qualitative floor
+  // reads; turning them into code requires cutoffs, and EVERY cutoff below
+  // is a labeled CONVENTION of this implementation, not a validated
+  // parameter and not Dalton's numbers:
+  //   - WINDOW_MS  60 min — the opening window being classified (§4g).
+  //   - PROBE_MS   30 min — a test-drive's probe must complete this fast (§4g).
+  //   - RETRACE_FRAC 0.2  — open-drive purity: max retrace against the drive
+  //     < 20% of the open range (§4g); doubles as the minimum first-leg size
+  //     for rejection-reverse (a leg under 20% of range is noise, not a drive).
+  //   - PROBE_FRAC 0.5    — a "probe" is ≤ half the eventual opposite drive;
+  //     larger first legs read as a drive that reversed, not a test.
+  //
+  // Event-time only: feed(ts, price) ignores pre-open prints, uses prints
+  // inside [openTs, openTs+60min) for the stats, and later prints only to
+  // advance the clock (classify() unlocks on EVENT time — replay rail).
+  // State is O(1) scalars (extremes, retraces, open-cross count) — no price
+  // array; deterministic: same tape in → same type out.
+  //
+  // classify() → {type:'pending'} until 60 min elapsed, then {type, evidence,
+  // label}. Precedence (first match wins — deterministic):
+  //   1. degenerate zero range → open-auction (a flat hour is rotational);
+  //   2. open-drive: retrace against the dominant direction < 20% of range;
+  //   3. open-test-drive: first extreme is a PROBE (≤30 min, ≤ half the
+  //      opposite extension, beyond the open) and the drive went opposite,
+  //      with at most one open cross (the probe's return);
+  //   4. open-rejection-reverse: a real first leg (≥20% of range), then
+  //      EXACTLY one full cross back through the open with no re-cross —
+  //      drove, got rejected, reversed and stayed reversed;
+  //   5. else open-auction (rotational — repeated open crosses land here).
+  function OpeningTypeClassifier(openTs) {
+    const WINDOW_MS = 3600000, PROBE_MS = 1800000;    // §4g conventions
+    const RETRACE_FRAC = 0.2, PROBE_FRAC = 0.5;       // labeled conventions
+    const LABEL = 'descriptive session read — not a signal';
+    const t0 = finiteOr(openTs, NaN);
+
+    let open = NaN, lastTs = NaN, n = 0;
+    let hi = -Infinity, hiTs = NaN, lo = Infinity, loTs = NaN;
+    let retraceUp = 0, retraceDn = 0; // max path move against each direction
+    let prevSide = 0, crossCount = 0; // open-cross bookkeeping (at-open holds side)
+
+    /** Ingest one print. Pre-open and malformed prints are dropped; prints
+     *  after the window only advance the event clock. */
+    function feed(ts, price) {
+      if (!Number.isFinite(t0) || !Number.isFinite(ts) || !Number.isFinite(price)) return;
+      if (ts < t0) return;                    // pre-open — not the opening auction
+      if (!(ts <= lastTs)) lastTs = ts;       // monotone event clock (NaN-safe)
+      if (ts >= t0 + WINDOW_MS) return;       // window closed — clock only
+      if (!Number.isFinite(open)) open = price;
+      n++;
+      if (price > hi) { hi = price; hiTs = ts; }
+      if (price < lo) { lo = price; loTs = ts; }
+      if (hi - price > retraceDn) retraceDn = hi - price;
+      if (price - lo > retraceUp) retraceUp = price - lo;
+      const s = price > open ? 1 : price < open ? -1 : 0;
+      if (s !== 0) {
+        if (prevSide !== 0 && s !== prevSide) crossCount++;
+        prevSide = s;
+      }
+    }
+
+    function classify() {
+      if (!Number.isFinite(t0) || !Number.isFinite(open)
+          || !(lastTs - t0 >= WINDOW_MS)) return { type: 'pending', label: LABEL };
+      const range = hi - lo;
+      const extUp = hi - open, extDn = open - lo;
+      const dir = extUp >= extDn ? 'up' : 'down';        // dominant side (tie → up)
+      const firstSide = hiTs <= loTs ? 'up' : 'down';    // earlier extreme (tie → up)
+      const firstExt = firstSide === 'up' ? extUp : extDn;
+      const secondExt = firstSide === 'up' ? extDn : extUp;
+      const firstTsRel = (firstSide === 'up' ? hiTs : loTs) - t0;
+      const evidence = {
+        open, hi, lo, range, extUp, extDn, retraceUp, retraceDn,
+        hiTs, loTs, dir, firstSide, crossCount, n,
+      };
+      const done = (type) => ({ type, evidence, label: LABEL });
+
+      if (!(range > 0)) return done('open-auction');
+      const driveRetrace = dir === 'up' ? retraceDn : retraceUp;
+      if (driveRetrace < RETRACE_FRAC * range) return done('open-drive');
+      if (firstSide !== dir && firstExt > 0 && firstTsRel <= PROBE_MS
+          && firstExt <= PROBE_FRAC * secondExt && crossCount <= 1) {
+        return done('open-test-drive');
+      }
+      if (firstExt >= RETRACE_FRAC * range && crossCount === 1) {
+        return done('open-rejection-reverse');
+      }
+      return done('open-auction');
+    }
+
+    return { feed, classify, openTs: t0 };
+  }
+
+  // ─── BasisSeries({max}) — perp basis + funding history ring (§4g) ────────
+  //
+  // Ring (default 3600 ≈ 1 h at the existing 1 s mark cadence — §4g: NO new
+  // feeds, this is fed from the mark events the header already consumes) of
+  // {ts, basisBp, fundingRate} for the STRUCTURE two-pane mini chart.
+  // fundingRate may be absent on a sample (Bybit tickers partial deltas omit
+  // unchanged fields) — stored as NaN, never zero-coerced: a fabricated 0
+  // would claim "flat funding" where the honest read is "unchanged/unknown";
+  // views skip NaN points (ProfileStore's NaN convention).
+  function BasisSeries(opts) {
+    const ring = makeRing(finiteOr(opts && opts.max, 3600));
+    let last = null;
+
+    function push(ts, basisBp, fundingRate) {
+      if (!Number.isFinite(ts) || !Number.isFinite(basisBp)) return;
+      last = { ts, basisBp, fundingRate: Number.isFinite(fundingRate) ? fundingRate : NaN };
+      ring.push(last);
+    }
+
+    /** Oldest→newest, ≤max — the chart feed. */
+    function list() { return ring.toArray(); }
+
+    /** Newest sample or null (never a fabricated zero row). */
+    function latest() { return last; }
+
+    return { push, list, latest, get length() { return ring.length; } };
+  }
+
+  // ─── deriveVenueIds(sym) — per-venue symbol mapping (§4g) ────────────────
+  //
+  // Mirrors the collector's `_symbol_legs` convention (btcquant/collector.py
+  // — ONE derivation for record and replay, base = symbol with the trailing
+  // USDT stripped) with one stated difference: where the collector keeps a
+  // heuristic passthrough for non-USDT symbols (and logs the derived ids so
+  // a wrong mapping is visible), the terminal returns NULL for a leg it
+  // cannot derive, so the UI degrades honestly ('no <venue> leg for <sym>'
+  // chip, §4g) instead of subscribing to a guessed id. A derived id is a
+  // NAMING convention, not proof of a listing — startAllLegs (terminal.js)
+  // probes derived binancef/coinbase ids against the venue before
+  // subscribing (§4g unknown/unreachable rule).
+  //   - bybit: the picker universe's own id, as-is — always known.
+  //   - binancef: the same USDT-perp id — a convention shared only by USDT
+  //     perps, so a non-USDT symbol degrades to null, never a guess.
+  //   - okx: <base>-USDT-SWAP; coinbase: <base>-USD (spot).
+  //   - Not USDT-quoted → binancef + okx + coinbase null (unknown mapping).
+  //   - Base starts with digits (1000PEPE — a multiplied perp contract) →
+  //     coinbase null: no such SPOT market exists, the 1000× prefix is a
+  //     derivatives listing artifact.
+  function deriveVenueIds(sym) {
+    const s = typeof sym === 'string' ? sym : '';
+    if (!s) return { bybit: null, binancef: null, okx: null, coinbase: null };
+    const out = { bybit: s, binancef: null, okx: null, coinbase: null };
+    if (!s.endsWith('USDT') || s.length <= 4) return out; // unknown mapping — honest nulls
+    const base = s.slice(0, -4);
+    out.binancef = s;
+    out.okx = base + '-USDT-SWAP';
+    if (!/^\d/.test(base)) out.coinbase = base + '-USD';
+    return out;
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalState = {
@@ -2592,6 +3074,11 @@
     // implementation, heuristics carry label:'heuristic' on every event.
     buildDeltaProfile, SessionClock, AnchoredVwap, OfiStore, microprice,
     stackedImbalances, AbsorptionDetector, cumDelta,
+    // T-1 (§4g): Trader's Edge stores — descriptive, convention-labeled;
+    // VPIN carries its citations (and the contested-interpretation note) at
+    // the implementation, the opening classifier its Dalton attribution.
+    TapeIntensityStore, WallsLedger, VpinStore, OpeningTypeClassifier,
+    BasisSeries, deriveVenueIds,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalState;

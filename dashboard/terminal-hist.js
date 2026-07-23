@@ -588,6 +588,63 @@
     } catch (_) { return null; }        // transient REST failure ≠ terminal state — caller renders '—'
   }
 
+  /** OKX SWAP contract multiplier (ctVal, base-asset units per contract) for
+   *  one instId — /api/v5/public/instruments. T-1 (§4g): the okx adapter
+   *  REQUIRES the real multiplier (§4b unit rail — a guessed ctVal would
+   *  mis-scale every okx size against the base-denominated legs), so on a
+   *  null return the caller SKIPS the leg with an honest degrade chip
+   *  instead of subscribing with a wrong number. */
+  async function fetchOkxCtVal(instId) {
+    try {
+      const j = await getJSON(
+        'https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=' + encodeURIComponent(instId)
+      );
+      const row = j && Array.isArray(j.data) ? j.data[0] : null;
+      const v = row ? Number(row.ctVal) : NaN;
+      return Number.isFinite(v) && v > 0 ? v : null;
+    } catch (_) { return null; }        // unreachable/unknown → caller degrades the leg honestly
+  }
+
+  /** T-1 (§4g) listing probes — a derived binancef/coinbase id is a NAMING
+   *  convention, not proof of a listing (deriveVenueIds, terminal-state.js),
+   *  so startAllLegs asks the venue before subscribing any non-pinned id.
+   *  Three-state: true = listed; false = the venue answered "no such
+   *  market"; null = probe unreachable. The caller degrades false/null to
+   *  the honest 'no leg' chip (§4g unknown/unreachable rule) instead of
+   *  opening a socket that never delivers — the watchdog would loop
+   *  'stalled — reconnecting' forever over a feed that never existed.
+   *  Raw fetch, not getJSON: the not-listed answer ARRIVES as an HTTP error
+   *  status, which getJSON collapses into the same throw as an outage. */
+  async function probeListing(url, notFoundStatus) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 10000);
+    try {
+      const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: ctrl.signal });
+      if (res.ok) return true;
+      return res.status === notFoundStatus ? false : null;   // other statuses = venue trouble, not an answer
+    } catch (_) {
+      return null;
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  /** Binance Futures listing probe: premiumIndex on the SAME fapi host the
+   *  REST poller consumes — 200 iff the perp exists, 400 (code -1121
+   *  "Invalid symbol") iff not (CORS-open, verified 2026-07-23). */
+  function probeBinanceFutSymbol(sym) {
+    return probeListing(
+      'https://fapi.binance.com/fapi/v1/premiumIndex?symbol=' + encodeURIComponent(sym), 400);
+  }
+
+  /** Coinbase product probe: Exchange REST /products/<id> — keyless,
+   *  CORS-open (verified 2026-07-23), same product ids as the advanced-trade
+   *  WS feed; 404 iff no such spot market. */
+  function probeCoinbaseProduct(productId) {
+    return probeListing(
+      'https://api.exchange.coinbase.com/products/' + encodeURIComponent(productId), 404);
+  }
+
   /** OKX open interest for one SWAP instId. */
   async function fetchOkxOi(instId) {
     try {
@@ -727,7 +784,7 @@
   const HIST = {
     // O-3 (§4c)
     normalizeBybitKlines, normalizeOkxFunding, normalizeOkxOi, normalizeHlMids,
-    fetchBybitKlines, fetchOkxFunding, fetchOkxOi, fetchHlMids,
+    fetchBybitKlines, fetchOkxFunding, fetchOkxOi, fetchOkxCtVal, fetchHlMids,
     // O-4 (§4d)
     normalizeBybitTickers, normalizeDeribitChain, normalizeDeribitDvol,
     normalizeHlLeaderboard, normalizeHlPositions,
@@ -736,6 +793,8 @@
     // O-5 (§4e)
     normalizePolymarketEvents, normalizeToaNews, normalizeEconLocal,
     fetchPolymarketBtc, fetchToaNews, fetchEconLocal,
+    // T-1 (§4g)
+    probeBinanceFutSymbol, probeCoinbaseProduct,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = HIST;

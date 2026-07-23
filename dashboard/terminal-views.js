@@ -39,6 +39,40 @@
     return '$' + x.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
   }
 
+  /** Decimals that resolve ONE TICK of the given grid: 0 for $1+ grids
+   *  (BTC's pinned set), else the tick's own decimal length — walk ×10 until
+   *  integral, cap 8. ceil(−log10) under-counted non-power-of-10 grids
+   *  (0.25 → 1 dp): every 2.5×/1.25×10^k level would render up to half a
+   *  tick away from the level that actually traded. T-1 (§4g multi-symbol):
+   *  a 5e-7-grouped 1000PEPE ladder at the old fixed 0–2 dp printed every
+   *  price as $0.00. */
+  function tickDp(tick) {
+    if (!Number.isFinite(tick) || tick <= 0 || tick >= 1) return 0;
+    let dp = 0, x = tick;
+    while (dp < 8 && Math.abs(x - Math.round(x)) > 1e-9 * Math.max(1, x)) { x *= 10; dp++; }
+    return dp;
+  }
+
+  /** Price label with tick-aware decimals — the multi-symbol fmtUsd. */
+  function fmtPx(x, tick) { return fmtUsd(x, tickDp(tick)); }
+
+  /** Merge canvas line labels ({y, color, label}) that fall within one text
+   *  height of each other into one 'A·B' entry — the cluster's first label
+   *  keeps y and color (sorted by y; the sort is stable, so on equal y the
+   *  push order wins: POC before VAH/VAL). Coincident levels are real (a
+   *  degenerate one-level profile puts POC = VAH = VAL at the same y; a
+   *  prior POC can equal the prior close) and overprinted glyphs are
+   *  unreadable. */
+  function mergeYLabels(items, lineH) {
+    const out = [];
+    for (const it of items.slice().sort((a, b) => a.y - b.y)) {
+      const last = out[out.length - 1];
+      if (last && it.y - last.y < lineH) last.label += '·' + it.label;
+      else out.push({ y: it.y, color: it.color, label: it.label });
+    }
+    return out;
+  }
+
   /** Signed compact USD for notionals/CVD ($12.5k / $3.42M / -$1.10B). */
   function fmtCompactUsd(x) {
     if (!Number.isFinite(x)) return '—';
@@ -50,7 +84,7 @@
     return s + '$' + a.toFixed(0);
   }
 
-  /** Base-asset (BTC) volume with decimals scaled to magnitude — footprint
+  /** Base-asset volume with decimals scaled to magnitude — footprint
    *  cells are tiny, so precision yields to legibility as volume grows. */
   function fmtVol(v) {
     if (!Number.isFinite(v)) return '—';
@@ -60,7 +94,7 @@
     return v.toFixed(2);
   }
 
-  /** Trade/ladder quantity (BTC). */
+  /** Trade/ladder quantity, base-asset units. */
   function fmtQty(q) {
     if (!Number.isFinite(q)) return '—';
     if (q >= 100) return q.toFixed(1);
@@ -219,10 +253,14 @@
     let drawQueued = false;    // rAF coalescing for mouse-driven redraws
     let lastCvdAt = 0;         // CVD setData throttle (see renderCvd)
     const CVD_MIN_MS = 600;    // setData on ~20k pts is the priciest op here — cap it
+    let drowsOn = true;        // T-1 (§4g): Δmin/Δmax + Δ% footer rows toggle
 
     // Fixed gutter/footer geometry.
     const GUT_VP = 84, GUT_AXIS = 60;
     const ROW_DELTA = 16, ROW_TVOL = 16, ROW_TIME = 14;
+    // T-1 (§4g): optional Δmin/Δmax + Δ% rows (heights applied only while the
+    // toggle is on — see draw()).
+    const ROW_DMM = 15, ROW_DPCT = 13;
     // I-1 (§4f): cum-delta mini-pane strip between the vol row and the time
     // labels — session-anchored running Σ of per-bar delta (cumDelta accessor;
     // like CVD it has no natural zero, so the read is slope/divergence only).
@@ -243,6 +281,17 @@
         scheduleDraw();
       });
       canvas.addEventListener('mouseleave', () => { mouse = null; scheduleDraw(); });
+      // T-1 (§4g): Δ-rows toggle lives in the panel chrome (terminal.html);
+      // the view owns the display choice, terminal.js persists it — the
+      // TapeView filter-input ownership split.
+      if (o.deltaRowsInput) {
+        drowsOn = !!o.deltaRowsInput.checked;
+        o.deltaRowsInput.addEventListener('change', () => {
+          drowsOn = !!o.deltaRowsInput.checked;
+          if (typeof o.onDeltaRows === 'function') o.onDeltaRows(drowsOn);
+          scheduleDraw();
+        });
+      }
 
       cvdEl = o.cvdEl || null;
       if (cvdEl) initCvd(o.buckets || [], o.cvdExs || ['bybit']);
@@ -430,7 +479,10 @@
 
       // Visible window: as many most-recent bars as fit at ≥ BAR_W_MIN each.
       const plotW = w - GUT_VP - GUT_AXIS;
-      const cellsH = h - ROW_DELTA - ROW_TVOL - ROW_CUM - ROW_TIME;
+      // T-1 (§4g): the Δmin/Δmax + Δ% rows take footer height only while the
+      // toggle is on — cells reclaim the space when it is off.
+      const extraRows = drowsOn ? ROW_DMM + ROW_DPCT : 0;
+      const cellsH = h - ROW_DELTA - ROW_TVOL - extraRows - ROW_CUM - ROW_TIME;
       const nFit = Math.max(1, Math.floor(plotW / BAR_W_MIN));
       const vis = bars.slice(-nFit);
       const barW = plotW / vis.length;
@@ -515,6 +567,34 @@
         ctx.fillText((b.delta > 0 ? '+' : '') + fmtVol(b.delta), x0 + half, yD);
         font(10); ctx.fillStyle = p.muted;
         ctx.fillText(fmtVol(b.totalVol), x0 + half, yV);
+        // T-1 (§4g): Δmin/Δmax row (intra-bar delta-path extremes, 0-anchored)
+        // mirrors the cells' sell-left/buy-right layout — position is the
+        // non-color cue, same WCAG rule as the '×' cells above. Δ% below it.
+        if (drowsOn) {
+          const yMM = cellsH + ROW_DELTA + ROW_TVOL + ROW_DMM / 2;
+          const yPC = cellsH + ROW_DELTA + ROW_TVOL + ROW_DMM + ROW_DPCT / 2;
+          font(9);
+          ctx.fillStyle = p.down; ctx.textAlign = 'right';
+          ctx.fillText(fmtVol(b.deltaMin), x0 + half - 4, yMM);
+          ctx.fillStyle = p.up; ctx.textAlign = 'left';
+          ctx.fillText(fmtVol(b.deltaMax), x0 + half + 4, yMM);
+          ctx.fillStyle = p.muted; ctx.textAlign = 'center';
+          ctx.fillText('|', x0 + half, yMM);
+          const pct = b.deltaPct;
+          font(9, true);
+          ctx.fillStyle = pct > 0 ? p.up : pct < 0 ? p.down : p.muted;
+          ctx.fillText((pct > 0 ? '+' : '') + (pct * 100).toFixed(0) + '%', x0 + half, yPC);
+        }
+        // T-1 (§4g): unfinished-auction corner markers — FINISHED bars whose
+        // extreme level printed BOTH sides (store computes the flag at bar
+        // close, same finished-only discipline as the imbalance outlines).
+        // ⌜ at the high / ⌟ at the low, --accent (annotation vocabulary —
+        // a bar fact by convention, not a heuristic event).
+        if (b.finished && (b.unfinishedHigh || b.unfinishedLow)) {
+          font(11, true); ctx.fillStyle = p.accent; ctx.textAlign = 'center';
+          if (b.unfinishedHigh) ctx.fillText('⌜', x0 + half, Math.max(6, yOf(b.h) - 4));
+          if (b.unfinishedLow) ctx.fillText('⌟', x0 + half, Math.min(cellsH - 4, yOf(b.l) + rowH + 4));
+        }
       }
 
       // ── I-1 (§4f): stacked-imbalance zone shading — side-colored translucent
@@ -566,7 +646,7 @@
       // anchored like CVD — the first bar in the ring is the anchor, so only
       // slope/divergence read (stated in the hint). Skipped bars (non-finite
       // delta) simply have no point — nothing is zero-coerced. ──
-      const yCum0 = cellsH + ROW_DELTA + ROW_TVOL;
+      const yCum0 = cellsH + ROW_DELTA + ROW_TVOL + extraRows;
       ctx.strokeStyle = p.border; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(0, yCum0 + 0.5); ctx.lineTo(plotW, yCum0 + 0.5); ctx.stroke();
       const cumByTs = new Map();
@@ -608,12 +688,16 @@
       const step = Math.max(1, Math.ceil(56 / barW));
       font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'center';
       for (let i = vis.length - 1; i >= 0; i -= step) {
-        ctx.fillText(hm(vis[i].t), i * barW + barW / 2, cellsH + ROW_DELTA + ROW_TVOL + ROW_CUM + ROW_TIME / 2);
+        ctx.fillText(hm(vis[i].t), i * barW + barW / 2, yCum0 + ROW_CUM + ROW_TIME / 2);
       }
       // Footer row captions in the gutter.
       font(9); ctx.textAlign = 'left'; ctx.fillStyle = p.muted;
       ctx.fillText('Δ', plotW + 4, cellsH + ROW_DELTA / 2);
       ctx.fillText('vol', plotW + 4, cellsH + ROW_DELTA + ROW_TVOL / 2);
+      if (drowsOn) {
+        ctx.fillText('Δmm', plotW + 4, cellsH + ROW_DELTA + ROW_TVOL + ROW_DMM / 2);
+        ctx.fillText('Δ%', plotW + 4, cellsH + ROW_DELTA + ROW_TVOL + ROW_DMM + ROW_DPCT / 2);
+      }
       ctx.fillText('cumΔ', plotW + 4, yCum0 + ROW_CUM / 2);
 
       // ── Right gutter: session VP histogram + POC/VAH/VAL (ProfileStore) ──
@@ -622,6 +706,7 @@
       // pretend the window is the session).
       const prof = slice.profile;
       const gx = plotW + 14;   // small gap after the Δ/vol captions column
+      const gutterLabelYs = [];   // ys claimed by POC/VAH/VAL tags — axis prices yield there
       if (prof && prof.levels && prof.levels.length) {
         let maxV = 0;
         for (const lv of prof.levels) if (lv.price >= minP && lv.price <= maxP && lv.vol > maxV) maxV = lv.vol;
@@ -635,7 +720,11 @@
         }
         // POC (accent solid) / VAH / VAL (muted dashed) across cells + gutter,
         // drawn only when inside the visible window — an off-screen arrow would
-        // imply knowledge of levels the eye can't verify.
+        // imply knowledge of levels the eye can't verify. Labels are deferred
+        // and merged via mergeYLabels: a degenerate profile (one price level →
+        // POC = VAH = VAL) would overprint all three at the same y into
+        // unreadable glyphs.
+        const hlLabels = [];
         const hline = (price, color, dash, label) => {
           if (!Number.isFinite(price) || price < minP || price > maxP) return;
           const y = yOf(price) + rowH / 2;
@@ -644,20 +733,56 @@
           ctx.strokeStyle = color; ctx.lineWidth = 1;
           ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - GUT_AXIS, y); ctx.stroke();
           ctx.restore();
-          font(9, true); ctx.fillStyle = color; ctx.textAlign = 'left';
-          ctx.fillText(label, w - GUT_AXIS + 2, y);
+          hlLabels.push({ y, color, label });
         };
         hline(prof.poc, p.accent, false, 'POC');
         hline(prof.vah, p.muted, true, 'VAH');
         hline(prof.val, p.muted, true, 'VAL');
+        font(9, true); ctx.textAlign = 'left';
+        for (const l of mergeYLabels(hlLabels, 9)) {
+          ctx.fillStyle = l.color;
+          ctx.fillText(l.label, w - GUT_AXIS + 2, l.y);
+          gutterLabelYs.push(l.y);
+        }
       }
 
-      // Price axis labels (right edge), thinned to ~14px spacing.
+      // ── T-1 (§4g): key-level markers (registry prior-day levels + live IB
+      // — composed by terminal.js, toggled in the key-levels panel). Drawn
+      // across the CELLS only with a short dash + a left-edge label, so they
+      // can't be confused with the session POC/VAH/VAL lines above (full
+      // width, labeled at the right axis). Off-window levels aren't drawn —
+      // same rule as hline. ──
+      const klLabels = [];
+      for (const kl of slice.keyLevels || []) {
+        if (!Number.isFinite(kl.price) || kl.price < minP || kl.price > maxP) continue;
+        const y = yOf(kl.price) + rowH / 2;
+        const col = kl.kind === 'ib' ? p.accent2 : (kl.kind === 'poc' || kl.kind === 'naked') ? p.accent : p.muted;
+        ctx.save();
+        ctx.setLineDash([2, 4]);
+        ctx.strokeStyle = rgba(col, 0.75); ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plotW, y); ctx.stroke();
+        ctx.restore();
+        klLabels.push({ y, color: col, label: kl.label });
+      }
+      // Same collision rule as the POC/VAH/VAL labels: coincident levels
+      // (e.g. pPOC = pC) merge instead of overprinting.
+      font(8, true); ctx.textAlign = 'left';
+      for (const l of mergeYLabels(klLabels, 8)) {
+        ctx.fillStyle = l.color;
+        ctx.fillText(l.label, 3, l.y - 5);
+      }
+
+      // Price axis labels (right edge), thinned to ~14px spacing. A row
+      // claimed by a POC/VAH/VAL tag is skipped: both strings at one y
+      // overstrike into garbage, and the scale survives a one-row gap while
+      // an unreadable level tag helps no one.
       const labStep = Math.max(1, Math.ceil(14 / rowH));
       font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'right';
       for (let r = 0; r < nRows; r += labStep) {
         const price = maxP - r * tick;
-        ctx.fillText(fmtUsd(price), w - 2, yOf(price) + rowH / 2);
+        const y = yOf(price) + rowH / 2;
+        if (gutterLabelYs.some((ly) => Math.abs(ly - y) < 9)) continue;
+        ctx.fillText(fmtPx(price, tick), w - 2, y);
       }
 
       // ── Crosshair + readout (cells area only) ──
@@ -675,7 +800,7 @@
         ctx.beginPath(); ctx.moveTo(bi * barW + barW / 2, 0); ctx.lineTo(bi * barW + barW / 2, cellsH); ctx.stroke();
         ctx.restore();
         // Readout box, top-left: bar time · level price · sell×buy · bar Δ.
-        const txt = hm(b.t) + (b.finished ? '' : ' (live)') + ' · ' + fmtUsd(price)
+        const txt = hm(b.t) + (b.finished ? '' : ' (live)') + ' · ' + fmtPx(price, tick)
           + ' · sell ' + (lv ? fmtVol(lv.sell) : '0') + ' × buy ' + (lv ? fmtVol(lv.buy) : '0')
           + ' · bar Δ ' + (b.delta > 0 ? '+' : '') + fmtVol(b.delta);
         font(10);
@@ -691,8 +816,9 @@
     /** slice = { bars, profile, cvd, tickSize, nowMs } + I-1 (§4f): zones
      *  (stackedImbalances output over the same bars), absorb (Absorption-
      *  Detector.events(), every one labeled 'heuristic'), cum (cumDelta
-     *  accessor output) — all straight from the stores; nothing here mutates
-     *  them. */
+     *  accessor output) + T-1 (§4g): keyLevels ([{price, label, kind}] —
+     *  registry/IB markers, empty when the toggle is off) — all straight
+     *  from the stores; nothing here mutates them. */
     function render(slice) {
       lastSlice = slice;
       draw(slice);
@@ -773,7 +899,7 @@
       const g = slice.grouped || { bids: [], asks: [] };
       const bars = slice.bars || [];
       const tick = slice.tickSize || 1;
-      const dp = tick >= 1 ? 0 : 2;
+      const dp = tickDp(tick);   // §4g: resolve one tick of the CURRENT grid (sub-$1 symbols)
       const naked = slice.nakedPocs || [];
 
       // Session per-level aggressor volume from the footprint bars (≤121 bars ×
@@ -848,7 +974,7 @@
       const best = slice.best || {};
       const spTd = rows[nLevels].firstChild;
       spTd.textContent = (best.bid && best.ask)
-        ? 'spread ' + fmtUsd(best.ask[0] - best.bid[0], 2) + ' · mid ' + fmtUsd((best.ask[0] + best.bid[0]) / 2, 1)
+        ? 'spread ' + fmtUsd(best.ask[0] - best.bid[0], Math.max(2, dp)) + ' · mid ' + fmtUsd((best.ask[0] + best.bid[0]) / 2, Math.max(1, dp))
         : 'waiting for book…';
       // Bid block.
       for (let i = 0; i < nLevels; i++) setRow(rows[nLevels + 1 + i], bids[i] || null, 'bid');
@@ -900,6 +1026,7 @@
         list.innerHTML = '<div class="chart-na">no prints yet (or none clear the filter) — the tape shows only trades that arrived this session.</div>';
         return;
       }
+      const dp = Math.max(1, tickDp(slice.tick));   // §4g: sub-$1 symbols need real decimals
       let html = '';
       for (const t of trades) {
         const notional = t.price * t.qty;
@@ -908,7 +1035,7 @@
         html += '<div class="tape-row' + (whale ? ' whale' : '') + '">'
           + '<span class="ts">' + hms(t.ts) + '</span>'
           + '<span class="ex ex-' + esc(t.ex) + '">' + esc(t.ex === 'coinbase' ? 'cb' : t.ex) + '</span>'
-          + '<span class="px delta ' + dir + '">' + fmtUsd(t.price, 1) + '</span>'
+          + '<span class="px delta ' + dir + '">' + fmtUsd(t.price, dp) + '</span>'
           + '<span class="qty">' + fmtQty(t.qty) + '</span>'
           + '<span class="ntl">' + (whale ? '◆ ' : '') + fmtCompactUsd(notional) + '</span>'
           + '</div>';
@@ -941,8 +1068,8 @@
       root.appendChild(legend);
     }
 
-    /** slice = { grouped:{bids,asks} } from AggBookStore.grouped(tick, nLevels):
-     *  rows are {price, total, byEx} best-first. */
+    /** slice = { grouped:{bids,asks}, tick } from AggBookStore.grouped(tick,
+     *  nLevels): rows are {price, total, byEx} best-first. */
     function render(slice) {
       if (!canvas) return;
       const g = slice.grouped || { bids: [], asks: [] };
@@ -1043,7 +1170,7 @@
           // far end a clear ~3px further from the bar tips than before.
           if (rowH >= 11 && i % priceStep === 0) {
             ctx.fillStyle = sideCol; ctx.textAlign = isBid ? 'right' : 'left';
-            ctx.fillText(fmtUsd(r.price), isBid ? centerX - 6 : centerX + 6, y + rowH / 2);
+            ctx.fillText(fmtPx(r.price, slice.tick), isBid ? centerX - 6 : centerX + 6, y + rowH / 2);
           }
           // Qty at the bar END (just past the tip, in empty space) — only
           // when the bar is long enough (≥28px) that the label reads as
@@ -1132,19 +1259,26 @@
       mkStat(grid, 'index', 'index (bybit)', 'Bybit index price');
       mkStat(grid, 'basis', 'basis', '(mark − index) / index · 1e4, basis points');
       mkStat(grid, 'funding', 'funding / next', 'Current funding rate + countdown to next funding');
-      mkStat(grid, 'oi', 'OI (bybit)', 'Open interest, BTC');
+      mkStat(grid, 'oi', 'OI (bybit)', 'Open interest, base-asset units');
       mkStat(grid, 'oiUsd', 'OI $ @ mark', 'Open interest × mark price (USD)');
       mkStat(grid, 'hi', 'session high', 'Highest Bybit perp print since page open — session-local, no backfill (§0.7)', 'session');
       mkStat(grid, 'lo', 'session low', 'Lowest Bybit perp print since page open');
+      // T-1 (§4g): AMT opening-type read — cited + labeled at the source
+      // (OpeningTypeClassifier); the tooltip carries the evidence once
+      // classified. Every cutoff is a stated convention, not Dalton's numbers.
+      mkStat(grid, 'open', 'opening type', 'AMT opening type after the first 60 min UTC (Dalton, Mind over Markets) — descriptive session read, not a signal; cutoffs are conventions of this implementation');
       mkStat(grid, 'bnFunding', 'funding (binancef)', 'Binance Futures funding (REST poll, 5s)', 'binancef');
       mkStat(grid, 'bnBasis', 'basis (binancef)', 'Binance Futures (mark − index) / index · 1e4');
-      mkStat(grid, 'bnOi', 'OI (binancef)', 'Binance Futures open interest, BTC (REST poll, 60s)');
+      mkStat(grid, 'bnOi', 'OI (binancef)', 'Binance Futures open interest, base-asset units (REST poll, 60s)');
       root.appendChild(grid);
     }
 
     /** slice = { marks:{ex→mark ev}, ois:{ex→oi ev}, statuses:{ex→{kind,msg}},
-     *  sessionHigh, sessionLow, nowMs } */
+     *  sessionHigh, sessionLow, opening:{text,title}|null (§4g), base, nowMs }
+     *  — base = the symbol's base-asset code (unit labels; null = unknown
+     *  quote → quantities render unitless rather than mislabeled, §4g). */
     function render(slice) {
+      const unit = slice.base ? ' ' + slice.base : '';
       const set = (k, v, cls) => {
         cells[k].textContent = v;
         // '.na' = absent value ('—') → dimmed ink, not ragged (presentation).
@@ -1153,9 +1287,10 @@
       const bp = (m) => (m && Number.isFinite(m.mark) && Number.isFinite(m.index) && m.index !== 0)
         ? ((m.mark - m.index) / m.index) * 1e4 : NaN;
 
+      const pdp = Math.max(1, tickDp(slice.tickSize));   // §4g: sub-$1 symbols need real decimals
       const by = slice.marks && slice.marks.bybit;
-      set('mark', by ? fmtUsd(by.mark, 1) : '—');
-      set('index', by ? fmtUsd(by.index, 1) : '—');
+      set('mark', by ? fmtUsd(by.mark, pdp) : '—');
+      set('index', by ? fmtUsd(by.index, pdp) : '—');
       const bby = bp(by);
       set('basis', Number.isFinite(bby) ? bby.toFixed(1) + ' bp' : '—', bby > 0 ? 'pos' : bby < 0 ? 'neg' : '');
       if (by && Number.isFinite(by.fundingRate)) {
@@ -1164,10 +1299,16 @@
           by.fundingRate > 0 ? 'pos' : by.fundingRate < 0 ? 'neg' : '');
       } else set('funding', '—');
       const oiBy = slice.ois && slice.ois.bybit;
-      set('oi', oiBy ? fmtQty(oiBy.oi) + ' BTC' : '—');
+      set('oi', oiBy ? fmtQty(oiBy.oi) + unit : '—');
       set('oiUsd', (oiBy && by && Number.isFinite(by.mark)) ? fmtCompactUsd(oiBy.oi * by.mark) : '—');
-      set('hi', fmtUsd(slice.sessionHigh, 1));
-      set('lo', fmtUsd(slice.sessionLow, 1));
+      set('hi', fmtUsd(slice.sessionHigh, pdp));
+      set('lo', fmtUsd(slice.sessionLow, pdp));
+      // T-1 (§4g): opening-type chip — terminal.js composes {text, title}
+      // (pending / unwitnessed / the class + evidence); the mount tooltip is
+      // the fallback when no richer title rides the slice.
+      const op = slice.opening;
+      set('open', op && op.text ? op.text : '—');
+      if (op && op.title) cells.open.parentNode.title = op.title;
 
       const bn = slice.marks && slice.marks.binancef;
       set('bnFunding', (bn && Number.isFinite(bn.fundingRate)) ? (bn.fundingRate * 100).toFixed(4) + '%' : '—',
@@ -1175,7 +1316,7 @@
       const bbn = bp(bn);
       set('bnBasis', Number.isFinite(bbn) ? bbn.toFixed(1) + ' bp' : '—', bbn > 0 ? 'pos' : bbn < 0 ? 'neg' : '');
       const oiBn = slice.ois && slice.ois.binancef;
-      set('bnOi', oiBn ? fmtQty(oiBn.oi) + ' BTC' : '—');
+      set('bnOi', oiBn ? fmtQty(oiBn.oi) + unit : '—');
 
       // Conn chips: mirror app.js updateLiveStatus semantics — 'stale' and
       // 'reconnecting' share the amber dot ('reconnecting' is just stale with
@@ -1248,13 +1389,14 @@
         list.innerHTML = '<div class="chart-na">no liquidations seen this session — only what actually printed on the wire is shown (§0.7).</div>';
         return;
       }
+      const dp = Math.max(1, tickDp(slice.tick));   // §4g: sub-$1 symbols need real decimals
       let html = '';
       for (const l of recent) {
         const long = l.side === 'long';
         html += '<div class="liq-row">'
           + '<span class="ts">' + hms(l.ts) + '</span>'
           + '<span class="liq-badge ' + (long ? 'long' : 'short') + '">' + (long ? 'LONG LIQ' : 'SHORT LIQ') + '</span>'
-          + '<span class="px">' + fmtUsd(l.price, 1) + '</span>'
+          + '<span class="px">' + fmtUsd(l.price, dp) + '</span>'
           + '<span class="qty">' + fmtQty(l.qty) + '</span>'
           + '<span class="ntl">' + fmtCompactUsd(l.notionalUsd) + '</span>'
           + '</div>';
@@ -1452,7 +1594,7 @@
       font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'right';
       for (let r = 0; r < nRows; r += labStep) {
         const price = range.max - r * tick;
-        ctx.fillText(fmtUsd(price), w - 2, yOf(price) + rowH / 2);
+        ctx.fillText(fmtPx(price, tick), w - 2, yOf(price) + rowH / 2);
       }
       // Time axis (bottom): labels at fixed fractions of the linear time span.
       font(9); ctx.textAlign = 'center';
@@ -1481,11 +1623,12 @@
         ctx.restore();
         let txt;
         if (!s || tsAt - s.ts > 1.5 * dtMed) {
-          txt = hms(tsAt) + ' · ' + fmtUsd(bucket) + ' · no sample (gap — gaps stay gaps)';
+          txt = hms(tsAt) + ' · ' + fmtPx(bucket, tick) + ' · no sample (gap — gaps stay gaps)';
         } else {
           const bq = s.bids.get(bucket) || 0, aq = s.asks.get(bucket) || 0;
           const side = bq && aq ? 'bid+ask' : bq ? 'bid' : aq ? 'ask' : '—';
-          txt = hms(s.ts) + ' · ' + fmtUsd(bucket) + ' · resting ' + fmtQty(bq + aq) + ' BTC (' + side + ')';
+          txt = hms(s.ts) + ' · ' + fmtPx(bucket, tick) + ' · resting ' + fmtQty(bq + aq)
+            + (slice.base ? ' ' + slice.base : '') + ' (' + side + ')';
         }
         font(10);
         const tw = ctx.measureText(txt).width;
@@ -1497,7 +1640,7 @@
       }
     }
 
-    /** slice = { samples, range, tickSize, trail, events, ex, sessions } —
+    /** slice = { samples, range, tickSize, trail, events, ex, base, sessions } —
      *  samples/range straight from DepthHistoryStore (LIVE refs, read-only),
      *  trail from the bootstrap's per-venue price ring, events from the
      *  detector, sessions (I-1 §4f) from SessionClock.boxesFor over the
@@ -1670,7 +1813,7 @@
       ctx.beginPath(); ctx.moveTo(0, my); ctx.lineTo(w - GUT_AXIS, my); ctx.stroke();
       ctx.restore();
       font(9, true); ctx.fillStyle = p.accent;
-      ctx.textAlign = 'right'; ctx.fillText(fmtUsd(mark), w - 2, my);
+      ctx.textAlign = 'right'; ctx.fillText(fmtPx(mark, tick), w - 2, my);
       ctx.textAlign = 'left'; ctx.fillText('mark', bandX + 2, my - 6);
 
       // Side captions — the redundant text cue for what each half means.
@@ -1715,7 +1858,7 @@
       font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'right';
       for (let i = 0; i <= nLab; i++) {
         const price = pmax - (i / nLab) * (pmax - pmin);
-        ctx.fillText(fmtUsd(price), w - 2, yOf(price));
+        ctx.fillText(fmtPx(price, tick), w - 2, yOf(price));
       }
 
       // Overflow markers at the window edges — the honest accounting for
@@ -1758,7 +1901,8 @@
       root.appendChild(list);
     }
 
-    /** slice = { events } — detector.events(), oldest→newest (reversed here). */
+    /** slice = { events, tickSize, base } — detector.events(), oldest→newest
+     *  (reversed here); base = unit label for the qty column (§4g). */
     function render(slice) {
       if (!list) return;
       const evs = (slice.events || []).slice().reverse().slice(0, MAX_ROWS);
@@ -1768,6 +1912,7 @@
           + '<i>consistent with</i> spoofing/icebergs, never proof (intent is unobservable from public L2).</div>';
         return;
       }
+      const dp = tickDp(slice.tickSize);   // §4g: detector prices live on the grouped grid
       let html = '';
       for (const ev of evs) {
         const spoof = ev.kind === 'spoof-pull';
@@ -1778,8 +1923,9 @@
         html += '<div class="det-row">'
           + '<span class="ts">' + hms(ev.ts) + '</span>'
           + '<span class="kind ' + (spoof ? 'spoof' : 'iceberg') + '">' + (spoof ? '▽ spoof-pull' : '◈ iceberg') + '</span>'
-          + '<span class="px">' + fmtUsd(ev.price) + '</span>'
-          + '<span class="qty" title="' + (spoof ? 'max displayed wall size (BTC)' : 'traded / max displayed (BTC)') + '">' + size + '</span>'
+          + '<span class="px">' + fmtUsd(ev.price, dp) + '</span>'
+          + '<span class="qty" title="' + (spoof ? 'max displayed wall size' : 'traded / max displayed')
+          + (slice.base ? ' (' + slice.base + ')' : '') + '">' + size + '</span>'
           + '<span class="life">' + life + '</span>'
           + '<span class="det-badge">' + esc(ev.label || 'heuristic') + '</span>'
           + '</div>';
@@ -2160,6 +2306,14 @@
       }
       note.hidden = true;
       const closes = bars.map((b) => b.c);
+      // T-1 (§4g multi-symbol): lightweight-charts' default price precision
+      // is 2 dp — a sub-cent symbol's candles would all flatten to 0.01.
+      // Derive precision from the last close's magnitude, once per data set.
+      const lc = closes[closes.length - 1];
+      if (Number.isFinite(lc) && lc > 0) {
+        const dp = lc >= 1000 ? 1 : lc >= 1 ? 2 : Math.min(8, Math.ceil(-Math.log10(lc)) + 3);
+        candle.applyOptions({ priceFormat: { type: 'price', precision: dp, minMove: Math.pow(10, -dp) } });
+      }
       const Q = global.Quant;
       for (const per of SMA_PERIODS) {
         // quant.js sma — house rule: indicator math is never reimplemented here.
@@ -2282,7 +2436,7 @@
         ctx.beginPath(); ctx.moveTo(GUT_LEFT - 4, y); ctx.lineTo(w - GUT_AXIS, y); ctx.stroke();
         ctx.restore();
         font(9, true);
-        const txt = label + ' ' + fmtUsd(price);
+        const txt = label + ' ' + fmtPx(price, tick);
         const tw = ctx.measureText(txt).width;
         ctx.fillStyle = rgba(p.panel2, 0.95);
         ctx.fillRect(w - GUT_AXIS + 1, y - 6, tw + 4, 12);
@@ -2314,7 +2468,7 @@
       font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'right';
       for (let r = 0; r < nRows; r += labStep) {
         const price = hi - r * tick;
-        ctx.fillText(fmtUsd(price), w - 2, yOf(price) + rowH / 2);
+        ctx.fillText(fmtPx(price, tick), w - 2, yOf(price) + rowH / 2);
       }
 
       // Caption: session date + construction statement (per-source label).
@@ -2364,6 +2518,7 @@
       const font = (px, bold) => { ctx.font = (bold ? '600 ' : '') + px + 'px ' + cssVar('--mono', 'monospace'); };
 
       const vp = slice.vp;
+      const vtick = slice.tick;   // §4g: adaptive VP grid tick — drives label decimals
       if (!vp || !vp.levels || !vp.levels.length) {
         if (setPanelEmpty(root, true)) { render(slice); return; }   // compact box → re-fit once
         font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
@@ -2426,7 +2581,7 @@
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - GUT_AXIS, y); ctx.stroke();
         ctx.restore();
         font(9, true);
-        const txt = label + ' ' + fmtUsd(price);
+        const txt = label + ' ' + fmtPx(price, vtick);
         const tw = ctx.measureText(txt).width;
         ctx.fillStyle = rgba(p.panel2, 0.95);
         ctx.fillRect(w - GUT_AXIS + 1, y - 6, tw + 4, 12);
@@ -2447,7 +2602,7 @@
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - GUT_AXIS, y); ctx.stroke();
         ctx.restore();
         font(9, true);
-        const txt = 'last ' + fmtUsd(last);
+        const txt = 'last ' + fmtPx(last, vtick);
         const tw = ctx.measureText(txt).width;
         ctx.fillStyle = rgba(p.panel2, 0.95);
         ctx.fillRect(w - GUT_AXIS + 1, y - 6, tw + 4, 12);
@@ -2512,7 +2667,8 @@
     }
 
     /** slice = { venues: {ex → {mark, last, fundingRate, nextFundingTs,
-     *  intervalH, oi, oiUsd}}, nowMs } — bootstrap-composed; '—' for absent. */
+     *  intervalH, oi, oiUsd}}, base, nowMs } — bootstrap-composed; '—' for
+     *  absent; base = unit label for the base-denominated OI column (§4g). */
     function render(slice) {
       if (!root) return;
       const anns = [];   // [ex, annualized %] for the spread footer
@@ -2539,7 +2695,7 @@
           tds[3].textContent = '—'; tds[3].className = 'num ann';
         }
         tds[4].textContent = Number.isFinite(v.nextFundingTs) ? countdown(v.nextFundingTs - slice.nowMs) : '—';
-        tds[5].textContent = Number.isFinite(v.oi) ? fmtQty(v.oi) + ' BTC' : '—';
+        tds[5].textContent = Number.isFinite(v.oi) ? fmtQty(v.oi) + (slice.base ? ' ' + slice.base : '') : '—';
         tds[6].textContent = Number.isFinite(v.oiUsd) ? fmtCompactUsd(v.oiUsd) : '—';
       }
       if (anns.length >= 2) {
@@ -2757,12 +2913,13 @@
         ctx.strokeStyle = rgba(hue, Math.min(1, a + 0.25));
         ctx.lineWidth = 1;
         ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-        if (r.sym === 'BTCUSDT') {
-          // The terminal's subject gets an accent ring + tag (emphasis, §4d).
+        if (slice.sym && r.sym === slice.sym) {
+          // The terminal's subject — the CURRENT symbol — gets an accent
+          // ring + tag (emphasis, §4d; follows switches, §4g).
           ctx.strokeStyle = p.accent; ctx.lineWidth = 1.5;
           ctx.beginPath(); ctx.arc(x, y, rad + 2.5, 0, Math.PI * 2); ctx.stroke();
           font(9, true); ctx.fillStyle = p.accent; ctx.textAlign = 'left';
-          ctx.fillText('BTC', x + rad + 5, y);
+          ctx.fillText(slice.base || slice.sym, x + rad + 5, y);
         }
         hits.push({ x, y, r: rad, row: r });
       }
@@ -2800,8 +2957,9 @@
       }
     }
 
-    /** slice = { rows, total, topMode } — buildScreener() output composed by
-     *  terminal.js from the 30s tickers poll. */
+    /** slice = { rows, total, topMode, sym, base } — buildScreener() output
+     *  composed by terminal.js from the 30s tickers poll; sym/base pick out
+     *  the terminal's current subject for the accent ring + tag (§4g). */
     function render(slice) {
       lastSlice = slice;
       draw(slice);
@@ -4363,7 +4521,7 @@
       font(9); ctx.fillStyle = p.muted; ctx.textAlign = 'right';
       for (let r = 0; r < nRows; r += labStep) {
         const price = hi - r * tick;
-        ctx.fillText(fmtUsd(price), w - 2, yOf(price) + rowH / 2);
+        ctx.fillText(fmtPx(price, tick), w - 2, yOf(price) + rowH / 2);
       }
 
       // POC / VAH / VAL / vwap reference lines (footprint-gutter vocabulary;
@@ -4602,9 +4760,10 @@
         cells[k].textContent = v;
         cells[k].className = 'v num' + (cls ? ' ' + cls : '');
       };
-      set('micro', Number.isFinite(slice.micro) ? fmtUsd(slice.micro, 2) : '—');
+      const mdp = Math.max(2, tickDp(slice.tickSize) + 1);   // §4g: sub-$1 symbols need real decimals
+      set('micro', Number.isFinite(slice.micro) ? fmtUsd(slice.micro, mdp) : '—');
       const pull = Number.isFinite(slice.micro) && Number.isFinite(slice.mid) ? slice.micro - slice.mid : NaN;
-      set('pull', Number.isFinite(pull) ? (pull > 0 ? '+' : '') + pull.toFixed(2) : '—',
+      set('pull', Number.isFinite(pull) ? (pull > 0 ? '+' : '') + pull.toFixed(mdp) : '—',
         pull > 0 ? 'pos' : pull < 0 ? 'neg' : '');
       set('imb', Number.isFinite(slice.imb) ? (slice.imb > 0 ? '+' : '') + slice.imb.toFixed(2) : '—',
         slice.imb > 0 ? 'pos' : slice.imb < 0 ? 'neg' : '');
@@ -4616,6 +4775,344 @@
       lastSetAt = now;
       ofiSeries.setData(lcSecondsSeries(slice.ofi, 'ofi'));
       mpSeries.setData(lcSecondsSeries(slice.mp, 'd'));
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ TapeIntensityView — tape-speed gauge strip in the tape header (§4g) ═══
+  //
+  // trades/sec + notional/sec over the rolling 10s window (mixed venues, like
+  // the tape itself), a z chip vs the session baseline of COMPLETED 10s
+  // buckets, and a ≤60-bucket notional sparkline. DESCRIPTIVE tape speed —
+  // burst ≠ signal (the strip's title and the trailing note say so). Rates
+  // are event-ts anchored (TapeIntensityStore): a quiet spell freezes the
+  // gauge honestly instead of decaying it on a wall clock.
+  function TapeIntensityView() {
+    let root = null, rateEl = null, ntlEl = null, zEl = null, spark = null;
+
+    function mount(el) {
+      root = el;
+      root.insertAdjacentHTML('beforeend',
+        '<span>tape <b class="ti-rate">—</b> tr/s</span>'
+        + '<span><b class="ti-ntl">—</b>/s</span>'
+        + '<span class="ti-z">z —</span>'
+        + '<canvas class="ti-spark" width="120" height="16"></canvas>'
+        + '<span class="ti-note">burst ≠ signal</span>');
+      rateEl = root.querySelector('.ti-rate');
+      ntlEl = root.querySelector('.ti-ntl');
+      zEl = root.querySelector('.ti-z');
+      spark = root.querySelector('.ti-spark');
+    }
+
+    /** slice = { stats: TapeIntensityStore.stats(), spark: .sparkline() } */
+    function render(slice) {
+      if (!rateEl) return;
+      const st = slice.stats || {};
+      rateEl.textContent = Number.isFinite(st.tradesPerSec10) ? st.tradesPerSec10.toFixed(1) : '—';
+      ntlEl.textContent = fmtCompactUsd(st.notionalPerSec10);
+      // z gates to 0 below 5 baseline samples (store contract) — say "forming"
+      // instead of wearing a fake calm number.
+      if (st.baselineN >= 5) {
+        zEl.textContent = 'z ' + (st.z > 0 ? '+' : '') + st.z.toFixed(1);
+        zEl.classList.toggle('hot', Math.abs(st.z) >= 2);
+        zEl.title = '10s trade count vs the session baseline of ' + st.baselineN
+          + ' completed 10s buckets (Welford) — descriptive; a burst is a burst, not a signal';
+      } else {
+        zEl.textContent = 'z — (' + (st.baselineN || 0) + '/5)';
+        zEl.classList.remove('hot');
+        zEl.title = 'baseline forming — z reads 0 until 5 completed 10s buckets exist (stated convention)';
+      }
+      // Sparkline: notional per completed 10s bucket, oldest→newest.
+      const pts = slice.spark || [];
+      const { ctx, w, h } = fitCanvas(spark);
+      const p = pal();
+      ctx.clearRect(0, 0, w, h);
+      if (pts.length) {
+        let maxN = 0;
+        for (const s of pts) if (s.notional > maxN) maxN = s.notional;
+        if (maxN > 0) {
+          const bw = w / 60;   // fixed 60 slots — the ring's capacity, right-aligned
+          ctx.fillStyle = rgba(p.c1, 0.8);
+          for (let i = 0; i < pts.length; i++) {
+            const bh = Math.max(1, (h - 1) * pts[i].notional / maxN);
+            ctx.fillRect(w - (pts.length - i) * bw, h - bh, Math.max(1, bw - 1), bh);
+          }
+        }
+      }
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ WallsLedgerView — big-level book history table (§4g) ═══
+  //
+  // DESCRIPTIVE BOOK-HISTORY BOOKKEEPING, NOT INTENT (the panel chrome says
+  // so): what unusually large resting levels DID — entered, got pulled, or
+  // traded through. Newest-first rows from WallsLedger.list(); the status
+  // badge text is the non-color cue (det-row family idiom).
+  function WallsLedgerView() {
+    let root = null, list = null;
+
+    function mount(el) {
+      root = el;
+      root.insertAdjacentHTML('beforeend',
+        '<div class="walls-row walls-head"><span>first seen</span><span>side</span><span>price</span><span>max qty</span><span>status</span></div>');
+      list = document.createElement('div');
+      list.className = 'walls-list';
+      root.appendChild(list);
+    }
+
+    /** slice = { entries: WallsLedger.list() (newest-first, ≤50) } */
+    function render(slice) {
+      if (!list) return;
+      const evs = slice.entries || [];
+      setPanelEmpty(root, !evs.length);   // presentation-only compact toggle
+      if (!evs.length) {
+        list.innerHTML = '<div class="chart-na">no walls this session — a level ≥ 4×p95 of the grouped '
+          + 'ladder sustained ≥ 5 samples enters this ledger (K/M conventions). Book-history bookkeeping, '
+          + 'not intent — see the detections panel for the pattern flags.</div>';
+        return;
+      }
+      const dp = tickDp(slice.tickSize);   // §4g: wall prices live on the grouped grid
+      let html = '';
+      for (const e of evs) {
+        html += '<div class="walls-row">'
+          + '<span class="ts">' + hms(e.firstTs) + '</span>'
+          + '<span class="side ' + (e.side === 'bid' ? 'bid' : 'ask') + '">' + (e.side === 'bid' ? 'bid' : 'ask') + '</span>'
+          + '<span class="px">' + fmtUsd(e.price, dp) + '</span>'
+          + '<span class="qty">' + fmtQty(e.maxQty) + '</span>'
+          + '<span><span class="wall-badge ' + esc(e.status) + '" title="'
+          + (e.status === 'pulled' ? 'vanished while price was >1 tick away — it cannot have traded (book fact, not intent)'
+            : e.status === 'filled' ? 'price traded through the level'
+              : 'still resting (or vanished at ≤1 tick of mid — ambiguous, unresolved until a print crosses)')
+          + ' · last seen ' + hms(e.lastTs) + '">' + esc(e.status) + '</span></span>'
+          + '</div>';
+      }
+      list.innerHTML = html;
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ KeyLevelsView — registry levels strip + live IB chips (§4g) ═══
+  //
+  // Reference levels, never signals: prior-day H/L/C, POC, VAH/VAL, naked
+  // POCs (age) and the weekly open from the /v1/levels registry (BTCUSDT
+  // only — honest note otherwise), plus the live session Initial Balance
+  // (first 2×30 min UTC range) once elapsed AND witnessed. terminal.js
+  // composes the slice; this view only renders chips/notes.
+  function KeyLevelsView() {
+    let root = null, wrap = null;
+
+    function mount(el, opts) {
+      const o = opts || {};
+      root = el;
+      wrap = document.createElement('div');
+      wrap.className = 'klev-wrap';
+      root.appendChild(wrap);
+      if (o.drawInput && typeof o.onDraw === 'function') {
+        o.drawInput.addEventListener('change', () => o.onDraw(!!o.drawInput.checked));
+      }
+    }
+
+    const chip = (cls, k, v, title) =>
+      '<span class="klev-chip ' + cls + '" title="' + esc(title || '') + '">'
+      + '<span class="k">' + esc(k) + '</span><span class="v">' + v + '</span></span>';
+
+    /** slice = { prior (registry row|null), priorDate, weekly ({price,date}|
+     *  null), naked ([{price,ageDays}]), regNote ('' when registry rendered),
+     *  ib ({high,low}|null), ibNote } — composed by terminal.js. */
+    function render(slice) {
+      if (!wrap) return;
+      const hasReg = !!slice.prior;
+      const hasIb = !!slice.ib;
+      setPanelEmpty(root, !hasReg && !hasIb);   // presentation-only compact toggle
+      let html = '';
+      if (hasReg) {
+        const d = slice.prior;
+        const dt = esc(String(slice.priorDate || ''));
+        html += chip('', 'pdH', fmtUsd(d.h), 'prior recorded day (' + dt + ') high')
+          + chip('', 'pdL', fmtUsd(d.l), 'prior recorded day (' + dt + ') low')
+          + chip('', 'pdC', fmtUsd(d.c), 'prior recorded day (' + dt + ') close')
+          + chip('poc', 'pPOC', fmtUsd(d.poc), 'prior recorded day (' + dt + ') point of control')
+          + chip('', 'VA', fmtUsd(d.val) + '–' + fmtUsd(d.vah), 'prior recorded day (' + dt + ') 70% value area (VAL–VAH)');
+        if (slice.weekly) {
+          html += chip('', 'wkO', fmtUsd(slice.weekly.price),
+            'weekly open = the registry Monday row\'s (' + esc(slice.weekly.date) + ') daily open — UTC-week convention; absent when that Monday was not recorded');
+        }
+        for (const n of slice.naked || []) {
+          html += chip('naked', 'nPOC', fmtUsd(n.price) + ' <span class="k">' + n.ageDays + 'd</span>',
+            'naked POC from ' + esc(n.date) + ' — never revisited by a later recorded day\'s range (derived at serve time)');
+        }
+      } else if (slice.regNote) {
+        html += '<span class="klev-note">' + esc(slice.regNote) + '</span>';
+      }
+      if (hasIb) {
+        html += chip('ib', 'IB', fmtUsd(slice.ib.low) + '–' + fmtUsd(slice.ib.high),
+          'Initial Balance = high/low of THIS session\'s primary-leg prints in the first 2×30 min after 00:00 UTC (witnessed open only)');
+      } else if (slice.ibNote) {
+        html += '<span class="klev-note">' + esc(slice.ibNote) + '</span>';
+      }
+      wrap.innerHTML = html;
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ VpinView — volume-synchronized flow imbalance (§4g, cited) ═══
+  //
+  // Current VPIN (mean |Δ|/V over ≤50 completed buckets) + a bucket sparkline
+  // on a FIXED 0–1 scale (VPIN is a bounded ratio — a stretched axis would
+  // dramatize noise). The citation and the contested-interpretation note are
+  // always-visible panel chrome in terminal.html (§4g mandatory); this view
+  // renders the series and claims nothing.
+  function VpinView() {
+    let root = null, valEl = null, metaEl = null, box = null, canvas = null;
+
+    function mount(el) {
+      root = el;
+      root.insertAdjacentHTML('beforeend',
+        '<div class="vpin-strip"><span class="vpin-val">—</span><span class="vpin-meta">—</span></div>');
+      valEl = root.querySelector('.vpin-val');
+      metaEl = root.querySelector('.vpin-meta');
+      box = document.createElement('div');
+      box.className = 'vpin-canvas-box';
+      canvas = document.createElement('canvas');
+      canvas.className = 'term-canvas';
+      box.appendChild(canvas);
+      root.appendChild(box);
+    }
+
+    /** slice = { vpin (null before the first completed bucket), buckets
+     *  ([{ts, imb}]), bucketVol, note ('' once armed with data) } */
+    function render(slice) {
+      if (!valEl) return;
+      const buckets = slice.buckets || [];
+      const empty = !buckets.length;
+      setPanelEmpty(root, empty);
+      box.hidden = empty;   // an un-drawn canvas box is dead space, not honesty
+      if (empty) {
+        valEl.textContent = '—';
+        metaEl.textContent = slice.note || 'no completed buckets yet';
+        return;
+      }
+      valEl.textContent = Number.isFinite(slice.vpin) ? slice.vpin.toFixed(3) : '—';
+      metaEl.textContent = buckets.length + '/50 buckets · V = '
+        + fmtQty(slice.bucketVol) + ' (base units)' + (slice.note ? ' · ' + slice.note : '');
+      const { ctx, w, h } = fitCanvas(canvas);
+      const p = pal();
+      ctx.clearRect(0, 0, w, h);
+      // Fixed 0–1 scale + a dotted midline at 0.5 for orientation.
+      ctx.save();
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = p.grid; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, h / 2 + 0.5); ctx.lineTo(w, h / 2 + 0.5); ctx.stroke();
+      ctx.restore();
+      const bw = w / 50;   // fixed 50 slots (the ring), right-aligned like the tape spark
+      ctx.fillStyle = rgba(p.c1, 0.75);
+      for (let i = 0; i < buckets.length; i++) {
+        const v = Math.max(0, Math.min(1, buckets[i].imb));
+        const bh = Math.max(1, (h - 2) * v);
+        ctx.fillRect(w - (buckets.length - i) * bw, h - bh, Math.max(1, bw - 1), bh);
+      }
+      ctx.font = '9px ' + cssVar('--mono', 'monospace');
+      ctx.fillStyle = p.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText('1.0', 2, 2);
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('0', 2, h - 1);
+    }
+
+    return { mount, render };
+  }
+
+  // ═══ BasisView — basis bp + funding two-pane mini chart (§4g) ═══
+  //
+  // TWO SEPARATE PANES, own scales (the MicrostructureView rail: never
+  // dual-axis) over BasisSeries — the ring of the EXISTING ~1s bybit mark
+  // events; no new feeds. Funding absent on a partial delta is NaN in the
+  // ring and simply has no point here (never zero-coerced, §0.7). Panes are
+  // built LAZILY on the first non-empty render so the honest empty state
+  // collapses cleanly (.panel--empty) without fixed-height chart shells.
+  function BasisView() {
+    let root = null, noteEl = null, built = false;
+    let basisChart = null, basisSeries = null, fundChart = null, fundSeries = null, lcMissing = false;
+    let lastSetAt = 0;
+    const SET_MIN_MS = 600;   // setData throttle — the CVD chart's budget
+
+    function mount(el) {
+      root = el;   // the terminal.html anchor IS the .basis-wrap two-column grid
+      noteEl = document.createElement('div');
+      noteEl.className = 'chart-na';
+      noteEl.textContent = 'awaiting bybit mark events — the panes fill from this session\'s ~1s tickers stream (§0.7).';
+      root.appendChild(noteEl);
+    }
+
+    function buildPanes() {
+      built = true;
+      const LC = global.LightweightCharts;
+      if (!LC || !LC.createChart) {
+        // Honest degrade (vendoring rule): say why, fabricate nothing.
+        noteEl.innerHTML = 'vendored lightweight-charts unavailable — basis/funding panes disabled (nothing is fabricated).';
+        lcMissing = true;
+        return;
+      }
+      const p = pal();
+      const mkPane = (cap, color, fmt) => {
+        const cell = document.createElement('div');
+        cell.className = 'basis-cell';
+        cell.innerHTML = '<div class="opt-cap">' + cap + '</div>';
+        const pane = document.createElement('div');
+        pane.className = 'basis-pane';
+        cell.appendChild(pane);
+        root.appendChild(cell);
+        const c = LC.createChart(pane, {
+          height: pane.clientHeight || 150,
+          layout: { background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace') },
+          grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
+          timeScale: { timeVisible: true, secondsVisible: true, borderColor: p.border },
+          rightPriceScale: { borderColor: p.border, scaleMargins: { top: 0.12, bottom: 0.12 } },
+          crosshair: { mode: 0 },
+          localization: fmt ? { priceFormatter: fmt } : undefined,
+        });
+        const s = c.addLineSeries({ color, lineWidth: 1, priceLineVisible: false, lastValueVisible: true });
+        s.createPriceLine({ price: 0, color: p.grid, lineWidth: 1, lineStyle: 1, axisLabelVisible: false, title: '' });
+        return { c, s, pane };
+      };
+      // basis = --c1, funding = --c4 (categorical tokens — signed series, not
+      // P&L; the MicrostructureView hue split).
+      const b = mkPane('basis (bp) — (mark − index)/index · 1e4, own pane/scale', p.c1);
+      basisChart = b.c; basisSeries = b.s;
+      const f = mkPane('funding rate (%) — own pane/scale · absent deltas stay absent', p.c4,
+        (v) => v.toFixed(4) + '%');
+      fundChart = f.c; fundSeries = f.s;
+      window.addEventListener('resize', () => {
+        if (basisChart) basisChart.applyOptions({ width: b.pane.clientWidth });
+        if (fundChart) fundChart.applyOptions({ width: f.pane.clientWidth });
+      });
+    }
+
+    /** slice = { list: BasisSeries.list() ([{ts, basisBp, fundingRate}]),
+     *  nowMs } — straight from the store; funding NaNs are skipped by
+     *  lcSecondsSeries (no point ≠ a zero point). */
+    function render(slice) {
+      if (!root) return;
+      const list = slice.list || [];
+      setPanelEmpty(root, !list.length);   // presentation-only compact toggle
+      if (!list.length || lcMissing) return;
+      if (!built) buildPanes();
+      if (!basisSeries) return;
+      noteEl.hidden = true;
+      const now = Number.isFinite(slice.nowMs) ? slice.nowMs : Date.now();
+      if (now - lastSetAt < SET_MIN_MS) return;
+      lastSetAt = now;
+      basisSeries.setData(lcSecondsSeries(list, 'basisBp'));
+      // Funding arrives as a fraction (0.0001 = 1bp/interval) — plotted in %.
+      const fund = [];
+      for (const r of list) {
+        if (Number.isFinite(r.fundingRate)) fund.push({ ts: r.ts, v: r.fundingRate * 100 });
+      }
+      fundSeries.setData(lcSecondsSeries(fund, 'v'));
     }
 
     return { mount, render };
@@ -4640,6 +5137,9 @@
     // HF archive, size-gated + labeled), the daily-levels registry table, and
     // the cited OFI/microprice microstructure panes.
     AuctionProfileView, LevelsView, MicrostructureView,
+    // T-1 (§4g): Trader's Edge panels — tape-speed gauge, walls ledger
+    // (bookkeeping, not intent), key-levels strip, cited VPIN, basis/funding.
+    TapeIntensityView, WallsLedgerView, KeyLevelsView, VpinView, BasisView,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalViews;

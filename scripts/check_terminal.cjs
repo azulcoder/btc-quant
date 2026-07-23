@@ -213,6 +213,37 @@
 //                           %3D hive encoding + allowlist THROWS on bad
 //                           repo/date/table segments — all network-free
 //
+// T-1 additions (DESIGN §4g "check_terminal groups (mandatory adds)"):
+//  47. footprint delta path → deltaMin/deltaMax = extremes of the HAND-
+//                           WRITTEN running-delta path (0-anchored) on a
+//                           constructed trade sequence; deltaPct =
+//                           delta/totalVol exact (buy-only bar → 1)
+//  48. unfinished auction  → both-sided extreme flags TRUE, one-sided
+//                           extreme flags FALSE, and flags stay false on
+//                           the OPEN bar (finished-bar-only discipline)
+//  49. TapeIntensityStore  → window math at fixed ts steps (hand-computed
+//                           rates), z stays 0 until 5 COMPLETED baseline
+//                           samples then z = −1/√5 exact, far-ahead ts
+//                           jump prunes both windows down to the lone print
+//  50. WallsLedger         → enters after EXACTLY M sustained samples (M−1
+//                           + a break must NOT enter), pulled on a >1-tick
+//                           vanish, filled via markTrade cross, near-mid
+//                           vanish stays standing until the cross
+//  51. VpinStore           → hand-computed buckets incl. a print that
+//                           STRADDLES the boundary (split exact) and one
+//                           spanning multiple buckets; vpin = hand mean;
+//                           null before the first complete; setBucketVol
+//                           re-arms FUTURE buckets only
+//  52. OpeningTypeClassifier → four constructed price paths, one per Dalton
+//                           class, plus pending before 60 min; the
+//                           descriptive-read label rides every result
+//  53. deriveVenueIds      → BTCUSDT/ETHUSDT full maps, 1000PEPEUSDT has
+//                           NO coinbase spot (null), non-USDT symbol
+//                           degrades binancef+okx+coinbase to null (bybit
+//                           keeps the id — it IS the picker's universe)
+//  54. BasisSeries         → ring wrap at max (oldest evicted, order kept),
+//                           NaN funding stored NOT zero-coerced, latest()
+//
 // Exit: 0 with one PASS line per group; non-zero with a clear FAIL message
 // (plus stack) if any group breaks. Run: node scripts/check_terminal.cjs
 
@@ -2510,6 +2541,337 @@ group('hfdata normalizeArchivedRow BigInt→Number + byodRowToEvent round-trip +
     assert.throws(() => HF.archivedParquetUrl(args[0], args[1], args[2]), /bad (repo|date|table)/,
       'must throw for ' + JSON.stringify(args));
   }
+});
+
+// ─── 47. FootprintStore delta path: deltaMin/deltaMax/deltaPct (§4g) ─────────
+group('footprint deltaMin/deltaMax hand-written running path + deltaPct exact', () => {
+  const fp = S.FootprintStore({ barMs: 60000, tickSize: 1 });
+  const T0 = 1783076400000; // bar-aligned epoch ms (group 7's anchor)
+  const mk = (ts, price, qty, buy) => ({ kind: 'trade', ex: 'bybit', ts, price, qty, aggressorBuy: buy, id: String(ts) });
+
+  // Bar 1 — running-delta path BY HAND (0-anchored, one step per trade):
+  //   start 0 → sell 2.0 → −2.0   (path min)
+  //            → buy 1.0 → −1.0
+  //            → buy 4.0 → +3.0   (path max)
+  //            → sell 0.5 → +2.5  (final delta)
+  // So deltaMin = −2, deltaMax = 3 — NEITHER equals the final delta 2.5,
+  // which is exactly what the min/max fields add over plain delta.
+  fp.onTrade(mk(T0 + 1000, 100, 2.0, false));
+  fp.onTrade(mk(T0 + 2000, 101, 1.0, true));
+  fp.onTrade(mk(T0 + 3000, 101, 4.0, true));
+  fp.onTrade(mk(T0 + 4000, 100, 0.5, false));
+
+  // The path is tracked AS TRADES ARRIVE — the open bar already reports it.
+  const open = fp.current();
+  assert.strictEqual(open.deltaMin, -2, 'open bar deltaMin');
+  assert.strictEqual(open.deltaMax, 3, 'open bar deltaMax');
+
+  // All inputs are binary-exact doubles → strict equality, no approx slack.
+  fp.onTrade(mk(T0 + 61000, 100, 1.0, true)); // next bar closes bar 1
+  const bar1 = fp.bars()[0];
+  assert.ok(bar1.finished, 'bar 1 finished');
+  assert.strictEqual(bar1.delta, 2.5, 'delta = +1 +4 −2 −0.5');
+  assert.strictEqual(bar1.totalVol, 7.5);
+  assert.strictEqual(bar1.deltaMin, -2, 'deltaMin = path minimum, not first/last value');
+  assert.strictEqual(bar1.deltaMax, 3, 'deltaMax = path maximum');
+  assert.strictEqual(bar1.deltaPct, 2.5 / 7.5, 'deltaPct = delta/totalVol exact');
+
+  // Bar 2 — one-directional path: 0 → +1 → +3. The path never goes negative,
+  // so deltaMin stays at the 0 ANCHOR (a min over {0, path}, not over trades).
+  fp.onTrade(mk(T0 + 62000, 100, 2.0, true));
+  fp.onTrade(mk(T0 + 121000, 100, 1.0, false)); // third bar closes bar 2
+  const bar2 = fp.bars()[1];
+  assert.strictEqual(bar2.deltaMin, 0, 'buy-only bar: deltaMin anchored at 0');
+  assert.strictEqual(bar2.deltaMax, 3);
+  assert.strictEqual(bar2.deltaPct, 1, 'all-buy bar: deltaPct = 1');
+});
+
+// ─── 48. Unfinished-auction flags: both-sided vs one-sided extremes (§4g) ────
+group('unfinished-auction flags: both-sided extreme true, one-sided false, open bar never', () => {
+  const fp = S.FootprintStore({ barMs: 60000, tickSize: 1 });
+  const T0 = 1783076400000;
+  const mk = (ts, price, qty, buy) => ({ kind: 'trade', ex: 'bybit', ts, price, qty, aggressorBuy: buy, id: String(ts) });
+
+  // Bar 1 — BOTH extreme levels print both sides: two-sided business was
+  // still being done at the extremes → both flags must come up true.
+  fp.onTrade(mk(T0 + 1000, 105, 2.0, true));   // high level 105: buy…
+  fp.onTrade(mk(T0 + 2000, 105, 1.0, false));  // …AND sell
+  fp.onTrade(mk(T0 + 3000, 102, 1.0, true));   // interior (must not matter)
+  fp.onTrade(mk(T0 + 4000, 100, 0.5, true));   // low level 100: buy…
+  fp.onTrade(mk(T0 + 5000, 100, 1.5, false));  // …AND sell
+
+  // Bar 2 — CLEAN extremes: high printed only buys (buyers lifting offers),
+  // low only sells. The auction finished its business → both flags false.
+  fp.onTrade(mk(T0 + 61000, 105, 2.0, true));  // closes bar 1
+  fp.onTrade(mk(T0 + 62000, 100, 1.0, false));
+  fp.onTrade(mk(T0 + 63000, 103, 1.0, false)); // interior both-sided is fine
+  fp.onTrade(mk(T0 + 64000, 103, 1.0, true));
+
+  // Bar 3 (open) — both-sided at its extreme, but flags are FINISHED-BAR-ONLY
+  // (same discipline as the diagonal imbalance flags: half-formed flickers).
+  fp.onTrade(mk(T0 + 121000, 104, 1.0, true)); // closes bar 2
+  fp.onTrade(mk(T0 + 122000, 104, 1.0, false));
+
+  const bars = fp.bars();
+  assert.strictEqual(bars.length, 3);
+  assert.strictEqual(bars[0].unfinishedHigh, true, 'both-sided high → unfinishedHigh');
+  assert.strictEqual(bars[0].unfinishedLow, true, 'both-sided low → unfinishedLow');
+  assert.strictEqual(bars[1].unfinishedHigh, false, 'buy-only high finished its auction');
+  assert.strictEqual(bars[1].unfinishedLow, false, 'sell-only low finished its auction');
+  assert.strictEqual(bars[2].finished, false);
+  assert.strictEqual(bars[2].unfinishedHigh, false, 'open bar never flags');
+  assert.strictEqual(bars[2].unfinishedLow, false, 'open bar never flags');
+});
+
+// ─── 49. TapeIntensityStore: window math, z gate, far-jump prune (§4g) ───────
+group('TapeIntensity window rates + z gated to 5 baseline samples + far-jump prune', () => {
+  const ti = S.TapeIntensityStore();
+  const T0 = 1783080000000; // 10s-bucket-aligned (T0/10000 is an integer)
+
+  // Five prints of $100 inside bucket 0 → rolling 10 s holds all five.
+  for (let i = 1; i <= 5; i++) ti.push(T0 + i * 1000, 100);
+  let st = ti.stats();
+  assert.strictEqual(st.tradesPerSec10, 0.5, '5 trades / 10 s');
+  assert.strictEqual(st.notionalPerSec10, 50, '$500 / 10 s');
+  assert.strictEqual(st.tradesPerSec60, 5 / 60);
+  assert.strictEqual(st.z, 0, 'no completed bucket yet → z pinned to 0');
+  assert.strictEqual(st.baselineN, 0);
+
+  // First print of bucket 1 completes bucket 0 (count 5, $500) AND prunes the
+  // 10 s window to (T0+2000, T0+12000]: the T0+1000/T0+2000 prints leave.
+  ti.push(T0 + 12000, 200);
+  st = ti.stats();
+  assert.strictEqual(st.baselineN, 1);
+  assert.strictEqual(st.tradesPerSec10, 0.4, '4 prints left in the 10 s window');
+  assert.strictEqual(st.notionalPerSec10, 50, '3×$100 + $200 = $500 / 10 s');
+  assert.strictEqual(st.tradesPerSec60, 6 / 60, '60 s window still holds all 6');
+  assert.strictEqual(st.z, 0, '1 baseline sample < 5 → z still 0');
+
+  // One print per bucket 2..5. Bucket counts completed so far after the
+  // T0+51000 push: [5, 1, 1, 1, 1] → n=5, mean 1.8, sample var (ddof=1)
+  // = (3.2² + 4·0.8²)/4 = 12.8/4 = 3.2. Current rolling-10s count = 1 (the
+  // T0+41000 print sits exactly on the cutoff and is evicted — half-open
+  // window (now−10s, now]). z = (1 − 1.8)/√3.2 = −0.8/(0.8√5) = −1/√5.
+  ti.push(T0 + 21000, 100);
+  ti.push(T0 + 31000, 100);
+  ti.push(T0 + 41000, 100);
+  st = ti.stats();
+  assert.strictEqual(st.baselineN, 4);
+  assert.strictEqual(st.z, 0, '4 baseline samples — still below the gate');
+  ti.push(T0 + 51000, 100);
+  st = ti.stats();
+  assert.strictEqual(st.baselineN, 5);
+  assert.strictEqual(st.tradesPerSec10, 0.1, 'only the newest print inside 10 s');
+  assert.ok(approx(st.z, -1 / Math.sqrt(5)), 'z = −1/√5 hand-computed, got ' + st.z);
+
+  // Far-ahead jump: both windows must prune down to the lone new print, and
+  // NO zero-count buckets are synthesized for the gap (gaps are gaps, §0.7)
+  // — exactly one more baseline sample (the completed bucket 5).
+  ti.push(T0 + 1000000, 50);
+  st = ti.stats();
+  assert.strictEqual(st.tradesPerSec10, 0.1);
+  assert.strictEqual(st.notionalPerSec10, 5, 'only $50 inside 10 s');
+  assert.strictEqual(st.tradesPerSec60, 1 / 60);
+  assert.strictEqual(st.notionalPerSec60, 50 / 60);
+  assert.strictEqual(st.baselineN, 6, 'gap synthesized no zero samples');
+
+  // Sparkline = completed buckets only, oldest→newest, hand notionals.
+  assert.deepStrictEqual(ti.sparkline().map((s) => s.notional), [500, 200, 100, 100, 100, 100]);
+  assert.deepStrictEqual(ti.sparkline().map((s) => s.ts), [0, 1, 2, 3, 4, 5].map((i) => T0 + i * 10000));
+
+  // Hygiene: non-finite / non-positive notional never lands.
+  ti.push(T0 + 1001000, NaN);
+  ti.push(T0 + 1001000, 0);
+  assert.strictEqual(ti.stats().tradesPerSec10, 0.1, 'garbage prints dropped');
+});
+
+// ─── 50. WallsLedger: enter at exactly M, pulled, filled, near-mid hold (§4g) ─
+group('WallsLedger enters at EXACTLY M (M−1 + break never), pulled >1 tick out, filled on cross', () => {
+  const wl = S.WallsLedger(); // K=4, M=5 defaults; p95 fed as 1 → wall ⇔ qty ≥ 4
+  const T1 = 1783080000000;
+
+  // M−1 sustained samples then a sub-threshold break: must NOT enter, and the
+  // break must RESET the streak (not just pause it).
+  for (let i = 0; i < 4; i++) wl.update(T1 + i * 1000, 'bid', 99, 5, 1, 8);
+  assert.strictEqual(wl.list().length, 0, 'M−1 samples never enter');
+  wl.update(T1 + 4000, 'bid', 99, 0.5, 1, 8); // shrank to ordinary — streak broken
+  for (let i = 5; i < 9; i++) wl.update(T1 + i * 1000, 'bid', 99, i === 6 ? 6 : 5, 1, 8);
+  assert.strictEqual(wl.list().length, 0, '4 post-break samples still not enough');
+  wl.update(T1 + 9000, 'bid', 99, 5, 1, 8); // 5th consecutive — enters NOW
+  let e = wl.list()[0];
+  assert.strictEqual(wl.list().length, 1, 'enters on exactly the Mth sustained sample');
+  assert.strictEqual(e.status, 'standing');
+  assert.strictEqual(e.firstTs, T1 + 5000, 'firstTs = start of the unbroken streak, not the pre-break one');
+  assert.strictEqual(e.lastTs, T1 + 9000);
+  assert.strictEqual(e.maxQty, 6, 'maxQty = largest size ever displayed');
+  assert.strictEqual(e.side, 'bid');
+  assert.strictEqual(e.price, 99);
+
+  // PULLED: vanishes >1 tick from mid — price never got there, cannot have
+  // traded; the ledger records the book fact, no intent claim.
+  wl.update(T1 + 10000, 'bid', 99, 0, 1, 8);
+  assert.strictEqual(wl.list()[0].status, 'pulled');
+  assert.strictEqual(wl.list()[0].lastTs, T1 + 10000);
+
+  // FILLED: an ask wall the tape then crosses (print AT the level = it traded).
+  for (let i = 0; i < 5; i++) wl.update(T1 + i * 1000, 'ask', 110, 8, 1, 12);
+  assert.strictEqual(wl.list()[0].price, 110, 'list is newest-first');
+  wl.markTrade(T1 + 5000, 110);
+  assert.strictEqual(wl.list()[0].status, 'filled');
+  assert.strictEqual(wl.list()[0].lastTs, T1 + 5000);
+  assert.strictEqual(wl.list()[1].status, 'pulled', 'a 110 print does not touch the bid-99 entry');
+
+  // NEAR-MID vanish (≤1 tick) is ambiguous — stays standing (we refuse to
+  // guess pull vs fill) until a real cross confirms 'filled'.
+  for (let i = 0; i < 5; i++) wl.update(T1 + 20000 + i * 1000, 'bid', 105, 9, 1, 3);
+  wl.update(T1 + 25000, 'bid', 105, 0, 1, 1); // vanished AT the touch
+  assert.strictEqual(wl.list()[0].status, 'standing', 'near-mid vanish never guesses');
+  wl.markTrade(T1 + 26000, 104.5);
+  assert.strictEqual(wl.list()[0].status, 'filled', 'the cross confirms the fill');
+
+  // Constructor overrides: K=2 with M=1 enters on the first qualifying sample.
+  const wl2 = S.WallsLedger({ k: 2, m: 1 });
+  wl2.update(T1, 'ask', 200, 2, 1, 5);
+  assert.strictEqual(wl2.list().length, 1, 'k/m constructor-overridable');
+});
+
+// ─── 51. VpinStore: boundary-straddle split + hand-computed vpin (§4g) ───────
+group('VPIN straddling-trade exact split + hand-computed mean + future-only re-arm', () => {
+  const vp = S.VpinStore(10); // V = 10 base units
+  const T2 = 1783080000000;
+  assert.strictEqual(vp.vpin(), null, 'null until the first bucket completes');
+
+  // Hand-computed bucket fills (V=10):
+  //   buy 4, sell 4, then buy 5 STRADDLES the boundary: 2 close the bucket
+  //   (buy 6 / sell 4 → |Δ|/V = 0.2), 3 carry into the next.
+  vp.push(T2 + 1000, 4, true);
+  vp.push(T2 + 2000, 4, false);
+  assert.strictEqual(vp.vpin(), null, 'bucket still open at 8/10');
+  vp.push(T2 + 3000, 5, true);
+  assert.ok(approx(vp.vpin(), 0.2), 'bucket 1: |6−4|/10 — straddle split exact');
+  //   sell 7 closes bucket 2 exactly (buy 3 / sell 7 → 0.4).
+  vp.push(T2 + 4000, 7, false);
+  assert.ok(approx(vp.vpin(), (0.2 + 0.4) / 2), 'vpin = mean over completed buckets');
+  //   buy 25 spans MULTIPLE buckets: 10 (all-buy → 1.0), 10 (→ 1.0), 5 carries.
+  vp.push(T2 + 5000, 25, true);
+  assert.ok(approx(vp.vpin(), (0.2 + 0.4 + 1 + 1) / 4), 'multi-bucket print splits across all of them');
+  assert.deepStrictEqual(vp.buckets().map((b) => b.imb), [0.2, 0.4, 1, 1].map((v) => v), 'per-bucket series');
+
+  // Re-arm is FUTURE-only: the partially-filled bucket (5 in) completes at
+  // its armed V=10; the NEW V applies from the next bucket on. Completed
+  // buckets keep the V they were measured at — nothing is restated.
+  vp.setBucketVol(4);
+  assert.strictEqual(vp.bucketVol, 10, 'partial bucket keeps its armed V');
+  vp.push(T2 + 6000, 5, false); // closes it: buy 5 / sell 5 → 0.0
+  assert.strictEqual(vp.bucketVol, 4, 'next bucket armed at the new V');
+  assert.ok(approx(vp.vpin(), (0.2 + 0.4 + 1 + 1 + 0) / 5), 'earlier buckets unchanged by the re-arm');
+
+  // An EMPTY open bucket is a future bucket — re-arms immediately.
+  vp.setBucketVol(8);
+  assert.strictEqual(vp.bucketVol, 8);
+
+  // Hygiene: malformed pushes never land.
+  vp.push(NaN, 1, true);
+  vp.push(T2 + 7000, 0, true);
+  vp.push(T2 + 7000, -2, false);
+  assert.ok(approx(vp.vpin(), 0.52), 'garbage dropped, state untouched');
+});
+
+// ─── 52. OpeningTypeClassifier: four constructed opens + pending (§4g) ───────
+group('OpeningType all four Dalton classes on constructed paths + pending before 60 min', () => {
+  const T3 = 1783080000000;
+  const mm = (m) => T3 + m * 60000;
+  const LABEL = 'descriptive session read — not a signal';
+  const run = (path) => {
+    const oc = S.OpeningTypeClassifier(T3);
+    for (const [m, p] of path) oc.feed(mm(m), p);
+    return oc.classify();
+  };
+
+  // PENDING: nothing fed, and again with <60 min of prints.
+  assert.strictEqual(S.OpeningTypeClassifier(T3).classify().type, 'pending');
+  const early = run([[0, 100], [30, 105]]);
+  assert.strictEqual(early.type, 'pending', 'still inside the opening window');
+  assert.strictEqual(early.label, LABEL, 'the descriptive-read label rides pending too');
+
+  // OPEN-DRIVE: one-directional up; worst pullback 0.5 on a 10 range (5%
+  // < the 20% convention). The 61-min print only unlocks the event clock.
+  const d = run([[0, 100], [5, 102], [15, 104], [20, 103.5], [40, 108], [59, 110], [61, 110]]);
+  assert.strictEqual(d.type, 'open-drive');
+  assert.strictEqual(d.evidence.dir, 'up');
+  assert.strictEqual(d.evidence.retraceDn, 0.5, 'hand path: 104 → 103.5 is the worst retrace');
+  assert.strictEqual(d.label, LABEL);
+
+  // OPEN-TEST-DRIVE: probe up 3 by 10 min (≤30 min, ≤ half the 10-point
+  // opposite drive), then drive down through the open and stay (1 cross).
+  const td = run([[0, 100], [5, 101.5], [10, 103], [20, 99], [35, 95], [55, 90], [61, 90]]);
+  assert.strictEqual(td.type, 'open-test-drive');
+  assert.strictEqual(td.evidence.firstSide, 'up', 'probed up first…');
+  assert.strictEqual(td.evidence.dir, 'down', '…then drove down');
+  assert.strictEqual(td.evidence.crossCount, 1);
+
+  // OPEN-REJECTION-REVERSE: drove up 10 of a 14 range, then ONE full
+  // reverse through the open with no re-cross. The at-open print (40 min,
+  // price 100) is side-neutral — it must not count as a crossing.
+  const rr = run([[0, 100], [10, 105], [20, 110], [30, 104], [40, 100], [45, 97], [55, 96], [61, 96]]);
+  assert.strictEqual(rr.type, 'open-rejection-reverse');
+  assert.strictEqual(rr.evidence.firstSide, 'up');
+  assert.strictEqual(rr.evidence.crossCount, 1, 'exactly one cross; the at-open print holds side');
+
+  // OPEN-AUCTION: rotation around the open — five crossings, no dominant leg.
+  const a = run([[0, 100], [5, 103], [15, 98], [25, 102], [35, 97], [45, 101], [55, 99], [61, 99]]);
+  assert.strictEqual(a.type, 'open-auction');
+  assert.strictEqual(a.evidence.crossCount, 5, 'rotation = repeated open crosses');
+
+  // Degenerate flat hour reads rotational, never NaN math.
+  assert.strictEqual(run([[0, 100], [30, 100], [61, 100]]).type, 'open-auction');
+});
+
+// ─── 53. deriveVenueIds: mapping + honest null degrades (§4g) ────────────────
+group('deriveVenueIds BTCUSDT/ETHUSDT full, 1000PEPE no coinbase, non-USDT degrades', () => {
+  assert.deepStrictEqual(S.deriveVenueIds('BTCUSDT'),
+    { bybit: 'BTCUSDT', binancef: 'BTCUSDT', okx: 'BTC-USDT-SWAP', coinbase: 'BTC-USD' });
+  assert.deepStrictEqual(S.deriveVenueIds('ETHUSDT'),
+    { bybit: 'ETHUSDT', binancef: 'ETHUSDT', okx: 'ETH-USDT-SWAP', coinbase: 'ETH-USD' });
+  // 1000-multiplied perp: the contract exists on the derivatives venues, but
+  // there is NO '1000PEPE' spot market — coinbase must degrade to null, not
+  // to a guessed id the leg would then 4xx/hang on.
+  assert.deepStrictEqual(S.deriveVenueIds('1000PEPEUSDT'),
+    { bybit: '1000PEPEUSDT', binancef: '1000PEPEUSDT', okx: '1000PEPE-USDT-SWAP', coinbase: null });
+  // Non-USDT symbol: the collector-mirrored derivation only covers USDT
+  // perps — binancef/okx/coinbase are UNKNOWN, stated as null (honest
+  // degrade, §4g); only bybit keeps the id, because the symbol IS a bybit
+  // universe row. A guessed binancef passthrough would subscribe a stream
+  // that never delivers and read 'stalled — reconnecting' forever.
+  assert.deepStrictEqual(S.deriveVenueIds('BTCUSD'),
+    { bybit: 'BTCUSD', binancef: null, okx: null, coinbase: null });
+  // Degenerate inputs never fabricate ids.
+  assert.deepStrictEqual(S.deriveVenueIds('USDT'),
+    { bybit: 'USDT', binancef: null, okx: null, coinbase: null });
+  assert.deepStrictEqual(S.deriveVenueIds(''),
+    { bybit: null, binancef: null, okx: null, coinbase: null });
+});
+
+// ─── 54. BasisSeries: ring wrap + NaN funding never zero-coerced (§4g) ───────
+group('BasisSeries ring wrap keeps newest in order + NaN funding + latest()', () => {
+  const bs = S.BasisSeries({ max: 5 });
+  const T4 = 1783080000000;
+  assert.strictEqual(bs.latest(), null, 'empty series has no latest — never a fake row');
+  for (let i = 0; i < 7; i++) bs.push(T4 + i * 1000, i, 0.0001 * i);
+  const l = bs.list();
+  assert.strictEqual(l.length, 5, 'ring capped at max');
+  assert.deepStrictEqual(l.map((r) => r.basisBp), [2, 3, 4, 5, 6], 'oldest two evicted, order kept');
+  assert.strictEqual(l[0].ts, T4 + 2000);
+  assert.strictEqual(bs.latest().basisBp, 6);
+  // Funding absent on a sample (Bybit partial deltas) → stored NaN, NEVER a
+  // fabricated 0 ("flat funding" is a claim; "unknown" is not).
+  bs.push(T4 + 7000, 7);
+  assert.ok(Number.isNaN(bs.latest().fundingRate), 'missing funding stays NaN');
+  assert.strictEqual(bs.latest().basisBp, 7);
+  // Hygiene: a non-finite basis point is dropped whole, not half-recorded.
+  bs.push(T4 + 8000, NaN, 0.0001);
+  assert.strictEqual(bs.latest().ts, T4 + 7000);
+  assert.strictEqual(bs.list().length, 5);
 });
 
 // ─── Verdict ─────────────────────────────────────────────────────────────────

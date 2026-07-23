@@ -38,16 +38,33 @@
   }
 
   const $ = (id) => document.getElementById(id);
-  const SYM = 'BTCUSDT';       // Bybit + Binance Futures linear perp
-  const SPOT = 'BTC-USD';      // Coinbase Advanced Trade product
-  const OKX_INST = 'BTC-USDT-SWAP';   // OKX linear swap (O-2, §4b — sizes in CONTRACTS, adapter ctVal-scales)
+  // T-1 (§4g): SYM is a RUNTIME setting (persisted; default BTCUSDT) — per-
+  // venue ids derive from it via deriveVenueIds (the collector's mapping;
+  // null = no derivable market → that leg degrades to an honest chip). The
+  // lets are (re)assigned by switchSymbol; everything downstream reads them.
+  let SYM = 'BTCUSDT';         // Bybit + Binance Futures linear perp
+  let SPOT = 'BTC-USD';        // Coinbase Advanced Trade product (null = no leg)
+  let OKX_INST = 'BTC-USDT-SWAP';   // OKX linear swap (O-2, §4b — sizes in CONTRACTS, adapter ctVal-scales; null = no leg)
+  let BASE = 'BTC';            // base-asset code for unit labels (null = unknown quote → views omit the unit rather than mislabel it)
+
+  /** Base asset of a USDT-quoted symbol (deriveVenueIds' strip-USDT
+   *  convention); null when the quote is unknown — a '1000PEPE' OI labeled
+   *  'BTC' would be a §0 mislabel, so unit strings ride this, never a
+   *  hardcoded 'BTC'. */
+  function baseAsset(sym) {
+    return typeof sym === 'string' && sym.length > 4 && sym.endsWith('USDT') ? sym.slice(0, -4) : null;
+  }
 
   // ─── Settings (persisted to localStorage 'btcq-terminal', §4) ───────────
   //
   // Only values from the whitelists below are accepted back from storage — a
   // hand-edited localStorage must not put the stores into an unsupported state.
   const LS_KEY = 'btcq-terminal';
-  const TICKS = [1, 5, 10, 25, 50];        // $ tick grouping (default 10 — §4 task spec)
+  // T-1 (§4g): the tick whitelist is SYMBOL-DEPENDENT — [1,5,10,25,50] is the
+  // pinned §4 BTC set; other symbols derive theirs from the ticker price via
+  // tickOptionsFor (the "$10 at $100k" ≈1bp convention, settings hint). It is
+  // a `let` rebuilt on symbol switch; the select is regenerated with it.
+  let TICKS = [1, 5, 10, 25, 50];          // $ tick grouping (default 10 — §4 task spec)
   const BARS = [60000, 300000];            // footprint bar interval: 1m | 5m
   const LIQ_RANGES = ['pct6', 'all'];      // liq-heatmap window: mark ± 6% (default) | full tier extent
   const SCR_TOPS = ['40', 'all'];          // screener slice: top-40 by turnover (default) | whole universe
@@ -79,6 +96,16 @@
   // UTC ISO week, custom = the datetime input — parsed as UTC, stated).
   const VWAP_ANCHORS = ['day', 'week', 'custom'];
 
+  // T-1 (§4g): workspace presets = named collapsed-set combos; 'last' is the
+  // user's own custom state (kept in lastCollapsed whenever a section toggle
+  // is used manually).
+  const WORKSPACES = {
+    all: { orderflow: false, structure: false, auction: false, intelligence: false, portfolio: false },
+    'orderflow-focus': { orderflow: false, structure: true, auction: true, intelligence: true, portfolio: true },
+    'auction-focus': { orderflow: true, structure: true, auction: false, intelligence: true, portfolio: true },
+  };
+  const WORKSPACE_NAMES = ['all', 'orderflow-focus', 'auction-focus', 'last'];
+
   const DEFAULTS = {
     tick: 10, barMs: 60000, tapeMin: 0, liqRange: 'pct6',
     // O-4 (§4d): screener slice, whale watchlist (+BTC filter), alert rules.
@@ -87,6 +114,10 @@
     collapsed: { orderflow: false, structure: false, auction: false, intelligence: false, portfolio: false },
     // I-1 (§4f): levels 'draw on charts' toggle + hist VWAP-band controls.
     levelsDraw: false, vwapOn: false, vwapAnchor: 'day',
+    // T-1 (§4g): runtime symbol, footprint Δ-rows toggle, key-level footprint
+    // markers (default on per contract), workspace preset + the custom state.
+    sym: 'BTCUSDT', fpDeltaRows: true, klevDraw: true, workspace: 'all',
+    lastCollapsed: { orderflow: false, structure: false, auction: false, intelligence: false, portfolio: false },
   };
 
   function loadSettings() {
@@ -96,10 +127,26 @@
     s.whaleAddrs = [];
     s.alertRules = DEFAULT_RULES.map((r) => Object.assign({ id: r.kind }, r));
     s.collapsed = { orderflow: false, structure: false, auction: false, intelligence: false, portfolio: false };
+    s.lastCollapsed = { orderflow: false, structure: false, auction: false, intelligence: false, portfolio: false };
     try {
       const j = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
-      if (TICKS.indexOf(j.tick) >= 0) s.tick = j.tick;
+      // T-1 (§4g): tick is validated for SANITY (finite, positive, bounded)
+      // rather than against the fixed list — the legal set is symbol-
+      // dependent and rebuilt from the ticker price once the universe
+      // arrives; the select whitelists from then on.
+      if (Number.isFinite(j.tick) && j.tick > 0 && j.tick <= 10000) s.tick = j.tick;
       if (BARS.indexOf(j.barMs) >= 0) s.barMs = j.barMs;
+      // T-1 (§4g): symbol — exchange-style code only (it goes into WS topic
+      // strings and REST urls; anything else must not return from storage).
+      if (typeof j.sym === 'string' && /^[A-Z0-9]{5,20}$/.test(j.sym)) s.sym = j.sym;
+      if (typeof j.fpDeltaRows === 'boolean') s.fpDeltaRows = j.fpDeltaRows;
+      if (typeof j.klevDraw === 'boolean') s.klevDraw = j.klevDraw;
+      if (WORKSPACE_NAMES.indexOf(j.workspace) >= 0) s.workspace = j.workspace;
+      if (j.lastCollapsed && typeof j.lastCollapsed === 'object') {
+        for (const sec of SECTIONS) {
+          if (typeof j.lastCollapsed[sec] === 'boolean') s.lastCollapsed[sec] = j.lastCollapsed[sec];
+        }
+      }
       if (Number.isFinite(j.tapeMin) && j.tapeMin >= 0) s.tapeMin = j.tapeMin;
       if (LIQ_RANGES.indexOf(j.liqRange) >= 0) s.liqRange = j.liqRange;
       // O-4 whitelists (same rule as above: only recognized values return
@@ -152,8 +199,54 @@
         alertRules: settings.alertRules.map((r) => ({ kind: r.kind, enabled: r.enabled, threshold: r.threshold })),
         collapsed: settings.collapsed,
         levelsDraw: settings.levelsDraw, vwapOn: settings.vwapOn, vwapAnchor: settings.vwapAnchor,
+        sym: settings.sym, fpDeltaRows: settings.fpDeltaRows, klevDraw: settings.klevDraw,
+        workspace: settings.workspace, lastCollapsed: settings.lastCollapsed,
       }));
     } catch (_) { /* private mode / quota — settings just don't persist */ }
+  }
+
+  // T-1 (§4g): adopt the persisted symbol + derive the venue legs. In replay
+  // the symbol is FORCED to BTCUSDT — the fixtures are recorded BTCUSDT
+  // frames and driving them under another label would mislabel every panel.
+  if (window.BTCQ_TERMINAL_REPLAY && window.BTCQ_TERMINAL_REPLAY.active()) settings.sym = 'BTCUSDT';
+  SYM = settings.sym;
+  BASE = baseAsset(SYM);
+  {
+    const ids = S.deriveVenueIds(SYM);
+    SPOT = ids.coinbase;
+    OKX_INST = ids.okx;
+  }
+
+  /** §4g tick-default convention (stated in the settings hint): ≈1bp of the
+   *  symbol's price, snapped by niceRound to the 1/2/2.5/5×10^k grid, is the
+   *  DEFAULT tick; the selectable set spans base×{0.1, 0.5, 1, 2.5, 5} —
+   *  exactly the pinned §4 BTC set [1,5,10,25,50] at base $10. BTCUSDT keeps
+   *  that pinned set verbatim (it predates the derivation and the fixtures
+   *  assume it); other symbols derive from their ticker last price. */
+  function tickOptionsFor(sym, price) {
+    if (sym === 'BTCUSDT' || !Number.isFinite(price) || price <= 0) return [1, 5, 10, 25, 50];
+    const base = niceRound(price * 1e-4);
+    // toPrecision strips float artifacts (0.1 × 0.5 → 0.05000…4) so option
+    // values round-trip through the select's string values exactly.
+    return [0.1, 0.5, 1, 2.5, 5].map((m) => Number((m * base).toPrecision(3)));
+  }
+
+  /** Rebuild the tick <select> for the CURRENT symbol. On a SWITCH the tick
+   *  resets to the derived default (index 2 = the ≈1bp base). With `keep`
+   *  (boot / first universe answer) a persisted tick outside the derived set
+   *  is kept and inserted — the user chose it; only a switch re-defaults. */
+  function applyTickOptions(price, keep) {
+    TICKS = tickOptionsFor(SYM, price);
+    if (TICKS.indexOf(settings.tick) < 0) {
+      if (keep && Number.isFinite(settings.tick) && settings.tick > 0) {
+        TICKS = TICKS.concat([settings.tick]).sort((a, b) => a - b);
+      } else {
+        settings.tick = TICKS[2];
+      }
+    }
+    const sel = $('set-tick');
+    sel.innerHTML = TICKS.map((t) => '<option value="' + t + '">' + t + '</option>').join('');
+    sel.value = String(settings.tick);
   }
 
   // Pause is deliberately NOT persisted: a page that loads pre-paused looks
@@ -164,17 +257,25 @@
   let paused = false;
 
   // ─── Stores (terminal-state.js §4 + §4b) ─────────────────────────────────
-  const tape = S.TapeStore(3000);
-  const liq = S.LiqStore(500);
-  // Per-exchange CVD (§4b): each venue gets its OWN session-anchored store —
-  // the view labels every line per venue and computes the exact Σ itself.
-  // Buckets only matter on the bybit store (the by-trade-size lines stay
-  // single-venue, same §0.7 reasoning as the footprint).
+  //
+  // T-1 (§4g): the flow stores are `let`s behind rebuildFlowStores so a
+  // symbol switch can restart them — a new symbol is a new session, the same
+  // honest-restart rule as the tick regroup (nothing re-bucketed, nothing
+  // synthesized). Per-exchange CVD (§4b): each venue gets its OWN session-
+  // anchored store — the view labels every line per venue and computes the
+  // exact Σ itself. Buckets only matter on the bybit store (the by-trade-size
+  // lines stay single-venue, same §0.7 reasoning as the footprint).
   const CVD_EXS = ['bybit', 'okx', 'coinbase'];
-  const cvds = {};
-  for (const ex of CVD_EXS) cvds[ex] = S.CvdStore({ bucketsUsd: [1e4, 1e5, 1e6] });   // §4 defaults
-  const aggBook = S.AggBookStore(['bybit', 'binancef', 'okx']);   // §4b: okx joins the merged book
-  const bybitBook = aggBook.books.get('bybit');   // DOM ladder = the primary venue's book
+  let tape, liq, aggBook, bybitBook;
+  const cvds = {};   // stable object identity; per-venue stores swap inside
+  function rebuildFlowStores() {
+    tape = S.TapeStore(3000);
+    liq = S.LiqStore(500);
+    for (const ex of CVD_EXS) cvds[ex] = S.CvdStore({ bucketsUsd: [1e4, 1e5, 1e6] });   // §4 defaults
+    aggBook = S.AggBookStore(['bybit', 'binancef', 'okx']);   // §4b: okx joins the merged book
+    bybitBook = aggBook.books.get('bybit');   // DOM ladder = the primary venue's book
+  }
+  rebuildFlowStores();
 
   // Footprint + profile are constructed AGAINST a tick/bar size, so changing
   // either setting rebuilds the store and restarts its session aggregation.
@@ -223,6 +324,12 @@
   // ladders onto a new grid would fabricate flow that never printed (§0.7).
   let ofi;              // OfiStore (Cont–Kukanov–Stoikov, top-5 levels)
   let mpHist;           // [{ts, d}] microprice − mid ring (same 3600-sample horizon)
+  // T-1 (§4g): the walls ledger is grid-bound too (its levels ARE grouped
+  // ladder prices) so it rebuilds with this family — the settings hint names
+  // it. prevLadder remembers the last sample's levels per side: a tracked
+  // level MISSING from the next sample is how the ledger observes a
+  // disappearance (caller contract, terminal-state.js).
+  let walls, prevLadder;
   function rebuildHeatmapStores() {
     depthHist = {}; priceTrail = {}; lastSampleTs = {};
     for (const ex of HIST_EXS) {
@@ -236,8 +343,42 @@
     lastEstTs = -Infinity;
     ofi = S.OfiStore({ levels: 5 });   // §4f default top-N
     mpHist = [];
+    walls = S.WallsLedger({});        // K=4×p95, M=5 — §4g conventions
+    prevLadder = { bid: new Map(), ask: new Map() };
   }
   rebuildHeatmapStores();
+
+  // ─── T-1 (§4g): Trader's Edge session stores — symbol-bound, NOT grid-
+  // bound (a tick regroup keeps them; a symbol switch rebuilds them) ────────
+  //
+  // VPIN arming (§4g convention, stated on-panel): the store is constructed
+  // only after 5 min of session flow with V = sessionVol/50, then V is
+  // re-estimated hourly via setBucketVol (future buckets only — the store
+  // never restates a completed bucket). Trades before arming size V; they do
+  // not enter buckets (nothing is backfilled).
+  //
+  // The opening classifier + IB are anchored on the UTC day of the FIRST
+  // bybit print (event time — deterministic in replay) and roll over with it;
+  // openState.firstTs lets the witnessed-open rule refuse to classify a
+  // session whose opening auction this page never saw.
+  let tapeInt, basisSeries, vpin, sessVol, sessVolT0, lastVpinArmTs, openState;
+  function rebuildEdgeStores() {
+    tapeInt = S.TapeIntensityStore();
+    basisSeries = S.BasisSeries({});
+    vpin = null;
+    sessVol = 0; sessVolT0 = NaN; lastVpinArmTs = -Infinity;
+    openState = null;   // {openTs, cls, firstTs, ibHigh, ibLow} — set on the first print
+  }
+  rebuildEdgeStores();
+
+  /** Witnessed-open convention (§4g honesty rail): the first print this page
+   *  ingested for the session's UTC day landed within 60 s of 00:00 UTC —
+   *  i.e. the page was actually listening when the auction opened. Without
+   *  it, opening-type and IB stay honestly withheld (classifying a partial
+   *  window would present fabricated evidence). */
+  function openWitnessed() {
+    return !!openState && openState.firstTs - openState.openTs <= 60000;
+  }
 
   // ─── Header-stat state (latest-value caches + session extremes) ─────────
   const marks = {};      // ex → latest normalized mark event
@@ -274,6 +415,7 @@
     auct: true, lvls: true, micro: true,   // I-1 AUCTION panels (§4f)
     scr: true, rsi: true, opts: true, whale: true, alerts: true, conf: true,   // O-4 INTELLIGENCE panels (§4d)
     jour: true, cal: true, poly: true, news: true, econ: true,   // O-5 PORTFOLIO panels (§4e)
+    tapeint: true, walls: true, vpin: true, klev: true, basis: true,   // T-1 Trader's Edge panels (§4g)
   };
   function dirtyAll() { for (const k in dirty) dirty[k] = true; }
 
@@ -283,6 +425,10 @@
       case 'trade':
         tape.push(ev);
         dirty.tape = true;
+        // T-1 (§4g): tape-intensity gauge — MIXED venues by design, like the
+        // tape it sits on (the strip's title says so).
+        tapeInt.push(ev.ts, ev.price * ev.qty);
+        dirty.tapeint = true;
         // Per-exchange CVD (§4b): each venue's trades feed ONLY its own
         // labeled store — the panel legend names every line per venue.
         if (cvds[ev.ex]) { cvds[ev.ex].onTrade(ev); dirty.fp = true; }
@@ -315,6 +461,28 @@
           if (!(sessionHigh >= ev.price)) sessionHigh = ev.price;   // NaN-safe first print
           if (!(sessionLow <= ev.price)) sessionLow = ev.price;
           lastPrice = ev.price;
+          // T-1 (§4g): primary-leg flow feeds — same single-venue rule as
+          // footprint/profile above (mixing venues would fabricate a session
+          // that traded nowhere).
+          if (Number.isFinite(ev.ts) && ev.qty > 0) {
+            if (!Number.isFinite(sessVolT0)) sessVolT0 = ev.ts;
+            sessVol += ev.qty;                              // sizes the VPIN bucket V (intel gate arms it)
+            if (vpin) { vpin.push(ev.ts, ev.qty, ev.aggressorBuy); dirty.vpin = true; }
+            walls.markTrade(ev.ts, ev.price);               // a print through a standing wall = 'filled'
+            // Opening classifier + IB, anchored on the print's UTC day (event
+            // time — rolls over deterministically at 00:00 UTC).
+            const day0 = Math.floor(ev.ts / 86400000) * 86400000;
+            if (!openState || day0 > openState.openTs) {
+              openState = { openTs: day0, cls: S.OpeningTypeClassifier(day0), firstTs: ev.ts, ibHigh: NaN, ibLow: NaN };
+              dirty.klev = true;
+            }
+            openState.cls.feed(ev.ts, ev.price);
+            if (ev.ts < openState.openTs + 3600000) {       // IB = first 2×30min UTC range
+              if (!(openState.ibHigh >= ev.price)) openState.ibHigh = ev.price;
+              if (!(openState.ibLow <= ev.price)) openState.ibLow = ev.price;
+              dirty.klev = true;
+            }
+          }
           dirty.fp = true;
           dirty.dom = true;      // ladder session sold/bought columns move with trades
           dirty.header = true;   // session high/low + topbar price
@@ -337,6 +505,14 @@
         marks[ev.ex] = ev;
         dirty.header = true;
         if (ev.ex === 'bybit' && Number.isFinite(ev.ts) && !(lastBybitTs >= ev.ts)) lastBybitTs = ev.ts;
+        // T-1 (§4g): basis/funding ring rides the EXISTING ~1s bybit mark
+        // events — no new feeds. A mark without a finite index yields no
+        // basis point (never a fabricated one); absent funding stays NaN in
+        // the store (BasisSeries contract).
+        if (ev.ex === 'bybit' && Number.isFinite(ev.mark) && Number.isFinite(ev.index) && ev.index !== 0) {
+          basisSeries.push(ev.ts, ((ev.mark - ev.index) / ev.index) * 1e4, ev.fundingRate);
+          dirty.basis = true;
+        }
         break;
       case 'oi':
         ois[ev.ex] = ev;
@@ -360,10 +536,16 @@
   headerView.mount($('view-header'));
 
   const fpView = V.FootprintView();
+  const fpDrowsInput = $('set-fp-drows');
+  fpDrowsInput.checked = settings.fpDeltaRows;
   fpView.mount($('view-footprint'), {
     cvdEl: $('view-cvd'),
     buckets: cvds.bybit.buckets,   // by-size lines read the bybit store only
     cvdExs: CVD_EXS,               // §4b: one labeled line per venue + exact Σ
+    // T-1 (§4g): Δmin/Δmax + Δ% footer rows — the view owns the display
+    // choice, persistence lives here (the TapeView filter-input split).
+    deltaRowsInput: fpDrowsInput,
+    onDeltaRows: (on) => { settings.fpDeltaRows = on; saveSettings(); dirty.fp = true; },
   });
 
   const domView = V.DomLadderView();
@@ -417,6 +599,25 @@
   const detView = V.DetectionFeedView();
   detView.mount($('view-detect'));
 
+  // ── T-1 views (§4g) — store-fed, so they mount in BOTH modes (replay
+  // drives them deterministically; REST-free by construction). ──
+  const tapeIntView = V.TapeIntensityView();
+  tapeIntView.mount($('view-tapeint'));
+  const wallsView = V.WallsLedgerView();
+  wallsView.mount($('view-walls'));
+  const vpinView = V.VpinView();
+  vpinView.mount($('view-vpin'));
+  const basisView = V.BasisView();
+  basisView.mount($('view-basis'));
+  let klevDrawOn = settings.klevDraw;
+  const klevView = V.KeyLevelsView();
+  const klevDrawInput = $('set-klev-draw');
+  klevDrawInput.checked = klevDrawOn;
+  klevView.mount($('view-keylevels'), {
+    drawInput: klevDrawInput,
+    onDraw: (on) => { klevDrawOn = on; settings.klevDraw = on; saveSettings(); dirty.fp = true; },
+  });
+
   // ─── Live legs: three sockets + one REST poller (§2 data matrix) ────────
   //
   // Each leg gets its own onStatus → chip; legs are independent — any subset
@@ -445,22 +646,102 @@
     // ?replay=byod the driver feeds collector rows to the sink DIRECTLY
     // (rows are already normalized; adapters bypassed); under ?replay=1 the
     // 4th arg is ignored and fixture replay is bit-for-bit unchanged.
-    if (REPLAY) window.BTCQ_TERMINAL_REPLAY.drive(name, adapter, api, sink);
-    else LW.makeSocket(adapter, api);
+    // Returns the socket handle ({close}) so a symbol switch can close the
+    // leg (§4g); replay legs have no handle — switching is disabled there.
+    if (REPLAY) { window.BTCQ_TERMINAL_REPLAY.drive(name, adapter, api, sink); return null; }
+    return LW.makeSocket(adapter, api);
   }
-  startLeg('bybit', A.makeBybitAdapter(SYM, sink), { onStatus: chipStatus('bybit') });
-  startLeg('binancef', A.makeBinanceDepthAdapter(SYM, sink), { onStatus: chipStatus('binancef') });
-  startLeg('coinbase', A.makeCoinbaseAdapter(SPOT, sink), { onStatus: chipStatus('coinbase') });
-  // O-2 (§4b): OKX leg — deeper agg book + its own labeled CVD line. The
-  // adapter ctVal-scales CONTRACT sizes to BTC; default 0.01 is the pinned
-  // BTC-USDT-SWAP value (fixtures _okx_ctval_note). Chip semantics identical.
-  startLeg('okx', A.makeOkxAdapter(OKX_INST, sink), { onStatus: chipStatus('okx') });
-  if (!REPLAY) {
-    // REST poller skipped in replay: it is real network (fapi.binance.com) and
-    // wall-clock-timed — both break the deterministic no-network replay rail.
-    const poller = A.makeBinanceRestPoller(SYM, sink);   // mark 5s / OI 60s → 'binancef' columns
-    poller.start();
+
+  // ── T-1 (§4g): leg lifecycle — every leg re-derivable from SYM ──
+  //
+  // startAllLegs derives per-venue ids for the CURRENT symbol and opens each
+  // leg; a null mapping (deriveVenueIds), a failed binancef/coinbase listing
+  // probe, or an unknown okx ctVal degrades to an honest 'no leg' chip
+  // instead of subscribing to a guessed id/scale. legGen guards async leg
+  // starts (listing probes, the okx ctVal fetch) against a switch that
+  // happened mid-flight.
+  const legHandles = { bybit: null, binancef: null, coinbase: null, okx: null };
+  let restPoller = null;
+  let legGen = 0;
+  function startAllLegs() {
+    const gen = ++legGen;
+    const ids = S.deriveVenueIds(SYM);
+    SPOT = ids.coinbase;
+    OKX_INST = ids.okx;
+    legHandles.bybit = startLeg('bybit', A.makeBybitAdapter(ids.bybit, sink), { onStatus: chipStatus('bybit') });
+    // §4g unknown/unreachable rule, BOTH halves: a null mapping (unknown)
+    // chips immediately; a DERIVED binancef/coinbase id is only a naming
+    // convention (deriveVenueIds), so beyond the pinned BTCUSDT ids the
+    // venue is probed before subscribing (terminal-hist.js probes). A
+    // guessed id would open a socket that never delivers — the watchdog
+    // would then loop 'stalled — reconnecting', prose that claims a
+    // transient outage on a feed that never existed, instead of the
+    // mandated 'no leg' chip.
+    const startBinance = (id) => {
+      legHandles.binancef = startLeg('binancef', A.makeBinanceDepthAdapter(id, sink), { onStatus: chipStatus('binancef') });
+      if (!REPLAY) {
+        // REST poller skipped in replay: it is real network (fapi.binance.com) and
+        // wall-clock-timed — both break the deterministic no-network replay rail.
+        restPoller = A.makeBinanceRestPoller(id, sink);   // mark 5s / OI 60s → 'binancef' columns
+        restPoller.start();
+      }
+    };
+    if (!ids.binancef) {
+      chipStatus('binancef')('error', 'no leg for ' + SYM);   // §4g honest degrade chip
+    } else if (SYM === 'BTCUSDT' || REPLAY) {
+      startBinance(ids.binancef);   // pinned id (collector/fixtures) — listing not in question
+    } else {
+      chipStatus('binancef')('stale', 'probing ' + ids.binancef + '…');
+      window.BTCQ_TERMINAL_HIST.probeBinanceFutSymbol(ids.binancef).then((listed) => {
+        if (gen !== legGen) return;   // symbol changed again mid-probe
+        if (listed) startBinance(ids.binancef);
+        else chipStatus('binancef')('error', 'no leg for ' + SYM + (listed === false ? ' (not listed)' : ' (probe unreachable)'));
+      });
+    }
+    const startCoinbase = (id) => {
+      legHandles.coinbase = startLeg('coinbase', A.makeCoinbaseAdapter(id, sink), { onStatus: chipStatus('coinbase') });
+    };
+    if (!ids.coinbase) {
+      chipStatus('coinbase')('error', 'no leg for ' + SYM);   // §4g honest degrade chip
+    } else if (SYM === 'BTCUSDT' || REPLAY) {
+      startCoinbase(ids.coinbase);
+    } else {
+      chipStatus('coinbase')('stale', 'probing ' + ids.coinbase + '…');
+      window.BTCQ_TERMINAL_HIST.probeCoinbaseProduct(ids.coinbase).then((listed) => {
+        if (gen !== legGen) return;   // symbol changed again mid-probe
+        if (listed) startCoinbase(ids.coinbase);
+        else chipStatus('coinbase')('error', 'no leg for ' + SYM + (listed === false ? ' (not listed)' : ' (probe unreachable)'));
+      });
+    }
+    // O-2 (§4b): OKX leg — deeper agg book + its own labeled CVD line. The
+    // adapter ctVal-scales CONTRACT sizes; 0.01 is the PINNED BTC-USDT-SWAP
+    // value (fixtures _okx_ctval_note) — any other instId fetches its real
+    // multiplier first (§4b unit rail: a guessed ctVal would mis-scale every
+    // okx size), and an unreachable/unknown ctVal skips the leg honestly.
+    if (!ids.okx) {
+      chipStatus('okx')('error', 'no leg for ' + SYM);
+    } else if (ids.okx === 'BTC-USDT-SWAP' || REPLAY) {
+      legHandles.okx = startLeg('okx', A.makeOkxAdapter(ids.okx, sink), { onStatus: chipStatus('okx') });
+    } else {
+      window.BTCQ_TERMINAL_HIST.fetchOkxCtVal(ids.okx).then((ctVal) => {
+        if (gen !== legGen) return;   // symbol changed again mid-fetch
+        if (ctVal === null) {
+          chipStatus('okx')('error', 'no leg for ' + SYM + ' (ctVal unknown)');
+          return;
+        }
+        legHandles.okx = startLeg('okx', A.makeOkxAdapter(ids.okx, sink, { ctVal }), { onStatus: chipStatus('okx') });
+      });
+    }
   }
+  function stopAllLegs() {
+    legGen++;   // invalidate any in-flight async leg start
+    for (const ex in legHandles) {
+      if (legHandles[ex] && legHandles[ex].close) legHandles[ex].close();
+      legHandles[ex] = null;
+    }
+    if (restPoller) { restPoller.stop(); restPoller = null; }
+  }
+  startAllLegs();
 
   // ─── O-3 STRUCTURE section (§4c): REST-fed panels + their polls ──────────
   //
@@ -472,6 +753,7 @@
   // there is nothing rather than fabricate something).
   const HIST = window.BTCQ_TERMINAL_HIST;
   let histView = null, tpoView = null, vpView = null, farbView = null, macroView = null;
+  let restRefresh = null;   // T-1 (§4g): re-fetches the SYM-parameterized REST panels on a symbol switch
   // O-3 state caches (REST results; the frame loop only reads them).
   let histBars = null;             // current-interval klines (chart + composite VP)
   let histInterval = '60';         // bybit interval code — html select default (1h)
@@ -584,10 +866,23 @@
     }
     refreshTpo();
 
+    // T-1 (§4g): a symbol switch re-fetches every SYM-parameterized REST
+    // panel; caches are dropped FIRST so the old symbol's bars never render
+    // under the new label while the fetch is in flight.
+    restRefresh = () => {
+      histBars = null; vpData = null; tpoSessions = null;
+      dirty.hist = true; dirty.vp = true; dirty.tpo = true;
+      refreshHist();
+      refreshTpo();
+      pollOkx();
+    };
+
     // ── OKX funding/OI: NEW 60s REST poll (§4c FundingArbView leg). A null
     // result simply keeps the previous value's staleness visible via the
-    // countdown / leaves '—' — silent-null tolerated by contract. ──
+    // countdown / leaves '—' — silent-null tolerated by contract. §4g: no
+    // derivable okx instId → the cells go honestly absent, never stale. ──
     function pollOkx() {
+      if (!OKX_INST) { okxFund = null; okxOiEv = null; dirty.farb = true; return; }
       HIST.fetchOkxFunding(OKX_INST).then((f) => { if (f) okxFund = f; dirty.farb = true; });
       HIST.fetchOkxOi(OKX_INST).then((o) => { if (o) okxOiEv = o; dirty.farb = true; });
     }
@@ -614,7 +909,9 @@
         }
         // BTC leg sampled on the SAME cadence from the live bybit mark, so
         // session-corr pairs align by sample index (§4c corr contract).
-        if (marks.bybit && Number.isFinite(marks.bybit.mark)) sessStore.onSample(now, 'BTC', marks.bybit.mark);
+        // §4g: with another symbol selected the bybit mark ISN'T BTC — the
+        // BTC session leg simply stops sampling (a gap, never a mislabel).
+        if (SYM === 'BTCUSDT' && marks.bybit && Number.isFinite(marks.bybit.mark)) sessStore.onSample(now, 'BTC', marks.bybit.mark);
         dirty.macro = true;
       });
     }
@@ -704,7 +1001,7 @@
       threshold: Number.isFinite(r.threshold) ? r.threshold : undefined,
     }));
   }
-  const alertEngine = S.AlertEngine({ rules: engineRules(), cooldownMs: 60000 });
+  let alertEngine = S.AlertEngine({ rules: engineRules(), cooldownMs: 60000 });   // let: rebuilt on symbol switch (honest restart)
 
   // Confluence + alerts views mount in BOTH modes (store-fed — see section
   // header); their inputs simply carry more 'n/a' in replay because the REST
@@ -817,6 +1114,14 @@
           btcTicker = null;
           for (const r of rows) if (r.sym === SYM) { btcTicker = r; break; }
           if (!rsiStarted) { rsiStarted = true; refreshRsi(); }   // RSI batch needs the universe first
+          // T-1 (§4g): first universe answer — derive the persisted symbol's
+          // real tick options from its price (boot had no price to derive
+          // from; the user's persisted tick is kept).
+          if (!tickDerived && btcTicker) {
+            tickDerived = true;
+            applyTickOptions(btcTicker.last, true);
+          }
+          renderSymList();   // refresh the picker/universe-fed lists in place
         }
         dirty.scr = true;   // null result → the view keeps saying 'awaiting tickers'
       });
@@ -1094,6 +1399,10 @@
   const DAY_MS = 86400000;
   const API_OFFLINE_NOTE = 'collector API offline — run `make collector-api` (127.0.0.1:8788). '
     + 'On the public Pages deployment this is expected: an https page cannot fetch http://127.0.0.1 (mixed content).';
+  // T-1 (§4g): the recorded store holds BTCUSDT only — every store-backed
+  // panel says so (compact honest note) while another symbol is selected.
+  const byodSymNote = () => 'collector records BTCUSDT only (§4g) — recorded-store data resumes on BTCUSDT; '
+    + 'nothing is fabricated for ' + SYM + '.';
 
   let auctionView = null, levelsView = null, microView = null;
   let apiUp = null;             // null = probing, false = offline, true = answering
@@ -1239,7 +1548,9 @@
   /** Naked POCs for overlays (auction panel always; ladder/hist behind the
    *  LevelsView toggle) — age in days from the row's UTC date to today. */
   function nakedPocs() {
-    if (!levelsDays) return [];
+    // §4g: registry rows are recorded BTCUSDT days — never overlaid on
+    // another symbol's panels (that would mislabel BTC levels as its own).
+    if (SYM !== 'BTCUSDT' || !levelsDays) return [];
     const today0 = utcDayStart(Date.now());
     const out = [];
     for (const d of levelsDays) {
@@ -1256,6 +1567,7 @@
   /** Hist-chart levels overlay (LevelsView 'draw on charts'): prior recorded
    *  day's POC/VA + every naked POC (cap applied in the view). */
   function overlayLevels() {
+    if (SYM !== 'BTCUSDT') return null;   // §4g: BTC registry levels never draw over another symbol's chart
     if (!levelsDrawOn || !levelsDays || !levelsDays.length) return null;
     const out = [];
     const prior = levelsDays[levelsDays.length - 1];   // newest recorded (closed) day
@@ -1311,7 +1623,8 @@
     // ONE parity fetch per anchor change (§4f: no vwap polling) — the
     // recorded store's tick-exact answer over the FULL anchor range, shown
     // as labeled legend text, never merged into the live series (§0.7).
-    if (apiUp === true && !REPLAY) {
+    // §4g: BTCUSDT only — the store has no other symbol to answer with.
+    if (apiUp === true && !REPLAY && SYM === 'BTCUSDT') {
       fetchJson(BYOD_API + '/v1/vwap?symbol=' + SYM + '&exchange=bybit&anchor_ms=' + ts, 15000)
         .then((r) => {
           if (r && Number.isFinite(r.vwap)) {
@@ -1447,6 +1760,9 @@
 
   function loadAuctionSource(src) {
     const gen = ++auctionGen;
+    // §4g symbol gate FIRST (before composite): no recorded bytes exist for
+    // another symbol — the panel states it instead of fetching a mislabel.
+    if (SYM !== 'BTCUSDT') { setAuctionProfile(null, '', byodSymNote()); return; }
     if (auctionComposite.on) { loadComposite(); return; }
     if (src === 'today') {
       if (apiUp !== true) {
@@ -1506,6 +1822,7 @@
   }
 
   function pollLevels() {
+    if (SYM !== 'BTCUSDT') return;   // §4g: the registry is recorded BTCUSDT days — nothing to poll for
     fetchJson(BYOD_API + '/v1/levels', 10000).then((r) => {
       levelsDays = r && Array.isArray(r.days) ? r.days : [];
       levelsNote = '';
@@ -1694,6 +2011,21 @@
     if (!Number.isFinite(ts) || ts - lastIntelTs < 5000) return;
     lastIntelTs = ts;
 
+    // ── T-1 (§4g): VPIN bucket-volume arming on the same event-ts gate —
+    // V = sessionVol/50 after 5 min of flow, re-estimated hourly (future
+    // buckets only; the store never restates a completed bucket). ──
+    if (Number.isFinite(sessVolT0) && sessVol > 0) {
+      if (!vpin && ts - sessVolT0 >= 300000) {
+        vpin = S.VpinStore(sessVol / 50);
+        lastVpinArmTs = ts;
+        dirty.vpin = true;
+      } else if (vpin && ts - lastVpinArmTs >= 3600000) {
+        vpin.setBucketVol(sessVol / 50);
+        lastVpinArmTs = ts;
+        dirty.vpin = true;
+      }
+    }
+
     // ── Confluence inputs — plain values from the existing stores/caches
     // (§4d contract: the builder never touches a store). Missing feeds stay
     // NaN/empty and read 'n/a' — never a fabricated 'neutral'. ──
@@ -1781,6 +2113,7 @@
     const oiBy = ois.bybit, oiBn = ois.binancef;
     return {
       nowMs: now,
+      base: BASE,   // OI unit label — venue OI is base-denominated (§4c unit rail)
       venues: {
         bybit: {
           mark: by ? by.mark : NaN, fundingRate: by ? by.fundingRate : NaN,
@@ -1825,7 +2158,9 @@
       if (it.key.indexOf(':') >= 0) px = Number.isFinite(hlMids[it.key]) ? hlMids[it.key] : NaN;
       else if (it.key === 'PAXG') px = macroLasts.PAXG;
       else if (it.key === 'ETH') px = macroLasts.ETH;
-      else px = marks.bybit ? marks.bybit.mark : NaN;
+      // §4g: the bybit mark is only BTC when BTCUSDT is selected — otherwise
+      // the BTC cell goes honestly absent rather than wearing another symbol.
+      else px = (SYM === 'BTCUSDT' && marks.bybit) ? marks.bybit.mark : NaN;
       const ser = sessStore.series(it.key);
       const sessPct = ser.length >= 2 ? (ser[ser.length - 1].px / ser[0].px - 1) * 100 : NaN;
       strip.push({ label: it.label, px, pctOnly: !!it.pctOnly, sessPct, src: it.src });
@@ -1841,6 +2176,92 @@
     const goldPrem = (Number.isFinite(hlMids['km:GOLD']) && Number.isFinite(macroLasts.PAXG) && macroLasts.PAXG > 0)
       ? (hlMids['km:GOLD'] / macroLasts.PAXG - 1) * 100 : NaN;
     return { strip, corr7d, sessCorr, goldPrem };
+  }
+
+  // ── T-1 render-slice composers (§4g) — read stores/caches, mutate nothing ──
+
+  /** Opening-type chip slice: pending → unwitnessed → the class + evidence.
+   *  Citation + not-a-signal label ride the tooltip (the classifier stamps
+   *  its own label on every result). */
+  function openingSlice() {
+    const LABEL = 'Dalton, Mind over Markets — descriptive session read, not a signal';
+    if (!openState) return { text: '—', title: 'no primary-leg prints yet this UTC session · ' + LABEL };
+    if (!openWitnessed()) {
+      return {
+        text: 'unwitnessed',
+        title: 'page began ingesting at ' + new Date(openState.firstTs).toISOString().slice(11, 19)
+          + ' UTC — the opening auction was not observed, so nothing is classified from a partial window (§0.7) · ' + LABEL,
+      };
+    }
+    const r = openState.cls.classify();
+    if (r.type === 'pending') {
+      return { text: 'pending', title: 'classifies 60 min after the 00:00 UTC open · ' + LABEL };
+    }
+    const e = r.evidence;
+    return {
+      text: r.type,
+      title: r.label + ' (Dalton, Mind over Markets; cutoffs are conventions of this implementation) · evidence: '
+        + 'open ' + e.open.toFixed(1) + ' · hi ' + e.hi.toFixed(1) + ' · lo ' + e.lo.toFixed(1)
+        + ' · range ' + e.range.toFixed(1) + ' · dir ' + e.dir + ' · first-extreme ' + e.firstSide
+        + ' · open-crosses ' + e.crossCount + ' · n ' + e.n,
+    };
+  }
+
+  /** Key-levels slice: registry portion (BTCUSDT only, honest note otherwise)
+   *  + the live IB (any symbol — it is THIS session's own prints). */
+  function klevSlice() {
+    let prior = null, priorDate = '', weekly = null, regNote = '';
+    if (REPLAY) regNote = 'registry disabled in replay — /v1/levels is a live-local collector endpoint (nothing fabricated, §0.7)';
+    else if (SYM !== 'BTCUSDT') regNote = byodSymNote();
+    else if (apiUp === false) regNote = API_OFFLINE_NOTE;
+    else if (!levelsDays) regNote = 'awaiting /v1/levels (collector API probe in flight)…';
+    else if (!levelsDays.length) regNote = 'registry empty — it fills as the collector closes UTC days';
+    else {
+      prior = levelsDays[levelsDays.length - 1];   // newest recorded (closed) day
+      priorDate = String(prior.date || '');
+      // Weekly open CONVENTION (§4g, comment mandated): the registry row
+      // dated this UTC week's Monday — its daily open IS the weekly open
+      // (UTC week); honestly absent when that Monday was not recorded.
+      const base = Number.isFinite(lastBybitTs) ? lastBybitTs : Date.now();
+      const day0 = utcDayStart(base);
+      const monday = dateStr(day0 - ((new Date(day0).getUTCDay() + 6) % 7) * DAY_MS);
+      for (const d of levelsDays) {
+        if (String(d.date) === monday && Number.isFinite(d.o)) { weekly = { price: d.o, date: monday }; break; }
+      }
+    }
+    // Live IB: witnessed-open sessions only, shown once the first hour has
+    // elapsed on the EVENT clock (never a wall-clock guess).
+    let ib = null, ibNote = '';
+    if (!openState) ibNote = 'IB: no prints yet this session';
+    else if (!openWitnessed()) ibNote = 'IB withheld — the page did not witness the 00:00 UTC open (§0.7: a partial range is not the IB)';
+    else if (!(lastBybitTs >= openState.openTs + 3600000)) ibNote = 'IB forming — first 2×30 min UTC not yet elapsed';
+    else if (Number.isFinite(openState.ibHigh) && Number.isFinite(openState.ibLow)) {
+      ib = { high: openState.ibHigh, low: openState.ibLow };
+    }
+    return { prior, priorDate, weekly, naked: nakedPocs(), regNote, ib, ibNote };
+  }
+
+  /** Footprint key-level markers (toggle, default on): registry levels +
+   *  live IB as {price, label, kind} — empty when toggled off. */
+  function keyLevelMarks() {
+    if (!klevDrawOn) return [];
+    const s = klevSlice();
+    const out = [];
+    if (s.prior) {
+      out.push({ price: s.prior.h, label: 'pdH', kind: 'ref' });
+      out.push({ price: s.prior.l, label: 'pdL', kind: 'ref' });
+      out.push({ price: s.prior.c, label: 'pdC', kind: 'ref' });
+      out.push({ price: s.prior.poc, label: 'pPOC', kind: 'poc' });
+      out.push({ price: s.prior.vah, label: 'pVAH', kind: 'ref' });
+      out.push({ price: s.prior.val, label: 'pVAL', kind: 'ref' });
+    }
+    if (s.weekly) out.push({ price: s.weekly.price, label: 'wkO', kind: 'ref' });
+    for (const n of s.naked) out.push({ price: n.price, label: 'nPOC', kind: 'naked' });
+    if (s.ib) {
+      out.push({ price: s.ib.high, label: 'IBH', kind: 'ib' });
+      out.push({ price: s.ib.low, label: 'IBL', kind: 'ib' });
+    }
+    return out;
   }
 
   // ─── Read-only debug hook FOR THE BROWSER HARNESS ────────────────────────
@@ -1866,13 +2287,22 @@
         heatSamples: depthHist.bybit.samples().length,   // reads the CURRENT (rebuildable) store
         aggLevels: agg.bids.length + agg.asks.length,
         footprintBars: footprint.bars().length,
+        // T-1 (§4g) store liveness for the harness.
+        basisPoints: basisSeries.length,
+        wallsRows: walls.list().length,
+        vpinBuckets: vpin ? vpin.buckets().length : 0,
+        tapeIntBuckets: tapeInt.sparkline().length,
       };
     },
+    sym() { return SYM; },
   };
 
   // ─── Settings row wiring ────────────────────────────────────────────────
   const tickSel = $('set-tick');
-  tickSel.value = String(settings.tick);
+  // T-1 (§4g): options are symbol-dependent — build them now (keeping a
+  // persisted off-list tick); the real per-symbol derivation re-runs when
+  // the tickers universe first answers with the symbol's price.
+  applyTickOptions(NaN, true);
   tickSel.addEventListener('change', () => {
     const v = Number(tickSel.value);
     if (TICKS.indexOf(v) < 0) return;
@@ -1908,6 +2338,330 @@
     if (!paused) dirtyAll();   // repaint everything that moved while frozen
   });
 
+  // ─── T-1 (§4g): symbol picker + switch (the multi-symbol headline) ───────
+  //
+  // Universe = the EXISTING fetchBybitAllTickers 30s poll (tickerRows) —
+  // top-N by turnover + substring search; no new endpoint. Switching is the
+  // HONEST RESTART (settings hint): every session store rebuilds, all WS
+  // legs close and re-subscribe with derived venue ids, and the symbol-
+  // parameterized REST panels refetch. Disabled in replay (fixtures are
+  // recorded BTCUSDT frames — switching would mislabel them).
+  let tickDerived = SYM === 'BTCUSDT';   // BTC keeps its pinned tick set — nothing to derive
+  const symBtn = $('sym-btn'), symPop = $('sym-pop'), symSearch = $('sym-search'), symList = $('sym-list');
+  let symSel = 0;   // keyboard-selected row index in the CURRENT filtered list
+  const fmtTurnover = (x) => !Number.isFinite(x) ? '—'
+    : x >= 1e9 ? '$' + (x / 1e9).toFixed(1) + 'B'
+      : x >= 1e6 ? '$' + (x / 1e6).toFixed(1) + 'M' : '$' + Math.round(x / 1e3) + 'k';
+
+  function refreshSymLabels() {
+    symBtn.textContent = SYM + ' ▾';
+    document.querySelectorAll('.js-sym').forEach((el) => { el.textContent = SYM; });
+    // Unit mentions in static hints follow the symbol too — a '(BTC)' left
+    // behind under ETHUSDT would mislabel the quantities it describes (§0).
+    document.querySelectorAll('.js-base').forEach((el) => { el.textContent = BASE || 'base units'; });
+  }
+
+  /** Filtered universe rows for the picker: top-30 by turnover, or every
+   *  substring match when searching (already turnover-sorted upstream). */
+  function symRows() {
+    const q = (symSearch.value || '').trim().toUpperCase();
+    const rows = (tickerRows || []).slice().sort((a, b) => b.turnover24h - a.turnover24h);
+    return (q ? rows.filter((r) => r.sym.indexOf(q) >= 0) : rows).slice(0, 30);
+  }
+
+  function renderSymList() {
+    if (symPop.hidden) return;
+    const rows = symRows();
+    if (symSel >= rows.length) symSel = Math.max(0, rows.length - 1);
+    if (!rows.length) {
+      symList.innerHTML = '<li class="sym-note">' + (tickerRows
+        ? 'no match in the bybit linear universe'
+        : 'awaiting the tickers universe (30s poll)…') + '</li>';
+      return;
+    }
+    symList.innerHTML = rows.map((r, i) =>
+      '<li role="option" data-sym="' + r.sym + '" aria-selected="' + (i === symSel)
+      + '" class="' + (r.sym === SYM ? 'cur ' : '') + (i === symSel ? 'sel' : '') + '">'
+      + '<span class="s-sym">' + r.sym + '</span>'
+      + '<span class="s-px">' + (Number.isFinite(r.last) ? r.last : '—') + '</span>'
+      + '<span class="s-to">' + fmtTurnover(r.turnover24h) + '</span></li>').join('');
+  }
+
+  function openSymPop() {
+    if (REPLAY) return;
+    symPop.hidden = false;
+    symBtn.setAttribute('aria-expanded', 'true');
+    symSearch.value = '';
+    symSel = 0;
+    renderSymList();
+    symSearch.focus();
+  }
+  function closeSymPop() {
+    symPop.hidden = true;
+    symBtn.setAttribute('aria-expanded', 'false');
+  }
+
+  /** THE honest restart (§4g): a new symbol is a new session. Order matters —
+   *  legs close first so no old-symbol frame lands in a fresh store. */
+  function switchSymbol(sym) {
+    if (REPLAY || !sym || sym === SYM) return;
+    stopAllLegs();
+    SYM = sym;
+    BASE = baseAsset(sym);
+    settings.sym = sym;
+    // Session stores: flow + grid-bound + edge families all restart (the
+    // browser keeps no raw tick store to re-bucket from — settings hint).
+    let row = null;
+    for (const r of tickerRows || []) if (r.sym === sym) { row = r; break; }
+    applyTickOptions(row ? row.last : NaN);   // re-derived default tick (§4g convention)
+    saveSettings();
+    rebuildFlowStores();
+    rebuildFootprint();
+    rebuildProfile();
+    rebuildHeatmapStores();
+    rebuildEdgeStores();
+    // Latest-value caches + event clocks: everything symbol-scoped resets —
+    // stale values from the old symbol must never render under the new one.
+    for (const k in marks) delete marks[k];
+    for (const k in ois) delete ois[k];
+    for (const k in lastDepthTs) delete lastDepthTs[k];
+    for (const k in lastPriceByEx) delete lastPriceByEx[k];
+    sessionHigh = NaN; sessionLow = NaN; lastPrice = NaN; lastBybitTs = NaN;
+    pendingTrades.length = 0;
+    oiHistBybit.length = 0;
+    intelWin.price.length = 0; intelWin.cvd.length = 0;
+    detSeenIntel = null; detLastEvt = null;
+    lastIntelTs = -Infinity;
+    confData = null;
+    // Alert engine: same honest restart — the events feed and the per-rule
+    // trackers (price-cross prev, funding sign) are symbol-scoped; carried
+    // over they would read phantom crosses/flips against the new symbol's
+    // first snapshot, and the feed would mix eras with no per-source label
+    // (§0.7). This keeps the settings hint's 'EVERY session store' literal.
+    alertEngine = S.AlertEngine({ rules: engineRules(), cooldownMs: 60000 });
+    alertFresh.length = 0;
+    okxFund = null; okxOiEv = null;
+    btcTicker = row;
+    vwapHist = []; storeVwapTxt = null;
+    anchoredVwap.reset(vwapAnchorMs());
+    startAllLegs();
+    refreshSymLabels();
+    if (restRefresh) restRefresh();          // O-3: klines/TPO/VP refetch under the new symbol
+    loadAuctionSource(auctionSource);        // I-1: renders the §4g honest note when sym ≠ BTCUSDT
+    if (SYM === 'BTCUSDT' && apiUp === true) pollLevels();
+    dirtyAll();
+  }
+
+  if (REPLAY) {
+    symBtn.disabled = true;
+    symBtn.title = 'symbol switching is disabled in replay — the fixtures are recorded BTCUSDT frames; '
+      + 'driving them under another label would mislabel every panel (§0)';
+  } else {
+    symBtn.addEventListener('click', () => { if (symPop.hidden) openSymPop(); else closeSymPop(); });
+    symSearch.addEventListener('input', () => { symSel = 0; renderSymList(); });
+    symSearch.addEventListener('keydown', (e) => {
+      const rows = symRows();
+      if (e.key === 'ArrowDown') { e.preventDefault(); symSel = Math.min(rows.length - 1, symSel + 1); renderSymList(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); symSel = Math.max(0, symSel - 1); renderSymList(); }
+      else if (e.key === 'Enter') { e.preventDefault(); if (rows[symSel]) { closeSymPop(); switchSymbol(rows[symSel].sym); } }
+      else if (e.key === 'Escape') { e.preventDefault(); closeSymPop(); symBtn.focus(); }
+    });
+    symList.addEventListener('click', (e) => {
+      const li = e.target.closest('li[data-sym]');
+      if (li) { closeSymPop(); switchSymbol(li.getAttribute('data-sym')); }
+    });
+    document.addEventListener('click', (e) => {
+      if (!symPop.hidden && !e.target.closest('.sym-picker')) closeSymPop();
+    });
+  }
+  refreshSymLabels();
+
+  // ─── T-1 (§4g): workspace presets — named collapsed-set combos ──────────
+  const wsSel = $('workspace-sel');
+  wsSel.value = settings.workspace;
+  function applyWorkspace(name) {
+    if (WORKSPACE_NAMES.indexOf(name) < 0) return;
+    settings.workspace = name;
+    settings.collapsed = Object.assign({},
+      name === 'last' ? settings.lastCollapsed : WORKSPACES[name]);
+    wsSel.value = name;
+    saveSettings();
+    applyCollapse();
+    for (const k in SEC_OF) if (!settings.collapsed[SEC_OF[k]]) dirty[k] = true;   // repaint what re-expanded
+  }
+  wsSel.addEventListener('change', () => applyWorkspace(wsSel.value));
+
+  // ─── T-1 (§4g): command palette — index.html §5.1 idiom (fuzzy filter,
+  // arrow nav, Enter runs, Esc closes, focus restored) ─────────────────────
+  const cmdk = { items: [], filtered: [], sel: 0, lastFocus: null };
+  const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function jumpToPanel(panel) {
+    if (!panel) return;
+    // A collapsed section un-collapses first (a jump into a hidden panel
+    // would land nowhere) — that is a manual layout change, so it flips the
+    // workspace to 'last' like any section toggle.
+    const host = panel.closest('[data-sec]');
+    const sec = host ? host.getAttribute('data-sec') : null;
+    if (sec && settings.collapsed[sec]) {
+      settings.collapsed[sec] = false;
+      settings.workspace = 'last';
+      settings.lastCollapsed = Object.assign({}, settings.collapsed);
+      wsSel.value = 'last';
+      saveSettings();
+      applyCollapse();
+      for (const k in SEC_OF) if (SEC_OF[k] === sec) dirty[k] = true;
+    }
+    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const prev = panel.getAttribute('tabindex');
+    panel.setAttribute('tabindex', '-1');
+    try { panel.focus({ preventScroll: true }); } catch (_) { /* ignore */ }
+    if (prev == null) setTimeout(() => panel.removeAttribute('tabindex'), 0);
+  }
+
+  function buildCommands() {
+    const items = [];
+    document.querySelectorAll('main .panel').forEach((p) => {
+      const h2 = p.querySelector('h2');
+      // Label = the h2's leading text plus its .js-sym symbol span, stopping
+      // at the first other element (status tags / controls). The first text
+      // node alone dropped the symbol span — 'HISTORICAL CHART — BTCUSDT'
+      // listed as a dangling 'historical chart —'.
+      let label = '';
+      for (const n of h2 ? h2.childNodes : []) {
+        if (n.nodeType === Node.TEXT_NODE) label += n.textContent;
+        else if (n.nodeType === Node.ELEMENT_NODE && n.classList.contains('js-sym')) label += n.textContent;
+        else break;
+      }
+      label = label.replace(/\s+/g, ' ').trim() || (p.getAttribute('aria-label') || '');
+      if (!label) return;
+      items.push({ kind: 'panel', label, run: () => jumpToPanel(p) });
+    });
+    for (const sec of SECTIONS) {
+      items.push({
+        kind: 'section',
+        label: 'Toggle ' + sec + ' (collapse/expand)',
+        run: () => {
+          const btn = document.querySelector('.sec-toggle[data-collapse="' + sec + '"]');
+          if (btn) btn.click();   // the toggle's own handler persists + flips workspace to 'last'
+        },
+      });
+    }
+    for (const name of WORKSPACE_NAMES) {
+      items.push({ kind: 'workspace', label: 'Workspace → ' + name, run: () => applyWorkspace(name) });
+    }
+    // Symbol switching: fuzzy over the WHOLE tickers universe (turnover-
+    // sorted so the liquid names win ties). Live modes only — replay pins
+    // BTCUSDT (see the picker note).
+    if (!REPLAY && tickerRows) {
+      const rows = tickerRows.slice().sort((a, b) => b.turnover24h - a.turnover24h);
+      for (const r of rows) {
+        items.push({
+          kind: 'symbol',
+          label: r.sym + ' · ' + fmtTurnover(r.turnover24h) + ' 24h',
+          run: () => switchSymbol(r.sym),
+        });
+      }
+    }
+    cmdk.items = items;
+  }
+
+  // Subsequence fuzzy score (app.js §5.1, verbatim semantics): prefix >
+  // contiguous substring > scattered subsequence; -1 = no match.
+  function fuzzyScore(text, needle) {
+    const hay = text.toLowerCase();
+    if (!needle) return 0;
+    const sub = hay.indexOf(needle);
+    if (sub === 0) return 10000;
+    if (sub > 0) return 6000 - sub;
+    let hi = 0, score = 2000, last = -2;
+    for (let i = 0; i < needle.length; i++) {
+      const found = hay.indexOf(needle[i], hi);
+      if (found < 0) return -1;
+      if (found === last + 1) score += 18;
+      score -= found;
+      last = found; hi = found + 1;
+    }
+    return score;
+  }
+
+  function renderCmdkList() {
+    const list = $('cmdk-list');
+    if (!cmdk.filtered.length) {
+      list.innerHTML = '<li class="cmdk-empty">No matching command.</li>';
+      return;
+    }
+    list.innerHTML = cmdk.filtered.map((it, i) =>
+      '<li class="cmdk-item" role="option" id="cmdk-opt-' + i + '" aria-selected="' + (i === cmdk.sel) + '" data-i="' + i + '">'
+      + '<span class="cmdk-kind">' + it.kind + '</span><span class="cmdk-label">' + escapeHtml(it.label) + '</span></li>').join('');
+    const selEl = list.querySelector('[aria-selected="true"]');
+    if (selEl) selEl.scrollIntoView({ block: 'nearest' });
+  }
+
+  function filterCmdk(q) {
+    const needle = q.trim().toLowerCase();
+    cmdk.filtered = !needle ? cmdk.items.slice()
+      : cmdk.items
+        .map((it) => ({ it, s: fuzzyScore(it.kind + ' ' + it.label, needle) }))
+        .filter((r) => r.s >= 0)
+        .sort((a, b) => b.s - a.s)
+        .map((r) => r.it);
+    cmdk.sel = 0;
+    renderCmdkList();
+  }
+
+  function openCmdk() {
+    const ov = $('cmdk'), input = $('cmdk-input');
+    cmdk.lastFocus = document.activeElement;
+    buildCommands();
+    ov.hidden = false;
+    input.value = '';
+    filterCmdk('');
+    input.focus();
+  }
+  function closeCmdk() {
+    const ov = $('cmdk');
+    if (ov.hidden) return;
+    ov.hidden = true;
+    if (cmdk.lastFocus && cmdk.lastFocus.focus) try { cmdk.lastFocus.focus(); } catch (_) { /* ignore */ }
+  }
+  function runCmdk(i) {
+    const it = cmdk.filtered[i];
+    closeCmdk();
+    if (it && it.run) try { it.run(); } catch (_) { /* ignore */ }
+  }
+
+  $('cmdk-open').addEventListener('click', openCmdk);
+  {
+    const input = $('cmdk-input'), list = $('cmdk-list');
+    input.addEventListener('input', () => filterCmdk(input.value));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); cmdk.sel = Math.min(cmdk.filtered.length - 1, cmdk.sel + 1); renderCmdkList(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); cmdk.sel = Math.max(0, cmdk.sel - 1); renderCmdkList(); }
+      else if (e.key === 'Enter') { e.preventDefault(); runCmdk(cmdk.sel); }
+      else if (e.key === 'Home') { e.preventDefault(); cmdk.sel = 0; renderCmdkList(); }
+      else if (e.key === 'End') { e.preventDefault(); cmdk.sel = cmdk.filtered.length - 1; renderCmdkList(); }
+    });
+    list.addEventListener('click', (e) => {
+      const li = e.target.closest('.cmdk-item');
+      if (li && li.dataset.i != null) runCmdk(+li.dataset.i);
+    });
+    list.addEventListener('mousemove', (e) => {
+      const li = e.target.closest('.cmdk-item');
+      if (li && li.dataset.i != null && +li.dataset.i !== cmdk.sel) { cmdk.sel = +li.dataset.i; renderCmdkList(); }
+    });
+    document.querySelectorAll('[data-cmdk-dismiss]').forEach((el) => el.addEventListener('click', closeCmdk));
+    document.addEventListener('keydown', (e) => {
+      const open = !$('cmdk').hidden;
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        if (open) closeCmdk(); else openCmdk();
+        return;
+      }
+      if (e.key === 'Escape' && open) { e.preventDefault(); closeCmdk(); }
+    });
+  }
+
   // ─── Render loop: one rAF, per-view dirty flag AND min-interval gate ────
   //
   // Intervals are per-view redraw budgets (ms), tuned to each panel's cost:
@@ -1930,6 +2684,11 @@
     // O-5 budgets: jour/cal move on user actions; poly/news/econ at their
     // 30–60s poll cadence — budgets just cap redraw bursts.
     jour: 400, cal: 600, poly: 1000, news: 800, econ: 1000,
+    // T-1 budgets (§4g): tapeint ticks with the tape burst (a text strip +
+    // 120px spark — cheap); walls/klev move at the 1/s sampler / 5min poll;
+    // vpin per completed bucket; basis at the ~1s mark cadence (the view
+    // throttles setData further, the CVD budget).
+    tapeint: 500, walls: 1000, vpin: 800, klev: 1000, basis: 600,
   };
   const lastAt = {
     fp: 0, dom: 0, tape: 0, agg: 0, header: 0, liq: 0, heat: 0, liqmap: 0, det: 0,
@@ -1937,6 +2696,7 @@
     auct: 0, lvls: 0, micro: 0,
     scr: 0, rsi: 0, opts: 0, whale: 0, alerts: 0, conf: 0,
     jour: 0, cal: 0, poly: 0, news: 0, econ: 0,
+    tapeint: 0, walls: 0, vpin: 0, klev: 0, basis: 0,
   };
 
   // ─── O-5 elite pass (§4e.1 + §4e.2): section collapse + visibility-gated
@@ -1962,6 +2722,7 @@
     scr: 'intelligence', rsi: 'intelligence', opts: 'intelligence',
     whale: 'intelligence', alerts: 'intelligence', conf: 'intelligence',
     jour: 'portfolio', cal: 'portfolio', poly: 'portfolio', news: 'portfolio', econ: 'portfolio',
+    tapeint: 'orderflow', walls: 'orderflow', basis: 'structure', klev: 'auction', vpin: 'auction',
   };
   const VIEW_ANCHOR = {
     fp: 'view-footprint', dom: 'view-dom', tape: 'view-tape', agg: 'view-aggbook',
@@ -1971,6 +2732,7 @@
     scr: 'view-screener', rsi: 'view-rsi', opts: 'view-options',
     whale: 'view-whale', alerts: 'view-alerts', conf: 'view-conf',
     jour: 'view-journal', cal: 'view-calendar', poly: 'view-polymarket', news: 'view-news', econ: 'view-econ',
+    tapeint: 'view-tapeint', walls: 'view-walls', basis: 'view-basis', klev: 'view-keylevels', vpin: 'view-vpin',
   };
   // key → last IntersectionObserver verdict. Defaults TRUE (paint until told
   // otherwise) so the page is never blank if IO is unavailable.
@@ -2037,6 +2799,11 @@
       const sec = btn.getAttribute('data-collapse');
       if (SECTIONS.indexOf(sec) < 0) return;
       settings.collapsed[sec] = !settings.collapsed[sec];
+      // T-1 (§4g): a manual toggle makes the layout the user's OWN — the
+      // workspace flips to 'last' and remembers this state.
+      settings.workspace = 'last';
+      settings.lastCollapsed = Object.assign({}, settings.collapsed);
+      wsSel.value = 'last';
       saveSettings();
       applyCollapse();
       if (!settings.collapsed[sec]) {
@@ -2086,6 +2853,9 @@
         // the top-5 of the same grouped ladder; microprice reads best-of-book
         // (grid-free). An empty-ladder gap re-seeds OFI inside the store.
         ofi.onDepthSample(ts, g40);
+        // T-1 (§4g): the walls ledger rides the SAME 1/s grouped sample —
+        // same venue, same tick grid as the detector it cross-references.
+        feedWalls(ts, g40, book);
         const mp = S.microprice(book);
         const best = book.best();
         if (mp !== null && best && best.bid && best.ask) {
@@ -2105,6 +2875,44 @@
       dirty.det = true;
       dirty.heat = true;   // heatmap overlays ▽/◈ markers at event coords
     }
+  }
+
+  // ── T-1 (§4g): walls-ledger feed — one WallsLedger.update per grouped
+  // ladder level per 1/s bybit sample (the store's caller contract) ──
+  //
+  // Baseline = p95 of the CURRENT sample's grouped level sizes (both sides;
+  // §4g: p95, one notch stricter than the detector's median, so one whale
+  // neighbor cannot hide a wall). Disappearance is observed by diffing
+  // against the PREVIOUS sample's levels — but only for prices still INSIDE
+  // the side's current 40-level window: a level that scrolled out of
+  // coverage is unobservable and is never judged (coverage limit, stated;
+  // the detector shares it).
+  function feedWalls(ts, g, book) {
+    const best = book.best();
+    if (!best || !best.bid || !best.ask) return;
+    const mid = (best.bid[0] + best.ask[0]) / 2;
+    const qtys = [];
+    for (const r of g.bids) qtys.push(r.qty);
+    for (const r of g.asks) qtys.push(r.qty);
+    if (qtys.length < 20) return;   // too thin a ladder for a p95 baseline to mean anything
+    qtys.sort((a, b) => a - b);
+    const p95 = qtys[Math.floor(0.95 * (qtys.length - 1))];
+    if (!(p95 > 0)) return;
+    const ticksFrom = (price) => Math.abs(price - mid) / settings.tick;
+    const cur = { bid: new Map(), ask: new Map() };
+    for (const r of g.bids) { cur.bid.set(r.price, r.qty); walls.update(ts, 'bid', r.price, r.qty, p95, ticksFrom(r.price), mid); }
+    for (const r of g.asks) { cur.ask.set(r.price, r.qty); walls.update(ts, 'ask', r.price, r.qty, p95, ticksFrom(r.price), mid); }
+    for (const side of ['bid', 'ask']) {
+      let lo = Infinity, hi = -Infinity;
+      for (const px of cur[side].keys()) { if (px < lo) lo = px; if (px > hi) hi = px; }
+      for (const px of prevLadder[side].keys()) {
+        if (cur[side].has(px)) continue;
+        if (px < lo || px > hi) continue;   // scrolled out of the window — unobservable, not judged
+        walls.update(ts, side, px, 0, p95, ticksFrom(px), mid);
+      }
+    }
+    prevLadder = cur;
+    dirty.walls = true;
   }
 
   // ── O-2 liq-model gate (§4b): re-estimate every ≥5s of EVENT time ──
@@ -2146,9 +2954,12 @@
       // from livewire.js), so replay is labeled at the source instead of
       // being patched over after the fact. verify_terminal_browser.py still
       // asserts no chip ever says 'live' in replay.
-      headerView.render({ marks, ois, statuses, sessionHigh, sessionLow, nowMs: now });
+      headerView.render({ marks, ois, statuses, sessionHigh, sessionLow, opening: openingSlice(), tickSize: settings.tick, base: BASE, nowMs: now });
+      // §4g: decimals resolve one tick of the current grid — the fixed 1 dp
+      // rendered every sub-$1 symbol's price as $0.0.
+      const pxDp = settings.tick >= 1 ? 1 : Math.min(8, Math.ceil(-Math.log10(settings.tick)));
       priceEl.textContent = Number.isFinite(lastPrice)
-        ? '$' + lastPrice.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+        ? '$' + lastPrice.toLocaleString('en-US', { minimumFractionDigits: pxDp, maximumFractionDigits: pxDp })
         : '—';
     }
 
@@ -2175,6 +2986,7 @@
           zones: S.stackedImbalances(fpBars, { k: 3, minRun: 3, tickSize: settings.tick, minVol: 1 }),
           absorb: absDet.events(),
           cum: S.cumDelta(fpBars),
+          keyLevels: keyLevelMarks(),   // T-1 (§4g): registry + live-IB markers (toggle, default on)
         });
       }
       if (due('dom', now)) {
@@ -2188,16 +3000,23 @@
         });
       }
       if (due('agg', now)) {
-        aggView.render({ grouped: aggBook.grouped(settings.tick, 14) });
+        aggView.render({ grouped: aggBook.grouped(settings.tick, 14), tick: settings.tick });
       }
       if (due('tape', now)) {
-        tapeView.render({ trades: tape.filtered(settings.tapeMin) });
+        tapeView.render({ trades: tape.filtered(settings.tapeMin), tick: settings.tick });
+      }
+      if (due('tapeint', now)) {
+        tapeIntView.render({ stats: tapeInt.stats(), spark: tapeInt.sparkline() });
+      }
+      if (due('walls', now)) {
+        wallsView.render({ entries: walls.list(), tickSize: settings.tick });
       }
       if (due('liq', now)) {
         // Wall-clock nowTs so the rolling 1m/5m sums DECAY during quiet spells
         // (the store's default anchor is the last event — replay-honest but a
         // live view wants live windows; LiqStore doc invites exactly this).
         liqView.render({
+          tick: settings.tick,
           recent: liq.recent(40),
           sum1m: liq.sumWindow(60000, now),
           sum5m: liq.sumWindow(300000, now),
@@ -2216,6 +3035,7 @@
           // venue's book would misattribute them, §0.7 per-source rail).
           events: heatVenue === 'bybit' ? detector.events() : [],
           ex: heatVenue,
+          base: BASE,
           // I-1 (§4f): Asia/London/NY boxes over the sample span (pure UTC
           // arithmetic — deterministic in replay too).
           sessions: sessionBoxes(dhSamples),
@@ -2229,7 +3049,7 @@
         });
       }
       if (due('det', now)) {
-        detView.render({ events: detector.events() });
+        detView.render({ events: detector.events(), tickSize: settings.tick, base: BASE });
       }
       // O-3 STRUCTURE panels (§4c) — null views in replay (honest notes were
       // rendered instead; the dirty flags simply expire unread).
@@ -2242,13 +3062,17 @@
         tpoView.render({ sessions: tpoSessions, tickSize: tpoTick });
       }
       if (vpView && due('vp', now)) {
-        vpView.render({ vp: vpData, lastPrice, interval: histInterval });
+        vpView.render({ vp: vpData, tick: vpTick, lastPrice, interval: histInterval });
       }
       if (farbView && due('farb', now)) {
         farbView.render(farbSlice(now));
       }
       if (macroView && due('macro', now)) {
         macroView.render(macroSlice());
+      }
+      // T-1 (§4g): basis/funding mini-chart — store-fed, runs in replay too.
+      if (due('basis', now)) {
+        basisView.render({ list: basisSeries.list(), nowMs: now });
       }
       // I-1 AUCTION panels (§4f) — null views in replay (honest notes were
       // rendered instead; the dirty flags simply expire unread).
@@ -2265,9 +3089,23 @@
         });
       }
       if (levelsView && due('lvls', now)) {
-        levelsView.render({
-          days: levelsDays,
-          note: apiUp === false ? API_OFFLINE_NOTE : levelsNote,
+        // §4g: with another symbol selected the registry table shows the
+        // honest note through the view's existing note path (days: null).
+        levelsView.render(SYM === 'BTCUSDT'
+          ? { days: levelsDays, note: apiUp === false ? API_OFFLINE_NOTE : levelsNote }
+          : { days: null, note: byodSymNote() });
+      }
+      // T-1 (§4g): key-levels strip + VPIN — store/registry-fed, both modes
+      // (the registry portion degrades to its honest note in replay/non-BTC).
+      if (due('klev', now)) {
+        klevView.render(klevSlice());
+      }
+      if (due('vpin', now)) {
+        vpinView.render({
+          vpin: vpin ? vpin.vpin() : null,
+          buckets: vpin ? vpin.buckets() : [],
+          bucketVol: vpin ? vpin.bucketVol : NaN,
+          note: vpin ? '' : 'estimating V from the first 5 min of session flow — VPIN accrues from arming (nothing backfilled)',
         });
       }
       if (microView && due('micro', now)) {
@@ -2275,6 +3113,7 @@
         const mid = (best && best.bid && best.ask) ? (best.bid[0] + best.ask[0]) / 2 : NaN;
         const mpNow = S.microprice(bybitBook);
         microView.render({
+          tickSize: settings.tick,
           ofi: ofi.series(60000),
           mp: mpHist,
           z: ofi.zscore(300),
@@ -2289,7 +3128,7 @@
       if (screenerView && due('scr', now)) {
         const topN = settings.screenerTop === 'all' ? 0 : 40;   // buildScreener: topN ≤ 0 → whole universe
         const scr = S.buildScreener(tickerRows || [], { topN });
-        screenerView.render({ rows: scr.rows, total: scr.total, topMode: settings.screenerTop });
+        screenerView.render({ rows: scr.rows, total: scr.total, topMode: settings.screenerTop, sym: SYM, base: BASE });
       }
       if (rsiView && due('rsi', now)) {
         rsiView.render(rsiState);

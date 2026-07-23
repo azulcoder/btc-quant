@@ -27,8 +27,34 @@
 
     <header class="topbar">
       <h1>btc<span class="tick">·</span>quant <span class="subtitle">orderflow terminal</span></h1>
+      <!-- T-1 (§4g): symbol picker — SYM is a runtime setting (persisted).
+           Universe = the EXISTING fetchBybitAllTickers poll (top-N by
+           turnover + text search); switching REBUILDS every session store
+           (honest-restart rule, stated in the settings hint). terminal.js
+           owns the popover behavior; disabled in replay (fixtures are
+           recorded BTCUSDT frames — switching would mislabel them). -->
+      <div class="sym-picker">
+        <button id="sym-btn" type="button" class="ux-btn" aria-haspopup="listbox" aria-expanded="false"
+                title="Switch symbol (bybit linear universe, top-N by turnover + search) — switching restarts the session stores">BTCUSDT ▾</button>
+        <div id="sym-pop" class="sym-pop" hidden>
+          <input id="sym-search" type="text" placeholder="search bybit linear perps…"
+                 autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+          <ul id="sym-list" class="sym-list" role="listbox" aria-label="Symbols"></ul>
+        </div>
+      </div>
       <span class="price" id="last-price">—</span>
       <nav class="ux-toolbar" aria-label="Navigation">
+        <!-- T-1 (§4g): workspace presets = named collapsed-set combos +
+             'last' (the user's own custom state). -->
+        <label class="ws-label" for="workspace-sel" title="Workspace preset = which sections are expanded. Manual section toggles switch this to 'last' (your custom state).">ws</label>
+        <select id="workspace-sel" class="ws-sel">
+          <option value="all" selected>ALL</option>
+          <option value="orderflow-focus">ORDERFLOW-focus</option>
+          <option value="auction-focus">AUCTION-focus</option>
+          <option value="last">last (custom)</option>
+        </select>
+        <!-- T-1 (§4g): ⌘K command palette — index.html §5.1 idiom. -->
+        <button id="cmdk-open" type="button" class="ux-btn" title="Command palette — jump to a panel, switch symbol/workspace, toggle sections (Cmd/Ctrl-K)">⌘K</button>
         <!-- Mirror of index.html's "terminal →" link (DESIGN §4). -->
         <a href="index.html" class="ux-btn" title="Back to the analytics / backtest page">analytics ←</a>
       </nav>
@@ -64,12 +90,17 @@
 
     <!-- Main row, left: footprint (large). Canvas built by FootprintView. -->
     <section class="panel area-fp" data-sec="orderflow">
-      <h2>footprint — Bybit BTCUSDT perp
+      <h2>footprint — Bybit <span class="js-sym">BTCUSDT</span> perp
         <span class="signal-tag st-desc" title="Bid×ask aggressor volume per price per bar, session-local. LIVE-DESCRIPTIVE ONLY (DESIGN §0.1): never a backtest input. Imbalance flags are computed on finished bars only.">descriptive</span>
+        <!-- T-1 (§4g): Δmin/Δmax + Δ% footer-row toggle (per-bar intra-bar
+             delta path extremes + delta/totalVol from FootprintStore). -->
+        <span class="heat-controls">
+          <label title="show per-bar Δmin/Δmax (intra-bar delta path extremes, 0-anchored) + Δ% (delta/totalVol) footer rows — finished-bar facts, descriptive"><input type="checkbox" id="set-fp-drows" checked /> Δ rows</label>
+        </span>
       </h2>
       <div class="panel-src" title="Bid×ask aggressor volume per price per bar, session-local. LIVE-DESCRIPTIVE ONLY (DESIGN §0.1): never a backtest input. Imbalance flags are computed on finished bars only.">live session · bid×ask aggressor volume per price per bar · never a backtest input (§0.1)</div>
       <div id="view-footprint" class="fp-wrap"></div>
-      <div class="hint"><span class="hint-lead">cells: <b>sell × buy</b> aggressor volume (BTC) per $-grouped level <span class="hint-flag">· ◉ absorption flag = heuristic</span></span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> outlined half = diagonal imbalance (k=3, finished bars only). Right gutter: session volume profile with POC/VAH/VAL. Dashed column = the open (unfinished) bar. I-1 (§4f): • = per-bar POC; translucent bands = stacked-imbalance zones (≥3 grid-adjacent same-side imbalances, finished bars; a traded-through zone dims instead of vanishing); ◉ = absorption flag — <b>heuristic</b> (volume spike, no follow-through next bar: pattern-consistent-with, never proof); bottom strip = cumΔ (session-anchored running Σ of bar deltas — slope/divergence only, level is meaningless).</span></details></div>
+      <div class="hint"><span class="hint-lead">cells: <b>sell × buy</b> aggressor volume (<span class="js-base">BTC</span>) per $-grouped level <span class="hint-flag">· ◉ absorption flag = heuristic</span></span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> outlined half = diagonal imbalance (k=3, finished bars only). Right gutter: session volume profile with POC/VAH/VAL. Dashed column = the open (unfinished) bar. I-1 (§4f): • = per-bar POC; translucent bands = stacked-imbalance zones (≥3 grid-adjacent same-side imbalances, finished bars; a traded-through zone dims instead of vanishing); ◉ = absorption flag — <b>heuristic</b> (volume spike, no follow-through next bar: pattern-consistent-with, never proof); bottom strip = cumΔ (session-anchored running Σ of bar deltas — slope/divergence only, level is meaningless). T-1 (§4g): Δmm/Δ% footer rows (toggle) = intra-bar delta-path extremes + delta/totalVol; ⌜/⌟ at a finished bar's extreme = <b>unfinished auction</b> (the extreme level printed BOTH sides — classic orderflow marker by convention, Dalton-adjacent, not a signal); dashed horizontal lines = key levels (prior-day/registry + live IB, toggle in the key-levels panel).</span></details></div>
     </section>
 
     <!-- Main row, middle column: DOM ladder + aggregated book. -->
@@ -83,9 +114,9 @@
       </section>
       <section class="panel">
         <h2>aggregated book — bybit + binancef + okx
-          <span class="signal-tag st-desc" title="Per-exchange stacked depth at $-grouped levels + cumulative depth curve. OKX sizes arrive in CONTRACTS and are ctVal-scaled to BTC (0.01) in the adapter. Legs are independent; a dead leg simply drops out (nothing interpolated).">descriptive</span>
+          <span class="signal-tag st-desc" title="Per-exchange stacked depth at $-grouped levels + cumulative depth curve. OKX sizes arrive in CONTRACTS and are ctVal-scaled to base units in the adapter (0.01 pinned for BTC-USDT-SWAP; any other instrument fetches its real multiplier first). Legs are independent; a dead leg simply drops out (nothing interpolated).">descriptive</span>
         </h2>
-        <div class="panel-src" title="Per-exchange stacked depth at $-grouped levels + cumulative depth curve. OKX sizes arrive in CONTRACTS and are ctVal-scaled to BTC (0.01) in the adapter. Legs are independent; a dead leg simply drops out (nothing interpolated).">per-exchange stacked depth · okx ctVal-scaled to BTC · a dead leg drops out, nothing interpolated</div>
+        <div class="panel-src" title="Per-exchange stacked depth at $-grouped levels + cumulative depth curve. OKX sizes arrive in CONTRACTS and are ctVal-scaled to base units in the adapter (0.01 pinned for BTC-USDT-SWAP; any other instrument fetches its real multiplier first). Legs are independent; a dead leg simply drops out (nothing interpolated).">per-exchange stacked depth · okx ctVal-scaled to base units · a dead leg drops out, nothing interpolated</div>
         <div id="view-aggbook" class="agg-wrap"></div>
       </section>
     </div>
@@ -97,6 +128,11 @@
           <span class="signal-tag st-desc" title="Mixed-venue time &amp; sales — every print carries its exchange tag (§0.7 per-source labels). Aggressor side normalized per venue (§0.6). ◆ = whale ≥ $250k.">descriptive</span>
         </h2>
         <div class="panel-src" title="Mixed-venue time &amp; sales — every print carries its exchange tag (§0.7 per-source labels). Aggressor side normalized per venue (§0.6). ◆ = whale ≥ $250k.">mixed venues, per-print exchange tag (§0.7) · aggressor normalized (§0.6) · ◆ whale ≥ $250k</div>
+        <!-- T-1 (§4g): tape-intensity gauge — trades/sec + notional/sec over
+             the rolling 10s window (mixed venues, like the tape itself), z
+             vs the session baseline of completed 10s buckets, 60-sample
+             sparkline. DESCRIPTIVE tape speed; burst ≠ signal. -->
+        <div id="view-tapeint" class="ti-strip" title="tape speed, rolling 10s (mixed venues) · z = current 10s trade count vs the session baseline of completed 10s buckets (Welford) · sparkline = notional/10s, last ≤60 buckets — descriptive; a burst is a burst, not a signal"></div>
         <div id="view-tape" class="tape-wrap"></div>
       </section>
       <section class="panel">
@@ -138,6 +174,19 @@
         </h2>
         <div class="panel-src" title="HEURISTIC (§4b): flags book patterns CONSISTENT WITH spoofing (▽ large wall pulled fast, barely traded) or icebergs (◈ traded volume ≫ max displayed). Intent is unobservable from public L2 — these are patterns, not proof, and never feed a signal.">patterns consistent with spoofing ▽ / icebergs ◈ — never proof; intent unobservable from public L2</div>
         <div id="view-detect" class="det-wrap"></div>
+      </section>
+
+      <!-- T-1 (§4g): walls ledger — DESCRIPTIVE book-history bookkeeping,
+           NOT intent. Records what unusually large resting bybit levels DID
+           (entered / pulled / traded through); same rule family as the spoof
+           detector above (its spoof-pull is this observation under extra
+           time/coverage constraints) but deliberately NOT merged with it. -->
+      <section class="panel">
+        <h2>walls ledger — Bybit book
+          <span class="signal-tag st-desc" title="Book-history bookkeeping, not intent (§4g): a level ≥ 4×p95 of the grouped ladder sustained ≥ 5 samples enters; 'pulled' = vanished while price was &gt;1 tick away (it cannot have traded); 'filled' = price traded through it; a vanish at ≤1 tick of mid is ambiguous and stays 'standing' until a print confirms. Cross-reference the detections panel — the ledger keeps EVERY wall's history, the detector flags a pattern.">descriptive</span>
+        </h2>
+        <div class="panel-src" title="Book-history bookkeeping, not intent (§4g). Enter: qty ≥ 4×p95 of the current 40-level grouped bybit ladder sustained ≥ 5 consecutive 1/s samples (K/M conventions). Pulled: vanished &gt;1 tick from mid. Filled: a print crossed the level. Ring 50, newest first.">what big resting levels DID — entered / pulled / filled · K=4×p95, M=5 samples (conventions) · not intent — see detections ▽ for the pattern flags</div>
+        <div id="view-walls" class="walls-wrap"></div>
       </section>
     </div>
 
@@ -181,7 +230,7 @@
 
     <!-- Row A, left 2/3: historical kline chart + bar replay. -->
     <section class="panel area-hist" id="sec-structure" data-sec="structure">
-      <h2>historical chart — BTCUSDT
+      <h2>historical chart — <span class="js-sym">BTCUSDT</span>
         <span class="signal-tag st-desc" title="Bybit v5 REST klines (linear perp), fetched newest-first and reversed to chronological (§4c gotcha). NO live-WS merging (§0.7): this panel is a pure REST snapshot, refreshed only on interval change — the live panels above carry the session.">descriptive</span>
         <span class="hist-flag" id="hist-replay-flag" hidden>REPLAY (historical bars)</span>
         <span class="heat-controls">
@@ -270,6 +319,18 @@
       <div id="view-macro" class="macro-wrap"></div>
     </section>
 
+    <!-- T-1 (§4g): basis + funding mini-chart — fed from the EXISTING ~1s
+         bybit mark/funding event stream via BasisSeries (no new feeds). Two
+         panes, own scales (§4f dataviz rail: never dual-axis). Store-fed, so
+         it runs in replay too. -->
+    <section class="panel area-basis" data-sec="structure">
+      <h2>basis + funding — Bybit perp
+        <span class="signal-tag st-desc" title="basis bp = (mark − index)/index · 1e4 and the funding rate, ring of the last ~1h of the EXISTING bybit tickers events (BasisSeries, §4g — no new feeds). Two panes, own scales. Descriptive; carry stays off-board (B3).">descriptive</span>
+      </h2>
+      <div class="panel-src" title="basis bp = (mark − index)/index · 1e4 and the funding rate, ring of the last ~1h of the EXISTING bybit tickers events (BasisSeries, §4g — no new feeds). Funding absent on a partial delta stays absent (NaN skipped), never zero-coerced.">session ring of the existing ~1s mark events · two panes, own scales · absent funding stays absent (§0.7)</div>
+      <div id="view-basis" class="basis-wrap"></div>
+    </section>
+
     <!-- ═══ I-1 AUCTION section (§4f) — Institutional Auction Suite, between
          STRUCTURE and INTELLIGENCE. Data sources: the LOCAL collector's BYOD
          API (/v1/profile, /v1/levels, /v1/vwap — 127.0.0.1:8788, probed once
@@ -283,6 +344,22 @@
          story (§7 L1). ═══ -->
 
     <div class="sec-hdr hd-au" data-sec="auction">auction</div>
+
+    <!-- T-1 (§4g): key-levels strip — prior-day H/L/C, POC, VAH/VAL, naked
+         POCs (age) and the weekly open from the /v1/levels registry (BTCUSDT
+         only — the collector records nothing else), plus the LIVE session
+         Initial Balance (first 2×30min UTC range) from this session's bybit
+         prints once elapsed. Reference levels, never signals. -->
+    <section class="panel area-klev" data-sec="auction">
+      <h2>key levels — registry + live IB
+        <span class="signal-tag st-desc" title="Registry rows (/v1/levels, recorded bybit BTCUSDT days): prior-day H/L/C, POC, VAH/VAL, naked POCs with age, weekly open = the registry's Monday row open (UTC-week convention, honestly absent if that Monday wasn't recorded). Live IB = high/low of THIS session's bybit prints in the first 2×30min after 00:00 UTC, shown once the hour elapsed and only if the page witnessed the open. Reference levels — not signals.">descriptive</span>
+        <span class="heat-controls">
+          <label title="draw the key levels as dashed horizontal markers on the footprint canvas (default on)"><input type="checkbox" id="set-klev-draw" checked /> draw on footprint</label>
+        </span>
+      </h2>
+      <div class="panel-src" title="Registry levels are recorded BTCUSDT days only (§4g honest note when another symbol is selected); weekly open = the Monday row's open (UTC week, convention); IB = first 2×30min UTC range of this session's own prints — unwitnessed opens stay honestly absent.">prior-day H/L/C · POC · VAH/VAL · naked POCs (age) · weekly open (Mon row, UTC) · live IB (first 2×30min UTC)</div>
+      <div id="view-keylevels" class="klev-wrap"></div>
+    </section>
 
     <!-- Row A, left ~2/3: the auction profile centerpiece. -->
     <section class="panel area-auct" id="sec-auction" data-sec="auction">
@@ -332,6 +409,18 @@
       <div class="hint"><span class="hint-lead">fed by the same event-ts-gated 1/s bybit book sampler as the depth history — a stalled feed stops producing samples (gaps stay gaps, §0.7).</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> OFI aggregates each second's book events into one e_t (stated approximation of the per-event definition); positive = net buy-side pressure. microprice − mid = how far the thin side pulls the estimator off the mid.</span></details></div>
     </section>
 
+    <!-- T-1 (§4g): VPIN — volume-synchronized flow imbalance over this
+         session's bybit prints. Citation + the contested-interpretation note
+         are ALWAYS-VISIBLE panel chrome (§4g mandatory), not tooltips. -->
+    <section class="panel area-vpin" data-sec="auction">
+      <h2>VPIN — Bybit prints
+        <span class="signal-tag st-cite" title="Easley, López de Prado &amp; O'Hara (2012), RFS 25(5): equal-volume buckets, per bucket |buyVol − sellVol|/V, VPIN = mean over the last 50. Classified with the REAL normalized aggressor flags (§0.6) — better-informed than the paper's BVC approximation. Toxicity interpretation CONTESTED (Andersen–Bondarenko 2014): series shown, no claim.">cited</span>
+      </h2>
+      <div class="panel-src" title="V = session volume / 50, armed after the first 5 min of session flow and re-estimated hourly (setBucketVol, future buckets only — completed buckets keep the V they were measured at). Session-local; restarts with the symbol.">volume clock · V = session vol / 50 (armed at 5 min, re-estimated hourly — convention) · real aggressor flags</div>
+      <div id="view-vpin" class="vpin-wrap"></div>
+      <div class="hint"><span class="hint-lead">Easley, López de Prado &amp; O'Hara (2012) — computed from <b>real aggressor flags</b> (better-informed than the paper's BVC approximation).</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> The toxicity interpretation is <b>contested</b>: Andersen &amp; Bondarenko (2014) attribute VPIN's predictive content largely to trading intensity/volatility and dispute the flash-crash early-warning claim. The series is shown; no toxicity claim is made (§0.1 descriptive only).</span></details></div>
+    </section>
+
     <!-- ═══ O-4 INTELLIGENCE section (§4d) — screener / RSI / options / whales /
          alerts / confluence, after STRUCTURE. Rail: everything here is a
          DESCRIPTIVE read or attention trigger — the IC run-log measured ≈0
@@ -357,7 +446,7 @@
       </h2>
       <div class="panel-src" title="ONE 30s REST call carries all ~720 linear symbols (§4d). x = 24h %, y = last vs the 24h-VWAP PROXY (turnover24h/volume24h — response-derived, labeled, not a tick-accurate VWAP), r ∝ √turnover, color = funding sign (α ∝ |annualized|). A hot quadrant is a 24h fact, not a signal.">bybit linear · 24h VWAP = turnover/volume (response-derived proxy, not tick-accurate) · one 30s REST call</div>
       <div id="view-screener" class="scr-wrap"></div>
-      <div class="hint"><span class="hint-lead">bubble = one perp symbol; quadrant cross at 0/0.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Rows without 24h volume have no VWAP and are <b>counted, not plotted</b> (a fabricated 0-deviation would lie). BTCUSDT wears the accent ring.</span></details></div>
+      <div class="hint"><span class="hint-lead">bubble = one perp symbol; quadrant cross at 0/0.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Rows without 24h volume have no VWAP and are <b>counted, not plotted</b> (a fabricated 0-deviation would lie). The current symbol wears the accent ring.</span></details></div>
     </section>
 
     <section class="panel area-rsi" data-sec="intelligence">
@@ -500,9 +589,28 @@
           <button id="set-pause" type="button" aria-pressed="false" title="Freezes rendering only — data keeps accumulating, so resume shows the true session (no gap is fabricated)">pause</button>
         </div>
       </div>
-      <div class="hint"><span class="hint-lead">settings persist locally.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Changing tick group or bar interval <b>restarts</b> the session footprint/profile aggregation — and the tick group also restarts the book-heatmap history, detector and liq-model (all grid-bound) — the browser keeps no raw tick store to re-bucket from (that is the collector's job), and synthesizing old bars/ladders onto a new grid would fabricate data. Pause freezes the display, not ingestion, and never the connection chips.</span></details></div>
+      <div class="hint"><span class="hint-lead">settings persist locally.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Changing tick group or bar interval <b>restarts</b> the session footprint/profile aggregation — and the tick group also restarts the book-heatmap history, detector, liq-model and walls ledger (all grid-bound) — the browser keeps no raw tick store to re-bucket from (that is the collector's job), and synthesizing old bars/ladders onto a new grid would fabricate data. <b>Switching the symbol restarts EVERY session store the same way</b> (§4g): a new symbol is a new session — all WS legs close and re-subscribe with derived venue ids, and the tick group re-derives its default from the symbol's price (~1bp of price snapped to a 1/2/2.5/5×10^k grid — the $10-at-$100k BTC convention). A venue with no derivable market for the symbol degrades to an honest 'no leg' chip. Pause freezes the display, not ingestion, and never the connection chips.</span></details></div>
     </section>
   </main>
+
+  <!-- T-1 (§4g): command palette (Cmd/Ctrl+K) — index.html §5.1 idiom, same
+       shared .overlay/.cmdk-* styles from styles.css. Jump to a panel,
+       switch symbol (fuzzy over the bybit universe), toggle a section,
+       switch workspace preset. Vanilla JS in terminal.js. -->
+  <div id="cmdk" class="overlay" hidden role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="overlay-backdrop" data-cmdk-dismiss></div>
+    <div class="cmdk-box" role="document">
+      <input id="cmdk-input" type="text" class="cmdk-input" placeholder="Jump to a panel, switch symbol / workspace, toggle a section…"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+             role="combobox" aria-expanded="true" aria-controls="cmdk-list" aria-autocomplete="list" />
+      <ul id="cmdk-list" class="cmdk-list" role="listbox" aria-label="Commands"></ul>
+      <div class="cmdk-foot">
+        <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+        <span><kbd>↵</kbd> run</span>
+        <span><kbd>esc</kbd> close</span>
+      </div>
+    </div>
+  </div>
 
   <footer>
     <p>Live-descriptive orderflow terminal (DESIGN-orderflow-terminal.md). Everything above renders only what arrived over the public wire this session — <b>never a backtest input</b>, never merged into the OOS harness. Feeds: Bybit v5 linear (primary), Binance Futures depth WS + REST mark/OI, Coinbase Advanced Trade spot tape, OKX v5 swap book+trades (O-2), Deribit options REST + Hyperliquid public state (O-4). Liq heatmap = <b>model estimate</b>; spoof/iceberg flags = <b>heuristics</b>; screener/confluence/alerts = <b>un-validated descriptive reads</b> (IC run-log ≈ 0) — all labeled in-panel. See <a href="../DISCLAIMER.md">DISCLAIMER.md</a>.</p>
