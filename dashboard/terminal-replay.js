@@ -64,14 +64,27 @@
 
   // Venue → ordered fixture keys. Order is LOAD-BEARING: book/tickers/trades
   // snapshots must precede their deltas/updates (the adapters' merge state —
-  // e.g. Bybit's tickerView, Coinbase's seed guard — expects snapshot-first,
-  // exactly as the wire delivers on a fresh subscribe).
+  // e.g. Bybit's tickerView, the OKX seq chain, Coinbase's dedupe — expects
+  // snapshot-first, exactly as the wire delivers on a fresh subscribe).
+  //
+  // T-2 (§4h): the matrix legs replay their own 2026-07-23 captures. The okx
+  // and coinbase venues moved to the T-2 fixtures because their LIVE legs now
+  // run the T-2 adapters (seq-chained okx books / exchange-feed l2+matches) —
+  // replaying the old advanced-trade / checksum-less frames into them would
+  // drive dead channels. binancef stays on depth20 ON PURPOSE: the live leg's
+  // diff engine needs a REST snapshot to ever sync and replay forbids network,
+  // so replay keeps the proven top-20 fixture leg (terminal.js seam comment).
   var VENUE_KEYS = {
     bybit: ['bybit_orderbook200_snapshot', 'bybit_orderbook200_delta', 'bybit_publicTrade',
             'bybit_tickers_snapshot', 'bybit_tickers_delta', 'bybit_allLiquidation'],
     binancef: ['binancef_depth20'],
-    coinbase: ['coinbase_market_trades_snapshot', 'coinbase_market_trades_update', 'coinbase_heartbeats'],
-    okx: ['okx_books_snapshot', 'okx_books_update', 'okx_trades'],
+    coinbase: ['t2_coinbase_l2_snapshot', 't2_coinbase_l2_update', 't2_coinbase_matches',
+               't2_coinbase_heartbeat'],
+    okx: ['t2_okxswap_books_snapshot', 't2_okxswap_books_update', 'okx_trades'],
+    bybit_spot: ['t2_bybitspot_orderbook200_snapshot', 't2_bybitspot_orderbook200_delta',
+                 't2_bybitspot_publicTrade'],
+    binance_spot: ['t2_binancespot_aggtrade', 't2_binancespot_depthdiff'],
+    okx_spot: ['t2_okxspot_books_snapshot', 't2_okxspot_books_update', 't2_okxspot_trades'],
   };
 
   // The terminal drives BTCUSDT (terminal.js SYM) — the captured allLiquidation
@@ -142,24 +155,15 @@
     return f;
   }
 
-  /** Coinbase speaks ISO-8601 STRINGS: envelope `.timestamp` and every
-   *  `events[].trades[].time` (the adapter Date.parse()s trade time). Also
-   *  offsets trade_id by 1e6 per loop pass (header note (c)) — the adapter
-   *  dedupes on monotonic trade_id, so an unmodified second pass would be
-   *  swallowed whole and the tape/CVD would stop accumulating. */
+  /** Coinbase (T-2: the EXCHANGE feed — snapshot/l2update/match/heartbeat all
+   *  carry one ISO-8601 `.time`). Match trade_ids offset by 1e6 per loop pass
+   *  (header note (c)) — the adapter dedupes on monotonic trade_id, so an
+   *  unmodified second pass would be swallowed whole and the tape/CVD would
+   *  stop accumulating. The id stays an INT like the wire sends it. */
   function rebaseCoinbase(f, ts, pass) {
     var iso = new Date(ts).toISOString();
-    f.timestamp = iso;
-    if (Array.isArray(f.events)) {
-      for (var i = 0; i < f.events.length; i++) {
-        var trades = f.events[i] && f.events[i].trades;
-        if (!Array.isArray(trades)) continue;
-        for (var j = 0; j < trades.length; j++) {
-          trades[j].time = iso;
-          trades[j].trade_id = String(Number(trades[j].trade_id) + pass * 1000000);
-        }
-      }
-    }
+    if (typeof f.time === 'string') f.time = iso;
+    if (f.trade_id !== undefined) f.trade_id = Number(f.trade_id) + pass * 1000000;
     return f;
   }
 
@@ -175,17 +179,22 @@
     return f;
   }
 
-  var REBASE = { bybit: rebaseBybit, binancef: rebaseBinance, coinbase: rebaseCoinbase, okx: rebaseOkx };
+  // T-2 (§4h): the matrix legs reuse their family's rebase — same clock
+  // fields per venue family, only the endpoint/market differs (fixtures).
+  var REBASE = {
+    bybit: rebaseBybit, binancef: rebaseBinance, coinbase: rebaseCoinbase, okx: rebaseOkx,
+    bybit_spot: rebaseBybit, binance_spot: rebaseBinance, okx_spot: rebaseOkx,
+  };
 
   /** A frame's own primary exchange timestamp (ms) — only used once, to anchor
    *  the shared synthetic t0 at the first driven frame's REAL capture time
    *  (keeps rebased times consistent with untouched fields like Bybit's
    *  nextFundingTime instead of teleporting the tape decades away). */
   function primaryTs(venue, f) {
-    if (venue === 'bybit') return Number(f.ts);
-    if (venue === 'binancef') return Number(f.data && f.data.E);
-    if (venue === 'coinbase') return Date.parse(f.timestamp);
-    if (venue === 'okx') return Number(f.data && f.data[0] && f.data[0].ts);
+    if (venue === 'bybit' || venue === 'bybit_spot') return Number(f.ts);
+    if (venue === 'binancef' || venue === 'binance_spot') return Number(f.data && f.data.E);
+    if (venue === 'coinbase') return Date.parse(f.time);
+    if (venue === 'okx' || venue === 'okx_spot') return Number(f.data && f.data[0] && f.data[0].ts);
     return NaN;
   }
 

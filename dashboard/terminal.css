@@ -173,6 +173,7 @@ main.term-main {
     "fp    mid    right"
     "heat  heat   right"
     "cvd   cvd    cvd"
+    "spcvd spcvd  spcvd"
     "hd-st hd-st  hd-st"
     "hist  hist   tpo"
     "vp    farb   macro"
@@ -204,6 +205,7 @@ main.term-main {
 .area-right { grid-area: right; }
 .area-heat  { grid-area: heat; }
 .area-cvd   { grid-area: cvd; }
+.area-spcvd { grid-area: spcvd; }   /* T-2 (§4h): spot vs perp CVD strip */
 .area-set   { grid-area: set; }
 /* O-3 STRUCTURE section (§4c): row A = hist (2/3) + tpo (1/3); row B = thirds. */
 .area-hist  { grid-area: hist; }
@@ -293,7 +295,7 @@ main.term-main {
   main.term-main {
     grid-template-columns: 1fr;
     grid-template-areas:
-      "stats" "hd-of" "fp" "mid" "right" "heat" "cvd"
+      "stats" "hd-of" "fp" "mid" "right" "heat" "cvd" "spcvd"
       "hd-st" "hist" "tpo" "vp" "farb" "macro" "basis"
       "hd-au" "klev" "auct" "lvls" "micro" "vpin"
       "hd-in" "scr" "rsi" "opts" "conf" "whale" "alerts"
@@ -1368,6 +1370,108 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
   .basis-wrap { grid-template-columns: 1fr; }
 }
 
+/* ═══ T-2 (§4h): venue-matrix surfaces ══════════════════════════════════════ */
+
+/* Leg manager popover (topbar) — the sym-pop skeleton, checkbox rows. */
+.leg-mgr { position: relative; }
+.legs-pop { width: 320px; left: auto; right: 0; }
+.legs-list { list-style: none; margin: 0; padding: 0; }
+.legs-list .leg-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  gap: var(--sp-2);
+  align-items: center;
+  padding: 3px 8px;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  border-radius: 3px;
+}
+.legs-list .leg-row:hover { background: var(--bg-hover); }
+.legs-list .leg-name { color: var(--fg); font-weight: 600; }
+.legs-list .leg-status { color: var(--muted); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+/* Status dot: same state colors as the header conn chips (.term-chip .dot). */
+.leg-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--g-400); flex: none; }
+.leg-row.live  .leg-dot { background: var(--up); box-shadow: 0 0 6px var(--up); }
+.leg-row.stale .leg-dot { background: var(--accent); }
+.leg-row.error .leg-dot { background: var(--down); }
+.legs-note {
+  color: var(--g-400);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: var(--sp-1) 8px 2px;
+  border-top: 1px solid var(--border);
+  margin-top: var(--sp-1);
+}
+
+/* Agg-book include checkboxes (display-side merge filter). */
+.agg-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px var(--sp-2);
+  align-items: center;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  padding-bottom: var(--sp-1);
+}
+.agg-controls .agg-inc-label { color: var(--g-400); text-transform: uppercase; font-size: 10px; }
+.agg-controls label { cursor: pointer; white-space: nowrap; }
+.agg-controls input[type="checkbox"] { vertical-align: middle; margin: 0 2px 0 0; }
+
+/* Per-leg depth-quality strip (honest sync ledger — resync counts visible). */
+.agg-quality {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px var(--sp-2);
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--sp-1);
+}
+.agg-quality .q-leg { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.agg-quality .q-leg b { font-weight: 600; }
+.agg-quality .sw { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+.agg-quality .q-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--g-400); display: inline-block; }
+.agg-quality .q-ok   .q-dot { background: var(--up); }
+.agg-quality .q-ok   b { color: var(--fg); }
+.agg-quality .q-wait .q-dot { background: var(--accent); }
+.agg-quality .q-wait b { color: var(--accent); }
+.agg-quality .q-bad  .q-dot { background: var(--down); }
+.agg-quality .q-bad  b { color: var(--down); }
+.agg-quality .q-off  .q-dot { background: var(--g-400); }
+.agg-quality .q-off  b { color: var(--g-400); }
+
+/* Spot vs perp CVD strip. */
+.spcvd-wrap { display: flex; flex-direction: column; }
+.spcvd-pane { height: 160px; }
+.spcvd-read {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  padding-bottom: var(--sp-1);
+}
+.spcvd-read b { color: var(--fg); font-weight: 600; }
+.spcvd-read .pos { color: var(--up); }
+.spcvd-read .neg { color: var(--down); }
+.spcvd-comp {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--g-400);
+  padding-top: var(--sp-1);
+}
+
+/* DOM ladder source note (frozen/awaiting states) — quiet strip like the
+   replay notes; hidden while the selected source book is flowing. */
+#dom-note { margin-bottom: var(--sp-1); }
+
+/* Tape tags for the matrix legs — venue hue (EX_TOKEN), same as CVD/agg. */
+.tape-row .ex-bybit_spot { color: var(--c2); }
+.tape-row .ex-binance_spot { color: var(--c1); }
+.tape-row .ex-okx_spot { color: var(--c3); }
+
 /* ═══ Empty-state collapse (presentation pass) ══════════════════════════════
    A panel whose body currently shows ONLY its honest disabled/awaiting note
    renders COMPACT: header + status chip + source line + the note as a quiet
@@ -1398,6 +1502,7 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .panel--empty .opt-cv,
 .panel--empty .vpin-canvas-box,
 .panel--empty .basis-pane,
+.panel--empty .spcvd-pane,
 .panel--empty .micro-pane {
   flex: 0 0 auto;
   height: auto;

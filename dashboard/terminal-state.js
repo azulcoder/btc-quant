@@ -211,12 +211,20 @@
      *  levels BEFORE merging is exact, not an approximation — if a merged price
      *  ranks in the global top-n, then in every exchange holding it fewer than
      *  n prices sit above it (the union can only add prices), so it is inside
-     *  every contributing leg's top-n and no byEx quantity is lost. */
-    function grouped(tickSize, nLevels) {
+     *  every contributing leg's top-n and no byEx quantity is lost.
+     *
+     *  T-2 (§4h): optional `includeExs` (array of ex codes) is a DISPLAY-side
+     *  include filter — the agg panel's per-leg checkboxes. Filtering happens
+     *  at merge time so an excluded leg contributes nothing, but its book
+     *  keeps ingesting untouched (unchecking a leg is a view choice, never a
+     *  data drop). Omitted/invalid → all legs, the pre-T-2 behavior. */
+    function grouped(tickSize, nLevels, includeExs) {
       const n = finiteOr(nLevels, Infinity);
+      const inc = Array.isArray(includeExs) ? new Set(includeExs) : null;
       const merge = (isBid) => {
         const acc = new Map(); // price → {total, byEx}
         for (const [ex, book] of books) {
+          if (inc && !inc.has(ex)) continue;
           const rows = book.grouped(tickSize, n)[isBid ? 'bids' : 'asks'];
           for (const { price, qty } of rows) {
             let cell = acc.get(price);
@@ -3054,6 +3062,130 @@
     return out;
   }
 
+  // ─── deriveLegIds(sym) — 7-leg venue×market matrix mapping (§4h) ─────────
+  //
+  // T-2 extension of deriveVenueIds to the full matrix. ADDITIVE on purpose:
+  // deriveVenueIds keeps its exact T-1 shape for existing consumers
+  // (terminal.js startAllLegs, the collector-mirror contract above) and this
+  // function owns the seven-leg registry. Same philosophy as its T-1 parent:
+  // a derived id is a NAMING convention, not proof of a listing — the per-leg
+  // listability probes (§4h reuses the T-1 rail) gate every derived id before
+  // subscribing, and a leg we cannot even NAME is null so the UI degrades
+  // honestly instead of guessing.
+  //   - bybit_linear: the picker universe's own id, as-is — always known.
+  //   - Derivatives + USDT-spot ids only exist for USDT-quoted symbols:
+  //     non-USDT → every leg but bybit_linear is null (T-1 rule, §4g).
+  //   - Spot ids (§4h): bybit_spot/binance_spot = <base>USDT (the perp id —
+  //     same string, different venue endpoint), okx_spot = <base>-USDT,
+  //     coinbase = <base>-USD.
+  //   - Digit-prefixed base (1000PEPE — a multiplied perp contract) →
+  //     coinbase null, the T-1 hard rule carried over: no USD spot market can
+  //     exist for a derivatives multiplier artifact. The USDT-spot ids stay
+  //     DERIVED for such bases — whether a venue lists a 1000×-spot pair is a
+  //     listing question the probe answers, not a naming impossibility.
+  function deriveLegIds(sym) {
+    const s = typeof sym === 'string' ? sym : '';
+    const out = {
+      bybit_linear: s || null, bybit_spot: null, binancef: null,
+      binance_spot: null, okx_swap: null, okx_spot: null, coinbase: null,
+    };
+    if (!s.endsWith('USDT') || s.length <= 4) return out; // unknown mapping — honest nulls
+    const base = s.slice(0, -4);
+    out.bybit_spot = s;
+    out.binancef = s;
+    out.binance_spot = s;
+    out.okx_swap = base + '-USDT-SWAP';
+    out.okx_spot = base + '-USDT';
+    if (!/^\d/.test(base)) out.coinbase = base + '-USD';
+    return out;
+  }
+
+  // ─── LegRegistry({enabled}) — the 7-leg venue×market matrix store (§4h) ──
+  //
+  // Pure session store behind the T-2 leg lifecycle: one row per matrix leg
+  // (keys ALIGN with deriveLegIds — the registry names WHICH legs exist, the
+  // mapping names their venue ids). `enabled` is the persisted user choice
+  // (seeded by the caller from settings; default ALL enabled per §4h) — the
+  // caller consults it BEFORE opening a socket, so a disabled leg never
+  // subscribes and its chip states the reason ('disabled (settings)') instead
+  // of pretending to connect. `status` is caller-owned bookkeeping (the leg's
+  // last chip state) carried for the UI snapshot — this store never invents
+  // one. No clocks, no DOM: same rails as every store above.
+  function LegRegistry(opts) {
+    // The seven §4h legs, fixed order (matrix display order). `venue` is the
+    // exchange family, `market` the leg's product class — 'perp'|'spot' is
+    // what SpotPerpCvdStore's isPerp split keys on, so it lives HERE (one
+    // source of truth) rather than being re-derived per call site.
+    const DEFS = [
+      { key: 'bybit_linear', venue: 'bybit', market: 'perp' },
+      { key: 'bybit_spot', venue: 'bybit', market: 'spot' },
+      { key: 'binancef', venue: 'binance', market: 'perp' },
+      { key: 'binance_spot', venue: 'binance', market: 'spot' },
+      { key: 'okx_swap', venue: 'okx', market: 'perp' },
+      { key: 'okx_spot', venue: 'okx', market: 'spot' },
+      { key: 'coinbase', venue: 'coinbase', market: 'spot' },
+    ];
+    const legs = new Map(); // key → {key, venue, market, enabled, status}
+    const seed = (opts && opts.enabled) || {};
+    for (const d of DEFS) {
+      // Only a STRICT stored boolean overrides the all-enabled default —
+      // corrupt/stale storage must not silently kill a leg (settings rail).
+      const en = typeof seed[d.key] === 'boolean' ? seed[d.key] : true;
+      legs.set(d.key, { key: d.key, venue: d.venue, market: d.market, enabled: en, status: null });
+    }
+
+    /** The 7 leg keys in matrix order. */
+    function keys() { return DEFS.map((d) => d.key); }
+
+    /** One leg's row as a COPY (callers must not reach into the store), or
+     *  null for an unknown key — never a guessed row. */
+    function get(key) {
+      const l = legs.get(key);
+      return l ? { key: l.key, venue: l.venue, market: l.market, enabled: l.enabled, status: l.status } : null;
+    }
+
+    /** Unknown keys read as DISABLED: a leg the registry cannot name must
+     *  never be started (deriveLegIds' honest-null philosophy). */
+    function isEnabled(key) {
+      const l = legs.get(key);
+      return !!l && l.enabled;
+    }
+
+    /** market 'perp' → true — the SpotPerpCvdStore split (§4h). */
+    function isPerp(key) {
+      const l = legs.get(key);
+      return !!l && l.market === 'perp';
+    }
+
+    /** Flip a leg. Returns true iff the stored value CHANGED (the caller
+     *  restarts sockets / persists only on a real transition). Non-boolean
+     *  or unknown-key calls are dropped, never coerced. */
+    function setEnabled(key, on) {
+      const l = legs.get(key);
+      if (!l || typeof on !== 'boolean' || l.enabled === on) return false;
+      l.enabled = on;
+      return true;
+    }
+
+    /** Caller-owned status bookkeeping (chip state); unknown keys dropped. */
+    function setStatus(key, status) {
+      const l = legs.get(key);
+      if (l) l.status = status;
+    }
+
+    /** {key: enabled} of all 7 legs — the persistence payload shape. */
+    function enabledMap() {
+      const out = {};
+      for (const d of DEFS) out[d.key] = legs.get(d.key).enabled;
+      return out;
+    }
+
+    /** All 7 rows as copies, matrix order — the UI's one read. */
+    function snapshot() { return DEFS.map((d) => get(d.key)); }
+
+    return { keys, get, isEnabled, isPerp, setEnabled, setStatus, enabledMap, snapshot };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalState = {
@@ -3079,6 +3211,10 @@
     // the implementation, the opening classifier its Dalton attribution.
     TapeIntensityStore, WallsLedger, VpinStore, OpeningTypeClassifier,
     BasisSeries, deriveVenueIds,
+    // T-2 (§4h): the 7-leg matrix mapping — additive next to deriveVenueIds,
+    // whose T-1 shape stays frozen for existing consumers — plus the leg
+    // registry the terminal's matrix lifecycle consults before any socket.
+    deriveLegIds, LegRegistry,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalState;

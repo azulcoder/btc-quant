@@ -177,9 +177,33 @@
    *  (tape tag, agg-book stack, CVD venue lines, legend) so one venue is always
    *  one color. okx = --c3 (O-2, §4b — the CVD 'whale' bucket line moved to
    *  --c6 so venue-pink stays venue-pink inside the same chart).
-   *  Deliberately NOT --up/--down (venues aren't P&L) and NOT --accent (chrome). */
-  const EX_TOKEN = { bybit: 'c2', binancef: 'c1', coinbase: 'c4', okx: 'c3' };
+   *  Deliberately NOT --up/--down (venues aren't P&L) and NOT --accent (chrome).
+   *
+   *  T-2 (§4h): the matrix spot legs share their VENUE's hue — six categorical
+   *  tokens cannot carry seven distinguishable hues, and venue identity is the
+   *  read that must survive across panels. Market is the SECOND cue instead:
+   *  dashed lines in the CVD chart, lower stack alpha in the agg book (both
+   *  stated in their legends). Coinbase is spot-only, so its hue needs no pair. */
+  const EX_TOKEN = {
+    bybit: 'c2', binancef: 'c1', coinbase: 'c4', okx: 'c3',
+    bybit_spot: 'c2', binance_spot: 'c1', okx_spot: 'c3',
+  };
   function exColor(p, ex) { return p[EX_TOKEN[ex]] || p.c5; }
+  /** True for a matrix spot leg that SHARES its venue hue (the dash/alpha
+   *  market cue applies); coinbase keeps its own hue and stays solid. */
+  function isSpotVariant(ex) { return typeof ex === 'string' && ex.slice(-5) === '_spot'; }
+  /** Display labels for the 7 matrix legs (§4h chip taxonomy: venue·market).
+   *  ex codes stay the frozen store keys; labels are presentation only. */
+  const EX_LABEL = {
+    bybit: 'bybit·lin', bybit_spot: 'bybit·spot',
+    binancef: 'binance·fut', binance_spot: 'binance·spot',
+    okx: 'okx·swap', okx_spot: 'okx·spot', coinbase: 'coinbase',
+  };
+  function exLabel(ex) { return EX_LABEL[ex] || ex; }
+  /** Tape-column short tags (the 'cb' precedent — the ex column is 6ch). */
+  const EX_TAG = {
+    coinbase: 'cb', bybit_spot: 'byb·s', binance_spot: 'bnb·s', okx_spot: 'okx·s',
+  };
 
   // ─── Shared canvas helper — DPR-aware sizing (crisp on retina) ───────────
   //
@@ -358,7 +382,12 @@
       };
       // LC.LineStyle: 0 Solid, 1 Dotted, 2 Dashed, 3 LargeDashed.
       addLine('sum', p.c1, 2, 0, '&Sigma; all venues');
-      for (const ex of cvdExs) addLine('ex:' + ex, exColor(p, ex), 1, 0, esc(ex));
+      // T-2 (§4h): a matrix spot leg shares its venue's hue and takes DASHED
+      // as the market cue (EX_TOKEN note) — solid = perp/primary, dashed =
+      // that venue's spot leg. binance·fut is honestly absent from this
+      // family: no futures trades flow on this network (§0.2), so there is
+      // no CVD to draw — the legend note says so instead of a flat 0 line.
+      for (const ex of cvdExs) addLine('ex:' + ex, exColor(p, ex), 1, isSpotVariant(ex) ? 2 : 0, esc(exLabel(ex)));
       const bucketStyle = [2, 1, 3];   // dashed / dotted / large-dashed, thresholds ascending
       cvdBuckets.forEach((k, i) => {
         if (k === 'whale') addLine('bucket:whale', p.c6, 1, 0, 'bybit &gt; largest bucket (whale)');
@@ -367,7 +396,8 @@
       });
       // Session-anchor honesty label (§4 CvdStore doc: CVD has no natural zero).
       legend.insertAdjacentHTML('beforeend',
-        '<span class="cvd-anchor">anchored at page open — slope/divergence only, level is meaningless</span>');
+        '<span class="cvd-anchor">dashed venue line = that venue’s spot leg · binance·fut absent — no futures trades on this network (§0.2) '
+        + '· anchored at page open — slope/divergence only, level is meaningless</span>');
       cvdEl.appendChild(legend);
     }
 
@@ -455,6 +485,13 @@
           if (cvdSeries[key] && by.byBucket[k]) cvdSeries[key].setData(toLcSeries(by.t, by.byBucket[k]));
         }
       }
+      // Session-anchored read: fit the WHOLE session into the pane so the
+      // "anchored at page open" slope/divergence is legible end-to-end
+      // (§4b/§4h label). Without it a young session bunches every line against
+      // the right edge over a near-empty pane — the more legs, the flatter the
+      // cluster (T-2 regression: 6 leg lines packed into the last ~10% read as
+      // a blank chart). Idempotent at the CVD throttle cadence.
+      cvdChart.timeScale().fitContent();
     }
 
     // ── Main canvas draw ──
@@ -1034,7 +1071,7 @@
         const dir = t.aggressorBuy ? 'up' : 'down';   // aggressor coloring (§0.6 normalized upstream)
         html += '<div class="tape-row' + (whale ? ' whale' : '') + '">'
           + '<span class="ts">' + hms(t.ts) + '</span>'
-          + '<span class="ex ex-' + esc(t.ex) + '">' + esc(t.ex === 'coinbase' ? 'cb' : t.ex) + '</span>'
+          + '<span class="ex ex-' + esc(t.ex) + '">' + esc(EX_TAG[t.ex] || t.ex) + '</span>'
           + '<span class="px delta ' + dir + '">' + fmtUsd(t.price, dp) + '</span>'
           + '<span class="qty">' + fmtQty(t.qty) + '</span>'
           + '<span class="ntl">' + (whale ? '◆ ' : '') + fmtCompactUsd(notional) + '</span>'
@@ -1054,12 +1091,19 @@
   // by RANK, not price — each side lists its own best-first ladder (that is
   // what an aggregated book is; a price-aligned merge is the DOM ladder's job).
   function AggBookView() {
-    let root = null, canvas = null, legend = null, nLevels = 14;
+    let root = null, canvas = null, legend = null, quality = null, nLevels = 14;
     let legendKey = '';   // rebuilt only when the participating-exchange set changes
+    let qualityKey = '';  // rebuilt only when a leg's quality text/class changes
 
     function mount(el, opts) {
       root = el;
       nLevels = (opts && opts.levels) || 14;
+      // T-2 (§4h): per-leg depth-quality strip — the honest sync ledger
+      // (synced / syncing / desync ×N / disabled) terminal.js composes from
+      // the engines; resync counts are visible by contract. Lives in the
+      // panel chrome (opts.qualityEl — the FootprintView cvdEl idiom) because
+      // the canvas absolutely fills this wrap.
+      quality = (opts && opts.qualityEl) || null;
       canvas = document.createElement('canvas');
       canvas.className = 'term-canvas agg-canvas';
       root.appendChild(canvas);
@@ -1068,10 +1112,27 @@
       root.appendChild(legend);
     }
 
-    /** slice = { grouped:{bids,asks}, tick } from AggBookStore.grouped(tick,
-     *  nLevels): rows are {price, total, byEx} best-first. */
+    /** T-2 (§4h): legQuality rows = [{ex, text, cls}] — one per matrix leg,
+     *  composed upstream (terminal.js owns engine/registry access; the view
+     *  only paints). cls ∈ q-ok|q-wait|q-bad|q-off styles the dot. */
+    function renderQuality(rows) {
+      if (!quality) return;
+      const list = Array.isArray(rows) ? rows : [];
+      const key = list.map((r) => r.ex + '|' + r.cls + '|' + r.text).join(';');
+      if (key === qualityKey) return;
+      qualityKey = key;
+      quality.innerHTML = list.map((r) =>
+        '<span class="q-leg ' + esc(r.cls || '') + '" title="' + esc(r.title || r.text) + '">'
+        + '<i class="q-dot"></i><i class="sw" style="background:' + exColor(pal(), r.ex) + '"></i>'
+        + esc(exLabel(r.ex)) + ' <b>' + esc(r.text) + '</b></span>').join('');
+    }
+
+    /** slice = { grouped:{bids,asks}, tick, legQuality? } from
+     *  AggBookStore.grouped(tick, nLevels, includeExs): rows are
+     *  {price, total, byEx} best-first. */
     function render(slice) {
       if (!canvas) return;
+      renderQuality(slice.legQuality);
       const g = slice.grouped || { bids: [], asks: [] };
       const bids = g.bids.slice(0, nLevels), asks = g.asks.slice(0, nLevels);
       const { ctx, w, h } = fitCanvas(canvas);
@@ -1091,9 +1152,11 @@
       const lk = exs.join(',');
       if (lk !== legendKey) {
         legendKey = lk;
+        // T-2 (§4h): spot legs share the venue hue at the same lower alpha
+        // they stack with (the market cue) — the legend swatch matches the bar.
         legend.innerHTML = exs.map((ex) =>
-          '<span><i class="sw" style="background:' + exColor(p, ex) + '"></i>' + esc(ex) + '</span>'
-        ).join('') + '<span class="lg-note">stacked size per $-grouped level · line = cumulative depth</span>';
+          '<span><i class="sw" style="background:' + rgba(exColor(p, ex), isSpotVariant(ex) ? 0.45 : 0.8) + '"></i>' + esc(exLabel(ex)) + '</span>'
+        ).join('') + '<span class="lg-note">stacked size per $-grouped level · pale = spot leg of the venue hue · line = cumulative depth</span>';
       }
 
       if (!bids.length && !asks.length) {
@@ -1157,7 +1220,9 @@
           const exKeys = Object.keys(r.byEx).sort();
           for (const ex of exKeys) {
             const seg = r.byEx[ex] * barScale;
-            ctx.fillStyle = rgba(exColor(p, ex), 0.8);
+            // Spot legs stack at lower alpha (venue hue, market = intensity —
+            // EX_TOKEN note; the legend swatches carry the same alphas).
+            ctx.fillStyle = rgba(exColor(p, ex), isSpotVariant(ex) ? 0.45 : 0.8);
             if (isBid) ctx.fillRect(bidEdge - off - seg, y + 1.5, seg, rowH - 3);
             else ctx.fillRect(askEdge + off, y + 1.5, seg, rowH - 3);
             off += seg;
@@ -1241,16 +1306,19 @@
       // be the first thing the eye hits (watchdog rail, livewire.js).
       const chipRow = document.createElement('div');
       chipRow.className = 'term-chips';
-      // okx joined in O-2 (§4b): agg-book leg + its own labeled CVD line.
-      for (const ex of ['bybit', 'binancef', 'coinbase', 'okx']) {
+      // T-2 (§4h): the full 7-leg venue×market matrix, grouped by venue with
+      // the market suffix (chip taxonomy note in EX_LABEL). Chip KEYS stay the
+      // frozen ex codes — statuses/stores key on them; only the label is new.
+      for (const ex of ['bybit', 'bybit_spot', 'binancef', 'binance_spot', 'okx', 'okx_spot', 'coinbase']) {
         const chip = document.createElement('span');
         chip.className = 'statchip term-chip';
-        chip.innerHTML = '<span class="dot"></span><span class="chip-text">' + ex + ': connecting…</span>';
+        chip.innerHTML = '<span class="dot"></span><span class="chip-text">' + exLabel(ex) + ': connecting…</span>';
         chipRow.appendChild(chip);
         chips[ex] = { el: chip, text: chip.querySelector('.chip-text') };
       }
       chipRow.insertAdjacentHTML('beforeend',
-        '<span class="chips-note">bybit = primary WS (trades/book/liq/mark/OI) · binancef = depth WS + REST mark/OI · coinbase = spot tape · okx = agg book + CVD leg</span>');
+        '<span class="chips-note">bybit·lin = primary WS (trades/book/liq/mark/OI) · binance·fut = diff-depth book + REST mark/OI (no WS trades on this network, §0.2) '
+        + '· okx legs = seq-chained books + trades · coinbase = full l2 book + matches · spot legs (§4h) = display/ingest only — the collector still records BTCUSDT bybit-primary</span>');
       root.appendChild(chipRow);
 
       const grid = document.createElement('div');
@@ -1333,9 +1401,9 @@
         // fixture replay as a live feed (verify_terminal_browser.py asserts
         // no chip says 'live' in replay). The .live CLASS stays: it styles
         // the healthy/green dot, it is not user-visible text.
-        if (s.kind === 'open') { chip.el.classList.add('live'); chip.text.textContent = ex + ': ' + (s.msg || 'live'); }
-        else if (s.kind === 'stale') { chip.el.classList.add('stale'); chip.text.textContent = ex + ': ' + (s.msg || 'stale'); }
-        else if (s.kind === 'reconnecting') { chip.el.classList.add('stale'); chip.text.textContent = ex + ': reconnecting…'; }
+        if (s.kind === 'open') { chip.el.classList.add('live'); chip.text.textContent = exLabel(ex) + ': ' + (s.msg || 'live'); }
+        else if (s.kind === 'stale') { chip.el.classList.add('stale'); chip.text.textContent = exLabel(ex) + ': ' + (s.msg || 'stale'); }
+        else if (s.kind === 'reconnecting') { chip.el.classList.add('stale'); chip.text.textContent = exLabel(ex) + ': reconnecting…'; }
         else if (s.kind === 'error') {
           // O-4 fix (§4d — closes the O-3 flag): kind 'error' renders the
           // transport's OWN message when it carries one — the BYOD driver
@@ -1344,7 +1412,7 @@
           // hid the actionable cause. 'offline' stays as the fallback for
           // transports that error without prose (same honesty rule as the
           // kind-'open' branch above: the transport speaks, we don't dub it).
-          chip.el.classList.add('error'); chip.text.textContent = ex + ': ' + (s.msg || 'offline');
+          chip.el.classList.add('error'); chip.text.textContent = exLabel(ex) + ': ' + (s.msg || 'offline');
         }
       }
     }
@@ -5118,6 +5186,116 @@
     return { mount, render };
   }
 
+  // ═══ SpotPerpCvdView — spot vs perp CVD strip (T-2, §4h) ═══
+  //
+  // Two session-anchored cumulative lines from SpotPerpCvdStore — Σ signed
+  // USD flow of the enabled PERP legs vs the enabled SPOT legs — in ONE pane
+  // on ONE scale (same units by construction; this is the one comparison the
+  // panel exists for, not a dual-axis blend). A DESCRIPTIVE lead/lag read,
+  // labeled on-panel: which side of the market moved first this session — NOT
+  // a signal, and nothing here scores it. The composition line names which
+  // legs are inside each sum LIVE (terminal.js composes it from the registry);
+  // a leg disabled mid-session leaves the list while its past flow stays in
+  // the sum honestly (the store's since-page-open contract, stated in chrome).
+  // Lazy pane build on first data — the BasisView empty-state idiom.
+  function SpotPerpCvdView() {
+    let root = null, noteEl = null, readEl = null, compEl = null, paneEl = null;
+    let built = false, lcMissing = false;
+    let chart = null, perpLine = null, spotLine = null;
+    let lastSetAt = 0;
+    const SET_MIN_MS = 600;   // setData throttle — the CVD chart's budget
+
+    function mount(el) {
+      root = el;
+      readEl = document.createElement('div');
+      readEl.className = 'spcvd-read num';
+      root.appendChild(readEl);
+      noteEl = document.createElement('div');
+      noteEl.className = 'chart-na';
+      noteEl.textContent = 'awaiting trades — the strip fills from this session\'s enabled trade legs; nothing is fabricated to seed it (§0.7).';
+      root.appendChild(noteEl);
+      compEl = document.createElement('div');
+      compEl.className = 'spcvd-comp';
+      root.appendChild(compEl);
+    }
+
+    function buildPane() {
+      built = true;
+      const LC = global.LightweightCharts;
+      if (!LC || !LC.createChart) {
+        noteEl.innerHTML = 'vendored lightweight-charts unavailable — spot/perp strip disabled (nothing is fabricated).';
+        lcMissing = true;
+        return;
+      }
+      const p = pal();
+      paneEl = document.createElement('div');
+      paneEl.className = 'spcvd-pane';
+      root.insertBefore(paneEl, compEl);
+      chart = LC.createChart(paneEl, {
+        height: paneEl.clientHeight || 150,
+        layout: { background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace') },
+        grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
+        timeScale: { timeVisible: true, secondsVisible: true, borderColor: p.border },
+        rightPriceScale: { borderColor: p.border, scaleMargins: { top: 0.12, bottom: 0.12 } },
+        crosshair: { mode: 0 },
+        localization: { priceFormatter: fmtCompactUsd },
+      });
+      // Market split hues: perp = --c1, spot = --c4 (the BasisView pane pair —
+      // markets aren't P&L, so never --up/--down; venue hues stay venue-only).
+      const mkLine = (color) => chart.addLineSeries({
+        color, lineWidth: 2, priceLineVisible: false, lastValueVisible: true,
+        crosshairMarkerVisible: false,
+      });
+      perpLine = mkLine(p.c1);
+      spotLine = mkLine(p.c4);
+      const legend = document.createElement('div');
+      legend.className = 'term-cvd-legend';
+      legend.innerHTML = '<span><i class="sw" style="background:' + p.c1 + '"></i>&Sigma; perp legs</span>'
+        + '<span><i class="sw" style="background:' + p.c4 + '"></i>&Sigma; spot legs</span>'
+        + '<span class="cvd-anchor">anchored at page open — a descriptive lead/lag read (which side moved first), NOT a signal; slope/divergence only, level is meaningless</span>';
+      root.insertBefore(legend, compEl);
+      window.addEventListener('resize', () => {
+        if (chart) chart.applyOptions({ width: paneEl.clientWidth });
+      });
+    }
+
+    /** slice = { list: SpotPerpCvdStore.list() ([{ts, cvdPerp, cvdSpot}]),
+     *  latest: .latest() ({ts, cvdPerp, cvdSpot}|null), comp: {perp:[label…],
+     *  spot:[label…]} (live composition from the registry), nowMs }. The
+     *  latest live read rides as the newest point so the strip's edge never
+     *  lags a full 10s bucket. */
+    function render(slice) {
+      if (!root) return;
+      const latest = slice.latest || null;
+      setPanelEmpty(root, !latest);   // presentation-only compact toggle
+      const comp = slice.comp || { perp: [], spot: [] };
+      compEl.textContent = 'perp Σ = ' + (comp.perp.length ? comp.perp.join(' + ') : 'no enabled perp legs')
+        + ' · spot Σ = ' + (comp.spot.length ? comp.spot.join(' + ') : 'no enabled spot legs')
+        + ' · a leg disabled mid-session leaves its list; its past flow stays in the sum (since-page-open series)';
+      if (!latest || lcMissing) { readEl.textContent = ''; return; }
+      if (!built) buildPane();
+      if (!perpLine) return;
+      noteEl.hidden = true;
+      const div = latest.cvdPerp - latest.cvdSpot;
+      readEl.innerHTML = 'perp Σ <b>' + fmtCompactUsd(latest.cvdPerp) + '</b>'
+        + ' · spot Σ <b>' + fmtCompactUsd(latest.cvdSpot) + '</b>'
+        + ' · divergence (perp − spot) <b class="' + (div > 0 ? 'pos' : div < 0 ? 'neg' : '') + '">'
+        + fmtCompactUsd(div) + '</b>';
+      const now = Number.isFinite(slice.nowMs) ? slice.nowMs : Date.now();
+      if (now - lastSetAt < SET_MIN_MS) return;
+      lastSetAt = now;
+      // Completed 10s buckets + the live cumulative read as the edge point.
+      const rows = (slice.list || []).concat([latest]);
+      perpLine.setData(lcSecondsSeries(rows, 'cvdPerp'));
+      spotLine.setData(lcSecondsSeries(rows, 'cvdSpot'));
+      // Same session-anchored read as the CVD strip: fit the whole session so
+      // the perp/spot lead-lag is legible end-to-end rather than bunched right.
+      chart.timeScale().fitContent();
+    }
+
+    return { mount, render };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalViews = {
@@ -5140,6 +5318,8 @@
     // T-1 (§4g): Trader's Edge panels — tape-speed gauge, walls ledger
     // (bookkeeping, not intent), key-levels strip, cited VPIN, basis/funding.
     TapeIntensityView, WallsLedgerView, KeyLevelsView, VpinView, BasisView,
+    // T-2 (§4h): spot vs perp CVD strip — descriptive lead/lag, never a signal.
+    SpotPerpCvdView,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalViews;

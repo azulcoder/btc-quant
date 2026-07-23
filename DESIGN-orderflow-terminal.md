@@ -12,7 +12,7 @@ un-validated). **O-5 shipped 2026-07-05** (§4e portfolio & research — trade j
 returns, Polymarket crowd-implied panel, ToA news feed, local-mirror econ calendar
 (`make econ` — faireconomy has no CORS), + the elite pass: sticky section nav w/
 persisted collapse, hidden-tab/offscreen paint gating (ingestion never pauses), and
-`check_terminal.cjs` (55 groups) promoted to a CI build gate). **The terminal feature
+`check_terminal.cjs` (70 groups) promoted to a CI build gate). **The terminal feature
 plan (§5) is complete** — further work follows the DEVELOPMENT.md §6 greenlight ritual;
 the T-1 Trader's Edge pass (§4g) added multi-symbol + the delta/intensity/walls/VPIN/
 opening-type/key-levels/basis surfaces on top of it.
@@ -687,6 +687,63 @@ transitions; VPIN bucket math on constructed trades (hand-computed); OpeningType
 four classes on constructed opens; venue-id derivation (BTCUSDT/ETHUSDT/1000PEPEUSDT —
 the last has NO coinbase mapping → leg skipped honestly); BasisSeries ring.
 
+## 4h. T-2 contracts — Venue Matrix (binding)
+
+Greenlit 2026-07-23. Empirical basis MEASURED on this network 2026-07-23 (25 s
+concurrent probes; scratch probe, results recorded here as the §2 extension):
+
+| leg            | trades                          | depth (keyless, measured)                          |
+|----------------|---------------------------------|----------------------------------------------------|
+| bybit linear   | publicTrade WS (current)        | orderbook.200 (orderbook.500 → handler-not-found)  |
+| bybit spot     | publicTrade WS — flows          | orderbook.200 — flows                              |
+| binance fut    | WS topic-filtered (§2) → REST   | diff `@depth@100ms` FLOWS → full local book sync   |
+| binance spot   | aggTrade WS — FLOWS (unlike fut)| diff + depth20 flow → full local book sync         |
+| okx swap       | trades WS (current)             | `books` 400-level + CRC32 checksum — flows         |
+| okx spot       | trades WS — flows               | `books` 400-level + CRC32 checksum — flows         |
+| coinbase spot  | matches WS (current)            | `level2_batch` keyless: FULL snapshot (~44k levels measured) + batched l2update |
+
+**Leg registry.** Seven venue×market legs, each individually enable/disable-able
+(persisted setting + a chip per leg; disabling closes the socket and freezes that
+leg's panels honestly — no interpolation). Symbol mapping extends T-1
+`deriveVenueIds` to the matrix (spot ids: binance spot = `<B>USDT`, bybit spot =
+`<B>USDT`, okx spot = `<B>-USDT`, coinbase = `<B>-USD`); T-1 listability probes
+reused per leg; unknown/unreachable → honest no-leg chip (§4g rule).
+
+**Full-book sync engines** (new file `dashboard/terminal-books.js`, pure, each with
+constructed-sequence check groups):
+- `BinanceBookSync` — REST snapshot (`depth?limit=1000`) + buffered diff events,
+  spot continuity `U ≤ lastUpdateId+1 ≤ u`, futures continuity via `pu` chaining;
+  any gap → counted honest resync (chip note `resync ×N`), never silent patching.
+- `OkxBookSync` — `books` snapshot+update; integrity via the **seqId/prevSeqId
+  chain** (each update's `prevSeqId` must equal the last applied `seqId`; gap →
+  counted resync + leg restart). **[SUPERSEDED 2026-07-24]** the original plan was
+  CRC32 checksum-verify, but MEASURED on the real wire (179/179 `books` frames
+  BTC-USDT-SWAP 2026-07-24, and 300+ frames across SWAP/spot/ETH the day before)
+  the public `books` channel carries `checksum: 0` on every frame — the venue only
+  populates the CRC on the login/VIP-gated `books-l2-tbt` tick-by-tick channels.
+  So checksum-verify is degenerate keyless; the seqId chain IS the venue's ordering
+  guarantee and is the correct rail. CRC32 helper retained (dependency-free + pinned
+  zlib vectors) for the tbt channel should we ever authenticate — documented dormant.
+- `CoinbaseBookSync` — full snapshot + `l2update` absolute-qty application
+  (qty 0 removes level); no venue sequence number exists (stated), so the rail is
+  reconnect-on-gap-in-time + fresh snapshot.
+- Perf contract (stated): O(1) map updates per event; sorted materialization only
+  for the visible render window at paint cadence, never per message.
+
+**Surfaces.** Agg-book panel becomes leg-aware (per-leg include toggles — the same
+registry); CVD-per-exchange gains the new legs; NEW **spot vs perp CVD** strip
+(sum of enabled spot legs vs perp legs — a descriptive lead/lag read, labeled, no
+signal claim). Book heatmap + grid-bound history stay bybit-linear primary
+(different grids/venues would fabricate a merged history — stated on panel).
+Collector recording scope is UNCHANGED this phase (BTCUSDT bybit-primary store);
+the matrix is a display/ingest surface — stated in the settings hint.
+
+**check_terminal groups (mandatory adds):** Binance continuity incl. gap→resync
+and event-straddling-snapshot; futures `pu` chaining vs spot rule difference;
+OKX CRC32 pinned vector + mismatch→resync; Coinbase apply/remove-zero/replace;
+leg-registry enable/disable + persistence shape; spot-vs-perp CVD store math;
+matrix `deriveVenueIds` extension (spot ids + digit-prefix + non-USDT degrades).
+
 ## 5. CryExc → btc-quant feature map & phase plan
 
 | # | CryExc view | Phase | Rail notes |
@@ -740,7 +797,7 @@ prevent AC sleep. `make check-ticks` weekly is the standing quality ritual.
 Layer 0 (static, every commit): `python -m pytest` (incl. collector tests; network-free);
 `node --check` on every dashboard JS file; `node scripts/check_terminal.cjs` (fixture
 smoke: adapters + stores + O-3/O-4 normalizers/builders replayed over the REAL captured
-frames/responses, 55 assertion groups incl. the T-1 §4g adds — a CI build gate since
+frames/responses, 70 assertion groups incl. the T-1 §4g + T-2 §4h adds — a CI build gate since
 O-5, §4e.3).
 
 - **L1 — deterministic browser harness** (`make verify-browser`,

@@ -645,6 +645,63 @@
       'https://api.exchange.coinbase.com/products/' + encodeURIComponent(productId), 404);
   }
 
+  /** T-2 (§4h) — Binance SPOT listing probe, the T-1 probeListing rail on the
+   *  spot host: ticker/price answers 200 iff the pair exists, 400 (code
+   *  -1121 "Invalid symbol") iff not (verified 2026-07-23). Gates the
+   *  binance_spot leg's derived id before any subscribe. */
+  function probeBinanceSpotSymbol(sym) {
+    return probeListing(
+      'https://api.binance.com/api/v3/ticker/price?symbol=' + encodeURIComponent(sym), 400);
+  }
+
+  /** T-2 (§4h) — Bybit SPOT listing probe. Bybit answers HTTP 200 for BOTH
+   *  outcomes (the not-listed answer is retCode 0 + an EMPTY result.list —
+   *  verified 2026-07-23), so the HTTP-status probeListing rail cannot read
+   *  it; presence-of-data is the answer, the fetchOkxCtVal pattern. */
+  async function probeBybitSpotSymbol(sym) {
+    try {
+      const j = await getJSON(
+        'https://api.bybit.com/v5/market/instruments-info?category=spot&symbol=' + encodeURIComponent(sym));
+      if (!j || Number(j.retCode) !== 0 || !j.result || !Array.isArray(j.result.list)) return null;
+      return j.result.list.length > 0;
+    } catch (_) { return null; }        // unreachable → caller degrades the leg honestly
+  }
+
+  /** T-2 (§4h) — OKX SPOT instrument probe: instruments?instType=SPOT answers
+   *  code "0" + a data row iff the instId exists, code 51001 + empty data iff
+   *  not (verified 2026-07-23) — presence-of-data again, HTTP 200 either way.
+   *  No ctVal here on purpose: SPOT sz is already coin units (§4b's contracts
+   *  rail is derivatives-only). */
+  async function probeOkxSpotInst(instId) {
+    try {
+      const j = await getJSON(
+        'https://www.okx.com/api/v5/public/instruments?instType=SPOT&instId=' + encodeURIComponent(instId));
+      if (!j || !Array.isArray(j.data)) return null;
+      if (String(j.code) === '0') return j.data.length > 0;
+      return String(j.code) === '51001' ? false : null;   // other codes = venue trouble, not an answer
+    } catch (_) { return null; }        // unreachable → caller degrades the leg honestly
+  }
+
+  /** T-2 (§4h) — Binance REST depth snapshot for the BinanceBookSync engines
+   *  (`market` 'spot' | 'futures', depth?limit=1000 per the official local-
+   *  book algo). Level rows return VERBATIM (wire string tuples): the engines
+   *  key their books by the venue's OWN price strings (terminal-books.js
+   *  primitives note) — a Number round-trip here would fork "65016.73000000"
+   *  from the diff stream's key of the same level. Silent-null on failure:
+   *  the caller's flush tick simply retries (poller idiom above). */
+  async function fetchBinanceDepthSnapshot(market, sym) {
+    const url = (market === 'futures'
+      ? 'https://fapi.binance.com/fapi/v1/depth?symbol='
+      : 'https://api.binance.com/api/v3/depth?symbol=')
+      + encodeURIComponent(sym) + '&limit=1000';
+    try {
+      const j = await getJSON(url);
+      const id = j ? Number(j.lastUpdateId) : NaN;
+      if (!Number.isFinite(id) || !Array.isArray(j.bids) || !Array.isArray(j.asks)) return null;
+      return { lastUpdateId: id, bids: j.bids, asks: j.asks };
+    } catch (_) { return null; }        // transient REST failure ≠ terminal state — next tick retries
+  }
+
   /** OKX open interest for one SWAP instId. */
   async function fetchOkxOi(instId) {
     try {
@@ -795,6 +852,9 @@
     fetchPolymarketBtc, fetchToaNews, fetchEconLocal,
     // T-1 (§4g)
     probeBinanceFutSymbol, probeCoinbaseProduct,
+    // T-2 (§4h): matrix-leg listability probes + the book-engine snapshots.
+    probeBinanceSpotSymbol, probeBybitSpotSymbol, probeOkxSpotInst,
+    fetchBinanceDepthSnapshot,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = HIST;

@@ -43,6 +43,22 @@
         </div>
       </div>
       <span class="price" id="last-price">—</span>
+      <!-- T-2 (§4h): leg manager — the 7-leg venue×market matrix, one
+           enable/disable toggle + live status dot per leg (persisted with the
+           settings object; the registry is consulted before any socket opens).
+           Disabling mid-session CLOSES the socket and the leg's chip states
+           'disabled (settings)' — panels freeze honestly, nothing is
+           interpolated. Same popover idiom as the symbol picker; terminal.js
+           owns the behavior. Toggles are disabled in replay (the deterministic
+           harness drives all legs). -->
+      <div class="leg-mgr">
+        <button id="legs-btn" type="button" class="ux-btn" aria-haspopup="true" aria-expanded="false"
+                title="Venue matrix legs (§4h): enable/disable each of the 7 venue×market legs. Disabling closes the socket mid-session; the chip states 'disabled (settings)' and that leg's panels freeze honestly.">legs ▾</button>
+        <div id="legs-pop" class="sym-pop legs-pop" hidden>
+          <ul id="legs-list" class="legs-list" aria-label="Venue matrix legs"></ul>
+          <div class="legs-note">display/ingest matrix only — the collector still records BTCUSDT bybit-primary (§4h)</div>
+        </div>
+      </div>
       <nav class="ux-toolbar" aria-label="Navigation">
         <!-- T-1 (§4g): workspace presets = named collapsed-set combos +
              'last' (the user's own custom state). -->
@@ -106,25 +122,57 @@
     <!-- Main row, middle column: DOM ladder + aggregated book. -->
     <div class="term-col area-mid" data-sec="orderflow">
       <section class="panel">
-        <h2>DOM ladder — Bybit
-          <span class="signal-tag st-desc" title="Grouped L2 book around the spread + per-level session sold/bought/delta from the footprint ring (last ≤120 bars, not all-of-session once the ring wraps).">descriptive</span>
+        <h2>DOM ladder
+          <span class="signal-tag st-desc" title="Grouped L2 book around the spread + per-level session sold/bought/delta from the footprint ring (last ≤120 bars, not all-of-session once the ring wraps). T-2 (§4h): source-selectable across the matrix books; session columns are bybit-footprint data and render only on the bybit·lin source (another venue's book under bybit session volume would blend venues, §0.7).">descriptive</span>
+          <!-- T-2 (§4h): ladder source — bybit linear stays the default; the
+               new synced books (engine-proven binance/coinbase, seq-chained
+               okx) are selectable. One book at a time, labeled. -->
+          <span class="heat-controls">
+            <label for="set-dom-source">source</label>
+            <select id="set-dom-source">
+              <option value="bybit" selected>bybit·lin</option>
+              <option value="bybit_spot">bybit·spot</option>
+              <option value="binancef">binance·fut</option>
+              <option value="binance_spot">binance·spot</option>
+              <option value="okx">okx·swap</option>
+              <option value="okx_spot">okx·spot</option>
+              <option value="coinbase">coinbase</option>
+            </select>
+          </span>
         </h2>
-        <div class="panel-src" title="Grouped L2 book around the spread + per-level session sold/bought/delta from the footprint ring (last ≤120 bars, not all-of-session once the ring wraps).">grouped L2 around the spread · session sold/bought/Δ from the footprint ring (≤120 bars)</div>
+        <div class="panel-src" title="Grouped L2 book around the spread + per-level session sold/bought/delta from the footprint ring (last ≤120 bars, not all-of-session once the ring wraps). Session columns are bybit-only footprint data — shown only on the bybit·lin source (§0.7).">grouped L2 around the spread · one source book at a time (§4h) · sold/bought/Δ = bybit footprint, bybit·lin source only</div>
+        <div id="dom-note" class="chart-na" hidden></div>
         <div id="view-dom" class="dom-wrap"></div>
       </section>
       <section class="panel">
-        <h2>aggregated book — bybit + binancef + okx
-          <span class="signal-tag st-desc" title="Per-exchange stacked depth at $-grouped levels + cumulative depth curve. OKX sizes arrive in CONTRACTS and are ctVal-scaled to base units in the adapter (0.01 pinned for BTC-USDT-SWAP; any other instrument fetches its real multiplier first). Legs are independent; a dead leg simply drops out (nothing interpolated).">descriptive</span>
+        <h2>aggregated book — venue matrix
+          <span class="signal-tag st-desc" title="Per-leg stacked depth at $-grouped levels + cumulative depth curve, across the 7-leg venue×market matrix (§4h). Sources: bybit WS books (snapshot+delta), engine-synced binance diff books (spot/futures continuity proven per event), seq-chained okx books, coinbase full l2 book. OKX swap sizes are ctVal-scaled to base units in the adapter. Legs are independent; a dead or disabled leg drops out (nothing interpolated). Include checkboxes are display-side only — books keep ingesting.">descriptive</span>
         </h2>
-        <div class="panel-src" title="Per-exchange stacked depth at $-grouped levels + cumulative depth curve. OKX sizes arrive in CONTRACTS and are ctVal-scaled to base units in the adapter (0.01 pinned for BTC-USDT-SWAP; any other instrument fetches its real multiplier first). Legs are independent; a dead leg simply drops out (nothing interpolated).">per-exchange stacked depth · okx ctVal-scaled to base units · a dead leg drops out, nothing interpolated</div>
+        <div class="panel-src" title="Include checkboxes filter the DISPLAY merge only — every enabled leg's book keeps ingesting. The binance/coinbase engine books are maintained FULL locally (top-1000 diff-synced / ~44k-level l2); the display truncates to the visible price window. Per-leg sync quality (incl. honest resync counts) is the strip above the canvas.">per-leg stacked depth (§4h) · include toggles are display-only · binance/coinbase/okx books maintained full, display windowed · resync counts visible</div>
+        <!-- T-2 (§4h): per-leg include checkboxes — display-side merge filter
+             (default: all enabled legs). Wired in terminal.js. -->
+        <div class="agg-controls" id="agg-controls">
+          <span class="agg-inc-label">include</span>
+          <label><input type="checkbox" data-agg-ex="bybit" checked /> bybit·lin</label>
+          <label><input type="checkbox" data-agg-ex="bybit_spot" checked /> bybit·spot</label>
+          <label><input type="checkbox" data-agg-ex="binancef" checked /> binance·fut</label>
+          <label><input type="checkbox" data-agg-ex="binance_spot" checked /> binance·spot</label>
+          <label><input type="checkbox" data-agg-ex="okx" checked /> okx·swap</label>
+          <label><input type="checkbox" data-agg-ex="okx_spot" checked /> okx·spot</label>
+          <label><input type="checkbox" data-agg-ex="coinbase" checked /> coinbase</label>
+        </div>
+        <!-- T-2 (§4h): per-leg depth quality — honest sync ledger incl. visible
+             resync counts (AggBookView renders it; terminal.js composes). -->
+        <div id="agg-quality" class="agg-quality"></div>
         <div id="view-aggbook" class="agg-wrap"></div>
+        <div class="hint"><span class="hint-lead">the full-book legs (binance·fut/spot, coinbase, okx) are <b>maintained full, display windowed</b> — the visible ladder is a price window over a locally synced book, not the whole book.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Continuity is PROVEN per leg and stated in the quality strip: binance = official diff algorithm (spot U/u bracket, futures pu chain), okx = seqId/prevSeqId chain (the wire's checksum field is an unpopulated 0 on this network — measured, §4h), coinbase = full snapshot + absolute l2updates with <b>no venue sequence number</b> (stated; the rail is staleness-gated reconnect). Any gap → the book is CLEARED and the resync COUNTED (never silently patched); the strip shows 'resync ×N' honestly. A disabled leg (legs button, topbar) reads 'disabled (settings)'.</span></details></div>
       </section>
     </div>
 
     <!-- Main row, right column: tape + liquidation feed. -->
     <div class="term-col area-right" data-sec="orderflow">
       <section class="panel">
-        <h2>tape — bybit perp + coinbase spot
+        <h2>tape — mixed venues
           <span class="signal-tag st-desc" title="Mixed-venue time &amp; sales — every print carries its exchange tag (§0.7 per-source labels). Aggressor side normalized per venue (§0.6). ◆ = whale ≥ $250k.">descriptive</span>
         </h2>
         <div class="panel-src" title="Mixed-venue time &amp; sales — every print carries its exchange tag (§0.7 per-source labels). Aggressor side normalized per venue (§0.6). ◆ = whale ≥ $250k.">mixed venues, per-print exchange tag (§0.7) · aggressor normalized (§0.6) · ◆ whale ≥ $250k</div>
@@ -206,17 +254,29 @@
       </h2>
       <div class="panel-src" title="Session ring of real 1/s book samples (event-time gated): X = session time, Y = price, α ∝ resting qty (p95-normalized). White line = that venue's own last-price trail. ▽/◈ = heuristic detector marks (bybit only). Reconnect gaps stay blank — nothing is interpolated (§0.7).">per-venue — books never merged · real 1/s samples, event-time gated · gaps stay gaps (§0.7)</div>
       <div id="view-bookheat" class="heat-wrap"></div>
-      <div class="hint"><span class="hint-lead">one venue at a time, labeled — books are never merged here.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> bid depth in green, ask depth in red (α ∝ resting size, p95-scaled so one whale wall can't wash out the ladder); ▽ = heuristic spoof-pull, ◈ = heuristic iceberg-refill (see detections panel). binancef shows no price line — its trades are topic-filtered on this network (§0.2), so there is honestly no per-venue print series to draw. I-1 (§4f): shaded columns = Asia (00–08) / London (07–16) / NY (12–21) session boxes, <b>UTC, classic FX-desk convention</b> — crypto never closes; overlaps are real and render darker; 21–24 UTC belongs to no session.</span></details></div>
+      <div class="hint"><span class="hint-lead">one venue at a time, labeled — books are never merged here. T-2 (§4h): the heatmap + its grid-bound history stay <b>bybit-linear primary</b> — merging different venues/grids into one history would fabricate a book that stood nowhere.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> bid depth in green, ask depth in red (α ∝ resting size, p95-scaled so one whale wall can't wash out the ladder); ▽ = heuristic spoof-pull, ◈ = heuristic iceberg-refill (see detections panel). binancef shows no price line — its trades are topic-filtered on this network (§0.2), so there is honestly no per-venue print series to draw. I-1 (§4f): shaded columns = Asia (00–08) / London (07–16) / NY (12–21) session boxes, <b>UTC, classic FX-desk convention</b> — crypto never closes; overlaps are real and render darker; 21–24 UTC belongs to no session.</span></details></div>
     </section>
 
     <!-- Footer row 1: CVD subchart (full-width; logically part of the
          footprint view — FootprintView mounts lightweight-charts here). -->
     <section class="panel area-cvd" data-sec="orderflow">
-      <h2>CVD — per exchange (bybit / okx / coinbase) + by trade size (bybit), session-anchored
-        <span class="signal-tag st-desc" title="Cumulative signed USD notional (aggressor buy − sell). One labeled line PER VENUE (§4b — never an unlabeled blend) plus an exact Σ, plus bybit-only trade-size buckets (dashed family). Anchored at page open — CVD has no natural zero; read slope/divergence, never level. NOT a signal, NOT backtestable from here.">descriptive</span>
+      <h2>CVD — per leg (bybit lin/spot · binance spot · okx swap/spot · coinbase) + by trade size (bybit), session-anchored
+        <span class="signal-tag st-desc" title="Cumulative signed USD notional (aggressor buy − sell). One labeled line PER TRADE LEG (§4b/§4h — never an unlabeled blend; spot legs share the venue hue, dashed) plus an exact Σ, plus bybit-only trade-size buckets. binance·fut is absent — no futures trades flow on this network (§0.2), so no line is fabricated for it. Anchored at page open — CVD has no natural zero; read slope/divergence, never level. NOT a signal, NOT backtestable from here.">descriptive</span>
       </h2>
-      <div class="panel-src" title="Cumulative signed USD notional (aggressor buy − sell). One labeled line PER VENUE (§4b — never an unlabeled blend) plus an exact Σ, plus bybit-only trade-size buckets (dashed family). Anchored at page open — CVD has no natural zero; read slope/divergence, never level. NOT a signal, NOT backtestable from here.">per-venue labels + exact Σ (§4b) · anchored at page open — slope/divergence only · NOT a signal</div>
+      <div class="panel-src" title="Cumulative signed USD notional (aggressor buy − sell). One labeled line PER TRADE LEG (§4b/§4h — never an unlabeled blend; spot legs share the venue hue, dashed) plus an exact Σ, plus bybit-only trade-size buckets. binance·fut is absent — no futures trades flow on this network (§0.2). Anchored at page open — CVD has no natural zero; read slope/divergence, never level. NOT a signal, NOT backtestable from here.">per-leg labels + exact Σ (§4b/§4h) · spot legs dashed in the venue hue · binance·fut honestly absent (§0.2) · anchored at page open — slope/divergence only · NOT a signal</div>
       <div id="view-cvd" class="term-cvd"></div>
+    </section>
+
+    <!-- T-2 (§4h): spot vs perp CVD strip — Σ signed USD flow of the enabled
+         PERP legs vs the enabled SPOT legs (SpotPerpCvdStore). A descriptive
+         lead/lag read, labeled on-panel; the composition line names which legs
+         are inside each sum LIVE. Never a signal. -->
+    <section class="panel area-spcvd" data-sec="orderflow">
+      <h2>spot vs perp CVD — session-anchored market split
+        <span class="signal-tag st-desc" title="Two cumulative session lines: Σ signed USD flow of the enabled PERP legs vs the enabled SPOT legs (registry market split, §4h). A DESCRIPTIVE lead/lag read — which side of the market moved first this session — labeled, never a signal, nothing scores it. A leg disabled mid-session stops contributing but its past flow stays in the sum (the series is since-page-open; removing it would restate history, §0.7).">descriptive</span>
+      </h2>
+      <div class="panel-src" title="Σ signed USD notional per market side (aggressor buy − sell), 10s buckets + live edge. Composition shown live below the pane. Descriptive lead/lag only — NOT a signal.">Σ perp legs vs Σ spot legs (§4h) · descriptive lead/lag read — NOT a signal · composition shown live</div>
+      <div id="view-spotperp" class="spcvd-wrap"></div>
     </section>
 
     <!-- ═══ O-3 STRUCTURE section (§4c) — REST-fed historical/structure panels,
@@ -589,7 +649,7 @@
           <button id="set-pause" type="button" aria-pressed="false" title="Freezes rendering only — data keeps accumulating, so resume shows the true session (no gap is fabricated)">pause</button>
         </div>
       </div>
-      <div class="hint"><span class="hint-lead">settings persist locally.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Changing tick group or bar interval <b>restarts</b> the session footprint/profile aggregation — and the tick group also restarts the book-heatmap history, detector, liq-model and walls ledger (all grid-bound) — the browser keeps no raw tick store to re-bucket from (that is the collector's job), and synthesizing old bars/ladders onto a new grid would fabricate data. <b>Switching the symbol restarts EVERY session store the same way</b> (§4g): a new symbol is a new session — all WS legs close and re-subscribe with derived venue ids, and the tick group re-derives its default from the symbol's price (~1bp of price snapped to a 1/2/2.5/5×10^k grid — the $10-at-$100k BTC convention). A venue with no derivable market for the symbol degrades to an honest 'no leg' chip. Pause freezes the display, not ingestion, and never the connection chips.</span></details></div>
+      <div class="hint"><span class="hint-lead">settings persist locally.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Changing tick group or bar interval <b>restarts</b> the session footprint/profile aggregation — and the tick group also restarts the book-heatmap history, detector, liq-model and walls ledger (all grid-bound) — the browser keeps no raw tick store to re-bucket from (that is the collector's job), and synthesizing old bars/ladders onto a new grid would fabricate data. <b>Switching the symbol restarts EVERY session store the same way</b> (§4g): a new symbol is a new session — all WS legs close and re-subscribe with derived venue ids, and the tick group re-derives its default from the symbol's price (~1bp of price snapped to a 1/2/2.5/5×10^k grid — the $10-at-$100k BTC convention). A venue with no derivable market for the symbol degrades to an honest 'no leg' chip. T-2 (§4h): the venue matrix (legs button, topbar) is a <b>display/ingest surface only — the collector's recording scope is UNCHANGED</b> (BTCUSDT bybit-primary store); disabling a leg closes its socket mid-session and its panels state 'disabled (settings)' rather than pretending to connect. The book heatmap stays <b>bybit-linear primary</b>: merging different venues/grids into one history would fabricate a merged book history. Pause freezes the display, not ingestion, and never the connection chips.</span></details></div>
     </section>
   </main>
 
@@ -613,13 +673,16 @@
   </div>
 
   <footer>
-    <p>Live-descriptive orderflow terminal (DESIGN-orderflow-terminal.md). Everything above renders only what arrived over the public wire this session — <b>never a backtest input</b>, never merged into the OOS harness. Feeds: Bybit v5 linear (primary), Binance Futures depth WS + REST mark/OI, Coinbase Advanced Trade spot tape, OKX v5 swap book+trades (O-2), Deribit options REST + Hyperliquid public state (O-4). Liq heatmap = <b>model estimate</b>; spoof/iceberg flags = <b>heuristics</b>; screener/confluence/alerts = <b>un-validated descriptive reads</b> (IC run-log ≈ 0) — all labeled in-panel. See <a href="../DISCLAIMER.md">DISCLAIMER.md</a>.</p>
+    <p>Live-descriptive orderflow terminal (DESIGN-orderflow-terminal.md). Everything above renders only what arrived over the public wire this session — <b>never a backtest input</b>, never merged into the OOS harness. Feeds (T-2 §4h venue matrix): Bybit v5 linear (primary) + spot, Binance diff-depth books (spot trades; futures trades are topic-filtered on this network, §0.2) + REST mark/OI, OKX v5 swap+spot books/trades (seq-chained), Coinbase Exchange full l2 book + matches, Deribit options REST + Hyperliquid public state (O-4). The matrix is display/ingest only — the collector records BTCUSDT bybit-primary, unchanged. Liq heatmap = <b>model estimate</b>; spoof/iceberg flags = <b>heuristics</b>; screener/confluence/alerts = <b>un-validated descriptive reads</b> (IC run-log ≈ 0) — all labeled in-panel. See <a href="../DISCLAIMER.md">DISCLAIMER.md</a>.</p>
   </footer>
 
-  <!-- Script order is a CONTRACT (DESIGN §4/§4c/§4f): vendor/lightweight-charts.js →
+  <!-- Script order is a CONTRACT (DESIGN §4/§4c/§4f/§4h): vendor/lightweight-charts.js →
        quant.js → livewire.js → terminal-adapters.js → terminal-state.js →
-       terminal-hist.js → vendor/hyparquet.js → terminal-hfdata.js →
-       terminal-views.js → terminal-replay.js → terminal.js.
+       terminal-books.js → terminal-hist.js → vendor/hyparquet.js →
+       terminal-hfdata.js → terminal-views.js → terminal-replay.js → terminal.js.
+       T-2 (§4h): terminal-books.js (book-sync engines + spot/perp CVD) is
+       standalone next to terminal-state.js — either order works between the
+       two; both must precede terminal.js.
        Each file is a plain IIFE exposing ONE global. O-3 additions: quant.js
        (HistChartView reads window.Quant.sma — indicator math is never
        reimplemented, house rule) and terminal-hist.js (REST fetchers/
@@ -635,6 +698,7 @@
   <script src="livewire.js"></script>
   <script src="terminal-adapters.js"></script>
   <script src="terminal-state.js"></script>
+  <script src="terminal-books.js"></script>
   <script src="terminal-hist.js"></script>
   <script src="vendor/hyparquet.js"></script>
   <script src="terminal-hfdata.js"></script>

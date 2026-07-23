@@ -244,6 +244,82 @@
 //  54. BasisSeries         → ring wrap at max (oldest evicted, order kept),
 //                           NaN funding stored NOT zero-coerced, latest()
 //
+// T-2 additions (DESIGN §4h "check_terminal groups (mandatory adds)"):
+//  55. Binance spot continuity → buffered-before-snapshot drop (u ≤ lastId),
+//                           event STRADDLING the snapshot boundary applies,
+//                           contiguous chain applies, qty-0 delete + absolute
+//                           replace, stale live diff ignored, gap → desync +
+//                           resyncCount + CLEARED book, and the violating
+//                           event re-buffers so a fresh snapshot resumes
+//  56. Binance futures pu chain → valid pu chain applies; broken pu → desync
+//                           even though U is CONTIGUOUS — and the SAME event
+//                           sequence stays synced under the spot rule, proving
+//                           the two continuity rules genuinely differ
+//  57. OKX CRC32 checksum  → dependency-free crc32 vs TWO pinned zlib.crc32
+//                           vectors (commands + values in the group), the
+//                           interleave string hand-written and asserted
+//                           byte-exact, valid snapshot+update verify, a
+//                           deliberate qty tweak → mismatch → desync +
+//                           cleared, post-desync updates ignored, fresh
+//                           snapshot re-arms
+//  58. Coinbase l2 book    → snapshot + apply/remove-zero/absolute-replace,
+//                           corrupt side tag skipped, lastUpdateTs advances
+//                           per frame (the ONLY rail — no sequence number,
+//                           stated), new snapshot replaces wholesale
+//  59. SpotPerpCvdStore    → hand-computed perp/spot accumulation, per-10s
+//                           samples close on event time (no zero-gap
+//                           synthesis), out-of-order push still accumulates,
+//                           ring wrap, invalid pushes dropped, latest() null
+//                           before any push
+//  60. deriveLegIds        → BTCUSDT full 7-leg matrix, 1000PEPEUSDT coinbase
+//                           null (T-1 hard rule carried over), non-USDT →
+//                           only bybit_linear survives; deriveVenueIds keeps
+//                           its frozen 4-key T-1 shape (additivity)
+//
+// T-2 wave-2 additions (§4h adapters + leg registry; fixtures `_t2_notes`,
+// live captures 2026-07-23):
+//  61. LegRegistry         → 7 fixed defs aligned with deriveLegIds keys,
+//                           default all-enabled, strict-boolean seed, flip
+//                           reports change-once, snapshot rows are COPIES,
+//                           unknown keys read disabled / write dropped
+//  62. bybit spot adapter  → spot endpoint + both topics + op-ping; real
+//                           publicTrade frames (taker side AS-IS, §0.6),
+//                           orderbook.200 snapshot+delta through BookStore
+//                           incl. a REAL qty-"0" tombstone; book frames mark
+//                           alive (no tickers channel), trades never
+//  63. binance spot adapter → aggTrade `m` INVERSION on real frames (§0.6:
+//                           isBuyerMaker true = SELL aggressor), diffs feed
+//                           BinanceBookSync (never the sink) and the REAL
+//                           same-moment REST snapshot drains them to synced —
+//                           the fixture pins u==lastUpdateId (covered drop)
+//                           and U==lastUpdateId+1 (contiguous) AS CAPTURED
+//  64. binance fut diff    → real @depth@100ms frames pu-chain exactly
+//                           (pinned per-frame) and the REAL fapi snapshot
+//                           lands INSIDE the bracket → futures engine syncs,
+//                           zero resyncs; adapter emits nothing to any sink
+//                           (§0.2 — fut trades live in the collector's REST
+//                           aggTrades poller, never duplicated here)
+//  65. okx books adapter   → MEASURED §4h deviation pinned as a fixture
+//                           precondition: every real books frame (swap+spot)
+//                           carries checksum:0 — the venue no longer
+//                           populates the CRC32 on the keyless channel, so
+//                           OkxBookSync's verify (group 57) has no wire
+//                           input; the adapter enforces the INTACT seqId/
+//                           prevSeqId chain instead: real frames apply
+//                           (ctVal ×0.01 exact on a pinned swap row; spot
+//                           UNSCALED — already coin units), a TAMPERED
+//                           prevSeqId halts emission + flags bookGapped()
+//                           until a fresh snapshot re-arms; trades taker-
+//                           side as-is; one socket, plain-text ping
+//  66. coinbase l2 adapter → exchange-feed snapshot (>1MB on the wire,
+//                           trimmed fixture) + l2updates through
+//                           CoinbaseBookSync (absolute qty, ts rail), match
+//                           maker-side INVERSION (lowercase `side`),
+//                           last_match seeds ONCE, monotonic trade_id dedupe
+//                           swallows re-delivery, l2/heartbeat mark alive,
+//                           matches never; NO ping (a re-subscribe nudge
+//                           would re-send the whole snapshot)
+//
 // Exit: 0 with one PASS line per group; non-zero with a clear FAIL message
 // (plus stack) if any group breaks. Run: node scripts/check_terminal.cjs
 
@@ -259,6 +335,9 @@ const R = require(path.join(__dirname, '..', 'dashboard', 'terminal-replay.js'))
 // requiring it here never touches the vendor bundle — group 46 only drives the
 // pure normalizer + URL allowlist (network-free by construction).
 const HF = require(path.join(__dirname, '..', 'dashboard', 'terminal-hfdata.js'));
+// T-2 (§4h): full-book sync engines — pure, constructed-sequence groups only
+// (no fixtures needed: continuity/checksum rules are exact arithmetic).
+const B = require(path.join(__dirname, '..', 'dashboard', 'terminal-books.js'));
 // quant.js is the O-4 views' options-math source (§4d: Γ via black76Greeks,
 // max pain via maxPain — the house rule forbids reimplementing either), so
 // group 30 drives it directly with normalized chain rows.
@@ -2872,6 +2951,583 @@ group('BasisSeries ring wrap keeps newest in order + NaN funding + latest()', ()
   bs.push(T4 + 8000, NaN, 0.0001);
   assert.strictEqual(bs.latest().ts, T4 + 7000);
   assert.strictEqual(bs.list().length, 5);
+});
+
+// ─── 55. BinanceBookSync spot: buffer/straddle/gap→resync/tombstone (§4h) ────
+group('binance spot continuity: buffer drop, straddle applies, gap → counted resync + cleared', () => {
+  const b = B.BinanceBookSync({ mode: 'spot' });
+  assert.strictEqual(b.mode, 'spot');
+  assert.strictEqual(b.state, 'buffering');
+  assert.ok(b.needsSnapshot(), 'no snapshot yet → caller must fetch');
+
+  // Diffs BEFORE the snapshot buffer; the book stays honestly empty.
+  b.onDiff({ U: 1, u: 3, bids: [['100.0', '1']], asks: [] });                       // u=3 ≤ 5 → dropped at drain
+  b.onDiff({ U: 4, u: 6, bids: [['99.5', '2']], asks: [['101.5', '3']] });          // STRADDLES: U=4 ≤ 5+1 ≤ u=6
+  b.onDiff({ U: 7, u: 8, bids: [['100.0', '0']], asks: [['101.0', '4']] });         // contiguous after the straddler
+  assert.strictEqual(b.bufferedCount, 3);
+  assert.deepStrictEqual(b.best(), { bid: null, ask: null }, 'pre-snapshot book is empty, never partial');
+
+  // Snapshot lastUpdateId=5: drain applies events 2+3 under U ≤ lastId+1 ≤ u.
+  b.onSnapshot(5, [['100.0', '10'], ['99.0', '5']], [['101.0', '7']]);
+  assert.strictEqual(b.state, 'synced');
+  assert.ok(!b.needsSnapshot());
+  assert.strictEqual(b.resyncCount, 0);
+  assert.strictEqual(b.lastUpdateId, 8, 'lastUpdateId = last applied u');
+  // Event 3's qty-0 deleted the snapshot's 100.0 level; 101.0 absolutely replaced 7→4.
+  assert.deepStrictEqual(b.best(), { bid: [99.5, 2], ask: [101.0, 4] });
+  assert.deepStrictEqual(b.topN(2), {
+    bids: [[99.5, 2], [99.0, 5]],
+    asks: [[101.0, 4], [101.5, 3]],
+  });
+
+  // Absolute replace on a live diff: qty 7 REPLACES 2 (never accumulates).
+  b.onDiff({ U: 9, u: 10, bids: [['99.5', '7']], asks: [] });
+  assert.deepStrictEqual(b.best().bid, [99.5, 7]);
+  // A stale live diff (u ≤ lastId — the venue re-delivering) is ignored, not a gap.
+  b.onDiff({ U: 2, u: 3, bids: [['1.0', '9']], asks: [] });
+  assert.strictEqual(b.state, 'synced');
+  // Bid side holds 99.5 + 99.0 (100.0 was tombstoned by the drained diff).
+  assert.strictEqual(b.topN(Infinity).bids.length, 2, 'stale diff must not touch the book');
+
+  // GAP: lastId=10, next U=12 > 11 → desync, counted, book CLEARED (§4h:
+  // never silently patched — a known-gap book on screen is fabricated data).
+  b.onDiff({ U: 12, u: 13, bids: [['99.5', '1']], asks: [] });
+  assert.strictEqual(b.state, 'desync');
+  assert.strictEqual(b.resyncCount, 1);
+  assert.ok(b.needsSnapshot());
+  assert.deepStrictEqual(b.best(), { bid: null, ask: null }, 'desync must CLEAR, not keep a holed book');
+  assert.strictEqual(b.bufferedCount, 1, 'the violating event re-buffers for the next snapshot');
+
+  // Fresh snapshot resumes: the re-buffered {U:12,u:13} brackets id=11 (12 ≤ 12).
+  b.onSnapshot(11, [['98.0', '1']], [['102.0', '1']]);
+  assert.strictEqual(b.state, 'synced');
+  assert.strictEqual(b.resyncCount, 1, 'resync counter is cumulative, not reset by recovery');
+  assert.deepStrictEqual(b.best().bid, [99.5, 1], 'buffered-during-desync diff applied after resync');
+});
+
+// ─── 56. BinanceBookSync futures: pu chain ≠ spot rule, provably (§4h) ───────
+group('binance futures pu-chaining: broken pu → desync while the SAME sequence passes spot rule', () => {
+  // One event sequence, two continuity verdicts — the whole point of `mode`.
+  // f3 is crafted so U chains contiguously (111 = 110+1, spot-legal) while
+  // pu points at 109 ≠ 110 (futures-illegal): only pu chaining catches it.
+  const f1 = { U: 98, u: 102, pu: 97, bids: [['100.0', '6']], asks: [] };  // first after snapshot: bracket 98 ≤ 101 ≤ 102
+  const f2 = { U: 103, u: 110, pu: 102, bids: [['99.0', '2']], asks: [] }; // pu === lastAppliedU
+  const f3 = { U: 111, u: 120, pu: 109, bids: [['98.0', '9']], asks: [] }; // broken chain, contiguous U
+
+  const f = B.BinanceBookSync({ mode: 'futures' });
+  f.onSnapshot(100, [['100.0', '5']], [['101.0', '5']]);
+  f.onDiff(f1);
+  assert.strictEqual(f.state, 'synced');
+  assert.deepStrictEqual(f.best().bid, [100.0, 6], 'first-after-snapshot bracket applied');
+  f.onDiff(f2);
+  assert.strictEqual(f.state, 'synced');
+  assert.strictEqual(f.lastUpdateId, 110);
+  f.onDiff(f3);
+  assert.strictEqual(f.state, 'desync', 'futures: pu 109 ≠ 110 is a hole even with contiguous U');
+  assert.strictEqual(f.resyncCount, 1);
+  assert.deepStrictEqual(f.best(), { bid: null, ask: null }, 'cleared, never patched');
+
+  const s = B.BinanceBookSync({ mode: 'spot' });
+  s.onSnapshot(100, [['100.0', '5']], [['101.0', '5']]);
+  s.onDiff(f1); s.onDiff(f2); s.onDiff(f3);
+  assert.strictEqual(s.state, 'synced', 'spot rule U ≤ lastId+1 ≤ u accepts the whole sequence');
+  assert.strictEqual(s.resyncCount, 0);
+  assert.deepStrictEqual(s.best().bid, [100.0, 6]);
+  assert.strictEqual(s.topN(Infinity).bids.length, 3, 'f3 applied under spot — the rules provably differ');
+});
+
+// ─── 57. OkxBookSync: CRC32 pinned vectors + mismatch → resync (§4h) ─────────
+group('OKX checksum: crc32 vs pinned zlib values, hand interleave, tweak → desync', () => {
+  // Pinned INDEPENDENTLY of our table (§4h "pinned test vector"). Commands run
+  // 2026-07-23:
+  //   python3 -c "import zlib; print(zlib.crc32(b'8476.98:415:8477:7:8475.55:100:8477.34:85'))"
+  //     → 3025791351 (unsigned) ≡ -1269175945 as signed int32
+  //   python3 -c "import zlib; print(zlib.crc32(b'3366.1:7:3366.8:9:3368:8:3372:8'))"
+  //     → 831078360 (unsigned) ≡ 831078360 as signed int32
+  assert.strictEqual(B.crc32('8476.98:415:8477:7:8475.55:100:8477.34:85'), -1269175945);
+  assert.strictEqual(B.crc32('3366.1:7:3366.8:9:3368:8:3372:8'), 831078360);
+
+  // Constructed book. Interleave BY HAND (bid1:qty:ask1:qty:bid2:qty:ask2:qty):
+  //   bids best-first: 100.5×10, 100.0×5; asks best-first: 101.0×3, 101.5×8
+  //   → "100.5:10:101.0:3:100.0:5:101.5:8"
+  //   python3 -c "import zlib; print(zlib.crc32(b'100.5:10:101.0:3:100.0:5:101.5:8'))" → 490508691
+  const ok = B.OkxBookSync();
+  assert.ok(ok.needsSnapshot());
+  // 4-column wire rows ([px, qty, liqOrders, numOrders]) — extra columns ignored.
+  ok.onSnapshot([['100.5', '10', '0', '2'], ['100.0', '5', '0', '1']],
+    [['101.0', '3', '0', '1'], ['101.5', '8', '0', '3']], 490508691);
+  assert.strictEqual(ok.state, 'synced');
+  assert.strictEqual(ok.checksumString(), '100.5:10:101.0:3:100.0:5:101.5:8');
+  assert.strictEqual(ok.checksum(), 490508691);
+
+  // Update: replace bid 100.5→12, tombstone ask 101.0 (qty "0"), add ask 102.0×4.
+  // Resulting hand interleave: "100.5:12:101.5:8:100.0:5:102.0:4"
+  //   python3 -c "import zlib; print(zlib.crc32(b'100.5:12:101.5:8:100.0:5:102.0:4'))" → 1317526142
+  ok.onUpdate([['100.5', '12']], [['101.0', '0'], ['102.0', '4']], 1317526142);
+  assert.strictEqual(ok.state, 'synced');
+  assert.strictEqual(ok.resyncCount, 0);
+  assert.deepStrictEqual(ok.best(), { bid: [100.5, 12], ask: [101.5, 8] });
+  assert.deepStrictEqual(ok.topN(1), { bids: [[100.5, 12]], asks: [[101.5, 8]] });
+
+  // DELIBERATE MISMATCH: the venue claims the CRC of a book where bid 100.5
+  // holds qty 13 (string "100.5:13:101.5:8:100.0:5:102.0:4" → unsigned
+  // 3943451248 ≡ signed -351516048, same python command) — ours holds 12.
+  ok.onUpdate([], [], -351516048);
+  assert.strictEqual(ok.state, 'desync');
+  assert.strictEqual(ok.resyncCount, 1);
+  assert.ok(ok.needsSnapshot());
+  assert.deepStrictEqual(ok.best(), { bid: null, ask: null }, 'mismatch clears — never silently patched');
+  // Post-desync updates are ignored: deltas onto a cleared book would fabricate.
+  ok.onUpdate([['1.0', '1']], [], 0);
+  assert.strictEqual(ok.topN(Infinity).bids.length, 0);
+  // Fresh snapshot re-arms; counter stays cumulative.
+  ok.onSnapshot([['100.5', '10'], ['100.0', '5']], [['101.0', '3'], ['101.5', '8']], 490508691);
+  assert.strictEqual(ok.state, 'synced');
+  assert.strictEqual(ok.resyncCount, 1);
+
+  // Asymmetric sides (< 25 levels: use what exists — per spec): 1 bid, 3 asks
+  // interleave to the SECOND pinned vector's exact string.
+  const ok2 = B.OkxBookSync();
+  ok2.onSnapshot([['3366.1', '7']], [['3366.8', '9'], ['3368', '8'], ['3372', '8']], 831078360);
+  assert.strictEqual(ok2.checksumString(), '3366.1:7:3366.8:9:3368:8:3372:8');
+  assert.strictEqual(ok2.state, 'synced');
+  // A snapshot failing its OWN checksum is corrupt → counted desync.
+  const ok3 = B.OkxBookSync();
+  ok3.onSnapshot([['3366.1', '7']], [['3366.8', '9']], 12345);
+  assert.strictEqual(ok3.state, 'desync');
+  assert.strictEqual(ok3.resyncCount, 1);
+});
+
+// ─── 58. CoinbaseBookSync: apply/remove-zero/replace + ts rail (§4h) ─────────
+group('coinbase l2: snapshot+apply+remove-zero+replace, lastUpdateTs advances', () => {
+  const T5 = 1783100000000;
+  const cb = B.CoinbaseBookSync();
+  // No sequence number exists on level2_batch — lastUpdateTs is the ONLY rail
+  // (staleness-gate → reconnect → fresh snapshot), so it must track exactly.
+  assert.ok(Number.isNaN(cb.lastUpdateTs), 'untouched book has no ts — never a fake 0');
+  cb.onSnapshot([['100.0', '2'], ['99.5', '1']], [['100.5', '3']], T5);
+  assert.strictEqual(cb.lastUpdateTs, T5);
+  assert.deepStrictEqual(cb.best(), { bid: [100.0, 2], ask: [100.5, 3] });
+
+  // One batch: remove (qty "0"), absolute replace (3→5, never 3+5), add.
+  cb.onL2Update([['buy', '100.0', '0'], ['sell', '100.5', '5'], ['buy', '99.0', '4']], T5 + 1000);
+  assert.strictEqual(cb.lastUpdateTs, T5 + 1000, 'ts advances per frame');
+  assert.deepStrictEqual(cb.best(), { bid: [99.5, 1], ask: [100.5, 5] });
+  assert.deepStrictEqual(cb.topN(2), { bids: [[99.5, 1], [99.0, 4]], asks: [[100.5, 5]] });
+
+  // Corrupt side tag: row skipped (never guessed onto a side), ts still
+  // advances — the gate measures channel liveness, not row quality.
+  cb.onL2Update([['hold', '98.0', '1']], T5 + 2000);
+  assert.strictEqual(cb.lastUpdateTs, T5 + 2000);
+  assert.strictEqual(cb.topN(Infinity).bids.length, 2);
+
+  // Reconnect rail: a new snapshot replaces the book WHOLESALE.
+  cb.onSnapshot([['50.0', '1']], [['51.0', '1']], T5 + 3000);
+  assert.deepStrictEqual(cb.best(), { bid: [50.0, 1], ask: [51.0, 1] });
+  assert.strictEqual(cb.topN(Infinity).bids.length, 1, 'old levels gone with the old book');
+});
+
+// ─── 59. SpotPerpCvdStore: hand-computed accumulation + sampling (§4h) ───────
+group('SpotPerpCvd accumulation: hand math, event-time buckets, out-of-order, ring', () => {
+  const T6 = 1783000000000; // multiple of 10000 — bucket edges land exactly
+  const st = B.SpotPerpCvdStore({});
+  assert.strictEqual(st.latest(), null, 'no pushes → null, never a fabricated zero row');
+
+  // Hand path: perp +100 −30 = 70; spot +40 within the first 10 s bucket.
+  st.push(T6, 'bybit_linear', true, 100);
+  st.push(T6 + 1000, 'binance_spot', false, 40);
+  st.push(T6 + 2000, 'okx_swap', true, -30);
+  assert.deepStrictEqual(st.latest(), { ts: T6 + 2000, cvdPerp: 70, cvdSpot: 40 });
+  assert.deepStrictEqual(st.list(), [], 'bucket still open — no sample yet');
+
+  // Crossing the bucket edge closes it at its PRE-push cums.
+  st.push(T6 + 10000, 'coinbase', false, -15);
+  assert.deepStrictEqual(st.list(), [{ ts: T6, cvdPerp: 70, cvdSpot: 40 }]);
+  // Out-of-order push (cross-venue interleave) still ACCUMULATES — dropping
+  // real flow would bias the perp/spot comparison — but moves no sample.
+  st.push(T6 + 9000, 'bybit_spot', false, 5);
+  assert.strictEqual(st.list().length, 1);
+  assert.deepStrictEqual(st.latest(), { ts: T6 + 10000, cvdPerp: 70, cvdSpot: 30 }, 'latest ts stays the max seen');
+
+  // Jump over an empty bucket: exactly ONE sample closes (gaps are gaps —
+  // no zero-sample synthesis), keyed by ITS bucket start.
+  st.push(T6 + 25000, 'bybit_linear', true, 1);
+  assert.deepStrictEqual(st.list(), [
+    { ts: T6, cvdPerp: 70, cvdSpot: 40 },
+    { ts: T6 + 10000, cvdPerp: 70, cvdSpot: 30 },
+  ]);
+  assert.deepStrictEqual(st.latest(), { ts: T6 + 25000, cvdPerp: 71, cvdSpot: 30 });
+  // Per-leg cumulative ledger (panel legend): bybit_linear 100+1, the rest as pushed.
+  assert.deepStrictEqual(st.byLeg, {
+    bybit_linear: 101, binance_spot: 40, okx_swap: -30, coinbase: -15, bybit_spot: 5,
+  });
+
+  // Hygiene: NaN ts / NaN or zero notional / missing legKey never touch state.
+  st.push(NaN, 'bybit_linear', true, 5);
+  st.push(T6 + 26000, 'bybit_linear', true, NaN);
+  st.push(T6 + 26000, 'bybit_linear', true, 0);
+  st.push(T6 + 26000, '', true, 5);
+  assert.deepStrictEqual(st.latest(), { ts: T6 + 25000, cvdPerp: 71, cvdSpot: 30 });
+
+  // Ring wrap: max 2 keeps only the newest two completed samples, in order.
+  const st2 = B.SpotPerpCvdStore({ max: 2 });
+  for (let i = 0; i < 4; i++) st2.push(T6 + i * 10000, 'okx_spot', false, 1);
+  assert.deepStrictEqual(st2.list().map((r) => r.ts), [T6 + 10000, T6 + 20000]);
+  assert.deepStrictEqual(st2.list().map((r) => r.cvdSpot), [2, 3]);
+});
+
+// ─── 60. deriveLegIds: the 7-leg matrix + honest degrades (§4h) ──────────────
+group('deriveLegIds BTCUSDT full matrix, 1000PEPE coinbase null, non-USDT bybit-only', () => {
+  assert.deepStrictEqual(S.deriveLegIds('BTCUSDT'), {
+    bybit_linear: 'BTCUSDT', bybit_spot: 'BTCUSDT',
+    binancef: 'BTCUSDT', binance_spot: 'BTCUSDT',
+    okx_swap: 'BTC-USDT-SWAP', okx_spot: 'BTC-USDT', coinbase: 'BTC-USD',
+  });
+  // Multiplied perp: coinbase is a NAMING impossibility (T-1 hard rule — no
+  // USD spot for a derivatives multiplier artifact); the USDT-spot ids stay
+  // derived, and the per-leg listability probe decides whether they exist.
+  assert.deepStrictEqual(S.deriveLegIds('1000PEPEUSDT'), {
+    bybit_linear: '1000PEPEUSDT', bybit_spot: '1000PEPEUSDT',
+    binancef: '1000PEPEUSDT', binance_spot: '1000PEPEUSDT',
+    okx_swap: '1000PEPE-USDT-SWAP', okx_spot: '1000PEPE-USDT', coinbase: null,
+  });
+  // Non-USDT: only the picker's own id survives (§4g rule extended to every
+  // derived leg — a guessed id would subscribe a stream that never delivers).
+  assert.deepStrictEqual(S.deriveLegIds('BTCUSD'), {
+    bybit_linear: 'BTCUSD', bybit_spot: null, binancef: null,
+    binance_spot: null, okx_swap: null, okx_spot: null, coinbase: null,
+  });
+  assert.deepStrictEqual(S.deriveLegIds(''), {
+    bybit_linear: null, bybit_spot: null, binancef: null,
+    binance_spot: null, okx_swap: null, okx_spot: null, coinbase: null,
+  });
+  // Additivity rail: deriveVenueIds keeps its frozen 4-key T-1 shape — T-2
+  // must not leak matrix keys into the T-1 consumers' contract.
+  assert.deepStrictEqual(Object.keys(S.deriveVenueIds('BTCUSDT')).sort(),
+    ['binancef', 'bybit', 'coinbase', 'okx']);
+});
+
+// ─── 61. LegRegistry: 7-leg matrix store (§4h) ───────────────────────────────
+group('LegRegistry: 7 defs, enable/disable change-once, copy snapshot, strict seed', () => {
+  const reg = S.LegRegistry();
+  assert.deepStrictEqual(reg.keys(),
+    ['bybit_linear', 'bybit_spot', 'binancef', 'binance_spot', 'okx_swap', 'okx_spot', 'coinbase']);
+  // One naming universe: registry keys ≡ deriveLegIds keys (§4h).
+  assert.deepStrictEqual(reg.keys().slice().sort(), Object.keys(S.deriveLegIds('')).sort());
+  assert.deepStrictEqual(reg.get('okx_swap'),
+    { key: 'okx_swap', venue: 'okx', market: 'perp', enabled: true, status: null });
+  assert.strictEqual(reg.isPerp('bybit_linear'), true);
+  assert.strictEqual(reg.isPerp('binance_spot'), false);
+  assert.ok(reg.snapshot().every((l) => l.enabled === true), 'default: ALL enabled (§4h)');
+
+  // Flip reports a change exactly once; reads and the persistence map agree.
+  assert.strictEqual(reg.setEnabled('coinbase', false), true);
+  assert.strictEqual(reg.setEnabled('coinbase', false), false, 'no-op flip reports no change');
+  assert.strictEqual(reg.isEnabled('coinbase'), false);
+  assert.strictEqual(reg.enabledMap().coinbase, false);
+  assert.strictEqual(reg.snapshot().find((l) => l.key === 'coinbase').enabled, false);
+
+  // Snapshot rows are COPIES — mutating the UI's read must not corrupt state.
+  const snap = reg.snapshot();
+  snap[0].enabled = false; snap[0].market = 'corrupted';
+  assert.strictEqual(reg.isEnabled('bybit_linear'), true);
+  assert.strictEqual(reg.get('bybit_linear').market, 'perp');
+
+  // Unknown keys: disabled reads (a leg the registry cannot name must never
+  // start), dropped writes, null get. Non-boolean flips dropped, not coerced.
+  assert.strictEqual(reg.isEnabled('nope'), false);
+  assert.strictEqual(reg.setEnabled('nope', true), false);
+  assert.strictEqual(reg.get('nope'), null);
+  assert.strictEqual(reg.setEnabled('okx_spot', 1), false);
+  assert.strictEqual(reg.isEnabled('okx_spot'), true);
+
+  // Persisted seed: STRICT booleans on KNOWN keys only (settings rail).
+  const reg2 = S.LegRegistry({ enabled: { binance_spot: false, okx_spot: 'no', bogus: false } });
+  assert.strictEqual(reg2.isEnabled('binance_spot'), false);
+  assert.strictEqual(reg2.isEnabled('okx_spot'), true, 'non-boolean seed ignored');
+  assert.strictEqual(reg2.isEnabled('bybit_linear'), true);
+
+  // Status is caller-owned bookkeeping, surfaced by the snapshot.
+  reg2.setStatus('binancef', { kind: 'stale', msg: 'disabled (settings)' });
+  assert.deepStrictEqual(reg2.get('binancef').status, { kind: 'stale', msg: 'disabled (settings)' });
+});
+
+// ─── 62. Bybit SPOT adapter: real publicTrade + orderbook.200 (§4h) ──────────
+group('bybit spot adapter: descriptor, taker-side trades, book tombstones, liveness split', () => {
+  const { evts, sink } = collectSink();
+  const ad = A.makeBybitSpotAdapter('BTCUSDT', sink);
+  assert.strictEqual(ad.url, 'wss://stream.bybit.com/v5/public/spot');
+  const { sent, ws } = captureWs();
+  ad.subscribe(ws); ad.ping(ws);
+  assert.deepStrictEqual(sent[0], { op: 'subscribe', args: ['publicTrade.BTCUSDT', 'orderbook.200.BTCUSDT'] });
+  assert.deepStrictEqual(sent[1], { op: 'ping' });
+
+  // Trades: §0.6 taker side AS-IS, ex 'bybit_spot', wire values exact —
+  // and trades NEVER markAlive (quiet spot tape = quiet market).
+  const api = countingApi();
+  for (const f of FX.t2_bybitspot_publicTrade) ad.onMessage(f, api);
+  const nTrades = FX.t2_bybitspot_publicTrade.reduce((n, f) => n + f.data.length, 0);
+  assert.strictEqual(evts.length, nTrades);
+  assert.strictEqual(api.alive, 0, 'trades must never markAlive');
+  let i = 0;
+  for (const f of FX.t2_bybitspot_publicTrade) {
+    for (const raw of f.data) {
+      const ev = evts[i++];
+      assert.strictEqual(ev.kind, 'trade');
+      assert.strictEqual(ev.ex, 'bybit_spot');
+      assert.strictEqual(ev.aggressorBuy, raw.S === 'Buy', 'S is already the taker side — no inversion');
+      assert.strictEqual(ev.ts, raw.T);
+      assert.strictEqual(ev.price, Number(raw.p));
+      assert.strictEqual(ev.qty, Number(raw.v));
+      assert.strictEqual(ev.id, String(raw.i));
+    }
+  }
+
+  // Book: snapshot + deltas through a real BookStore. Every book frame marks
+  // alive — this socket has no tickers channel, the book IS its liveness.
+  evts.length = 0;
+  ad.onMessage(FX.t2_bybitspot_orderbook200_snapshot[0], api);
+  for (const f of FX.t2_bybitspot_orderbook200_delta) ad.onMessage(f, api);
+  assert.strictEqual(api.alive, 1 + FX.t2_bybitspot_orderbook200_delta.length);
+  assert.strictEqual(evts[0].isSnapshot, true);
+  assert.strictEqual(evts[0].ex, 'bybit_spot');
+  assert.strictEqual(evts[0].bids[0][0], 65072.3, 'fixture best bid');
+  assert.strictEqual(evts[0].asks[0][0], 65072.4, 'fixture best ask');
+  // A REAL qty-"0" tombstone (delta 1 carries ["64962.8","0"]) survives the
+  // adapter for the store to delete — the linear leg's rail, same code path.
+  assert.ok(evts[1].bids.some((l) => l[0] === 64962.8 && l[1] === 0), 'tombstone kept for the store');
+  const book = S.BookStore();
+  for (const ev of evts) book.applyDepth(ev);
+  const b = book.best();
+  assert.ok(b.bid && b.ask && b.bid[0] < b.ask[0], 'book sane after real deltas');
+});
+
+// ─── 63. Binance SPOT adapter: aggTrade inversion + engine sync (§4h) ────────
+group('binance spot adapter: m-inversion, diffs feed the engine, real REST snapshot syncs', () => {
+  const { evts, sink } = collectSink();
+  const eng = B.BinanceBookSync({ mode: 'spot' });
+  const ad = A.makeBinanceSpotAdapter('BTCUSDT', sink, { book: eng });
+  assert.strictEqual(ad.url, 'wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/btcusdt@depth@100ms');
+
+  // §0.6: `m` (isBuyerMaker) true → SELL aggressor — aggressorBuy inverts m.
+  const api = countingApi();
+  for (const f of FX.t2_binancespot_aggtrade) ad.onMessage(f, api);
+  assert.strictEqual(api.alive, 0, 'trades never markAlive');
+  assert.strictEqual(evts.length, FX.t2_binancespot_aggtrade.length);
+  FX.t2_binancespot_aggtrade.forEach((f, j) => {
+    const raw = f.data, ev = evts[j];
+    assert.strictEqual(ev.kind, 'trade');
+    assert.strictEqual(ev.ex, 'binance_spot');
+    assert.strictEqual(ev.aggressorBuy, raw.m === false, 'aggressorBuy must INVERT isBuyerMaker');
+    assert.strictEqual(ev.ts, raw.T, 'ts = trade time T, not gateway E');
+    assert.strictEqual(ev.id, String(raw.a));
+    assert.strictEqual(ev.price, Number(raw.p));
+    assert.strictEqual(ev.qty, Number(raw.q));
+  });
+  // Fixture precondition: the captured prints are all m:true, so a copied
+  // (non-inverted) flag would fail every row above as `true`.
+  assert.ok(FX.t2_binancespot_aggtrade.every((f) => f.data.m === true));
+
+  // Diffs go to the ENGINE, never the sink; every diff frame marks alive.
+  for (const f of FX.t2_binancespot_depthdiff) ad.onMessage(f, api);
+  assert.strictEqual(evts.length, FX.t2_binancespot_aggtrade.length, 'diffs must not reach the sink');
+  assert.strictEqual(api.alive, FX.t2_binancespot_depthdiff.length);
+  assert.strictEqual(eng.state, 'buffering');
+  assert.strictEqual(eng.bufferedCount, 4);
+
+  // The REAL same-moment REST snapshot drains them under the spot rule. The
+  // capture pinned the interesting boundary: diff 1's u == lastUpdateId
+  // EXACTLY (dropped as covered) and diff 2's U == lastUpdateId+1
+  // (contiguous) — assert the precondition so a re-capture that stops
+  // exercising the boundary cannot silently pass.
+  const snap = FX.t2_binancespot_rest_depth;
+  assert.strictEqual(Number(FX.t2_binancespot_depthdiff[0].data.u), snap.lastUpdateId);
+  assert.strictEqual(Number(FX.t2_binancespot_depthdiff[1].data.U), snap.lastUpdateId + 1);
+  eng.onSnapshot(snap.lastUpdateId, snap.bids, snap.asks);
+  assert.strictEqual(eng.state, 'synced', 'real diffs + real snapshot must sync');
+  assert.strictEqual(eng.resyncCount, 0);
+  assert.strictEqual(eng.lastUpdateId, Number(FX.t2_binancespot_depthdiff[3].data.u));
+  const b = eng.best();
+  assert.ok(b.bid && b.ask && Number.isFinite(b.bid[0]) && b.bid[0] < b.ask[0], 'synced book sane');
+});
+
+// ─── 64. Binance FUT diff adapter: real pu chain + fapi snapshot (§4h) ───────
+group('binance fut diff adapter: real pu chain syncs the futures engine, sink-free', () => {
+  const eng = B.BinanceBookSync({ mode: 'futures' });
+  const ad = A.makeBinanceFutDepthDiff('BTCUSDT', { book: eng });
+  assert.strictEqual(ad.url, 'wss://fstream.binance.com/stream?streams=btcusdt@depth@100ms');
+  const api = countingApi();
+  for (const f of FX.t2_binancef_depthdiff) ad.onMessage(f, api);
+  assert.strictEqual(api.alive, FX.t2_binancef_depthdiff.length, 'every diff frame marks alive');
+  assert.strictEqual(eng.bufferedCount, 4);
+
+  // Fixture preconditions that make this a REAL continuity proof: captured
+  // consecutive diffs chain pu === previous u exactly, and the same-moment
+  // fapi snapshot id lands INSIDE diff 2's [U, u] (the bracket the engine's
+  // first-after-snapshot rule admits).
+  const d = FX.t2_binancef_depthdiff.map((f) => f.data);
+  for (let j = 1; j < d.length; j++) {
+    assert.strictEqual(Number(d[j].pu), Number(d[j - 1].u), 'wire pu chain intact as captured');
+  }
+  const snap = FX.t2_binancef_rest_depth;
+  assert.ok(Number(d[0].u) <= snap.lastUpdateId, 'diff 1 entirely covered by the snapshot');
+  assert.ok(Number(d[1].U) <= snap.lastUpdateId + 1 && snap.lastUpdateId <= Number(d[1].u),
+    'diff 2 brackets the snapshot id');
+  eng.onSnapshot(snap.lastUpdateId, snap.bids, snap.asks);
+  assert.strictEqual(eng.state, 'synced', 'real fut diffs + real snapshot must sync via pu chaining');
+  assert.strictEqual(eng.resyncCount, 0);
+  assert.strictEqual(eng.lastUpdateId, Number(d[3].u));
+  const b = eng.best();
+  assert.ok(b.bid && b.ask && b.bid[0] < b.ask[0]);
+});
+
+// ─── 65. OKX books adapter: measured checksum reality + seq chain (§4h) ──────
+group('okx books adapter: real frames carry checksum:0 (measured) — seq chain rail, ctVal, gap halts', () => {
+  // THE §4h DEVIATION, pinned as a fixture precondition: every captured
+  // books frame (swap AND spot, 2026-07-23, 300+ frames probed across three
+  // instruments) carries checksum:0 — the venue no longer populates the
+  // CRC32 on the keyless books channel, so OkxBookSync's verify (group 57
+  // pins the convention against zlib) has NO wire input to check. The
+  // identifiable continuity rail on the real wire is seqId/prevSeqId
+  // chaining, which this adapter enforces below ON those same real frames.
+  const allBooks = [FX.t2_okxswap_books_snapshot[0]].concat(FX.t2_okxswap_books_update,
+    [FX.t2_okxspot_books_snapshot[0]], FX.t2_okxspot_books_update);
+  for (const f of allBooks) {
+    assert.strictEqual(f.data[0].checksum, 0, 'fixture precondition: checksum is the 0 placeholder');
+  }
+
+  // SWAP leg: ctVal 0.01 CONTRACTS→BTC on every level (§4b unit rail).
+  const { evts, sink } = collectSink();
+  const api = countingApi();
+  const ad = A.makeOkxBooksAdapter('BTC-USDT-SWAP', sink, { ex: 'okx', ctVal: 0.01 });
+  assert.strictEqual(ad.bookGapped(), false);
+  ad.onMessage(FX.t2_okxswap_books_snapshot[0], api);
+  for (const f of FX.t2_okxswap_books_update) ad.onMessage(f, api);
+  assert.strictEqual(api.alive, 4, 'every books data frame marks alive (§4b contract)');
+  assert.strictEqual(evts.length, 4, 'intact chain: snapshot + all three updates emit');
+  assert.strictEqual(evts[0].isSnapshot, true);
+  assert.ok(evts.slice(1).every((e) => e.isSnapshot === false));
+  assert.strictEqual(evts[0].bids[0][0], 65029.9);
+  assert.ok(approx(evts[0].bids[0][1], 3.1836, 1e-12), 'sz 318.36 contracts → 3.1836 BTC exactly');
+  // A REAL sz-"0" tombstone survives scaling (0 × ctVal = 0) for the store.
+  assert.ok(evts[1].bids.some((l) => l[0] === 65020.1 && l[1] === 0), 'real tombstone kept');
+  const book = S.BookStore();
+  for (const ev of evts) book.applyDepth(ev);
+  const b = book.best();
+  assert.ok(b.bid && b.ask && b.bid[0] < b.ask[0], 'book sane after the chained updates');
+  assert.strictEqual(ad.bookResyncs, 0);
+
+  // TAMPERED prevSeqId → gap: the frame is DROPPED (§0.7 — no deltas past a
+  // known hole), bookGapped() flags the caller's resubscribe poll, later
+  // GOOD frames stay dropped (the chain is broken, not resumed), and only a
+  // fresh snapshot re-arms.
+  const tampered = JSON.parse(JSON.stringify(FX.t2_okxswap_books_update[0]));
+  tampered.data[0].prevSeqId = Number(tampered.data[0].prevSeqId) + 1;
+  const statuses = [];
+  const api2 = { markAlive() {}, onStatus(k, m) { statuses.push([k, m]); } };
+  const { evts: ev2, sink: sink2 } = collectSink();
+  const ad2 = A.makeOkxBooksAdapter('BTC-USDT-SWAP', sink2, { ex: 'okx', ctVal: 0.01 });
+  ad2.onMessage(FX.t2_okxswap_books_snapshot[0], api2);
+  ad2.onMessage(tampered, api2);
+  assert.strictEqual(ad2.bookGapped(), true);
+  assert.strictEqual(ad2.bookResyncs, 1, 'counted honest resync');
+  assert.strictEqual(ev2.length, 1, 'the gapped update must NOT emit');
+  ad2.onMessage(FX.t2_okxswap_books_update[1], api2);   // chains off the update we dropped
+  assert.strictEqual(ev2.length, 1, 'post-gap updates stay dropped until a snapshot');
+  assert.ok(statuses.some(([k, m]) => k === 'stale' && /seq gap/.test(m)), 'gap chips its reason');
+  ad2.onMessage(FX.t2_okxswap_books_snapshot[0], api2);
+  assert.strictEqual(ad2.bookGapped(), false, 'fresh snapshot re-arms the chain');
+  assert.strictEqual(ev2.length, 2);
+
+  // SPOT leg: sz ALREADY coin units → UNSCALED (ctVal 1), ex tag, and the
+  // trades channel taker-side rail on real spot prints.
+  const { evts: ev3, sink: sink3 } = collectSink();
+  const ad3 = A.makeOkxBooksAdapter('BTC-USDT', sink3, { ex: 'okx_spot', ctVal: 1 });
+  ad3.onMessage(FX.t2_okxspot_books_snapshot[0], nullApi);
+  for (const f of FX.t2_okxspot_books_update) ad3.onMessage(f, nullApi);
+  for (const f of FX.t2_okxspot_trades) ad3.onMessage(f, nullApi);
+  const depths = ev3.filter((e) => e.kind === 'depth');
+  const trades = ev3.filter((e) => e.kind === 'trade');
+  assert.strictEqual(depths.length, 4);
+  assert.ok(depths.every((e) => e.ex === 'okx_spot'));
+  assert.strictEqual(depths[0].bids[0][0], 65052.3);
+  assert.strictEqual(depths[0].bids[0][1], 0.56597003, 'spot qty UNSCALED — already coin units');
+  assert.strictEqual(trades.length, FX.t2_okxspot_trades.length);
+  trades.forEach((ev, j) => {
+    const raw = FX.t2_okxspot_trades[j].data[0];
+    assert.strictEqual(ev.ex, 'okx_spot');
+    assert.strictEqual(ev.aggressorBuy, raw.side === 'buy', 'taker side as-is (§0.6 Bybit family)');
+    assert.strictEqual(ev.qty, Number(raw.sz));
+    assert.strictEqual(ev.ts, Number(raw.ts));
+    assert.strictEqual(ev.id, String(raw.tradeId));
+  });
+
+  // Descriptor: ONE socket per leg (books + trades), plain-text keepalive.
+  const { sent, ws } = captureWs();
+  ad3.subscribe(ws); ad3.ping(ws);
+  assert.deepStrictEqual(sent[0], {
+    op: 'subscribe',
+    args: [{ channel: 'books', instId: 'BTC-USDT' }, { channel: 'trades', instId: 'BTC-USDT' }],
+  });
+  assert.strictEqual(sent[1], 'ping');
+});
+
+// ─── 66. Coinbase L2 adapter: exchange feed through CoinbaseBookSync (§4h) ───
+group('coinbase l2 adapter: real snapshot+l2update via engine, maker inversion, dedupe', () => {
+  const { evts, sink } = collectSink();
+  const eng = B.CoinbaseBookSync();
+  const ad = A.makeCoinbaseL2Adapter('BTC-USD', sink, { book: eng });
+  assert.strictEqual(ad.url, 'wss://ws-feed.exchange.coinbase.com');
+  const { sent, ws } = captureWs();
+  ad.subscribe(ws);
+  assert.deepStrictEqual(sent[0], {
+    type: 'subscribe', product_ids: ['BTC-USD'],
+    channels: ['level2_batch', 'matches', 'heartbeat'],
+  });
+  // NO ping on purpose: a periodic re-subscribe "nudge" (the advanced-trade
+  // idiom) makes this venue re-send the whole >1MB snapshot.
+  assert.strictEqual(ad.ping, undefined, 'no keepalive nudge — heartbeat channel is the keepalive');
+
+  const api = countingApi();
+  const snap = FX.t2_coinbase_l2_snapshot[0];
+  ad.onMessage(snap, api);
+  assert.strictEqual(eng.lastUpdateTs, Date.parse(snap.time), 'snapshot time seeds the staleness rail');
+  let b = eng.best();
+  assert.deepStrictEqual([b.bid[0], b.ask[0]], [65009.22, 65009.23], 'fixture best after snapshot');
+  for (const u of FX.t2_coinbase_l2_update) ad.onMessage(u, api);
+  assert.strictEqual(eng.lastUpdateTs, Date.parse(FX.t2_coinbase_l2_update[2].time), 'ts advances per l2 frame');
+  // REAL change rows, both rails: 65010.85 lands at its ABSOLUTE qty (last
+  // write wins, never accumulated), and 64915.46 — set by update 1, zeroed
+  // by a later update — is GONE (the qty-0 removal on real frames).
+  const bidLadder = eng.topN(Infinity).bids;
+  assert.ok(bidLadder.some((l) => l[0] === 65010.85 && l[1] === 0.74329118),
+    'l2update change applied absolutely');
+  assert.ok(!bidLadder.some((l) => l[0] === 64915.46), 'qty-0 change removed the level');
+  b = eng.best();
+  assert.ok(b.bid && b.ask && b.bid[0] < b.ask[0], 'book sane after real updates');
+  assert.strictEqual(api.alive, FX.t2_coinbase_l2_update.length, 'l2 batches mark alive; the one-shot snapshot does not');
+  ad.onMessage(FX.t2_coinbase_heartbeat[0], api);
+  assert.strictEqual(api.alive, FX.t2_coinbase_l2_update.length + 1, 'heartbeat marks alive');
+
+  // Matches: §0.6 gotcha — `side` is the MAKER (lowercase on this feed),
+  // aggressor is the INVERSE. last_match (the subscribe-time seed print)
+  // emits ONCE; monotonic trade_id dedupe swallows re-delivery.
+  for (const m of FX.t2_coinbase_matches) ad.onMessage(m, api);
+  assert.strictEqual(api.alive, FX.t2_coinbase_l2_update.length + 1, 'matches never markAlive');
+  assert.strictEqual(evts.length, FX.t2_coinbase_matches.length);
+  FX.t2_coinbase_matches.forEach((raw, j) => {
+    const ev = evts[j];
+    assert.strictEqual(ev.kind, 'trade');
+    assert.strictEqual(ev.ex, 'coinbase');
+    assert.strictEqual(ev.aggressorBuy, raw.side === 'sell', 'maker side must invert to the aggressor');
+    assert.strictEqual(ev.ts, Date.parse(raw.time));
+    assert.strictEqual(ev.id, String(raw.trade_id));
+    assert.strictEqual(ev.price, Number(raw.price));
+    assert.strictEqual(ev.qty, Number(raw.size));
+  });
+  assert.strictEqual(FX.t2_coinbase_matches[0].type, 'last_match', 'fixture precondition: the seed print is present');
+  for (const m of FX.t2_coinbase_matches) ad.onMessage(m, api);
+  assert.strictEqual(evts.length, FX.t2_coinbase_matches.length, 'reconnect re-delivery emits ZERO new trades');
 });
 
 // ─── Verdict ─────────────────────────────────────────────────────────────────

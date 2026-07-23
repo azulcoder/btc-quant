@@ -31,9 +31,10 @@
   const A = window.BTCQ_TERMINAL_ADAPTERS;
   const S = window.BTCQ_TERMINAL_STATE;
   const V = window.BTCQ_TERMINAL_VIEWS;
-  if (!LW || !A || !S || !V || !window.BTCQ_TERMINAL_HIST) {
+  const B = window.BTCQ_TERMINAL_BOOKS;   // T-2 (§4h): book-sync engines + spot/perp CVD
+  if (!LW || !A || !S || !B || !V || !window.BTCQ_TERMINAL_HIST) {
     // Script-order contract broken (§4/§4c load order) — say so, render nothing.
-    console.error('terminal.js: missing globals (load order must be livewire → adapters → state → hist → views → terminal)');
+    console.error('terminal.js: missing globals (load order must be livewire → adapters → state → books → hist → views → terminal)');
     return;
   }
 
@@ -118,7 +119,14 @@
     // markers (default on per contract), workspace preset + the custom state.
     sym: 'BTCUSDT', fpDeltaRows: true, klevDraw: true, workspace: 'all',
     lastCollapsed: { orderflow: false, structure: false, auction: false, intelligence: false, portfolio: false },
+    // T-2 (§4h): the 7-leg enabled-set — ALL enabled by default (contract);
+    // populated per-key in loadSettings so DEFAULTS never shares the object.
+    legs: null,
   };
+
+  // T-2 (§4h): the matrix leg keys — ONE source (deriveLegIds' shape), so the
+  // settings whitelist, the registry and the lifecycle can never disagree.
+  const LEG_KEYS = Object.keys(S.deriveLegIds(''));
 
   function loadSettings() {
     const s = Object.assign({}, DEFAULTS);
@@ -128,6 +136,10 @@
     s.alertRules = DEFAULT_RULES.map((r) => Object.assign({ id: r.kind }, r));
     s.collapsed = { orderflow: false, structure: false, auction: false, intelligence: false, portfolio: false };
     s.lastCollapsed = { orderflow: false, structure: false, auction: false, intelligence: false, portfolio: false };
+    // T-2 (§4h): all legs enabled unless storage holds a strict boolean for a
+    // KNOWN key (same validated-on-load rule as every other stored value).
+    s.legs = {};
+    for (const k of LEG_KEYS) s.legs[k] = true;
     try {
       const j = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
       // T-1 (§4g): tick is validated for SANITY (finite, positive, bounded)
@@ -185,6 +197,12 @@
       if (typeof j.levelsDraw === 'boolean') s.levelsDraw = j.levelsDraw;
       if (typeof j.vwapOn === 'boolean') s.vwapOn = j.vwapOn;
       if (VWAP_ANCHORS.indexOf(j.vwapAnchor) >= 0) s.vwapAnchor = j.vwapAnchor;
+      // T-2 (§4h): leg enabled-set — known keys, strict booleans only.
+      if (j.legs && typeof j.legs === 'object') {
+        for (const k of LEG_KEYS) {
+          if (typeof j.legs[k] === 'boolean') s.legs[k] = j.legs[k];
+        }
+      }
     } catch (_) { /* corrupt storage → defaults */ }
     return s;
   }
@@ -201,6 +219,7 @@
         levelsDraw: settings.levelsDraw, vwapOn: settings.vwapOn, vwapAnchor: settings.vwapAnchor,
         sym: settings.sym, fpDeltaRows: settings.fpDeltaRows, klevDraw: settings.klevDraw,
         workspace: settings.workspace, lastCollapsed: settings.lastCollapsed,
+        legs: settings.legs,
       }));
     } catch (_) { /* private mode / quota — settings just don't persist */ }
   }
@@ -216,6 +235,31 @@
     SPOT = ids.coinbase;
     OKX_INST = ids.okx;
   }
+
+  // ─── T-2 (§4h): leg registry + the event-tag ↔ leg-key mapping ──────────
+  //
+  // The registry holds the 7-leg matrix (enabled-set seeded from the
+  // persisted settings; startAllLegs consults it BEFORE any socket opens).
+  // Event `ex` codes: the four T-1 legs keep their FROZEN short codes —
+  // every existing store/panel keys on 'bybit'/'binancef'/'okx'/'coinbase'
+  // and relabeling them would orphan that state — while each NEW leg's ex
+  // code IS its leg key. LEG_EX is the one place that mapping lives.
+  const legReg = S.LegRegistry({ enabled: settings.legs });
+  const LEG_EX = {
+    bybit_linear: 'bybit', binancef: 'binancef', okx_swap: 'okx', coinbase: 'coinbase',
+    bybit_spot: 'bybit_spot', binance_spot: 'binance_spot', okx_spot: 'okx_spot',
+  };
+  const EX_LEG = {};
+  for (const k in LEG_EX) EX_LEG[LEG_EX[k]] = k;
+  // Display labels (§4h chip taxonomy: venue·market) — presentation only;
+  // keys/ex codes stay frozen. Mirrored in terminal-views.js EX_LABEL (the
+  // two files stay standalone — shared-in-spirit helpers are mirrored, the
+  // terminal-books.js header rule).
+  const LEG_LABEL = {
+    bybit_linear: 'bybit·lin', bybit_spot: 'bybit·spot',
+    binancef: 'binance·fut', binance_spot: 'binance·spot',
+    okx_swap: 'okx·swap', okx_spot: 'okx·spot', coinbase: 'coinbase',
+  };
 
   /** §4g tick-default convention (stated in the settings hint): ≈1bp of the
    *  symbol's price, snapped by niceRound to the 1/2/2.5/5×10^k grid, is the
@@ -265,15 +309,25 @@
   // anchored store — the view labels every line per venue and computes the
   // exact Σ itself. Buckets only matter on the bybit store (the by-trade-size
   // lines stay single-venue, same §0.7 reasoning as the footprint).
-  const CVD_EXS = ['bybit', 'okx', 'coinbase'];
-  let tape, liq, aggBook, bybitBook;
+  // T-2 (§4h): every trade-carrying leg gets its OWN CvdStore keyed by its
+  // event ex code (= leg key for the new legs, LEG_EX note above), and the
+  // CVD panel renders one labeled line per leg (spot legs dashed in the venue
+  // hue — the view's EX_TOKEN market cue). binancef is absent by wire reality
+  // (§0.2: no futures trades on this network) — the legend note says so
+  // rather than drawing a fabricated flat line.
+  const CVD_LEG_EXS = ['bybit', 'okx', 'coinbase', 'bybit_spot', 'binance_spot', 'okx_spot'];
+  let tape, liq, aggBook, bybitBook, spotPerp;
   const cvds = {};   // stable object identity; per-venue stores swap inside
   function rebuildFlowStores() {
     tape = S.TapeStore(3000);
     liq = S.LiqStore(500);
-    for (const ex of CVD_EXS) cvds[ex] = S.CvdStore({ bucketsUsd: [1e4, 1e5, 1e6] });   // §4 defaults
-    aggBook = S.AggBookStore(['bybit', 'binancef', 'okx']);   // §4b: okx joins the merged book
+    for (const ex of CVD_LEG_EXS) cvds[ex] = S.CvdStore({ bucketsUsd: [1e4, 1e5, 1e6] });   // §4 defaults
+    aggBook = S.AggBookStore(['bybit', 'binancef', 'okx']);   // §4b merged book (lazily admits the T-2 legs)
     bybitBook = aggBook.books.get('bybit');   // DOM ladder = the primary venue's book
+    // T-2 (§4h): spot-vs-perp CVD strip store — Σ signed USD flow of the
+    // enabled perp legs vs the enabled spot legs (descriptive lead/lag read;
+    // the strip itself lands with the UI wave, the session accumulates NOW).
+    spotPerp = B.SpotPerpCvdStore({});
   }
   rebuildFlowStores();
 
@@ -416,6 +470,7 @@
     scr: true, rsi: true, opts: true, whale: true, alerts: true, conf: true,   // O-4 INTELLIGENCE panels (§4d)
     jour: true, cal: true, poly: true, news: true, econ: true,   // O-5 PORTFOLIO panels (§4e)
     tapeint: true, walls: true, vpin: true, klev: true, basis: true,   // T-1 Trader's Edge panels (§4g)
+    spcvd: true,   // T-2 (§4h): spot-vs-perp CVD strip
   };
   function dirtyAll() { for (const k in dirty) dirty[k] = true; }
 
@@ -432,6 +487,17 @@
         // Per-exchange CVD (§4b): each venue's trades feed ONLY its own
         // labeled store — the panel legend names every line per venue.
         if (cvds[ev.ex]) { cvds[ev.ex].onTrade(ev); dirty.fp = true; }
+        // T-2 (§4h): spot-vs-perp CVD — every trade leg pushes its signed
+        // USD notional, split by MARKET (the registry's perp/spot defs). A
+        // disabled leg's socket never opens, so only enabled flow ever
+        // reaches this sum (the store's "caller pushes only enabled legs"
+        // contract).
+        {
+          const legKey = EX_LEG[ev.ex];
+          if (legKey && Number.isFinite(ev.ts) && Number.isFinite(ev.price) && ev.qty > 0) {
+            spotPerp.push(ev.ts, legKey, legReg.isPerp(legKey), (ev.aggressorBuy ? 1 : -1) * ev.price * ev.qty);
+          }
+        }
         lastPriceByEx[ev.ex] = ev.price;   // heatmap polyline trail source
         // O-4 (§4d): whale-print alert input — EVERY venue's prints qualify
         // (the tape mixes venues deliberately and a $2M Coinbase sweep is as
@@ -541,7 +607,7 @@
   fpView.mount($('view-footprint'), {
     cvdEl: $('view-cvd'),
     buckets: cvds.bybit.buckets,   // by-size lines read the bybit store only
-    cvdExs: CVD_EXS,               // §4b: one labeled line per venue + exact Σ
+    cvdExs: CVD_LEG_EXS,           // §4b/§4h: one labeled line per trade leg + exact Σ
     // T-1 (§4g): Δmin/Δmax + Δ% footer rows — the view owns the display
     // choice, persistence lives here (the TapeView filter-input split).
     deltaRowsInput: fpDrowsInput,
@@ -550,9 +616,149 @@
 
   const domView = V.DomLadderView();
   domView.mount($('view-dom'), { levels: 12 });
+  // T-2 (§4h): ladder source select — one book at a time, labeled; bybit
+  // linear stays the default. The select lives in the panel chrome
+  // (terminal.html); whitelisting + persistence-free session state live here.
+  const domSourceSel = $('set-dom-source');
+  const domNote = $('dom-note');
+  let domSource = 'bybit';
+  domSourceSel.addEventListener('change', () => {
+    if (!(domSourceSel.value in EX_LEG)) return;   // whitelist: known ex codes only
+    domSource = domSourceSel.value;
+    dirty.dom = true;
+  });
 
   const aggView = V.AggBookView();
-  aggView.mount($('view-aggbook'), { levels: 14 });
+  aggView.mount($('view-aggbook'), { levels: 14, qualityEl: $('agg-quality') });
+  // T-2 (§4h): per-leg include checkboxes — a DISPLAY-side merge filter
+  // (AggBookStore.grouped includeExs): unchecking hides a leg from the merge,
+  // its book keeps ingesting untouched. Default all checked.
+  const aggInclude = {};
+  document.querySelectorAll('#agg-controls input[data-agg-ex]').forEach((box) => {
+    const ex = box.getAttribute('data-agg-ex');
+    aggInclude[ex] = box.checked;
+    box.addEventListener('change', () => { aggInclude[ex] = box.checked; dirty.agg = true; });
+  });
+  // The merge feed is checkbox AND registry: a leg-disable (topbar) closes the
+  // socket and freezes that leg's book at its last frame, so it must ALSO drop
+  // out of the shared live-descriptive merge — a frozen ladder painted as live
+  // depth would be exactly the stale-as-live fabrication §0 forbids. The book
+  // itself is left frozen (not cleared, never interpolated); this gate keeps it
+  // off-canvas until the leg is re-enabled and re-snapshots.
+  function aggIncludeExs() {
+    const out = [];
+    for (const ex in aggInclude) {
+      if (aggInclude[ex] && legReg.isEnabled(EX_LEG[ex])) out.push(ex);
+    }
+    return out;
+  }
+
+  // T-2 (§4h): spot vs perp CVD strip — store-fed, mounts in BOTH modes
+  // (replay drives the trade legs deterministically).
+  const spotPerpView = V.SpotPerpCvdView();
+  spotPerpView.mount($('view-spotperp'));
+
+  // ─── T-2 (§4h): render-side helpers for the matrix surfaces ─────────────
+  //
+  // Composed HERE (terminal.js owns registry + engine + book access; the views
+  // only paint). Every read is LIVE state — a leg's registry flag, its socket
+  // status, its book presence in the merge, and each sync engine's OWN honest
+  // counters — and nothing is interpolated: a leg with no proven book reads
+  // 'syncing'/'offline', never a fabricated ladder.
+
+  /** One leg's depth-quality cell {cls, text, title} for the agg-book strip.
+   *  cls ∈ q-ok|q-wait|q-bad|q-off (terminal.css dot colors). Resync counts are
+   *  the engines' OWN tallies — visible by contract (§4h), never smoothed. */
+  function legDepthQuality(key) {
+    const ex = LEG_EX[key];
+    if (!legReg.isEnabled(key)) return { cls: 'q-off', text: 'disabled', title: 'disabled (settings) — socket closed, book frozen' };
+    const st = statuses[ex] || {};
+    if (st.kind === 'error') return { cls: 'q-bad', text: 'offline', title: st.msg || 'socket offline' };
+    const book = aggBook.books.get(ex);
+    const hasDepth = !!book && (book.bids.size > 0 || book.asks.size > 0);
+    // Book-sync engine legs (binance spot/fut live, coinbase l2): the engine's
+    // OWN state is the truth — a diff book that cannot prove continuity is
+    // CLEARED, never shown (terminal-books.js header rule).
+    const bl = bookLegs[key];
+    if (bl && bl.eng) {
+      const eng = bl.eng;
+      if (typeof eng.state === 'string') {   // BinanceBookSync (spot U/u bracket | futures pu chain)
+        const rs = eng.resyncCount ? ' · resync ×' + eng.resyncCount : '';
+        if (eng.state === 'synced') return { cls: 'q-ok', text: 'synced' + rs, title: 'diff-synced full local book' + rs };
+        if (eng.state === 'desync') return { cls: 'q-bad', text: 'desync — resyncing ×' + eng.resyncCount, title: 'continuity gap; book cleared, awaiting a fresh REST snapshot' };
+        return { cls: 'q-wait', text: REPLAY ? 'no book (replay: no REST)' : 'syncing…', title: 'buffering diffs until the REST snapshot brackets them (replay forbids the fetch)' };
+      }
+      // CoinbaseBookSync — full snapshot + absolute l2; no venue sequence
+      // number exists, so the rail is staleness-gated reconnect (no desync
+      // count), and 'synced' means the full l2 book is populated.
+      return hasDepth
+        ? { cls: 'q-ok', text: 'synced (full l2)', title: 'full snapshot + absolute l2updates — no venue seq no.; staleness-gated reconnect' }
+        : { cls: 'q-wait', text: 'syncing…', title: 'awaiting the full l2 snapshot' };
+    }
+    // OKX legs — seq-chain guarded in the adapter; a gap halts emission and
+    // requests a resubscribe (the wire checksum is 0 on this network, §4h).
+    const ol = okxLegs[key];
+    if (ol && ol.adapter) {
+      const rs = ol.adapter.bookResyncs ? ' · resync ×' + ol.adapter.bookResyncs : '';
+      if (ol.adapter.bookGapped()) return { cls: 'q-wait', text: 'resync — seq gap' + rs, title: 'seqId/prevSeqId gap; resubscribing for a fresh snapshot' };
+      return hasDepth
+        ? { cls: 'q-ok', text: 'synced' + rs, title: 'seqId/prevSeqId chain intact (wire checksum is 0 keyless, §4h)' + rs }
+        : { cls: 'q-wait', text: 'syncing…', title: 'awaiting the books snapshot' };
+    }
+    // Bybit WS books (linear/spot) + binance·fut-in-replay depth20 — snapshot +
+    // deltas straight into the merge, no local sync engine.
+    if (hasDepth) return { cls: 'q-ok', text: 'synced', title: 'WS book snapshot + deltas' };
+    if (st.kind === 'stale') return { cls: 'q-wait', text: st.msg || 'stale', title: st.msg || 'feed stalled' };
+    return { cls: 'q-wait', text: 'syncing…', title: 'awaiting the book snapshot' };
+  }
+
+  /** The 7 depth-quality rows in matrix order — AggBookView.renderQuality. */
+  function legQualityRows() {
+    return LEG_KEYS.map((key) => Object.assign({ ex: LEG_EX[key] }, legDepthQuality(key)));
+  }
+
+  /** Live composition of each spot-vs-perp sum: the ENABLED trade legs on each
+   *  market side (registry split). binance·fut is excluded — no futures trades
+   *  flow on this network (§0.2), so it contributes nothing to the perp Σ and
+   *  listing it would overstate the composition. */
+  function spotPerpComp() {
+    const perp = [], spot = [];
+    for (const key of LEG_KEYS) {
+      if (key === 'binancef' || !legReg.isEnabled(key)) continue;
+      (legReg.isPerp(key) ? perp : spot).push(LEG_LABEL[key]);
+    }
+    return { perp, spot };
+  }
+
+  /** Source-selectable DOM ladder (§4h): the selected book, session columns
+   *  ONLY on the bybit·lin source (they are bybit-footprint data — another
+   *  venue's book under bybit session volume would blend venues, §0.7). A
+   *  source with no proven book (or a disabled leg) shows an honest note. */
+  function renderDom() {
+    const ex = domSource;
+    const key = EX_LEG[ex];
+    const isBybit = ex === 'bybit';
+    const book = aggBook.books.get(ex);
+    const hasDepth = !!book && (book.bids.size > 0 || book.asks.size > 0);
+    if (!hasDepth) {
+      domNote.hidden = false;
+      domNote.textContent = (key && !legReg.isEnabled(key))
+        ? (LEG_LABEL[key] || ex) + ' — disabled (settings); enable it from the legs menu (topbar)'
+        : (LEG_LABEL[key] || ex) + ' — awaiting a synced book (no proven depth yet; nothing is interpolated)';
+      domView.render({ grouped: { bids: [], asks: [] }, best: {}, bars: [], tickSize: settings.tick, nakedPocs: [] });
+      return;
+    }
+    domNote.hidden = isBybit;
+    if (!isBybit) domNote.textContent = 'source: ' + (LEG_LABEL[key] || ex)
+      + ' book · session sold/bought/Δ are bybit-only footprint data (hidden here — another venue’s book under bybit session volume would blend venues, §0.7)';
+    domView.render({
+      grouped: book.grouped(settings.tick, 12),
+      best: book.best(),
+      bars: isBybit ? footprint.bars() : [],
+      tickSize: settings.tick,
+      nakedPocs: (isBybit && levelsDrawOn) ? nakedPocs() : [],
+    });
+  }
 
   const tapeView = V.TapeView();
   const tapeMinInput = $('set-tape-min');
@@ -618,7 +824,7 @@
     onDraw: (on) => { klevDrawOn = on; settings.klevDraw = on; saveSettings(); dirty.fp = true; },
   });
 
-  // ─── Live legs: three sockets + one REST poller (§2 data matrix) ────────
+  // ─── Live legs: the 7-leg venue matrix (§4h) + one REST poller ──────────
   //
   // Each leg gets its own onStatus → chip; legs are independent — any subset
   // alive keeps its own panels moving and the rest degrade honestly (chips go
@@ -652,95 +858,319 @@
     return LW.makeSocket(adapter, api);
   }
 
-  // ── T-1 (§4g): leg lifecycle — every leg re-derivable from SYM ──
+  // ── T-2 (§4h): leg lifecycle — the 7-leg venue×market matrix ──
   //
-  // startAllLegs derives per-venue ids for the CURRENT symbol and opens each
-  // leg; a null mapping (deriveVenueIds), a failed binancef/coinbase listing
-  // probe, or an unknown okx ctVal degrades to an honest 'no leg' chip
-  // instead of subscribing to a guessed id/scale. legGen guards async leg
-  // starts (listing probes, the okx ctVal fetch) against a switch that
-  // happened mid-flight.
-  const legHandles = { bybit: null, binancef: null, coinbase: null, okx: null };
+  // startAllLegs derives per-leg ids for the CURRENT symbol (deriveLegIds)
+  // and opens each ENABLED leg; the honest-degrade ladder per leg is:
+  //   disabled in the registry → chip 'disabled (settings)', socket never
+  //   opens (§4h — the freeze is user-chosen, amber not red);
+  //   null mapping → 'no leg' chip (§4g naming rule);
+  //   derived-but-unprobed id → listability probe first (T-1 probes extended
+  //   to the spot legs — a guessed id would open a socket that never
+  //   delivers and the watchdog would claim a transient outage forever);
+  //   unknown okx SWAP ctVal → 'no leg' (§4b unit rail).
+  // legGen guards async starts (probes, ctVal fetch, snapshot fetches)
+  // against a switch that happened mid-flight.
+  //
+  // Book-sync legs (§4h): binance spot/fut diffs and the coinbase l2 feed go
+  // adapter → ENGINE (terminal-books.js), not adapter → sink; flushBookLegs
+  // below turns each SYNCED engine into ordinary §4 depth events. OKX books
+  // are seq-chain-guarded in the adapter and emit depth directly (the CRC
+  // engine has nothing to verify on today's wire — terminal-adapters.js T-2
+  // header; the adapter requests a resubscribe on a chain break and the
+  // flush performs it).
+  const legHandles = {};   // legKey → socket handle ({close}) | null
   let restPoller = null;
   let legGen = 0;
-  function startAllLegs() {
-    const gen = ++legGen;
-    const ids = S.deriveVenueIds(SYM);
-    SPOT = ids.coinbase;
-    OKX_INST = ids.okx;
-    legHandles.bybit = startLeg('bybit', A.makeBybitAdapter(ids.bybit, sink), { onStatus: chipStatus('bybit') });
-    // §4g unknown/unreachable rule, BOTH halves: a null mapping (unknown)
-    // chips immediately; a DERIVED binancef/coinbase id is only a naming
-    // convention (deriveVenueIds), so beyond the pinned BTCUSDT ids the
-    // venue is probed before subscribing (terminal-hist.js probes). A
-    // guessed id would open a socket that never delivers — the watchdog
-    // would then loop 'stalled — reconnecting', prose that claims a
-    // transient outage on a feed that never existed, instead of the
-    // mandated 'no leg' chip.
-    const startBinance = (id) => {
-      legHandles.binancef = startLeg('binancef', A.makeBinanceDepthAdapter(id, sink), { onStatus: chipStatus('binancef') });
-      if (!REPLAY) {
-        // REST poller skipped in replay: it is real network (fapi.binance.com) and
-        // wall-clock-timed — both break the deterministic no-network replay rail.
-        restPoller = A.makeBinanceRestPoller(id, sink);   // mark 5s / OI 60s → 'binancef' columns
-        restPoller.start();
-      }
-    };
-    if (!ids.binancef) {
-      chipStatus('binancef')('error', 'no leg for ' + SYM);   // §4g honest degrade chip
-    } else if (SYM === 'BTCUSDT' || REPLAY) {
-      startBinance(ids.binancef);   // pinned id (collector/fixtures) — listing not in question
-    } else {
-      chipStatus('binancef')('stale', 'probing ' + ids.binancef + '…');
-      window.BTCQ_TERMINAL_HIST.probeBinanceFutSymbol(ids.binancef).then((listed) => {
-        if (gen !== legGen) return;   // symbol changed again mid-probe
-        if (listed) startBinance(ids.binancef);
-        else chipStatus('binancef')('error', 'no leg for ' + SYM + (listed === false ? ' (not listed)' : ' (probe unreachable)'));
+  let bookLegs = {};       // legKey → engine-flush bookkeeping (see regBookLeg)
+  let okxLegs = {};        // legKey → {adapter, restart, gen, lastRestartAt}
+  let lastBookFlush = 0;
+
+  // Per-leg async generation (§4h leg manager): the probe / ctVal /
+  // continuation guards check BOTH counters — legGen catches a whole-matrix
+  // restart (symbol switch), legGens[key] catches a single-leg toggle, so a
+  // disable-then-enable mid-probe can never double-start one leg's socket
+  // while leaving the other six untouched.
+  const legGens = {};
+  for (const k of LEG_KEYS) legGens[k] = 0;
+
+  /** Start ONE matrix leg for the CURRENT symbol (§4h degrade ladder):
+   *    disabled in the registry → chip 'disabled (settings)', socket never
+   *    opens; null mapping → 'no leg' chip; derived-but-unprobed id →
+   *    listability probe first; unknown okx SWAP ctVal → 'no leg'. */
+  function startMatrixLeg(key) {
+    const gen = legGen;
+    const lgen = ++legGens[key];
+    const ex = LEG_EX[key];
+    const HIST_ = window.BTCQ_TERMINAL_HIST;
+    // Registry + naming gate (§4h/§4g): honest chip, then stop.
+    if (!legReg.isEnabled(key)) { chipStatus(ex)('stale', 'disabled (settings)'); return; }
+    const id = S.deriveLegIds(SYM)[key];
+    if (!id) { chipStatus(ex)('error', 'no leg for ' + SYM); return; }
+    /** True when this start is obsolete: matrix restarted, THIS leg toggled
+     *  again, or the user disabled it while an async step was in flight. */
+    const dead = () => gen !== legGen || lgen !== legGens[key] || !legReg.isEnabled(key);
+
+    /** Probe-then-start plumbing (T-1 rail, §4h "probes reused per leg"):
+     *  pinned BTCUSDT ids (and replay, which forces BTCUSDT) start straight
+     *  away; any other derived id asks the venue first. */
+    function probed(probe, start) {
+      if (SYM === 'BTCUSDT' || REPLAY) { start(); return; }
+      chipStatus(ex)('stale', 'probing ' + id + '…');
+      probe(id).then((listed) => {
+        if (dead()) return;
+        if (listed) start();
+        else chipStatus(ex)('error', 'no leg for ' + SYM + (listed === false ? ' (not listed)' : ' (probe unreachable)'));
       });
     }
-    const startCoinbase = (id) => {
-      legHandles.coinbase = startLeg('coinbase', A.makeCoinbaseAdapter(id, sink), { onStatus: chipStatus('coinbase') });
-    };
-    if (!ids.coinbase) {
-      chipStatus('coinbase')('error', 'no leg for ' + SYM);   // §4g honest degrade chip
-    } else if (SYM === 'BTCUSDT' || REPLAY) {
-      startCoinbase(ids.coinbase);
-    } else {
-      chipStatus('coinbase')('stale', 'probing ' + ids.coinbase + '…');
-      window.BTCQ_TERMINAL_HIST.probeCoinbaseProduct(ids.coinbase).then((listed) => {
-        if (gen !== legGen) return;   // symbol changed again mid-probe
-        if (listed) startCoinbase(ids.coinbase);
-        else chipStatus('coinbase')('error', 'no leg for ' + SYM + (listed === false ? ' (not listed)' : ' (probe unreachable)'));
-      });
+
+    /** Register a book-sync leg for flushBookLegs: wireTs is stamped by the
+     *  tap wrappers below from each frame's OWN exchange ts, so the emitted
+     *  depth events stay event-time-driven (replay rail — the 100ms flush
+     *  clock is transport cadence, never a store clock). */
+    function regBookLeg(eng, extra) {
+      const bl = Object.assign(
+        { key, ex, eng, gen, wireTs: NaN, lastEmitTs: NaN, snapBusy: false, lastSnapAt: 0 },
+        extra);
+      bookLegs[key] = bl;
+      return bl;
     }
-    // O-2 (§4b): OKX leg — deeper agg book + its own labeled CVD line. The
-    // adapter ctVal-scales CONTRACT sizes; 0.01 is the PINNED BTC-USDT-SWAP
-    // value (fixtures _okx_ctval_note) — any other instId fetches its real
-    // multiplier first (§4b unit rail: a guessed ctVal would mis-scale every
-    // okx size), and an unreachable/unknown ctVal skips the leg honestly.
-    if (!ids.okx) {
-      chipStatus('okx')('error', 'no leg for ' + SYM);
-    } else if (ids.okx === 'BTC-USDT-SWAP' || REPLAY) {
-      legHandles.okx = startLeg('okx', A.makeOkxAdapter(ids.okx, sink), { onStatus: chipStatus('okx') });
-    } else {
-      window.BTCQ_TERMINAL_HIST.fetchOkxCtVal(ids.okx).then((ctVal) => {
-        if (gen !== legGen) return;   // symbol changed again mid-fetch
-        if (ctVal === null) {
-          chipStatus('okx')('error', 'no leg for ' + SYM + ' (ctVal unknown)');
-          return;
+    const stampTs = (bl) => (ts) => { if (Number.isFinite(ts) && !(bl.wireTs >= ts)) bl.wireTs = ts; };
+    // Engine-feed taps: adapters pass the frame's wire ts as the LAST arg
+    // (terminal-adapters.js T-2 header); the engines ignore it — these
+    // wrappers capture it for the flush and delegate untouched.
+    function tapDiff(eng, bl) {
+      const st = stampTs(bl);
+      return { onDiff(ev, ts) { st(ts); eng.onDiff(ev); } };
+    }
+    function tapCoinbase(eng, bl) {
+      const st = stampTs(bl);
+      return {
+        onSnapshot(b, a, ts) { st(ts); eng.onSnapshot(b, a, ts); },
+        onL2Update(ch, ts) { st(ts); eng.onL2Update(ch, ts); },
+      };
+    }
+
+    // ── okx legs — books (seq-chained) + trades, one socket each. ctVal
+    // rail (§4b): SWAP sizes are CONTRACTS (0.01 pinned for BTC-USDT-SWAP,
+    // fetched otherwise, leg skipped when unknown); SPOT sz is coin units. ──
+    function startOkxLeg(ctVal) {
+      const adapter = A.makeOkxBooksAdapter(id, sink, { ex, ctVal });
+      legHandles[key] = startLeg(key === 'okx_swap' ? 'okx' : key, adapter, { onStatus: chipStatus(ex) });
+      okxLegs[key] = {
+        adapter, gen, key,
+        lastRestartAt: okxLegs[key] ? okxLegs[key].lastRestartAt : 0,
+        // Seq-gap remedy (§4h reality): a fresh socket → fresh books
+        // snapshot → chain reset. The adapter only FLAGS (it never sees the
+        // socket); the flush polls the flag and calls this.
+        restart() {
+          if (legHandles[key] && legHandles[key].close) legHandles[key].close();
+          startOkxLeg(ctVal);
+        },
+      };
+    }
+
+    switch (key) {
+      case 'bybit_linear':
+        // PRIMARY leg (§2), path unchanged from T-1.
+        legHandles.bybit_linear = startLeg('bybit', A.makeBybitAdapter(id, sink), { onStatus: chipStatus('bybit') });
+        break;
+
+      case 'bybit_spot':
+        // Same venue family, spot endpoint (§4h).
+        probed(HIST_.probeBybitSpotSymbol, () => {
+          legHandles.bybit_spot = startLeg('bybit_spot', A.makeBybitSpotAdapter(id, sink), { onStatus: chipStatus('bybit_spot') });
+        });
+        break;
+
+      case 'binancef':
+        // Diff depth → BinanceBookSync futures + REST mark/OI.
+        probed(HIST_.probeBinanceFutSymbol, () => {
+          if (REPLAY) {
+            // Replay keeps the PROVEN depth20 fixture leg: the diff engine can
+            // only sync off a REST snapshot and replay forbids network — a
+            // forever-buffering engine would leave an honest but empty book
+            // where the fixtures can render a real one.
+            legHandles.binancef = startLeg('binancef', A.makeBinanceDepthAdapter(id, sink), { onStatus: chipStatus('binancef') });
+            return;
+          }
+          const eng = B.BinanceBookSync({ mode: 'futures' });   // pu-chain continuity (§4h)
+          const bl = regBookLeg(eng, { market: 'futures', id });
+          legHandles.binancef = startLeg('binancef',
+            A.makeBinanceFutDepthDiff(id, { book: tapDiff(eng, bl) }), { onStatus: chipStatus('binancef') });
+          // Trades stay ABSENT by wire reality (§0.2 topic filter; the
+          // collector's REST aggTrades poller records them — never duplicated
+          // here); mark/OI columns come from the REST poller as before.
+          restPoller = A.makeBinanceRestPoller(id, sink);   // mark 5s / OI 60s → 'binancef' columns
+          restPoller.start();
+        });
+        break;
+
+      case 'binance_spot':
+        // aggTrade + diff depth → BinanceBookSync spot (§4h).
+        probed(HIST_.probeBinanceSpotSymbol, () => {
+          const eng = B.BinanceBookSync({ mode: 'spot' });   // U ≤ lastId+1 ≤ u continuity
+          const bl = regBookLeg(eng, { market: 'spot', id });
+          legHandles.binance_spot = startLeg('binance_spot',
+            A.makeBinanceSpotAdapter(id, sink, { book: tapDiff(eng, bl) }), { onStatus: chipStatus('binance_spot') });
+          // In replay this engine never syncs (no REST) — trades still flow;
+          // the flush simply never emits an unsynced book (honest absence).
+        });
+        break;
+
+      case 'okx_swap':
+        if (id === 'BTC-USDT-SWAP' || REPLAY) {
+          startOkxLeg(0.01);
+        } else {
+          HIST_.fetchOkxCtVal(id).then((ctVal) => {
+            if (dead()) return;
+            if (ctVal === null) {
+              chipStatus('okx')('error', 'no leg for ' + SYM + ' (ctVal unknown)');
+              return;
+            }
+            startOkxLeg(ctVal);
+          });
         }
-        legHandles.okx = startLeg('okx', A.makeOkxAdapter(ids.okx, sink, { ctVal }), { onStatus: chipStatus('okx') });
-      });
+        break;
+
+      case 'okx_spot':
+        probed(HIST_.probeOkxSpotInst, () => startOkxLeg(1));
+        break;
+
+      case 'coinbase':
+        // Exchange-feed l2 book + matches tape (§4h). No sequence number
+        // exists on level2_batch (engine header): the continuity rail is
+        // liveness — a stalled channel stops marking alive, makeSocket's
+        // watchdog reconnects, and the resubscribe's fresh >1MB snapshot
+        // replaces the book wholesale.
+        probed(HIST_.probeCoinbaseProduct, () => {
+          const eng = B.CoinbaseBookSync();
+          const bl = regBookLeg(eng, {});
+          legHandles.coinbase = startLeg('coinbase',
+            A.makeCoinbaseL2Adapter(id, sink, { book: tapCoinbase(eng, bl) }), { onStatus: chipStatus('coinbase') });
+        });
+        break;
+
+      default:
+        break;   // unknown key = registry/lifecycle drift — start nothing
     }
   }
+
+  function startAllLegs() {
+    legGen++;
+    bookLegs = {};
+    okxLegs = {};
+    const ids = S.deriveLegIds(SYM);
+    SPOT = ids.coinbase;
+    OKX_INST = ids.okx_swap;
+    for (const key of LEG_KEYS) startMatrixLeg(key);
+  }
+
+  /** Stop ONE leg (§4h leg manager): close the socket, drop its flush /
+   *  restart bookkeeping, bump its per-leg gen so in-flight async starts
+   *  die. The engine object goes out of scope; the leg's last depth stays
+   *  frozen in aggBook (never interpolated) but the aggIncludeExs enabled-gate
+   *  drops it from the merge — honest absence on-canvas, no stale-as-live. */
+  function stopLeg(key) {
+    legGens[key]++;
+    if (legHandles[key] && legHandles[key].close) legHandles[key].close();
+    legHandles[key] = null;
+    delete bookLegs[key];
+    delete okxLegs[key];
+    // The REST poller is the binancef leg's other half (mark/OI columns).
+    if (key === 'binancef' && restPoller) { restPoller.stop(); restPoller = null; }
+  }
+
   function stopAllLegs() {
-    legGen++;   // invalidate any in-flight async leg start
-    for (const ex in legHandles) {
-      if (legHandles[ex] && legHandles[ex].close) legHandles[ex].close();
-      legHandles[ex] = null;
+    legGen++;   // invalidate any in-flight async leg start / snapshot fetch
+    for (const key in legHandles) {
+      if (legHandles[key] && legHandles[key].close) legHandles[key].close();
+      legHandles[key] = null;
     }
+    bookLegs = {};
+    okxLegs = {};
     if (restPoller) { restPoller.stop(); restPoller = null; }
   }
+
+  /** THE leg toggle (§4h): registry flip → persist → per-leg lifecycle.
+   *  Disabling closes the socket NOW and the chip states the honest reason;
+   *  panels freeze at their last real data (no interpolation). Disabled in
+   *  replay — the deterministic harness drives all legs (sym-btn rule). */
+  function setLegEnabled(key, on) {
+    if (REPLAY) return;
+    if (!legReg.setEnabled(key, on)) return;   // no real transition → no restart
+    settings.legs = legReg.enabledMap();
+    saveSettings();
+    if (on) {
+      startMatrixLeg(key);
+    } else {
+      stopLeg(key);
+      chipStatus(LEG_EX[key])('stale', 'disabled (settings)');
+    }
+    dirty.header = true; dirty.agg = true; dirty.spcvd = true;
+    renderLegRows();
+  }
+
+  // ── T-2 (§4h): book-engine flush — the 100ms depth tick for the engine
+  // legs. Turns each SYNCED engine book into the EXISTING per-venue depth
+  // event (topN ladder, isSnapshot:true — the wholesale-replace semantics
+  // BookStore already speaks for binance depth20), at the same ~100ms cadence
+  // the wire legs deliver, so the agg book / samplers / paint gates see
+  // nothing new. The 100ms gate is WALL clock on purpose: it replaces the
+  // transport's delivery cadence (livewire territory), while every emitted
+  // event carries the leg's newest WIRE ts — stores stay event-time-driven
+  // (replay rail). No new wire frames → no emit (a re-emitted unchanged book
+  // would fabricate liveness). Runs from frame() with the other ingestion-
+  // side work: never gated by pause/visibility (§4e.2 — paint gates skip
+  // PAINT, never data).
+  const BOOK_EMIT_LEVELS = 200;   // bybit-book parity; bounds the per-emit copy
+  function flushBookLegs(now) {
+    if (now - lastBookFlush < 100) return;
+    lastBookFlush = now;
+    for (const key in bookLegs) {
+      const bl = bookLegs[key];
+      if (bl.gen !== legGen) continue;
+      const eng = bl.eng;
+      // Binance snapshot loop (live only — REST is forbidden in replay): the
+      // official algo is stream-first, snapshot-on-demand; a 2s floor between
+      // attempts retries a failing endpoint politely instead of hammering it.
+      if (!REPLAY && bl.market && eng.needsSnapshot() && !bl.snapBusy && now - bl.lastSnapAt >= 2000) {
+        bl.snapBusy = true;
+        bl.lastSnapAt = now;
+        window.BTCQ_TERMINAL_HIST.fetchBinanceDepthSnapshot(bl.market, bl.id).then((snap) => {
+          bl.snapBusy = false;
+          if (bl.gen !== legGen) return;   // symbol switched mid-fetch
+          if (snap) eng.onSnapshot(snap.lastUpdateId, snap.bids, snap.asks);
+          // null → transient REST failure; the next flush tick retries (§4c idiom)
+        });
+      }
+      if (eng.needsSnapshot && eng.needsSnapshot()) continue;   // unsynced: nothing honest to emit
+      const ts = bl.wireTs;
+      if (!Number.isFinite(ts) || ts === bl.lastEmitTs) continue;   // no new frames → no fabricated tick
+      // topN sorts the engine's whole side maps (its stated materialization
+      // cost) — bounded at 10 Hz by this gate. Coinbase is the heavy case
+      // (~44k levels): a few ms/s, accepted; the emitted event itself carries
+      // only the top-200 window downstream.
+      const top = eng.topN(BOOK_EMIT_LEVELS);
+      if (!top.bids.length && !top.asks.length) continue;   // coinbase pre-snapshot
+      bl.lastEmitTs = ts;
+      sink({ kind: 'depth', ex: bl.ex, ts, bids: top.bids, asks: top.asks, isSnapshot: true });
+    }
+    // OKX seq-gap restarts (live only; replay chains are intact by capture):
+    // the adapter halted its book on a broken chain (§0.7) and flagged — a
+    // fresh subscribe delivers a fresh snapshot. 2s floor against thrash.
+    if (!REPLAY) {
+      for (const key in okxLegs) {
+        const ol = okxLegs[key];
+        if (ol.gen !== legGen) continue;
+        if (ol.adapter.bookGapped() && now - ol.lastRestartAt >= 2000) {
+          ol.lastRestartAt = now;
+          ol.restart();   // replaces okxLegs[key], carrying lastRestartAt over
+        }
+      }
+    }
+  }
+
   startAllLegs();
 
   // ─── O-3 STRUCTURE section (§4c): REST-fed panels + their polls ──────────
@@ -2292,9 +2722,32 @@
         wallsRows: walls.list().length,
         vpinBuckets: vpin ? vpin.buckets().length : 0,
         tapeIntBuckets: tapeInt.sparkline().length,
+        // T-2 (§4h) matrix liveness for the harness / live check: the spot-vs-
+        // perp strip's completed buckets, whether it has a live cumulative read,
+        // enabled legs, and how many legs currently carry a non-empty book.
+        spotPerpBuckets: spotPerp.list().length,
+        spotPerpLive: spotPerp.latest() ? 1 : 0,
+        enabledLegs: legReg.snapshot().filter((l) => l.enabled).length,
+        aggLegs: (() => { let n = 0; for (const [, b] of aggBook.books) if (b.bids.size > 0 || b.asks.size > 0) n++; return n; })(),
       };
     },
     sym() { return SYM; },
+    // T-2 (§4h): per-leg matrix snapshot — {enabled, kind (chip state), hasBook}
+    // keyed by leg key. The live-check harness asserts ≥5 legs synced from this.
+    legs() {
+      const out = {};
+      for (const key of LEG_KEYS) {
+        const ex = LEG_EX[key];
+        const st = statuses[ex] || {};
+        const book = aggBook.books.get(ex);
+        out[key] = {
+          enabled: legReg.isEnabled(key),
+          kind: st.kind || null,
+          hasBook: !!book && (book.bids.size > 0 || book.asks.size > 0),
+        };
+      }
+      return out;
+    },
   };
 
   // ─── Settings row wiring ────────────────────────────────────────────────
@@ -2476,6 +2929,59 @@
   }
   refreshSymLabels();
 
+  // ─── T-2 (§4h): leg manager — the 7-leg matrix enable/disable popover ────
+  //
+  // Same topbar-popover idiom as the symbol picker. Each row: live status dot
+  // + a persisted enable/disable toggle + the leg's chip state. Toggling wires
+  // straight to setLegEnabled (registry flip → persist → socket restart/close);
+  // disabling mid-session closes the socket and the leg's panels state
+  // 'disabled (settings)' honestly. Toggles are DISABLED in replay (the
+  // deterministic harness drives all legs) but the popover still OPENS so the
+  // per-leg status is inspectable. renderLegRows is a hoisted declaration so
+  // setLegEnabled (defined earlier) can repaint the list after a flip; a
+  // change-keyed cache keeps the live-status repaint from eating a click.
+  const legsBtn = $('legs-btn'), legsPop = $('legs-pop'), legsList = $('legs-list');
+  let legsPopOpen = false;
+  let legRowsKey = '';
+  function renderLegRows() {
+    const parts = legReg.snapshot().map((l) => {
+      const st = statuses[LEG_EX[l.key]] || {};
+      // Dot state mirrors the header chip taxonomy; a disabled leg is neutral
+      // (grey), not error — the freeze is user-chosen (§4h amber-not-red rule).
+      const cls = !l.enabled ? '' : st.kind === 'open' ? 'live' : st.kind === 'error' ? 'error' : 'stale';
+      const text = !l.enabled ? 'disabled (settings)' : (st.msg || 'connecting…');
+      return { key: l.key, enabled: l.enabled, cls, text };
+    });
+    const k = parts.map((r) => r.key + r.enabled + r.cls + r.text).join('|');
+    if (k === legRowsKey) return;   // nothing changed — don't rebuild under a click
+    legRowsKey = k;
+    legsList.innerHTML = parts.map((r) =>
+      '<li class="leg-row ' + r.cls + '">'
+      + '<i class="leg-dot"></i>'
+      + '<input type="checkbox" data-leg="' + r.key + '"' + (r.enabled ? ' checked' : '') + (REPLAY ? ' disabled' : '') + ' />'
+      + '<span class="leg-name"></span><span class="leg-status"></span></li>').join('');
+    // Labels/status via textContent (never innerHTML) — no escaping question.
+    const lis = legsList.children;
+    for (let i = 0; i < parts.length; i++) {
+      lis[i].querySelector('.leg-name').textContent = LEG_LABEL[parts[i].key];
+      lis[i].querySelector('.leg-status').textContent = parts[i].text;
+    }
+  }
+  function openLegPop() { legsPop.hidden = false; legsBtn.setAttribute('aria-expanded', 'true'); legsPopOpen = true; renderLegRows(); }
+  function closeLegPop() { legsPop.hidden = true; legsBtn.setAttribute('aria-expanded', 'false'); legsPopOpen = false; }
+  legsBtn.addEventListener('click', () => { if (legsPop.hidden) openLegPop(); else closeLegPop(); });
+  legsList.addEventListener('change', (e) => {
+    const box = e.target.closest('input[data-leg]');
+    if (box) setLegEnabled(box.getAttribute('data-leg'), box.checked);   // no-op in replay (setLegEnabled guards)
+  });
+  document.addEventListener('click', (e) => {
+    if (!legsPop.hidden && !e.target.closest('.leg-mgr')) closeLegPop();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !legsPop.hidden) { closeLegPop(); legsBtn.focus(); }
+  });
+  renderLegRows();   // seed the list before first open (statuses fill in as legs connect)
+
   // ─── T-1 (§4g): workspace presets — named collapsed-set combos ──────────
   const wsSel = $('workspace-sel');
   wsSel.value = settings.workspace;
@@ -2549,6 +3055,19 @@
     }
     for (const name of WORKSPACE_NAMES) {
       items.push({ kind: 'workspace', label: 'Workspace → ' + name, run: () => applyWorkspace(name) });
+    }
+    // T-2 (§4h): leg enable/disable — one entry per matrix leg (label reflects
+    // the CURRENT state; buildCommands re-runs on every open). Live only: replay
+    // drives all legs deterministically (setLegEnabled no-ops there anyway).
+    if (!REPLAY) {
+      for (const key of LEG_KEYS) {
+        const on = legReg.isEnabled(key);
+        items.push({
+          kind: 'leg',
+          label: (on ? 'Disable' : 'Enable') + ' leg — ' + LEG_LABEL[key],
+          run: () => setLegEnabled(key, !legReg.isEnabled(key)),
+        });
+      }
     }
     // Symbol switching: fuzzy over the WHOLE tickers universe (turnover-
     // sorted so the liquid names win ties). Live modes only — replay pins
@@ -2689,6 +3208,8 @@
     // vpin per completed bucket; basis at the ~1s mark cadence (the view
     // throttles setData further, the CVD budget).
     tapeint: 500, walls: 1000, vpin: 800, klev: 1000, basis: 600,
+    // T-2 (§4h): spot-vs-perp CVD strip — the CVD chart's setData budget.
+    spcvd: 600,
   };
   const lastAt = {
     fp: 0, dom: 0, tape: 0, agg: 0, header: 0, liq: 0, heat: 0, liqmap: 0, det: 0,
@@ -2697,6 +3218,7 @@
     scr: 0, rsi: 0, opts: 0, whale: 0, alerts: 0, conf: 0,
     jour: 0, cal: 0, poly: 0, news: 0, econ: 0,
     tapeint: 0, walls: 0, vpin: 0, klev: 0, basis: 0,
+    spcvd: 0,
   };
 
   // ─── O-5 elite pass (§4e.1 + §4e.2): section collapse + visibility-gated
@@ -2723,6 +3245,7 @@
     whale: 'intelligence', alerts: 'intelligence', conf: 'intelligence',
     jour: 'portfolio', cal: 'portfolio', poly: 'portfolio', news: 'portfolio', econ: 'portfolio',
     tapeint: 'orderflow', walls: 'orderflow', basis: 'structure', klev: 'auction', vpin: 'auction',
+    spcvd: 'orderflow',   // T-2 (§4h): spot-vs-perp CVD strip (ORDERFLOW section)
   };
   const VIEW_ANCHOR = {
     fp: 'view-footprint', dom: 'view-dom', tape: 'view-tape', agg: 'view-aggbook',
@@ -2733,6 +3256,7 @@
     whale: 'view-whale', alerts: 'view-alerts', conf: 'view-conf',
     jour: 'view-journal', cal: 'view-calendar', poly: 'view-polymarket', news: 'view-news', econ: 'view-econ',
     tapeint: 'view-tapeint', walls: 'view-walls', basis: 'view-basis', klev: 'view-keylevels', vpin: 'view-vpin',
+    spcvd: 'view-spotperp',   // T-2 (§4h)
   };
   // key → last IntersectionObserver verdict. Defaults TRUE (paint until told
   // otherwise) so the page is never blank if IO is unavailable.
@@ -2931,9 +3455,10 @@
   function frame() {
     const now = Date.now();
     // INGESTION-SIDE work runs on every tick unconditionally — §4e.2 honesty:
-    // the visibility gates below skip PAINT only, never data. These three keep
+    // the visibility gates below skip PAINT only, never data. These keep
     // sampling/evaluating while the tab is hidden (frame() then ticks on the
     // background timer in scheduleFrame instead of rAF).
+    flushBookLegs(now);   // T-2 (§4h): engine books → depth events (before the sampler reads them)
     sampleDepth();
     maybeEstimateLiq();
     maybeIntel();   // O-4 (§4d): confluence + alert evaluation on the 5s event-ts gate
@@ -2955,6 +3480,9 @@
       // being patched over after the fact. verify_terminal_browser.py still
       // asserts no chip ever says 'live' in replay.
       headerView.render({ marks, ois, statuses, sessionHigh, sessionLow, opening: openingSlice(), tickSize: settings.tick, base: BASE, nowMs: now });
+      // T-2 (§4h): keep the open leg-manager's status dots live at the header
+      // cadence (change-keyed inside — a no-op when nothing moved).
+      if (legsPopOpen) renderLegRows();
       // §4g: decimals resolve one tick of the current grid — the fixed 1 dp
       // rendered every sub-$1 symbol's price as $0.0.
       const pxDp = settings.tick >= 1 ? 1 : Math.min(8, Math.ceil(-Math.log10(settings.tick)));
@@ -2965,10 +3493,10 @@
 
     if (!paused) {
       if (due('fp', now)) {
-        // cvd: per-exchange series map (§4b) — the view draws one labeled
-        // line per venue, the exact Σ, and the bybit by-size bucket lines.
+        // cvd: per-leg series map (§4b/§4h) — the view draws one labeled
+        // line per trade leg, the exact Σ, and the bybit by-size bucket lines.
         const cvdExs = {};
-        for (const ex of CVD_EXS) cvdExs[ex] = cvds[ex].series();
+        for (const ex of CVD_LEG_EXS) cvdExs[ex] = cvds[ex].series();
         const fpBars = footprint.bars();
         // I-1 (§4f): feed the absorption detector every NEWLY finished bar
         // (onBar wants each exactly once, in order — absFedT tracks it), then
@@ -2990,17 +3518,33 @@
         });
       }
       if (due('dom', now)) {
-        domView.render({
-          grouped: bybitBook.grouped(settings.tick, 12),
-          best: bybitBook.best(),
-          bars: footprint.bars(),
-          tickSize: settings.tick,
-          // I-1 (§4f): naked-POC row markers, behind the LevelsView toggle.
-          nakedPocs: levelsDrawOn ? nakedPocs() : [],
-        });
+        // T-2 (§4h): source-selectable ladder. bybit·lin is the default and the
+        // only source that carries the session sold/bought/Δ columns — those are
+        // bybit FOOTPRINT data, and pouring another venue's book into bybit's
+        // session volume would blend venues (§0.7), so the other sources render
+        // book-only and the note says why. A source with no synced book yet (or a
+        // disabled leg) shows an honest note instead of an empty ladder.
+        renderDom();
       }
       if (due('agg', now)) {
-        aggView.render({ grouped: aggBook.grouped(settings.tick, 14), tick: settings.tick });
+        // T-2 (§4h): include filter (display-side merge; books keep ingesting)
+        // + the honest per-leg depth-quality strip (synced/syncing/desync ×N/
+        // disabled — resync counts visible by contract).
+        aggView.render({
+          grouped: aggBook.grouped(settings.tick, 14, aggIncludeExs()),
+          tick: settings.tick,
+          legQuality: legQualityRows(),
+        });
+      }
+      if (due('spcvd', now)) {
+        // T-2 (§4h): spot vs perp CVD strip — Σ enabled spot legs vs perp legs,
+        // with the live composition; descriptive lead/lag, never a signal.
+        spotPerpView.render({
+          list: spotPerp.list(),
+          latest: spotPerp.latest(),
+          comp: spotPerpComp(),
+          nowMs: now,
+        });
       }
       if (due('tape', now)) {
         tapeView.render({ trades: tape.filtered(settings.tapeMin), tick: settings.tick });

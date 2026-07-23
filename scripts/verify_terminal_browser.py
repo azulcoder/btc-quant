@@ -14,8 +14,9 @@ REPLAY MODE flag, which this harness asserts (§0 honesty rails).
 
 Checks (all must pass, no allowlist):
   a. ZERO console errors and ZERO uncaught page errors.
-  b. All 4 venue chips (bybit/binancef/coinbase/okx) report 'open' via the
-     read-only ``window.__BTCQ_TERMINAL_DEBUG`` hook (status msg is 'replay').
+  b. All 7 venue-matrix legs (bybit lin/spot, binance fut/spot, okx swap/spot,
+     coinbase) report 'open' via the read-only ``window.__BTCQ_TERMINAL_DEBUG``
+     hook (status msg is 'replay') — the T-2 (§4h) matrix.
   c. Every visible canvas STACK is non-blank: >2% of a 40×40 sample grid
      differs from the page background color (stack = canvases sharing one
      screen rect, composited — see CANVAS_JS note on lightweight-charts'
@@ -66,6 +67,10 @@ PANELS = {
     "vpin": "#view-vpin",
     "keylevels": "#view-keylevels",
     "basis": "#view-basis",
+    # T-2 (§4h) Venue Matrix: the spot-vs-perp CVD strip. Replay drives perp
+    # (bybit·lin + okx·swap) and spot (coinbase + the new spot legs), so the
+    # strip carries real lines — assert-with-data below, not a bare screenshot.
+    "spotperp": "#view-spotperp",
 }
 
 READY_TIMEOUT_MS = 45_000  # replay deals ~4 frames/s; heatSamples>=3 needs ~10s
@@ -249,17 +254,23 @@ def main() -> int:
         shots += p
         fails += f
 
-        # ── (b) chips: all 4 venues 'open' (replay-labeled, never 'live') ──
+        # ── (b) chips: all 7 matrix legs 'open' (replay-labeled, never 'live').
+        # T-2 (§4h): the venue matrix drives all seven venue×market legs in
+        # replay (the new spot legs replay their own 2026-07-23 captures), so
+        # every chip must report open — the four T-1 legs keep their frozen ex
+        # codes, the three new legs' ex codes ARE their leg keys. ──
+        MATRIX_EX = ("bybit", "bybit_spot", "binancef", "binance_spot",
+                     "okx", "okx_spot", "coinbase")
         chips = page.evaluate("() => window.__BTCQ_TERMINAL_DEBUG ? __BTCQ_TERMINAL_DEBUG.chips() : null")
         if not chips:
             fails.append("chips: __BTCQ_TERMINAL_DEBUG missing — terminal.js debug hook not installed")
         else:
-            for ex in ("bybit", "binancef", "coinbase", "okx"):
+            for ex in MATRIX_EX:
                 kind = chips.get(ex)
                 if kind != "open":
                     fails.append(f"chip {ex}: expected 'open' (replay), got {kind!r}")
-            if all(chips.get(ex) == "open" for ex in ("bybit", "binancef", "coinbase", "okx")):
-                print(f"PASS chips: all 4 venues open — {chips}")
+            if all(chips.get(ex) == "open" for ex in MATRIX_EX):
+                print(f"PASS chips: all 7 matrix legs open — {chips}")
 
         # ── (d) store counts sane ──
         counts = page.evaluate("() => window.__BTCQ_TERMINAL_DEBUG ? __BTCQ_TERMINAL_DEBUG.counts() : null")
@@ -269,14 +280,47 @@ def main() -> int:
             # T-1 (§4g): basisPoints ≥ 1 — the fixture tickers frames carry
             # mark+index, so BasisSeries must have accrued. walls/vpin/tapeint
             # buckets are NOT asserted: a short replay honestly leaves them 0.
+            #
+            # T-2 (§4h): the matrix must be alive, not merely booted —
+            #   enabledLegs == 7   (all legs default-enabled, none dropped);
+            #   aggLegs >= 3       (multiple venue books reach the merged agg
+            #                       book — the leg-aware panel's whole point);
+            #   spotPerpLive == 1  (the spot-vs-perp strip has a live cumulative
+            #                       read: perp = bybit·lin+okx·swap, spot =
+            #                       coinbase + the new spot legs both flowed).
             mins = {"tapeRows": 1, "ladderRows": 1, "cvdPoints": 1,
                     "heatSamples": 3, "aggLevels": 1, "footprintBars": 1,
-                    "basisPoints": 1}
+                    "basisPoints": 1, "enabledLegs": 7, "aggLegs": 3,
+                    "spotPerpLive": 1}
             bad = [k for k, lo in mins.items() if not (counts.get(k, 0) >= lo)]
             if bad:
                 fails.append(f"counts below minimum {bad}: {counts}")
             else:
                 print(f"PASS counts: {counts}")
+
+        # ── (d2) T-2 (§4h) matrix surfaces render their DOM, not just stores ──
+        # The leg manager lists all 7 legs (seeded at init even while the
+        # popover is hidden); the agg-book depth-quality strip composes one
+        # cell per leg; the spot-vs-perp strip shows its live composition line.
+        leg_rows = page.locator("#legs-list .leg-row").count()
+        if leg_rows != 7:
+            fails.append(f"leg manager: expected 7 leg rows in #legs-list, got {leg_rows}")
+        else:
+            print(f"PASS leg manager: 7 leg rows rendered")
+        q_legs = page.locator("#agg-quality .q-leg").count()
+        if q_legs != 7:
+            fails.append(f"agg-book depth-quality strip: expected 7 leg cells, got {q_legs}")
+        else:
+            print(f"PASS agg-book quality strip: 7 per-leg cells")
+        # Spot-vs-perp composition line names the enabled trade legs live; the
+        # panel must NOT be in the honest-empty state (replay drove both sides).
+        comp = page.text_content(".spcvd-comp") or ""
+        empty_spcvd = page.locator(".area-spcvd.panel--empty").count()
+        if "perp" in comp and "spot" in comp and empty_spcvd == 0:
+            print("PASS spot-vs-perp: live composition rendered, panel has data")
+        else:
+            fails.append(f"spot-vs-perp: composition/empty-state wrong "
+                         f"(comp={comp[:80]!r}, empty_panels={empty_spcvd})")
 
         # ── (e) REPLAY honesty flag in the permanent banner (§0 rail) ──
         banner = page.text_content(".term-banner") or ""
@@ -294,10 +338,10 @@ def main() -> int:
         replay_chips = [t for t in chip_texts if t.endswith(": replay")]
         if live_chips:
             fails.append(f"chip text presents replay as LIVE (§0 violation): {live_chips}")
-        elif len(replay_chips) == 4:
-            print(f"PASS chip text: all 4 chips labeled 'replay' — {replay_chips}")
+        elif len(replay_chips) == 7:
+            print(f"PASS chip text: all 7 matrix chips labeled 'replay' — {replay_chips}")
         else:
-            fails.append(f"chip text: expected 4 ': replay' labels, got {chip_texts}")
+            fails.append(f"chip text: expected 7 ': replay' labels, got {chip_texts}")
 
         # ── (c) canvas non-blank: >2% of sampled pixels differ from page bg ──
         for c in page.evaluate(CANVAS_JS):

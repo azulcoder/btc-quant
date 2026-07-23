@@ -36,8 +36,27 @@
 //     then deltas where qty "0" deletes a level; Binance `depth20@100ms` frames are
 //     each a FULL 20-level snapshot; Coinbase `market_trades` arrives as snapshot
 //     then update batches, newest-first; OKX `books` sends action:'snapshot' then
-//     'update' frames where sz "0" deletes — and ALL OKX sizes are in CONTRACTS,
-//     not BTC (ctVal 0.01 — fixtures `_okx_ctval_note`).
+//     'update' frames where sz "0" deletes — and ALL OKX SWAP sizes are in CONTRACTS,
+//     not BTC (ctVal 0.01 — fixtures `_okx_ctval_note`; SPOT sz is already coin units).
+//
+// T-2 Venue Matrix additions (§4h, fixtures `_t2_notes`, captures 2026-07-23):
+//   - The diff/l2 legs (Binance spot+futures, Coinbase exchange feed) feed the
+//     terminal-books.js SYNC ENGINES via `opts.book`, NOT the sink: a partial
+//     diff is not a §4 depth event, and only a book whose continuity the engine
+//     has PROVEN may reach a panel. Level rows pass to the engines VERBATIM
+//     (wire string tuples) — the engines key by the venue's OWN price strings
+//     (terminal-books.js primitives note); Number round-tripping here would
+//     fork "65070.00000000" from the REST snapshot's key of the same level.
+//     Each engine call carries the frame's wire ts as a TRAILING extra arg the
+//     engines ignore — the caller's flush emits depth events with it (stores
+//     stay event-time-driven, replay rail).
+//   - OKX `books` checksum is an UNPOPULATED 0 placeholder on every frame
+//     (measured 2026-07-23: 300+ frames, BTC-USDT-SWAP / BTC-USDT / ETH-USDT-
+//     SWAP — the §4h CRC32 plan is degenerate on the real wire). The
+//     identifiable continuity rail is seqId/prevSeqId chaining, which IS
+//     intact — makeOkxBooksAdapter enforces it and halts on a gap (§0.7:
+//     never apply deltas past a known hole). OkxBookSync's CRC path stays
+//     pinned by its check group for the day the venue re-populates the field.
 //
 // No DOM access, no globals beyond the ONE export — unit-testable in Node via the
 // quant.js dual-export pattern (consumed by scripts/check_terminal.cjs).
@@ -480,8 +499,349 @@
     };
   }
 
+  // ═══ T-2 Venue Matrix adapters (§4h) — see the header block for the shared
+  // engine-feed and wire-reality conventions ═══════════════════════════════
+
+  // ─── Bybit v5 SPOT — publicTrade + orderbook.200 (§4h matrix leg) ──────────
+  //
+  // Same venue family as the linear primary, different endpoint: frame shapes
+  // are IDENTICAL to the linear ones (fixtures t2_bybitspot_*: publicTrade
+  // items carry T/p/v/S/i, orderbook sends snapshot then deltas with qty-"0"
+  // tombstones), so trades/depth normalize exactly like makeBybitAdapter —
+  // just ex:'bybit_spot' and no tickers/liquidation channels (spot has no
+  // funding/OI/forced liqs to subscribe). Spot qty is already coin units.
+  function makeBybitSpotAdapter(sym, sink) {
+    return {
+      url: 'wss://stream.bybit.com/v5/public/spot',
+      pingMs: 20000,   // same v5 gateway rule as linear: client ping ≲ 20s
+      subscribe(ws) {
+        ws.send(JSON.stringify({
+          op: 'subscribe',
+          args: ['publicTrade.' + sym, 'orderbook.200.' + sym],
+        }));
+      },
+      ping(ws) { ws.send(JSON.stringify({ op: 'ping' })); },
+      onMessage(msg, api) {
+        if (!msg) return;
+        if (msg.op === 'pong' || msg.ret_msg === 'pong') { if (api.markAlive) api.markAlive(); return; }
+        if (msg.op) return;
+        if (!msg.topic || msg.data === undefined) return;
+
+        if (msg.topic.indexOf('publicTrade.') === 0) {
+          // §0.6: Bybit `S` is already the TAKER side — as-is, no inversion.
+          // Trades never markAlive (quiet spot tape = quiet market, §0 rail).
+          for (const t of msg.data || []) {
+            const price = Number(t.p), qty = Number(t.v);
+            if (!Number.isFinite(price) || !Number.isFinite(qty)) continue;
+            sink({
+              kind: 'trade', ex: 'bybit_spot',
+              ts: Number(t.T),
+              price, qty,
+              aggressorBuy: t.S === 'Buy',
+              id: String(t.i),
+            });
+          }
+        } else if (msg.topic.indexOf('orderbook.') === 0) {
+          // This socket carries no tickers channel, so the book stream is its
+          // liveness signal: near-continuous for any symbol liquid enough to
+          // enable this leg, and the §0 rail only forbids TRADES marking
+          // alive. Snapshot/delta semantics are the linear path's verbatim
+          // (qty-"0" tombstones kept for the store to delete).
+          if (api.markAlive) api.markAlive();
+          sink({
+            kind: 'depth', ex: 'bybit_spot',
+            ts: Number(msg.ts),
+            bids: normLevels(msg.data.b, true),
+            asks: normLevels(msg.data.a, false),
+            isSnapshot: msg.type === 'snapshot',
+          });
+        }
+      },
+    };
+  }
+
+  // ─── Binance SPOT — aggTrade + diff depth @100ms (§4h matrix leg) ──────────
+  //
+  // MEASURED reality this leg exists on (§4h table): unlike the FUTURES WS,
+  // Binance SPOT streams flow on this network — aggTrade delivers (242 frames
+  // in the 9s capture window) alongside the @depth@100ms diff stream. One
+  // combined-stream socket carries both; diffs feed a BinanceBookSync (spot
+  // continuity U ≤ lastUpdateId+1 ≤ u) via opts.book, trades feed the sink.
+  function makeBinanceSpotAdapter(sym, sink, opts) {
+    const o = opts || {};
+    const book = o.book || null;   // BinanceBookSync (spot mode) — diff consumer
+    const s = String(sym).toLowerCase();
+    return {
+      // Combined-stream endpoint: the subscription IS the URL (frames arrive
+      // wrapped {stream, data} — fixture t2_binancespot_*), same idiom as the
+      // futures depth adapters. No client ping: Binance pings at the protocol
+      // level and the browser answers automatically.
+      url: 'wss://stream.binance.com:9443/stream?streams=' + s + '@aggTrade/' + s + '@depth@100ms',
+      subscribe() { /* URL-subscribed — no subscribe frame needed */ },
+      onMessage(msg, api) {
+        if (!msg || !msg.data) return;
+        const d = msg.data;
+        if (d.e === 'aggTrade') {
+          // §0.6: `m` (isBuyerMaker) true → the BUYER rested → SELL aggressor.
+          // aggressorBuy is the INVERSE of m; a frame without the boolean is
+          // dropped whole (guessing a side would fabricate signed flow).
+          if (typeof d.m !== 'boolean') return;
+          const price = Number(d.p), qty = Number(d.q);
+          if (!Number.isFinite(price) || !Number.isFinite(qty)) return;
+          sink({
+            kind: 'trade', ex: 'binance_spot',
+            ts: Number(d.T),                 // trade time (E is gateway event time)
+            price, qty,
+            aggressorBuy: d.m === false,
+            id: String(d.a),                 // aggTrade id — monotonic int on the wire
+          });
+        } else if (d.e === 'depthUpdate') {
+          // Diff stream ticks ~10/s whether or not anyone trades → the
+          // socket's liveness proof (trades stay silent per the §0 rail).
+          if (api.markAlive) api.markAlive();
+          if (!book) return;   // engine-less construction: diffs have nowhere honest to go
+          // Rows VERBATIM + wire ts as the trailing arg (header conventions).
+          // Spot diffs carry NO pu — that is the mode split BinanceBookSync
+          // exists for, not a missing field.
+          book.onDiff({ U: d.U, u: d.u, bids: d.b, asks: d.a }, Number(d.E));
+        }
+      },
+    };
+  }
+
+  // ─── Binance FUTURES diff depth @100ms → BinanceBookSync futures (§4h) ─────
+  //
+  // Depth ONLY, like makeBinanceDepthAdapter before it (§0.2: futures WS
+  // topic-filters trades/mark on this network — sub-ack, zero frames), but
+  // the diff stream + REST snapshot upgrade the leg from a top-20 window to
+  // a FULL synced local book with `pu` chain verification. NOTHING is emitted
+  // to a sink here: futures trades are recorded by the collector's REST
+  // aggTrades poller (§3c) — the terminal does not duplicate that poller, and
+  // the local book reaches panels through the caller's engine flush.
+  function makeBinanceFutDepthDiff(sym, opts) {
+    const o = opts || {};
+    const book = o.book || null;   // BinanceBookSync (futures mode) — pu chaining
+    const stream = String(sym).toLowerCase() + '@depth@100ms';
+    return {
+      url: 'wss://fstream.binance.com/stream?streams=' + stream,
+      subscribe() { /* URL-subscribed — no subscribe frame needed */ },
+      onMessage(msg, api) {
+        if (!msg || !msg.data || msg.data.e !== 'depthUpdate') return;
+        const d = msg.data;
+        // Same liveness reasoning as makeBinanceDepthAdapter: this is the
+        // socket's only topic and it ticks 10/s regardless of trade activity.
+        if (api.markAlive) api.markAlive();
+        if (!book) return;   // engine-less construction: diffs have nowhere honest to go
+        // Rows VERBATIM + wire ts trailing (header conventions); pu passes
+        // through untouched — the engine's futures rule verifies the chain.
+        book.onDiff({ U: d.U, u: d.u, pu: d.pu, bids: d.b, asks: d.a }, Number(d.E));
+      },
+    };
+  }
+
+  // ─── OKX v5 books + trades — seq-chain-guarded matrix legs (§4h) ───────────
+  //
+  // One socket per okx leg (swap OR spot instId): `books` (400 levels,
+  // snapshot then sparse absolute updates, sz "0" deletes) + `trades`.
+  // Replaces makeOkxAdapter for the terminal's matrix legs; that adapter's
+  // trade/level normalization is carried over verbatim.
+  //
+  // CONTINUITY (the §4h deviation, measured 2026-07-23 and pinned in
+  // fixtures `_t2_notes`): the wire's `checksum` field is an unpopulated 0
+  // placeholder on EVERY frame, so CRC verification (OkxBookSync) has no
+  // input to verify against on today's wire. The seqId/prevSeqId chain IS
+  // intact and is the identifiable rail: every update must chain exactly
+  // (prevSeqId === last seqId); a break flags `bookGapped()` and STOPS depth
+  // emission (§0.7 — deltas are never applied past a known hole) until the
+  // caller resubscribes (fresh socket → fresh snapshot resets the chain).
+  // The adapter cannot resubscribe itself — onMessage never sees the socket —
+  // hence the polled getter instead of self-healing.
+  //
+  // UNIT RAIL (§4b): SWAP sizes (trades `sz` AND book `sz`) are in CONTRACTS
+  // — callers pass the instrument's real ctVal. SPOT sz is ALREADY coin
+  // units → ctVal defaults to 1 (the §4b contracts rail is derivatives-only).
+  function makeOkxBooksAdapter(instId, sink, opts) {
+    const o = opts || {};
+    // ex is the event tag consumers key on: the swap leg keeps the frozen
+    // O-2 short code 'okx' (every existing panel/store reads it); the spot
+    // leg passes 'okx_spot'.
+    const ex = typeof o.ex === 'string' && o.ex ? o.ex : 'okx';
+    const ctVal = Number.isFinite(o.ctVal) && o.ctVal > 0 ? Number(o.ctVal) : 1;
+    let lastSeqId = NaN;   // NaN until a snapshot seeds the chain
+    let gapped = false;
+    let bookResyncs = 0;   // counted honest resyncs (§4h chip note idiom)
+
+    return {
+      url: 'wss://ws.okx.com:8443/ws/v5/public',
+      pingMs: 25000,   // OKX idle-drop ~30s; plain-text ping (makeOkxAdapter note)
+      subscribe(ws) {
+        ws.send(JSON.stringify({
+          op: 'subscribe',
+          args: [
+            { channel: 'books', instId: instId },
+            { channel: 'trades', instId: instId },
+          ],
+        }));
+      },
+      // Plain-text pong never survives makeSocket's JSON.parse — safely
+      // ignored BY CONSTRUCTION (see makeOkxAdapter's keepalive note).
+      ping(ws) { ws.send('ping'); },
+      /** Caller-polled resync request: true from the moment a seq gap is
+       *  detected until the next books snapshot re-seeds the chain. */
+      bookGapped() { return gapped; },
+      get bookResyncs() { return bookResyncs; },
+      onMessage(msg, api) {
+        if (!msg) return;
+        if (msg.event) return;   // sub acks / error events carry no data
+        if (!msg.arg || !Array.isArray(msg.data)) return;
+        const ch = msg.arg.channel;
+        if (ch !== 'books' && ch !== 'trades') return;
+
+        // Liveness: every books/trades data frame (makeOkxAdapter's §4b
+        // reasoning — books ticks near-continuously and is the primary
+        // signal; a stalled feed stops marking and trips the watchdog).
+        if (api.markAlive) api.markAlive();
+
+        if (ch === 'trades') {
+          for (const t of msg.data) {
+            const price = Number(t.px), qty = Number(t.sz) * ctVal;   // CONTRACTS→coin (swap) / ×1 (spot)
+            if (!Number.isFinite(price) || !Number.isFinite(qty)) continue;
+            sink({
+              kind: 'trade', ex: ex,
+              ts: Number(t.ts),
+              price, qty,
+              // §0.6 family: OKX `side` is the TAKER side — as-is (Bybit
+              // convention, NOT the Coinbase maker-side gotcha).
+              aggressorBuy: t.side === 'buy',
+              id: String(t.tradeId),
+            });
+          }
+          return;
+        }
+        for (const row of msg.data) {
+          if (msg.action === 'snapshot') {
+            // Snapshot RESETS the chain (a resubscribe's fresh baseline) and
+            // clears any standing gap flag.
+            lastSeqId = Number(row.seqId);
+            gapped = false;
+            sink({
+              kind: 'depth', ex: ex,
+              ts: Number(row.ts),
+              bids: normLevels(row.bids, true, ctVal),
+              asks: normLevels(row.asks, false, ctVal),
+              isSnapshot: true,
+            });
+          } else {
+            if (gapped) continue;   // halted: no deltas past a known hole (§0.7)
+            // The chain must be EXACT — an unverifiable link (corrupt ids)
+            // counts as broken, not assumed fine (BinanceBookSync's rule).
+            const prev = Number(row.prevSeqId);
+            if (!Number.isFinite(prev) || prev !== lastSeqId) {
+              gapped = true;
+              bookResyncs++;
+              // Chip the reason honestly; the caller's poll does the restart.
+              if (api.onStatus) api.onStatus('stale', 'book seq gap — resubscribing (×' + bookResyncs + ')');
+              continue;
+            }
+            lastSeqId = Number(row.seqId);
+            sink({
+              kind: 'depth', ex: ex,
+              ts: Number(row.ts),
+              bids: normLevels(row.bids, true, ctVal),    // sz-"0" tombstones kept (store deletes)
+              asks: normLevels(row.asks, false, ctVal),
+              isSnapshot: false,
+            });
+          }
+        }
+      },
+    };
+  }
+
+  // ─── Coinbase Exchange feed — level2_batch + matches (§4h matrix leg) ──────
+  //
+  // The KEYLESS full-book leg (§4h table): one socket on the Exchange feed
+  // (ws-feed.exchange.coinbase.com) carrying level2_batch (FULL snapshot then
+  // batched absolute l2updates) + matches (the spot tape) + heartbeat (~1/s
+  // liveness). Replaces makeCoinbaseAdapter for the terminal's coinbase leg;
+  // app.js keeps the Advanced Trade adapter untouched.
+  //
+  // FRAME SIZE reality (§4h): the BTC-USD snapshot measured 1,160,901 bytes
+  // (~44k levels) in ONE WS message. makeSocket JSON.parses with no size
+  // assumption and the browser WebSocket has no incoming-message cap — the
+  // 1 MiB limit met during probing was a python-websockets client default,
+  // not a wire property (verified live 2026-07-23, fixtures `_t2_notes`).
+  //
+  // The book feeds a CoinbaseBookSync via opts.book. No sequence number
+  // exists on this channel (engine header states it) — the continuity rail
+  // is the engine's staleness ts + makeSocket's watchdog: a stalled channel
+  // stops marking alive, the forced reconnect resubscribes, and the fresh
+  // snapshot replaces the book wholesale.
+  function makeCoinbaseL2Adapter(productId, sink, opts) {
+    const o = opts || {};
+    const book = o.book || null;   // CoinbaseBookSync — snapshot/l2update consumer
+    // Monotonic trade-id dedupe: every (re)subscribe re-delivers a
+    // `last_match` (the most recent print — emitted ONCE as the tape's seed,
+    // the advanced-trade snapshot-seeding precedent), and a reconnect must
+    // not double-print it.
+    let lastTradeId = -1;
+
+    return {
+      url: 'wss://ws-feed.exchange.coinbase.com',
+      subscribe(ws) {
+        ws.send(JSON.stringify({
+          type: 'subscribe', product_ids: [productId],
+          channels: ['level2_batch', 'matches', 'heartbeat'],
+        }));
+      },
+      // NO ping and NO re-subscribe nudge on purpose: heartbeat (~1/s) is the
+      // keepalive, and re-subscribing level2_batch makes the venue re-send
+      // the whole >1MB snapshot — a 20s "nudge" would re-download the book
+      // three times a minute.
+      onMessage(msg, api) {
+        if (!msg || typeof msg.type !== 'string') return;
+        if (msg.type === 'heartbeat') { if (api.markAlive) api.markAlive(); return; }
+        if (msg.type === 'snapshot') {
+          // Full replace. Rows VERBATIM (wire string tuples — header rail);
+          // the snapshot carries its own ISO `time` (fixture).
+          if (book) book.onSnapshot(msg.bids, msg.asks, Date.parse(msg.time));
+          return;
+        }
+        if (msg.type === 'l2update') {
+          // Batched book channel ticks steadily → a real liveness signal
+          // (matches stay silent per the §0 quiet-tape rail).
+          if (api.markAlive) api.markAlive();
+          if (book) book.onL2Update(msg.changes, Date.parse(msg.time));
+          return;
+        }
+        if (msg.type === 'match' || msg.type === 'last_match') {
+          // §0.6 / DEVELOPMENT.md §5 gotcha: Exchange-feed `side` is the
+          // MAKER side (lowercase here) — aggressor is the INVERSE:
+          // side 'sell' ⇒ a resting ask was lifted ⇒ aggressive BUY.
+          const idNum = Number(msg.trade_id);
+          const price = Number(msg.price), qty = Number(msg.size);
+          const ts = Date.parse(msg.time);
+          if (!Number.isFinite(idNum) || !Number.isFinite(price) || !Number.isFinite(qty) || !Number.isFinite(ts)) return;
+          if (idNum <= lastTradeId) return;   // reconnect re-delivery — already printed
+          lastTradeId = idNum;
+          sink({
+            kind: 'trade', ex: 'coinbase',
+            ts, price, qty,
+            aggressorBuy: msg.side === 'sell',
+            id: String(msg.trade_id),
+          });
+        }
+      },
+    };
+  }
+
   // ─── Export (ONE global + Node dual-export, quant.js pattern) ───────────────
-  const ADAPTERS = { makeBybitAdapter, makeBinanceDepthAdapter, makeCoinbaseAdapter, makeOkxAdapter, makeBinanceRestPoller };
+  const ADAPTERS = {
+    makeBybitAdapter, makeBinanceDepthAdapter, makeCoinbaseAdapter, makeOkxAdapter, makeBinanceRestPoller,
+    // T-2 (§4h): venue-matrix legs — see the T-2 header block for the shared
+    // engine-feed conventions and the measured OKX checksum reality.
+    makeBybitSpotAdapter, makeBinanceSpotAdapter, makeBinanceFutDepthDiff,
+    makeOkxBooksAdapter, makeCoinbaseL2Adapter,
+  };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = ADAPTERS;
   if (typeof global !== 'undefined') global.BTCQ_TERMINAL_ADAPTERS = ADAPTERS;
