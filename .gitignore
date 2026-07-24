@@ -37,3 +37,7 @@ reports/verify/
 dashboard/econ_calendar.json
 data/hf-stage/manifests/
 data/hf-stage/
+
+# GCP collector deploy (deploy/gcp/): the real env file carries the HF write token.
+# Only env.example is committed. Never the filled-in env.
+deploy/gcp/env

@@ -1,0 +1,54 @@
+[Unit]
+Description=btc-quant HF sync — upload closed day files, verify on the Hub, then free local disk
+Documentation=https://github.com/azulcoder/btc-quant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@RUN_USER@
+Group=@RUN_USER@
+WorkingDirectory=@APP_DIR@
+# Leading '-' tolerates a missing env file (manual install, un-seeded box) instead of
+# hard-failing the unit; a missing HF_TOKEN then surfaces loudly at the upload, not here.
+-EnvironmentFile=@APP_DIR@/deploy/gcp/env
+# huggingface_hub (and its Xet upload backend) put their cache + logs under
+# $HOME=@APP_DIR@, which ProtectSystem=strict below mounts READ-ONLY — the only
+# writable subtree is @APP_DIR@/data. Pin the hub + Xet caches inside it, or the very
+# first Xet chunk write dies with EROFS, the verify-then-delete rail never runs, and
+# local disk fills — the exact failure this VM exists to prevent. (env.example is
+# copied verbatim, not token-rendered, so this must live here in the unit.)
+Environment=HF_HOME=@APP_DIR@/data/.hf-home
+Environment=HF_XET_CACHE=@APP_DIR@/data/.hf-home/xet
+# Direct venv python — NOT `make`. The Mac launchd port hit exactly this: a minimal
+# scheduler PATH resolved the wrong python3 and duckdb was missing. A pinned absolute
+# interpreter removes the whole class of bug. --yes lets the unattended run actually
+# delete locally after upload; upload_hf.py's verify-then-delete rail is built so a day
+# file is never removed until its partition is confirmed present on the Hub — a failed
+# or re-run job leaves local data intact.
+ExecStart=@VENV@/bin/python scripts/upload_hf.py --yes
+
+# --- hardening (least privilege: the syncer needs outbound net + data/ only) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+# The ONLY writable subtree: closed day files in, staged parquet + the hub/Xet cache out.
+ReadWritePaths=@APP_DIR@/data
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

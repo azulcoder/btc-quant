@@ -1,0 +1,17 @@
+[Unit]
+Description=Daily btc-quant HF sync
+# Fires 07:20 in the VM's timezone. bootstrap.sh sets the VM to Asia/Jakarta, so
+# 07:20 WIB = 00:20 UTC — comfortably AFTER the UTC day rolls (00:00) and the §3c
+# 5-minute grace window closes (00:05), so the just-closed UTC day is complete and
+# ready to upload. Same wall-clock as the Mac launchd unit it replaces.
+
+[Timer]
+OnCalendar=*-*-* 07:20:00
+# If the VM was down at 07:20 (reboot, maintenance), run as soon as it is back —
+# a missed sync would let local disk fill. Mirrors launchd's StartCalendarInterval
+# catch-up behaviour.
+Persistent=true
+Unit=btcquant-hfsync.service
+
+[Install]
+WantedBy=timers.target

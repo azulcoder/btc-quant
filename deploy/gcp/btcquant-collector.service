@@ -1,0 +1,62 @@
+[Unit]
+Description=btc-quant tick collector (keyless orderflow recorder, DESIGN §3c)
+Documentation=https://github.com/azulcoder/btc-quant
+# Continuity IS the research value: every minute down is an honest gap in the
+# per-UTC-day rotation store (gaps stay gaps — never interpolated), and MinBTL
+# clearance for the order-flow families is gated on accumulated history. So the
+# recorder restarts forever and never rate-limits itself into giving up.
+After=network-online.target
+Wants=network-online.target
+# Keep restarting no matter how often it crashes (mirrors launchd KeepAlive=true);
+# a start-limit that gave up would silently stop recording. This directive lives in
+# [Unit] on systemd >= v230.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@RUN_USER@
+Group=@RUN_USER@
+WorkingDirectory=@APP_DIR@
+# Fallback symbol so a missing/un-seeded env file (tolerated by the leading '-' below)
+# never expands to an empty --symbol argument; the env file overrides it when present.
+Environment=BTCQUANT_SYMBOL=BTCUSDT
+-EnvironmentFile=@APP_DIR@/deploy/gcp/env
+# --symbol comes from the env file (default BTCUSDT above). NO --api-port: the BYOD API
+# is a local-analysis surface, so the VM records only and opens no inbound port (the
+# public terminal reads recorded days straight from the HF dataset). To serve it anyway,
+# add `--api-port 8788` AND reach it over an SSH tunnel — never a public firewall rule.
+ExecStart=@VENV@/bin/python scripts/run_collector.py --symbol ${BTCQUANT_SYMBOL}
+# Clean SIGTERM → the collector flushes its final rows before exit (its own handler).
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=15
+
+# --- hardening (least privilege: the recorder needs only outbound net + data/) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+# The ONLY path the service may write. duckdb day files + WAL, hf-stage, levels.jsonl
+# all live under data/. Everything else (repo, venv, /usr, /etc) is read-only to it.
+ReadWritePaths=@APP_DIR@/data
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
