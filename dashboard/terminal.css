@@ -357,6 +357,21 @@ main.term-main {
 .heat-controls input[type="checkbox"] { vertical-align: middle; margin: 0 0 0 3px; }
 .heat-controls button { font-size: var(--fs-xs); padding: 1px 6px; text-transform: none; letter-spacing: 0; }
 
+/* T-3 (§4i): panel-control sub-row — a WRAPPING flex row of selects/toggles
+   under panel-src (tape filters, ladder source+cum). The narrow orderflow
+   columns cannot carry these in the h2 chrome the way a single-select panel
+   can, so they get their own row that wraps instead of overflowing the column
+   (horizontal-scroll defect fix). Mono/small like the legends. */
+.panel-ctl {
+  display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: center;
+  padding: 3px 0 2px; margin-bottom: 2px;
+  font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.panel-ctl label { color: var(--muted); }
+.panel-ctl select { min-width: 78px; max-width: 128px; padding: 1px 4px; font-size: var(--fs-xs); }
+.panel-ctl input[type="checkbox"] { vertical-align: middle; margin: 0 0 0 2px; }
+
 /* Shared canvas-panel legend (agg book; CVD has its own overlay variant). */
 .term-legend {
   display: flex;
@@ -481,6 +496,23 @@ table.ladder tr.spread td {
   from { background-color: rgba(224, 163, 62, 0.35); }
   to   { background-color: transparent; }
 }
+/* ─── T-3 (§4i): trade imprint + cum + wall marker + spread readouts ─────── */
+/* Imprint = rolling executed volume-at-price (sell left, buy right — position
+   is the second cue next to the coloured mini bar background). */
+table.ladder td.imp { color: var(--muted); font-size: 10px; }
+table.ladder td.imp-buy { text-align: left; }
+table.ladder td.cum { color: var(--muted); }
+/* WallsLedger marker (§4g cross-reference): a ‖ after the price on a wall
+   row — accent = "notable structure" chrome, side-agnostic, coexists with the
+   naked-POC dotted underline. */
+table.ladder tr.wall td.px { position: relative; }
+table.ladder tr.wall td.px::after {
+  content: '‖'; color: var(--accent); font-weight: 700; margin-left: 4px;
+}
+/* Enriched spread row: mid marker + spread ticks/bps + TOB & N-tick imbalance. */
+table.ladder tr.spread td { font-size: 10px; }
+table.ladder tr.spread .sp-mid { color: var(--fg); font-weight: 600; margin-right: 8px; }
+table.ladder tr.spread .sp-x { color: var(--muted); margin: 0 5px; }
 
 /* ─── Tape — newest-first prints, aggressor-colored, whale emphasis ──────── */
 .tape-wrap { display: flex; flex-direction: column; }
@@ -495,7 +527,7 @@ table.ladder tr.spread td {
    the row itself can never overflow the panel (that overflow WAS the clip). */
 .tape-row {
   display: grid;
-  grid-template-columns: 62px 30px minmax(72px, 1.3fr) minmax(0, 0.85fr) minmax(0, 1.05fr);
+  grid-template-columns: 62px 54px minmax(66px, 1.3fr) minmax(0, 1fr) minmax(0, 1.05fr);
   gap: var(--sp-2);
   font-family: var(--mono);
   font-size: var(--fs-xs);
@@ -523,13 +555,50 @@ table.ladder tr.spread td {
 .tape-row .px { text-align: right; }
 /* Exchange tag per print (§0.7 per-source label) — venue = categorical token,
    consistent with the agg-book stacking colors. */
-.tape-row .ex { font-size: 10px; }
-.tape-row .ex-bybit { color: var(--c2); }
-.tape-row .ex-coinbase { color: var(--c4); }
-.tape-row .ex-okx { color: var(--c3); }   /* O-2 leg — same EX_TOKEN hue as CVD/agg-book */
-/* Whale ≥ $250k: bold + ◆ marker in the notional cell (marker = non-color cue). */
-.tape-row.whale { font-weight: 700; background: rgba(224, 163, 62, 0.08); }
-.tape-row.whale .ntl { color: var(--accent); }
+/* Venue = a coloured dot (EX_TOKEN hue, one venue = one colour across panels);
+   the tag text stays muted so the dot carries the colour cue. */
+.tape-row .ex { font-size: 10px; color: var(--muted); display: inline-flex; align-items: center; gap: 3px; overflow: hidden; }
+.tape-row .ex.spot { text-decoration: underline dotted; text-underline-offset: 2px; }  /* market = second cue */
+.ex-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; flex: none; }
+
+/* ─── T-3 (§4i): size-tiered tape blocks — colour intensity + weight is the
+   redundant cue next to the log-notional bar (the ◆/◇ glyph is the third). ── */
+.tape-row .qty { position: relative; background-clip: padding-box; }
+.tape-row .qty .xn { color: var(--muted); font-size: 9px; margin-left: 3px; }
+.tape-row.tier-baseline { opacity: 0.6; }        /* dust — dim, still legible */
+.tape-row.tier-sig      { opacity: 0.85; }
+.tape-row.big           { font-weight: 700; }    /* huge / whale */
+.tape-row.tier-huge  .ntl { color: var(--accent); }
+.tape-row.tier-whale .ntl { color: var(--accent); font-weight: 700; }
+.tape-row.tier-whale { background: rgba(224, 163, 62, 0.07); }
+
+/* Big-print rail — a pinned, horizontally-scrolling strip of the last N
+   huge/whale blocks above the tape (§4i don't-miss-the-block). */
+.bigprint-rail {
+  display: flex; gap: 6px; align-items: center;
+  overflow-x: auto; overflow-y: hidden;
+  padding: 3px 2px 4px; margin-bottom: 2px;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: thin;
+}
+.bp-label { flex: none; color: var(--muted); text-transform: uppercase; font-size: 9px; letter-spacing: 0.05em; }
+.bp-empty { color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs); }
+.bp-chip {
+  flex: none; display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--mono); font-size: var(--fs-xs);
+  padding: 1px 5px; border: 1px solid var(--border); border-radius: 3px;
+  background: var(--bg-panel-2); white-space: nowrap;
+}
+.bp-chip b { font-weight: 700; }
+.bp-chip .bp-px { color: var(--muted); }
+.bp-chip .bp-age { color: var(--muted); font-size: 9px; }
+.bp-chip.tier-whale { border-color: var(--accent); }
+
+/* Honesty line: which legs feed the merged tape + that tiers are conventions. */
+.tape-hon {
+  color: var(--muted); font-family: var(--mono); font-size: 10px; line-height: 1.35;
+  padding: 3px 2px 0; margin-top: 2px; border-top: 1px solid var(--border);
+}
 
 /* ─── Liquidation feed ───────────────────────────────────────────────────── */
 .liq-wrap { display: flex; flex-direction: column; }
@@ -576,6 +645,12 @@ table.ladder tr.spread td {
 }
 .liq-badge.long  { color: var(--down); border: 1px solid var(--down); }
 .liq-badge.short { color: var(--up);   border: 1px solid var(--up); }
+/* T-3 (§4i): liquidation notional tiers (own thresholds, labeled conventions):
+   ≥ huge gets ◆ + weight, ≥ big gets ◇ — the don't-miss-the-cascade emphasis. */
+.liq-row.liq-big  .ntl { color: var(--fg); }
+.liq-row.liq-huge { font-weight: 700; }
+.liq-row.liq-huge .ntl { color: var(--accent); }
+.liq-est { color: var(--warn-fg); font-style: italic; }   /* venue sent notional only (§0.4) */
 
 /* ─── Detection feed (O-2, §4b) — heuristic spoof/iceberg flags ──────────── */
 /* Dead-space fix: the detections panel is the right column's flex-fill (see
@@ -643,6 +718,13 @@ table.ladder tr.spread td {
 /* ─── Settings row ───────────────────────────────────────────────────────── */
 .area-set select { min-width: 90px; }
 .area-set input[type="number"] { width: 110px; }
+/* T-3 (§4i): the four tape-tier inputs sit in one compact row; the tier and
+   audio widgets are narrower than the default number width above. */
+.control-tiers .tier-inputs { display: inline-flex; gap: 3px; }
+.control-tiers .tier-inputs input[type="number"] { width: 74px; }
+.audio-ctl { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); }
+.audio-ctl input[type="range"] { width: 84px; }
+.audio-ctl input[type="checkbox"] { margin: 0; }
 
 /* ─── O-3 STRUCTURE panels (§4c) ─────────────────────────────────────────── */
 

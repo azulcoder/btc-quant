@@ -288,10 +288,18 @@ def main() -> int:
             #   spotPerpLive == 1  (the spot-vs-perp strip has a live cumulative
             #                       read: perp = bybit·lin+okx·swap, spot =
             #                       coinbase + the new spot legs both flowed).
+            #
+            # T-3 (§4i): the aggregated tape + ladder must be alive —
+            #   tapeAggRows >= 1  (merged blocks exist in the aggregator);
+            #   imprintLevels >= 1 (the bybit trade imprint bucketed prints —
+            #                       the ladder's volume-at-price surface).
+            # bigPrints is NOT asserted: a short replay honestly rarely holds a
+            # ≥$1M huge/whale BLOCK, so the rail is legitimately empty (its
+            # structure is checked below; the live check reports population).
             mins = {"tapeRows": 1, "ladderRows": 1, "cvdPoints": 1,
                     "heatSamples": 3, "aggLevels": 1, "footprintBars": 1,
                     "basisPoints": 1, "enabledLegs": 7, "aggLegs": 3,
-                    "spotPerpLive": 1}
+                    "spotPerpLive": 1, "tapeAggRows": 1, "imprintLevels": 1}
             bad = [k for k, lo in mins.items() if not (counts.get(k, 0) >= lo)]
             if bad:
                 fails.append(f"counts below minimum {bad}: {counts}")
@@ -321,6 +329,33 @@ def main() -> int:
         else:
             fails.append(f"spot-vs-perp: composition/empty-state wrong "
                          f"(comp={comp[:80]!r}, empty_panels={empty_spcvd})")
+
+        # ── (d3) T-3 (§4i) tape + ladder surfaces render their DOM ──
+        # The big-print rail strip is present above the tape (populated or its
+        # honest empty note); the tape honesty line names the feeding legs +
+        # states the tiers are conventions; the ladder spread row carries the
+        # enriched mid + spread readout (the reworked DomLadderView).
+        rail = page.locator("#view-tape .bigprint-rail").count()
+        if rail == 1:
+            print("PASS tape: big-print rail strip present")
+        else:
+            fails.append(f"tape: expected 1 .bigprint-rail strip, got {rail}")
+        hon = page.text_content("#view-tape .tape-hon") or ""
+        if "merges" in hon and "conventions" in hon:
+            print("PASS tape: honesty line names feeding legs + tier conventions")
+        else:
+            fails.append(f"tape: honesty line missing/wrong (text={hon[:90]!r})")
+        # Tiered blocks: at least one aggregated row rendered with a tier class.
+        tiered = page.locator("#view-tape .tape-row[class*='tier-']").count()
+        if tiered >= 1:
+            print(f"PASS tape: {tiered} tier-classed block rows rendered")
+        else:
+            fails.append("tape: no tier-classed block rows rendered")
+        spread = page.text_content("#view-dom tr.spread") or ""
+        if "mid" in spread and "spread" in spread:
+            print("PASS ladder: enriched spread row (mid + spread ticks/bps)")
+        else:
+            fails.append(f"ladder: spread row missing mid/spread readout (text={spread[:90]!r})")
 
         # ── (e) REPLAY honesty flag in the permanent banner (§0 rail) ──
         banner = page.text_content(".term-banner") or ""

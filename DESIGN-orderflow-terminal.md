@@ -12,7 +12,7 @@ un-validated). **O-5 shipped 2026-07-05** (§4e portfolio & research — trade j
 returns, Polymarket crowd-implied panel, ToA news feed, local-mirror econ calendar
 (`make econ` — faireconomy has no CORS), + the elite pass: sticky section nav w/
 persisted collapse, hidden-tab/offscreen paint gating (ingestion never pauses), and
-`check_terminal.cjs` (70 groups) promoted to a CI build gate). **The terminal feature
+`check_terminal.cjs` (73 groups) promoted to a CI build gate). **The terminal feature
 plan (§5) is complete** — further work follows the DEVELOPMENT.md §6 greenlight ritual;
 the T-1 Trader's Edge pass (§4g) added multi-symbol + the delta/intensity/walls/VPIN/
 opening-type/key-levels/basis surfaces on top of it.
@@ -744,6 +744,72 @@ OKX CRC32 pinned vector + mismatch→resync; Coinbase apply/remove-zero/replace;
 leg-registry enable/disable + persistence shape; spot-vs-perp CVD store math;
 matrix `deriveVenueIds` extension (spot ids + digit-prefix + non-USDT degrades).
 
+## 4i. T-3 contracts — Tape & Ladder Pro (binding)
+
+Greenlit 2026-07-24, prompted by an aggr.trade workspace (RifeBTC-full). aggr's
+value is its aggregated TAPE: many venues merged into one time-ordered tape with
+size-tiered emphasis on big prints; it has NO order book. So T-3 = port that
+tape-reading MODEL onto the T-2 venue matrix, and (our own add) turn the DOM ladder
+into a full-depth reading surface on the T-2 local books. Everything live-descriptive
+(§0.1); thresholds are labeled display conventions; COVERAGE IS HONEST — the tape
+aggregates the venues we reach keyless (the enabled T-2 trade legs, up to 6), NOT
+aggr's ~24. No claim beyond what the wire gives.
+
+### Tape (TapeView rework + pure stores)
+
+- **TapeAggregator (pure).** Merge a run of same-venue, same-side trades at the same
+  price within `aggWindowMs` (default 100 ms, event-ts) into one row: summed qty,
+  summed notional, volume-weighted avg price, and `count` (shown `×N`). Mirrors aggr
+  `aggregationLength`. A price change, side flip, venue change, or window expiry
+  closes the row. Never merges across venues (that would fake a single print).
+- **Size tiers by USD notional** (configurable; BTC-scaled defaults, each a stated
+  convention): `sig` >= $100k, `large` >= $250k, `huge` >= $1M, `whale` >= $5M;
+  below `sig` = baseline (dim, optionally collapsed). Each tier => colour intensity
+  + row weight + a histogram bar scaled by log-notional. This is the "read the tape"
+  core (aggr threshold/significant/huge/rare).
+- **Merged multi-venue tape.** All ENABLED T-2 trade legs, time-ordered into one tape
+  with a per-row venue dot/tag; spot vs perp visually distinguished + a spot-only /
+  perp-only / both filter. The existing per-panel single-venue view stays.
+- **Big-print rail.** A compact pinned strip of the last N `huge`/`whale` prints
+  (venue, side, $, px, age) above the tape — the don't-miss-the-block surface.
+- **Liquidation tier.** Liquidations (already flowing) get their own notional tiers
+  and emphasis; keep the ESTIMATED/model label where a venue sends only notional.
+- **Optional audio (default OFF).** A toggle plays a short Web-Audio ping (no assets)
+  on `huge`/`whale` prints and a distinct one on large liquidations; volume control.
+  Labeled a UX aid, NOT a signal. Muted by default; state persisted.
+- Display toggles: cumulative $, time-ago, avg price. Honesty line names which legs
+  feed the merged tape and that tiers/audio are conventions, not signals.
+
+### DOM ladder (DomView rework on the T-2 full local books)
+
+- **Depth size bars.** Per price level, a bar proportional to resting qty (bid/ask),
+  read from the FULL local book (BinanceBookSync / OkxBookSync / CoinbaseBookSync /
+  bybit), not just top-of-book. Book maintained full, display windowed (stated).
+- **Cumulative depth.** Optional running sum from mid outward (column or curve) —
+  where liquidity stacks.
+- **Wall highlight.** Levels flagged by WallsLedger (>= K x p95 sustained) get a
+  marker — this is where tape-reading meets resting liquidity (cross-reference, do
+  not merge the stores).
+- **Trade imprint at price.** Rolling-window executed buy vs sell volume bucketed by
+  price level, painted on the ladder (a mini bid/ask volume-at-price) — the tape-
+  meets-DOM reading surface. Window configurable; descriptive.
+- **Spread / mid / imbalance.** Mid marker, spread in ticks + bps, top-of-book
+  imbalance %, and a depth-imbalance readout (sum bid vs ask within N ticks).
+- **Source select.** Default single-venue (bybit linear). An AGGREGATED ladder option
+  merges enabled SAME-QUOTE (USDT) legs onto the primary tick grid — display-only,
+  loudly caveated (cross-venue/cross-quote depth is an approximation, never a merged
+  truth); different-quote legs are excluded from the sum, not silently rescaled.
+- Tick-group selector (existing) drives row granularity.
+
+### check_terminal groups (mandatory adds)
+TapeAggregator merge math (same-venue run merges; price/side/venue/window boundary
+closes; VWAP avg px); size-tier classification at boundary notionals; merged
+multi-venue time-ordering + spot/perp tag + enabled-leg filter; big-print rail last-N
+selection; liquidation tier; DOM depth-bar log scaling; cumulative-depth running sum;
+trade-imprint-at-price bucketing (buy/sell split, window prune); depth-imbalance
+within-N-ticks math; aggregated-ladder same-quote-only grid merge (a non-USDT leg is
+excluded, not rescaled).
+
 ## 5. CryExc → btc-quant feature map & phase plan
 
 | # | CryExc view | Phase | Rail notes |
@@ -797,7 +863,7 @@ prevent AC sleep. `make check-ticks` weekly is the standing quality ritual.
 Layer 0 (static, every commit): `python -m pytest` (incl. collector tests; network-free);
 `node --check` on every dashboard JS file; `node scripts/check_terminal.cjs` (fixture
 smoke: adapters + stores + O-3/O-4 normalizers/builders replayed over the REAL captured
-frames/responses, 70 assertion groups incl. the T-1 §4g + T-2 §4h adds — a CI build gate since
+frames/responses, 73 assertion groups incl. the T-1 §4g + T-2 §4h + T-3 §4i adds — a CI build gate since
 O-5, §4e.3).
 
 - **L1 — deterministic browser harness** (`make verify-browser`,

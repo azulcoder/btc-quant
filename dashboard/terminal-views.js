@@ -865,40 +865,51 @@
     return { mount, render };
   }
 
-  // ═══ DomLadderView — grouped price ladder around the spread ═══
+  // ═══ DomLadderView — full-book depth ladder + trade imprint (§4i) ═══
   //
   // Fixed row pool (nLevels asks + spread + nLevels bids) built once at mount;
-  // render() only rewrites text/styles — no per-frame DOM churn, and flash
+  // render() only rewrites text/styles — no per-frame DOM churn, flash
   // animations survive because the elements persist. Columns:
-  //   sold(session) | size(ask) | price | size(bid) | bought(session) | Δ(session)
-  // Session sold/bought/Δ per level come from FootprintStore's bars — i.e. the
-  // finished-bar ring (≤120 bars) plus the open bar, NOT all-of-session once
-  // the ring wraps. Stated on the panel; we don't stretch the label.
+  //   sell(imprint) | size(ask) | price | size(bid) | buy(imprint) | cum
   //
-  // Grid-alignment honesty note: ladder ask rows bucket UP and footprint
-  // levels bucket DOWN (both per snapTick's conservative convention), so an
-  // ask row at grid price P shows the session volume of the floor bucket AT P
-  // — the [P, P+tick) bucket. Same grid, half-open interval semantics; the
-  // alternative (re-bucketing trades up for asks) would double-count.
+  // §4i rework: the depth bars read the FULL local book (ladderRows over the
+  // synced BookStore / merged same-quote book — the book is maintained full,
+  // the DISPLAY is windowed, stated on the panel) and are LOG-scaled
+  // (logBarWidth's log1p ratio — one whale wall must not flatten every other
+  // level to a sliver). The sold/bought columns become TRADE IMPRINT: rolling-
+  // window executed sell vs buy volume-at-price (TradeImprint), a mini
+  // volume-at-price painted where tape-reading meets the DOM. WallsLedger
+  // levels get a marker (cross-reference, not a merged store, §4g). The spread
+  // row carries spread ticks+bps, mid, top-of-book imbalance, and the
+  // within-N-ticks depth imbalance (§4i).
+  //
+  // Grid-alignment note (kept): ladder asks bucket UP, bids DOWN (snapTick),
+  // while the imprint snaps to the NEAREST tick — both on the SAME grouping
+  // tick, so a row's imprint is looked up at the row's grid price and may sit
+  // ≤1 tick off at a boundary (descriptive mini-bar; not double-counted).
   function DomLadderView() {
-    let root = null, tbody = null, rows = [], nLevels = 12;
+    let root = null, tbody = null, rows = [], nLevels = 14;
     let prevQty = new Map();   // 'a'/'b'+price → qty, for change-flash detection
+
+    // Log depth-bar fraction — mirrors terminal-state.js logBarWidth (the view
+    // cannot reach the store export; identical log1p ratio, §4i covered at L0).
+    const logFrac = (q, mx) => (q > 0 && mx > 0 ? Math.min(1, Math.log1p(q) / Math.log1p(mx)) : 0);
+    const pctTxt = (v) => (Number.isFinite(v) ? (v > 0 ? '+' : '') + Math.round(v * 100) + '%' : '—');
 
     function mount(el, opts) {
       root = el;
-      nLevels = (opts && opts.levels) || 12;
+      nLevels = (opts && opts.levels) || 14;
       const table = document.createElement('table');
       table.className = 'ladder';
       table.innerHTML = '<thead><tr>'
-        + '<th title="session sell volume at level (footprint ring window)">sold</th>'
-        + '<th title="resting ask size (grouped)">ask</th>'
+        + '<th title="rolling-window executed SELL volume at level (TradeImprint)">sell</th>'
+        + '<th title="resting ask size, full local book (log depth bar)">ask</th>'
         + '<th>price</th>'
-        + '<th title="resting bid size (grouped)">bid</th>'
-        + '<th title="session buy volume at level (footprint ring window)">bought</th>'
-        + '<th title="session buy − sell at level">Δ</th>'
+        + '<th title="resting bid size, full local book (log depth bar)">bid</th>'
+        + '<th title="rolling-window executed BUY volume at level (TradeImprint)">buy</th>'
+        + '<th title="cumulative resting depth from mid outward (toggle)">cum</th>'
         + '</tr></thead>';
       tbody = document.createElement('tbody');
-      // Ask block (worst→best downward), spread row, bid block (best→worst).
       for (let i = 0; i < nLevels; i++) tbody.appendChild(mkRow('ask'));
       const sp = document.createElement('tr');
       sp.className = 'spread';
@@ -913,8 +924,8 @@
     function mkRow(side) {
       const tr = document.createElement('tr');
       tr.className = side;
-      tr.innerHTML = '<td class="sess"></td><td class="sz ask-sz"></td><td class="px"></td>'
-        + '<td class="sz bid-sz"></td><td class="sess"></td><td class="dl"></td>';
+      tr.innerHTML = '<td class="imp imp-sell"></td><td class="sz ask-sz"></td><td class="px"></td>'
+        + '<td class="sz bid-sz"></td><td class="imp imp-buy"></td><td class="cum"></td>';
       return tr;
     }
 
@@ -926,68 +937,62 @@
       cell.classList.add('cell-flash');
     }
 
-    /** slice = { grouped:{bids,asks} (best-first), best:{bid,ask}, bars,
-     *  tickSize, nakedPocs } — nakedPocs (I-1 §4f, optional): [{price, date}]
-     *  naked POC rows from the /v1/levels registry; a ladder row whose
-     *  [price, price+tick) bucket contains one gets a subtle marker (LevelsView
-     *  'draw on charts' toggle — terminal.js passes [] when it is off). */
+    /** slice = { lad:{bids,asks} (ladderRows, mid-outward best-first), best,
+     *  mid, spread:{ticks,bps}, tobImb, depthImb:{pct,nTicks}, imprint (Map<
+     *  gridPrice,{buyQty,sellQty}>|null), walls ([{price,side,status}]|[]),
+     *  tickSize, cumOn, nakedPocs } — every field straight from the pure
+     *  stores/helpers; nothing here mutates them. */
     function render(slice) {
       if (!tbody) return;
-      const g = slice.grouped || { bids: [], asks: [] };
-      const bars = slice.bars || [];
+      const lad = slice.lad || { bids: [], asks: [] };
       const tick = slice.tickSize || 1;
-      const dp = tickDp(tick);   // §4g: resolve one tick of the CURRENT grid (sub-$1 symbols)
+      const dp = tickDp(tick);
       const naked = slice.nakedPocs || [];
+      const imprint = slice.imprint || null;
+      const cumOn = !!slice.cumOn;
 
-      // Session per-level aggressor volume from the footprint bars (≤121 bars ×
-      // their levels — small; recomputed only on dirty renders).
-      const sess = new Map();
-      for (const b of bars) {
-        for (const lv of b.levels) {
-          let e = sess.get(lv.price);
-          if (!e) { e = { buy: 0, sell: 0 }; sess.set(lv.price, e); }
-          e.buy += lv.buy; e.sell += lv.sell;
-        }
-      }
+      // Wall lookup: 'side@gridPrice' → status (bybit-grid aligned upstream).
+      const wallSet = new Map();
+      for (const wl of (slice.walls || [])) wallSet.set(wl.side + '@' + wl.price, wl.status || 'standing');
 
-      const asks = g.asks.slice(0, nLevels);   // best-first ascending
-      const bids = g.bids.slice(0, nLevels);   // best-first descending
-      let maxQty = 0;
+      const asks = lad.asks.slice(0, nLevels);   // best-first ascending (mid-out)
+      const bids = lad.bids.slice(0, nLevels);    // best-first descending (mid-out)
+      let maxQty = 0, maxImp = 0;
       for (const r of asks) if (r.qty > maxQty) maxQty = r.qty;
       for (const r of bids) if (r.qty > maxQty) maxQty = r.qty;
+      if (imprint) for (const [, c] of imprint) { const m = Math.max(c.buyQty, c.sellQty); if (m > maxImp) maxImp = m; }
       const nextQty = new Map();
       const p = pal();
 
       const setRow = (tr, lvl, side) => {
         const tds = tr.children;
         if (!lvl) {
-          for (let i = 0; i < 6; i++) tds[i].textContent = '';
-          tds[1].style.background = ''; tds[3].style.background = '';
-          tr.classList.remove('naked');
-          tds[2].title = '';
+          for (let i = 0; i < 6; i++) { tds[i].textContent = ''; tds[i].style.background = ''; }
+          tr.classList.remove('naked', 'wall');
+          tds[2].title = ''; tds[1].title = ''; tds[3].title = '';
           return;
         }
-        // I-1 (§4f): naked-POC marker — dotted underline on the price cell
-        // (terminal.css), tooltip names the day(s). Subtle by design: a prior
-        // day's untested POC is context, not a signal.
+        // naked-POC marker (I-1 §4f) — dotted underline on the price cell.
         let nk = '';
         for (const np of naked) {
-          if (np.price >= lvl.price && np.price < lvl.price + tick) {
-            nk += (nk ? ', ' : '') + np.date;
-          }
+          if (np.price >= lvl.price && np.price < lvl.price + tick) nk += (nk ? ', ' : '') + np.date;
         }
         tr.classList.toggle('naked', nk !== '');
         tds[2].title = nk ? 'naked POC (' + nk + ') — untested since that day (registry-derived, descriptive)' : '';
-        const s = sess.get(lvl.price);
-        const buy = s ? s.buy : 0, sell = s ? s.sell : 0, d = buy - sell;
-        tds[0].textContent = sell > 0 ? fmtVol(sell) : '';
-        tds[4].textContent = buy > 0 ? fmtVol(buy) : '';
-        tds[5].textContent = (buy || sell) ? ((d > 0 ? '+' : '') + fmtVol(d)) : '';
-        tds[5].className = 'dl ' + (d > 0 ? 'pos' : d < 0 ? 'neg' : '');
         tds[2].textContent = fmtUsd(lvl.price, dp);
-        // Size + depth bar: ask bar grows leftward from the price column, bid
-        // bar rightward — mirrored direction is the second non-color cue.
-        const wPct = maxQty > 0 ? Math.round(100 * lvl.qty / maxQty) : 0;
+
+        // Trade imprint at this price (rolling window): sell left, buy right —
+        // mini bars scaled by the visible imprint max (position = second cue).
+        const impCell = imprint ? imprint.get(lvl.price) : null;
+        const sell = impCell ? impCell.sellQty : 0, buy = impCell ? impCell.buyQty : 0;
+        const impW = (q) => (maxImp > 0 ? Math.round(100 * q / maxImp) : 0);
+        tds[0].textContent = sell > 0 ? fmtVol(sell) : '';
+        tds[0].style.background = sell > 0 ? 'linear-gradient(to left,' + rgba(p.down, 0.5) + ' ' + impW(sell) + '%,transparent ' + impW(sell) + '%)' : '';
+        tds[4].textContent = buy > 0 ? fmtVol(buy) : '';
+        tds[4].style.background = buy > 0 ? 'linear-gradient(to right,' + rgba(p.up, 0.5) + ' ' + impW(buy) + '%,transparent ' + impW(buy) + '%)' : '';
+
+        // Full-book depth bar (LOG scaled): ask grows leftward, bid rightward.
+        const wPct = Math.round(100 * logFrac(lvl.qty, maxQty));
         const askCell = tds[1], bidCell = tds[3];
         if (side === 'ask') {
           askCell.textContent = fmtQty(lvl.qty);
@@ -998,21 +1003,41 @@
           bidCell.style.background = 'linear-gradient(to right,' + rgba(p.up, 0.22) + ' ' + wPct + '%,transparent ' + wPct + '%)';
           askCell.textContent = ''; askCell.style.background = '';
         }
-        // Flash the size cell on a qty change at the SAME price (a level that
-        // merely scrolled into a row is not a change).
+        // Cumulative resting depth from mid (toggle) — the ladderRows running
+        // sum; blank when the toggle is off (a hidden column, never a 0).
+        tds[5].textContent = cumOn ? fmtQty(lvl.cum) : '';
+
+        // Wall marker (WallsLedger cross-reference, §4g) — a bar-left accent +
+        // status tooltip on the size cell facing the book.
+        const wstat = wallSet.get(side + '@' + lvl.price);
+        tr.classList.toggle('wall', !!wstat);
+        const szCell = side === 'ask' ? askCell : bidCell;
+        szCell.title = wstat ? 'WallsLedger: ' + wstat + ' wall (≥K×p95 resting, §4g — descriptive, not intent)' : '';
+
+        // Flash the size cell on a qty change at the SAME price.
         const key = (side === 'ask' ? 'a' : 'b') + lvl.price;
         nextQty.set(key, lvl.qty);
-        if (prevQty.has(key) && prevQty.get(key) !== lvl.qty) flash(side === 'ask' ? askCell : bidCell);
+        if (prevQty.has(key) && prevQty.get(key) !== lvl.qty) flash(szCell);
       };
 
       // Ask block: rows[0..nLevels-1] top→down = worst→best (asks reversed).
       for (let i = 0; i < nLevels; i++) setRow(rows[i], asks[nLevels - 1 - i] || null, 'ask');
-      // Spread row.
+      // Spread row — spread ticks+bps, mid marker, TOB + within-N-ticks imbalance.
       const best = slice.best || {};
       const spTd = rows[nLevels].firstChild;
-      spTd.textContent = (best.bid && best.ask)
-        ? 'spread ' + fmtUsd(best.ask[0] - best.bid[0], Math.max(2, dp)) + ' · mid ' + fmtUsd((best.ask[0] + best.bid[0]) / 2, Math.max(1, dp))
-        : 'waiting for book…';
+      if (best.bid && best.ask && Number.isFinite(slice.mid)) {
+        const sp = slice.spread || {};
+        const di = slice.depthImb || {};
+        spTd.innerHTML = '<span class="sp-mid">mid ' + fmtUsd(slice.mid, Math.max(1, dp)) + '</span>'
+          + '<span class="sp-x">spread ' + (Number.isFinite(sp.ticks) ? sp.ticks + 't' : '—')
+          + ' / ' + (Number.isFinite(sp.usd) ? fmtUsd(sp.usd, Math.max(2, dp)) : '—')
+          + ' / ' + (Number.isFinite(sp.bps) ? sp.bps.toFixed(1) + 'bps' : '—') + '</span>'
+          + '<span class="sp-x">TOB ' + pctTxt(slice.tobImb) + '</span>'
+          + '<span class="sp-x" title="sum bid vs ask within ' + (di.nTicks || 0) + ' ticks of mid (signed)">±'
+          + (di.nTicks || 0) + 't ' + pctTxt(di.pct) + '</span>';
+      } else {
+        spTd.innerHTML = 'waiting for book…';
+      }
       // Bid block.
       for (let i = 0; i < nLevels; i++) setRow(rows[nLevels + 1 + i], bids[i] || null, 'bid');
 
@@ -1022,59 +1047,161 @@
     return { mount, render };
   }
 
-  // ═══ TapeView — time & sales, newest-first ═══
+  // ═══ TapeView — aggregated, size-tiered read-the-tape surface (§4i) ═══
   //
-  // The min-notional filter INPUT physically lives in the settings row
-  // (terminal.html); this view wires its listener via opts.filterInput +
-  // opts.onFilter so filter behavior is view-owned while persistence stays in
-  // terminal.js (which also does the actual filtering via TapeStore.filtered —
-  // the view renders an already-filtered slice).
+  // The aggr TAPE model ported onto the T-2 venue matrix (§4i): the rows are
+  // TapeAggregator output (same venue/side/price runs merged to one `×N` block
+  // — never across venues, §0.7) and each is classified by USD-notional TIER
+  // (sig/large/huge/whale — LABELED DISPLAY CONVENTIONS, not signals, §0.1).
+  // Tier drives colour intensity + row weight + a log-notional histogram bar,
+  // so a swept level reads as one weighted block instead of a blur of dust.
   //
-  // Whale emphasis: notional ≥ $250k (§4) → bold + '◆' marker (marker = the
-  // non-color cue). Every print carries its exchange tag — mixed-venue tape is
-  // deliberate and each row says which wire it came from (§0.7 per-source label).
+  // Above the tape sits the BIG-PRINT RAIL — the last N huge/whale blocks
+  // pinned so a block never scrolls away unnoticed (BigPrintRail store). The
+  // honesty footer names WHICH legs feed the merged tape and restates that the
+  // tiers are conventions (§4i).
+  //
+  // Controls are view-owned/behaviour, terminal.js-persisted (the min-notional
+  // filter-input split): market both/spot/perp, single-venue filter, and the
+  // metric-column toggle (notional / avg px / cum $ / time-ago). The actual
+  // filtering happens upstream — the view renders an already-filtered slice.
   function TapeView() {
-    let root = null, list = null, whaleUsd = 250000;
-    const MAX_ROWS = 60;   // DOM budget; the ring holds more, the eye doesn't
+    let root = null, rail = null, list = null, hon = null;
+    const MAX_ROWS = 60;   // DOM budget; the store holds more, the eye doesn't
+
+    // Bar-background alpha per tier (over the aggressor hue) — the second,
+    // redundant cue next to the ◆/▲▼ glyphs and row weight (WCAG 1.4.1).
+    const TIER_ALPHA = { baseline: 0.0, sig: 0.14, large: 0.26, huge: 0.42, whale: 0.60 };
 
     function mount(el, opts) {
       root = el;
       const o = opts || {};
-      whaleUsd = Number.isFinite(o.whaleUsd) ? o.whaleUsd : 250000;
+      // Min-notional filter lives in the settings row (existing split).
       if (o.filterInput && typeof o.onFilter === 'function') {
         o.filterInput.addEventListener('input', () => {
           const v = Number(o.filterInput.value);
           o.onFilter(Number.isFinite(v) && v > 0 ? v : 0);
         });
       }
+      // Panel-chrome selects (market / venue / metric) — behaviour here,
+      // persistence in terminal.js via the callbacks.
+      const wireSel = (sel, cb) => { if (sel && typeof cb === 'function') sel.addEventListener('change', () => cb(sel.value)); };
+      wireSel(o.marketSel, o.onMarket);
+      wireSel(o.venueSel, o.onVenue);
+      wireSel(o.metricSel, o.onMetric);
+
+      // Big-print rail — pinned strip above the tape (§4i don't-miss-the-block).
+      rail = document.createElement('div');
+      rail.className = 'bigprint-rail';
+      root.appendChild(rail);
       root.insertAdjacentHTML('beforeend',
-        '<div class="tape-row tape-head"><span>UTC</span><span>ex</span><span>price</span><span>size</span><span>notional</span></div>');
+        '<div class="tape-row tape-head"><span>UTC</span><span>ex</span><span>price</span><span>size ×N</span><span class="metric-h">notional</span></div>');
       list = document.createElement('div');
       list.className = 'tape-list';
       root.appendChild(list);
+      hon = document.createElement('div');
+      hon.className = 'tape-hon';
+      root.appendChild(hon);
     }
 
-    /** slice = { trades } — newest-first, already min-notional-filtered. */
-    function render(slice) {
-      if (!list) return;
-      const trades = (slice.trades || []).slice(0, MAX_ROWS);
-      setPanelEmpty(root, !trades.length);   // presentation-only compact toggle
-      if (!trades.length) {
-        list.innerHTML = '<div class="chart-na">no prints yet (or none clear the filter) — the tape shows only trades that arrived this session.</div>';
+    /** Compact age string off event ts vs render nowMs — real elapsed time
+     *  (not wall-clock timestamp), so a stalled feed's blocks age visibly. */
+    function ageStr(ms) {
+      if (!Number.isFinite(ms) || ms < 0) return '—';
+      const s = Math.floor(ms / 1000);
+      if (s < 60) return s + 's';
+      if (s < 3600) return Math.floor(s / 60) + 'm';
+      return Math.floor(s / 3600) + 'h';
+    }
+
+    /** Rail = last N huge/whale blocks (rows already tier-tagged upstream),
+     *  newest-first. Honest empty note in a session with no blocks yet. */
+    function renderRail(rows, tiers, nowMs, dp) {
+      const list_ = Array.isArray(rows) ? rows : [];
+      if (!list_.length) {
+        rail.innerHTML = '<span class="bp-label">big prints</span>'
+          + '<span class="bp-empty">no huge/whale blocks yet (≥ ' + fmtCompactUsd(tiers.huge) + ' this session)</span>';
         return;
       }
+      const p = pal();
+      let html = '<span class="bp-label">big prints</span>';
+      for (const r of list_) {
+        const dir = r.isBuy ? 'up' : 'down';
+        const col = r.isBuy ? p.up : p.down;
+        html += '<span class="bp-chip tier-' + esc(r.tier) + '" title="'
+          + esc(exLabel(r.ex)) + ' ' + (r.isBuy ? 'buy' : 'sell') + ' · ' + fmtCompactUsd(r.notional)
+          + ' @ ' + fmtUsd(r.price, dp) + ' · ' + ageStr(nowMs - r.ts) + ' ago">'
+          + '<i class="ex-dot" style="background:' + rgba(exColor(p, r.ex), 0.95) + '"></i>'
+          + '<span class="delta ' + dir + '">' + (r.tier === 'whale' ? '◆' : '◇') + '</span>'
+          + '<b>' + fmtCompactUsd(r.notional) + '</b>'
+          + '<span class="bp-px">' + fmtUsd(r.price, dp) + '</span>'
+          + '<span class="bp-age">' + ageStr(nowMs - r.ts) + '</span>'
+          + '</span>';
+      }
+      rail.innerHTML = html;
+    }
+
+    /** slice = { rows, bigPrints, tiers, tick, nowMs, legsNote, metric }
+     *  rows: aggregated blocks NEWEST-FIRST, already market/venue/min filtered,
+     *  each tagged {ts, ex, isBuy, price, qty, notional, count, tier, market}.
+     *  metric ∈ ntl|avg|cum|ago — the toggleable right column. */
+    function render(slice) {
+      if (!list) return;
+      const tiers = slice.tiers || { sig: 1e5, large: 2.5e5, huge: 1e6, whale: 5e6 };
       const dp = Math.max(1, tickDp(slice.tick));   // §4g: sub-$1 symbols need real decimals
-      let html = '';
-      for (const t of trades) {
-        const notional = t.price * t.qty;
-        const whale = notional >= whaleUsd;
-        const dir = t.aggressorBuy ? 'up' : 'down';   // aggressor coloring (§0.6 normalized upstream)
-        html += '<div class="tape-row' + (whale ? ' whale' : '') + '">'
-          + '<span class="ts">' + hms(t.ts) + '</span>'
-          + '<span class="ex ex-' + esc(t.ex) + '">' + esc(EX_TAG[t.ex] || t.ex) + '</span>'
-          + '<span class="px delta ' + dir + '">' + fmtUsd(t.price, dp) + '</span>'
-          + '<span class="qty">' + fmtQty(t.qty) + '</span>'
-          + '<span class="ntl">' + (whale ? '◆ ' : '') + fmtCompactUsd(notional) + '</span>'
+      const nowMs = slice.nowMs || Date.now();
+      const metric = slice.metric || 'ntl';
+      renderRail(slice.bigPrints, tiers, nowMs, dp);
+      hon.textContent = slice.legsNote || '';
+
+      const rows = (slice.rows || []).slice(0, MAX_ROWS);
+      setPanelEmpty(root, !rows.length);   // presentation-only compact toggle
+      if (!rows.length) {
+        list.innerHTML = '<div class="chart-na">no blocks yet (or none clear the filter) — the tape merges only prints that arrived this session (§0.7).</div>';
+        return;
+      }
+      // Reference for the log-notional bar = the largest visible block; log so
+      // one whale does not flatten every other bar to a sliver (logBarWidth
+      // rationale, §4i). A running max keeps the loudest block at full width.
+      let maxN = 0;
+      for (const r of rows) if (r.notional > maxN) maxN = r.notional;
+      const logRef = Math.log1p(Math.max(maxN, 1));
+      const metricHead = metric === 'avg' ? 'avg px' : metric === 'cum' ? 'cum $' : metric === 'ago' ? 'age' : 'notional';
+      root.querySelector('.metric-h').textContent = metricHead;
+
+      const p = pal();
+      let html = '', cum = 0;
+      for (const r of rows) {
+        cum += r.notional;
+        const dir = r.isBuy ? 'up' : 'down';
+        const col = r.isBuy ? p.up : p.down;
+        const alpha = TIER_ALPHA[r.tier] || 0;
+        // Log-notional histogram: bar grows from the LEFT of the size cell,
+        // width ∝ log1p(notional), tinted by the aggressor hue at tier alpha.
+        const w = maxN > 0 ? Math.round(100 * Math.log1p(Math.max(r.notional, 1)) / logRef) : 0;
+        const barBg = alpha > 0
+          ? 'linear-gradient(to right,' + rgba(col, alpha) + ' ' + w + '%,transparent ' + w + '%)'
+          : '';
+        const big = r.tier === 'huge' || r.tier === 'whale';
+        const mk = r.tier === 'whale' ? '◆ ' : r.tier === 'huge' ? '◇ ' : '';
+        // Market cue: spot legs get an underlined venue tag (the CVD/agg-book
+        // dashed/pale convention has no line here, so underline carries it).
+        const spot = r.market === 'spot';
+        const metricVal = metric === 'avg' ? fmtUsd(r.price, dp)
+          : metric === 'cum' ? fmtCompactUsd(cum)
+          : metric === 'ago' ? ageStr(nowMs - r.ts)
+          : (mk + fmtCompactUsd(r.notional));
+        html += '<div class="tape-row tier-' + esc(r.tier) + (big ? ' big' : '') + '"'
+          + ' title="' + esc(exLabel(r.ex)) + (spot ? ' (spot)' : '') + ' · ' + fmtCompactUsd(r.notional)
+          + ' · ' + r.tier + ' — labeled convention, not a signal">'
+          + '<span class="ts">' + hms(r.ts) + '</span>'
+          + '<span class="ex ex-' + esc(r.ex) + (spot ? ' spot' : '') + '">'
+          + '<i class="ex-dot" style="background:' + rgba(exColor(p, r.ex), spot ? 0.55 : 0.95) + '"></i>'
+          + esc(EX_TAG[r.ex] || r.ex) + '</span>'
+          + '<span class="px delta ' + dir + '">' + fmtUsd(r.price, dp) + '</span>'
+          + '<span class="qty" style="background:' + barBg + '">' + fmtQty(r.qty)
+          + (r.count > 1 ? '<span class="xn">×' + r.count + '</span>' : '') + '</span>'
+          + '<span class="ntl">' + esc(metricVal) + '</span>'
           + '</div>';
       }
       list.innerHTML = html;
@@ -1445,7 +1572,11 @@
       root.appendChild(list);
     }
 
-    /** slice = { recent (newest-first), sum1m, sum5m } */
+    /** slice = { recent (newest-first), sum1m, sum5m } — each row already
+     *  tier-tagged upstream by S.liqTier (§4i: 'huge' | 'big' | 'baseline',
+     *  own thresholds separate from the tape's, each a LABELED CONVENTION, not
+     *  a signal). A 'huge' liq gets ◆ + row weight, 'big' gets ◇ — the
+     *  don't-miss-the-cascade emphasis. */
     function render(slice) {
       if (!list) return;
       const bs = sumsEl.querySelectorAll('b');
@@ -1461,12 +1592,19 @@
       let html = '';
       for (const l of recent) {
         const long = l.side === 'long';
-        html += '<div class="liq-row">'
+        const n = l.notionalUsd;
+        const tier = l.tier === 'huge' || l.tier === 'big' ? l.tier : '';
+        const mk = tier === 'huge' ? '◆ ' : tier === 'big' ? '◇ ' : '';
+        // ESTIMATED label preserved (§4i): a venue that sends only notional
+        // (no size) carries l.estimated; the size cell then reads 'est.'
+        // rather than a fabricated qty (§0.4/§0.7).
+        const est = l.estimated === true;
+        html += '<div class="liq-row' + (tier ? ' liq-' + tier : '') + '">'
           + '<span class="ts">' + hms(l.ts) + '</span>'
           + '<span class="liq-badge ' + (long ? 'long' : 'short') + '">' + (long ? 'LONG LIQ' : 'SHORT LIQ') + '</span>'
           + '<span class="px">' + fmtUsd(l.price, dp) + '</span>'
-          + '<span class="qty">' + fmtQty(l.qty) + '</span>'
-          + '<span class="ntl">' + fmtCompactUsd(l.notionalUsd) + '</span>'
+          + '<span class="qty">' + (est ? '<span class="liq-est" title="venue reported notional only — size is model-derived (§0.4)">est.</span>' : fmtQty(l.qty)) + '</span>'
+          + '<span class="ntl">' + mk + fmtCompactUsd(n) + '</span>'
           + '</div>';
       }
       list.innerHTML = html;

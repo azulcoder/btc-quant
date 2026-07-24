@@ -107,6 +107,21 @@
   };
   const WORKSPACE_NAMES = ['all', 'orderflow-focus', 'auction-focus', 'last'];
 
+  // T-3 (§4i): tape controls — market filter, single-venue filter, and the
+  // metric-column toggle. Venue codes are the frozen event ex codes (defined
+  // as EX_LEG below); listed here as a plain whitelist so loadSettings (which
+  // runs before EX_LEG) can validate a stored value without forward-referencing.
+  const TAPE_MARKETS = ['both', 'spot', 'perp'];
+  const TAPE_METRICS = ['ntl', 'avg', 'cum', 'ago'];
+  const TAPE_VENUES = ['all', 'bybit', 'bybit_spot', 'binancef', 'binance_spot', 'okx', 'okx_spot', 'coinbase'];
+  // DOM ladder source (§4i): a single venue book, or the aggregated same-quote
+  // (USDT) merge — display-only, loudly caveated (mergeSameQuoteBooks).
+  const DOM_SOURCES = TAPE_VENUES.slice(1).concat(['__agg']);
+  const DOM_IMB_TICKS = 20;   // §4i depth-imbalance band — a stated convention
+  // Liquidation notional tiers are S.liqTier / S.LIQ_TIER_DEFAULTS (§4i, own
+  // thresholds separate from the tape's) — ONE classifier for the feed's ◆/◇
+  // emphasis and the audio-ping trigger, never a re-derived inline threshold.
+
   const DEFAULTS = {
     tick: 10, barMs: 60000, tapeMin: 0, liqRange: 'pct6',
     // O-4 (§4d): screener slice, whale watchlist (+BTC filter), alert rules.
@@ -122,6 +137,15 @@
     // T-2 (§4h): the 7-leg enabled-set — ALL enabled by default (contract);
     // populated per-key in loadSettings so DEFAULTS never shares the object.
     legs: null,
+    // T-3 (§4i): tape size tiers (labeled DISPLAY conventions, not signals —
+    // BTC-scaled sizeTier defaults, user-overridable), the optional audio UX
+    // aid (default OFF + muted, persisted — never a signal), the tape
+    // market/venue filters + metric-column toggle, the DOM ladder source, and
+    // the cumulative-depth toggle. Object values are deep-copied in
+    // loadSettings so DEFAULTS is never shared (the legs/collapsed rule).
+    tapeTiers: null, tapeAudio: null,
+    tapeMarket: 'both', tapeVenue: 'all', tapeMetric: 'ntl',
+    domSource: 'bybit', domCum: false,
   };
 
   // T-2 (§4h): the matrix leg keys — ONE source (deriveLegIds' shape), so the
@@ -140,6 +164,9 @@
     // KNOWN key (same validated-on-load rule as every other stored value).
     s.legs = {};
     for (const k of LEG_KEYS) s.legs[k] = true;
+    // T-3 (§4i): deep-copy the object defaults so DEFAULTS is never shared.
+    s.tapeTiers = Object.assign({}, S.SIZE_TIER_DEFAULTS);
+    s.tapeAudio = { on: false, vol: 0.4 };
     try {
       const j = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
       // T-1 (§4g): tick is validated for SANITY (finite, positive, bounded)
@@ -203,6 +230,26 @@
           if (typeof j.legs[k] === 'boolean') s.legs[k] = j.legs[k];
         }
       }
+      // T-3 (§4i): tape tiers — each cut a finite positive USD notional; a
+      // hand-edited blob cannot smuggle a NaN/negative/out-of-order tier past
+      // the sanity gate (a bad tier would mis-classify every block). Only a
+      // strictly-increasing sig<large<huge<whale set is adopted whole; a
+      // partial/garbled object keeps the labeled defaults.
+      if (j.tapeTiers && typeof j.tapeTiers === 'object') {
+        const t = j.tapeTiers, k = ['sig', 'large', 'huge', 'whale'];
+        const ok = k.every((x) => Number.isFinite(t[x]) && t[x] > 0)
+          && t.sig < t.large && t.large < t.huge && t.huge < t.whale;
+        if (ok) s.tapeTiers = { sig: t.sig, large: t.large, huge: t.huge, whale: t.whale };
+      }
+      if (j.tapeAudio && typeof j.tapeAudio === 'object') {
+        if (typeof j.tapeAudio.on === 'boolean') s.tapeAudio.on = j.tapeAudio.on;
+        if (Number.isFinite(j.tapeAudio.vol)) s.tapeAudio.vol = Math.max(0, Math.min(1, j.tapeAudio.vol));
+      }
+      if (TAPE_MARKETS.indexOf(j.tapeMarket) >= 0) s.tapeMarket = j.tapeMarket;
+      if (TAPE_VENUES.indexOf(j.tapeVenue) >= 0) s.tapeVenue = j.tapeVenue;
+      if (TAPE_METRICS.indexOf(j.tapeMetric) >= 0) s.tapeMetric = j.tapeMetric;
+      if (DOM_SOURCES.indexOf(j.domSource) >= 0) s.domSource = j.domSource;
+      if (typeof j.domCum === 'boolean') s.domCum = j.domCum;
     } catch (_) { /* corrupt storage → defaults */ }
     return s;
   }
@@ -220,6 +267,10 @@
         sym: settings.sym, fpDeltaRows: settings.fpDeltaRows, klevDraw: settings.klevDraw,
         workspace: settings.workspace, lastCollapsed: settings.lastCollapsed,
         legs: settings.legs,
+        // T-3 (§4i): tape tiers/audio/filters + ladder source.
+        tapeTiers: settings.tapeTiers, tapeAudio: settings.tapeAudio,
+        tapeMarket: settings.tapeMarket, tapeVenue: settings.tapeVenue, tapeMetric: settings.tapeMetric,
+        domSource: settings.domSource, domCum: settings.domCum,
       }));
     } catch (_) { /* private mode / quota — settings just don't persist */ }
   }
@@ -317,6 +368,12 @@
   // rather than drawing a fabricated flat line.
   const CVD_LEG_EXS = ['bybit', 'okx', 'coinbase', 'bybit_spot', 'binance_spot', 'okx_spot'];
   let tape, liq, aggBook, bybitBook, spotPerp;
+  // T-3 (§4i): the aggregated read-the-tape surface. ONE TapeAggregator fed by
+  // ALL enabled trade legs (§0.7-safe: it merges only same-venue runs, so a
+  // venue change closes the run — the merged multi-venue tape is exactly the
+  // time-ordered interleave of per-venue blocks). BigPrintRail is fed the rows
+  // as they FLUSH (railFed dedup below) and keeps the last N huge/whale blocks.
+  let tapeAgg, bigPrints, railFedSig;
   const cvds = {};   // stable object identity; per-venue stores swap inside
   function rebuildFlowStores() {
     tape = S.TapeStore(3000);
@@ -328,8 +385,38 @@
     // enabled perp legs vs the enabled spot legs (descriptive lead/lag read;
     // the strip itself lands with the UI wave, the session accumulates NOW).
     spotPerp = B.SpotPerpCvdStore({});
+    tapeAgg = S.TapeAggregator({ aggWindowMs: 100, size: 400 });   // §4i aggr default window
+    bigPrints = S.BigPrintRail({ max: 12, thresholds: settings.tapeTiers });
+    railFedSig = null;
   }
   rebuildFlowStores();
+
+  /** Feed BigPrintRail the aggregator's newly-FLUSHED rows (§4i). Once any
+   *  trade is seen the aggregator's open row is list()[0] forever, so
+   *  list()[1] is ALWAYS the newest CLOSED block — push it once (signature
+   *  dedup) each time a fresh block flushes. Returns the flushed block's tier
+   *  (the audio-ping trigger reads it), or null when nothing new flushed. */
+  function feedRailFromTape() {
+    const rs = tapeAgg.list();
+    if (rs.length < 2) return null;
+    const c = rs[1];
+    const sig = c.ex + '|' + c.isBuy + '|' + c.price + '|' + c.ts + '|' + c.count;
+    if (sig === railFedSig) return null;
+    railFedSig = sig;
+    bigPrints.push(c);           // kept iff huge/whale (rail's own tier gate)
+    return S.sizeTier(c.notional, settings.tapeTiers);
+  }
+
+  /** Rebuild the rail with the CURRENT tiers (a tier edit re-classifies what a
+   *  "block" is) and re-seed it from the blocks the aggregator still holds —
+   *  deterministic and immediate, no waiting for fresh flow (§0 honest restart:
+   *  nothing synthesized, only re-read). */
+  function rebuildBigPrints() {
+    bigPrints = S.BigPrintRail({ max: 12, thresholds: settings.tapeTiers });
+    const rs = tapeAgg.list();
+    for (let i = rs.length - 1; i >= 1; i--) bigPrints.push(rs[i]);   // oldest→newest, skip the open row
+    railFedSig = rs.length >= 2 ? (rs[1].ex + '|' + rs[1].isBuy + '|' + rs[1].price + '|' + rs[1].ts + '|' + rs[1].count) : null;
+  }
 
   // Footprint + profile are constructed AGAINST a tick/bar size, so changing
   // either setting rebuilds the store and restarts its session aggregation.
@@ -384,8 +471,16 @@
   // level MISSING from the next sample is how the ledger observes a
   // disappearance (caller contract, terminal-state.js).
   let walls, prevLadder;
+  // T-3 (§4i): trade-imprint-at-price, ONE per trade-carrying leg (the DOM
+  // ladder paints the imprint of whichever single-venue source it shows). The
+  // imprint is grid-bound (its buckets ARE the grouping-tick grid), so it
+  // rebuilds with this family on a tick change — re-bucketing a rolling window
+  // onto a new grid would fabricate volume-at-price that never printed (§0.7).
+  let imprints;
   function rebuildHeatmapStores() {
     depthHist = {}; priceTrail = {}; lastSampleTs = {};
+    imprints = {};
+    for (const ex of CVD_LEG_EXS) imprints[ex] = S.TradeImprint({ windowMs: 60000 });   // §4i rolling window
     for (const ex of HIST_EXS) {
       depthHist[ex] = S.DepthHistoryStore({ tickSize: settings.tick, maxSamples: 3600, nLevels: 40 });
       priceTrail[ex] = [];
@@ -474,12 +569,68 @@
   };
   function dirtyAll() { for (const k in dirty) dirty[k] = true; }
 
+  // ─── T-3 (§4i): optional audio UX aid — Web-Audio ping, NO assets ────────
+  //
+  // Default OFF + muted, persisted (settings.tapeAudio). A short synthesized
+  // blip on a huge/whale BLOCK, a distinct lower two-tone on a large LIQ.
+  // LABELED A UX AID, NOT A SIGNAL (§4i). The AudioContext is created lazily on
+  // first use (browsers block autoplay until a user gesture — the toggle is
+  // one), and pings are rate-limited so a swept level cannot machine-gun.
+  let audioCtx = null;
+  let lastPingAt = 0;
+  function ensureAudioCtx() {
+    if (audioCtx) return audioCtx;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) audioCtx = new AC();
+    } catch (_) { audioCtx = null; }
+    return audioCtx;
+  }
+  function audioPing(kind) {
+    if (!settings.tapeAudio || !settings.tapeAudio.on) return;
+    const ctx = ensureAudioCtx();
+    if (!ctx) return;
+    const now = Date.now();
+    if (now - lastPingAt < 140) return;   // rate-limit — a swept level is ONE cue
+    lastPingAt = now;
+    if (ctx.state === 'suspended') { try { ctx.resume(); } catch (_) { /* gesture pending */ } }
+    const vol = Math.max(0, Math.min(1, settings.tapeAudio.vol)) * 0.28;   // conservative ceiling
+    if (vol <= 0) return;
+    const t0 = ctx.currentTime;
+    const beep = (freq, start, dur) => {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, t0 + start);
+      g.gain.linearRampToValueAtTime(vol, t0 + start + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + start + dur);
+      osc.connect(g); g.connect(ctx.destination);
+      osc.start(t0 + start); osc.stop(t0 + start + dur + 0.02);
+    };
+    if (kind === 'liq') { beep(320, 0, 0.12); beep(220, 0.10, 0.16); }   // lower two-tone
+    else beep(880, 0, 0.10);                                             // bright blip
+  }
+
   // ─── The sink: every normalized adapter event funnels through here (§4) ──
   function sink(ev) {
     switch (ev.kind) {
       case 'trade':
         tape.push(ev);
         dirty.tape = true;
+        // T-3 (§4i): feed the ONE aggregated tape with EVERY trade leg — the
+        // aggregator merges only same-venue/side/price runs, so the output is
+        // the time-ordered interleave of per-venue blocks (never a cross-venue
+        // fusion, §0.7). Then push any freshly-flushed block to the big-print
+        // rail; a huge/whale flush optionally pings (UX aid, gated OFF).
+        tapeAgg.push({ ts: ev.ts, ex: ev.ex, isBuy: ev.aggressorBuy, price: ev.price, qty: ev.qty, notional: ev.price * ev.qty });
+        {
+          const flushedTier = feedRailFromTape();
+          if (flushedTier === 'huge' || flushedTier === 'whale') audioPing('block');
+        }
+        // T-3 (§4i): rolling volume-at-price per trade leg (the ladder paints
+        // the imprint of its current single-venue source). Grouping-tick grid.
+        if (imprints[ev.ex]) imprints[ev.ex].push(ev.ts, ev.price, ev.qty, ev.aggressorBuy, settings.tick);
         // T-1 (§4g): tape-intensity gauge — MIXED venues by design, like the
         // tape it sits on (the strip's title says so).
         tapeInt.push(ev.ts, ev.price * ev.qty);
@@ -566,6 +717,10 @@
       case 'liq':
         liq.push(ev);
         dirty.liq = true;
+        // T-3 (§4i): a distinct ping for a large liquidation (own tier, UX aid
+        // — gated OFF by default, never a signal). Same classifier the feed
+        // paints with, so ping and ◆ emphasis never disagree.
+        if (S.liqTier(ev.notionalUsd) === 'huge') audioPing('liq');
         break;
       case 'mark':
         marks[ev.ex] = ev;
@@ -615,16 +770,25 @@
   });
 
   const domView = V.DomLadderView();
-  domView.mount($('view-dom'), { levels: 12 });
-  // T-2 (§4h): ladder source select — one book at a time, labeled; bybit
-  // linear stays the default. The select lives in the panel chrome
-  // (terminal.html); whitelisting + persistence-free session state live here.
+  domView.mount($('view-dom'), { levels: 14 });
+  // T-2/T-3 (§4h/§4i): ladder source select — one venue book at a time, OR the
+  // aggregated same-quote (USDT) merge (loudly caveated). bybit linear stays
+  // the default. The select lives in the panel chrome (terminal.html); the
+  // whitelist + persistence live here.
   const domSourceSel = $('set-dom-source');
+  const domCumBox = $('set-dom-cum');
   const domNote = $('dom-note');
-  let domSource = 'bybit';
+  domSourceSel.value = settings.domSource;
+  domCumBox.checked = settings.domCum;
   domSourceSel.addEventListener('change', () => {
-    if (!(domSourceSel.value in EX_LEG)) return;   // whitelist: known ex codes only
-    domSource = domSourceSel.value;
+    if (DOM_SOURCES.indexOf(domSourceSel.value) < 0) return;   // whitelist: known sources only
+    settings.domSource = domSourceSel.value;
+    saveSettings();
+    dirty.dom = true;
+  });
+  domCumBox.addEventListener('change', () => {
+    settings.domCum = domCumBox.checked;
+    saveSettings();
     dirty.dom = true;
   });
 
@@ -730,12 +894,85 @@
     return { perp, spot };
   }
 
-  /** Source-selectable DOM ladder (§4h): the selected book, session columns
-   *  ONLY on the bybit·lin source (they are bybit-footprint data — another
-   *  venue's book under bybit session volume would blend venues, §0.7). A
-   *  source with no proven book (or a disabled leg) shows an honest note. */
+  // ─── T-3 (§4i): DOM ladder render helpers ───────────────────────────────
+  const DOM_RAW_LEVELS = 60;   // raw grouped levels fed to ladderRows/depthImbalance (covers the display window + the N-tick band)
+
+  /** A BookStore's grouped ladder as best-first [px,qty] PAIRS on the current
+   *  grouping tick — the shape ladderRows/mergeSameQuoteBooks consume (§4i). */
+  function bookPairs(bk, n) {
+    const g = bk.grouped(settings.tick, n);
+    return { bids: g.bids.map((r) => [r.price, r.qty]), asks: g.asks.map((r) => [r.price, r.qty]) };
+  }
+  /** A leg's quote asset (§4i same-quote merge): coinbase is BTC-USD, every
+   *  other matrix leg is USDT — the excluded/summed split keys on this. */
+  function legQuote(key) { return key === 'coinbase' ? 'USD' : 'USDT'; }
+
+  /** Spread + imbalance readouts from a best-first book snapshot (§4i). */
+  function ladderReads(bookObj, best, mid) {
+    const tick = settings.tick;
+    let spread = {}, tobImb = NaN;
+    if (best.bid && best.ask) {
+      const w = best.ask[0] - best.bid[0];
+      // ticks against the DISPLAY grouping tick (the ladder's own grid) — a
+      // sub-group spread reads 0t, so the dollar width rides alongside it (the
+      // native venue tick is not carried here; bps + $ are grid-independent).
+      spread = { ticks: Math.round(w / tick), usd: w, bps: Number.isFinite(mid) && mid > 0 ? (w / mid) * 1e4 : NaN };
+      const bq = best.bid[1], aq = best.ask[1], t = bq + aq;
+      tobImb = t > 0 ? (bq - aq) / t : NaN;
+    }
+    const di = S.depthImbalance(bookObj, mid, DOM_IMB_TICKS, tick);
+    return { spread, tobImb, depthImb: { pct: di.pct, nTicks: DOM_IMB_TICKS } };
+  }
+
+  /** Source-selectable DOM ladder (§4h/§4i): full-book depth bars (ladderRows +
+   *  log scaling) + rolling trade imprint + wall markers + spread/mid/imbalance
+   *  readouts. Single-venue (default bybit·lin) OR the aggregated same-quote
+   *  merge (mergeSameQuoteBooks — a DISPLAY approximation, loudly caveated).
+   *  Imprint + walls are bybit-grid data and ride the SINGLE-venue source that
+   *  owns them (another venue's book under them would blend venues, §0.7). */
   function renderDom() {
-    const ex = domSource;
+    const src = settings.domSource;
+    const tick = settings.tick;
+    const emptySlice = () => domView.render({ lad: { bids: [], asks: [] }, best: {}, mid: NaN, tickSize: tick, cumOn: settings.domCum, imprint: null, walls: [], nakedPocs: [] });
+
+    if (src === '__agg') {
+      // Aggregated same-quote (USDT) ladder — DISPLAY approximation (§4i).
+      const booksByLeg = {}, legMeta = {};
+      for (const key of LEG_KEYS) {
+        if (!legReg.isEnabled(key)) continue;
+        const b = aggBook.books.get(LEG_EX[key]);
+        if (!b || (b.bids.size === 0 && b.asks.size === 0)) continue;   // no proven depth → not summed
+        booksByLeg[key] = bookPairs(b, DOM_RAW_LEVELS);
+        legMeta[key] = { quote: legQuote(key), tickSize: tick, primary: key === 'bybit_linear' };
+      }
+      const merged = S.mergeSameQuoteBooks(booksByLeg, legMeta);
+      const mb = merged.book;
+      if (!mb.bids.length && !mb.asks.length) {
+        domNote.hidden = false;
+        domNote.textContent = 'aggregated (same-quote USDT) — awaiting synced USDT books (nothing summed yet; nothing interpolated)';
+        emptySlice();
+        return;
+      }
+      const best = { bid: mb.bids[0] || null, ask: mb.asks[0] || null };
+      const mid = (best.bid && best.ask) ? (best.bid[0] + best.ask[0]) / 2 : NaN;
+      const reads = ladderReads(mb, best, mid);
+      const inc = merged.includedLegs.map((k) => LEG_LABEL[k] || k).join(', ') || '—';
+      const exc = merged.excludedLegs.map((k) => LEG_LABEL[k] || k).join(', ');
+      domNote.hidden = false;
+      domNote.textContent = 'AGGREGATED same-quote (USDT) depth — a DISPLAY APPROXIMATION, never a merged book (§4i): '
+        + 'separate matching engines share no queue. Summed: ' + inc
+        + (exc ? ' · excluded (non-USDT, not rescaled): ' + exc : '');
+      domView.render({
+        lad: S.ladderRows(mb, mid, tick, 14),
+        best, mid, spread: reads.spread, tobImb: reads.tobImb, depthImb: reads.depthImb,
+        imprint: null,   // cross-venue imprint would need a merge (§0.7) — off here
+        walls: [], tickSize: tick, cumOn: settings.domCum, nakedPocs: [],
+      });
+      return;
+    }
+
+    // Single-venue source.
+    const ex = src;
     const key = EX_LEG[ex];
     const isBybit = ex === 'bybit';
     const book = aggBook.books.get(ex);
@@ -745,29 +982,97 @@
       domNote.textContent = (key && !legReg.isEnabled(key))
         ? (LEG_LABEL[key] || ex) + ' — disabled (settings); enable it from the legs menu (topbar)'
         : (LEG_LABEL[key] || ex) + ' — awaiting a synced book (no proven depth yet; nothing is interpolated)';
-      domView.render({ grouped: { bids: [], asks: [] }, best: {}, bars: [], tickSize: settings.tick, nakedPocs: [] });
+      emptySlice();
       return;
     }
+    const raw = bookPairs(book, DOM_RAW_LEVELS);
+    const best = book.best();
+    const mid = (best.bid && best.ask) ? (best.bid[0] + best.ask[0]) / 2 : NaN;
+    const reads = ladderReads(raw, best, mid);
+    // Imprint + walls belong to the SINGLE venue that produced them: imprint is
+    // this leg's own rolling flow; the walls ledger is bybit-grid (§4g), so it
+    // rides the bybit·lin source only.
+    const imprint = imprints[ex] ? imprints[ex].map() : null;
+    const wallRows = isBybit ? walls.list().map((w) => ({ price: w.price, side: w.side, status: w.status })) : [];
     domNote.hidden = isBybit;
     if (!isBybit) domNote.textContent = 'source: ' + (LEG_LABEL[key] || ex)
-      + ' book · session sold/bought/Δ are bybit-only footprint data (hidden here — another venue’s book under bybit session volume would blend venues, §0.7)';
+      + ' book · full local depth (§4h, display windowed) · imprint = this leg’s rolling flow · walls ledger is bybit-only (hidden here, §0.7)';
     domView.render({
-      grouped: book.grouped(settings.tick, 12),
-      best: book.best(),
-      bars: isBybit ? footprint.bars() : [],
-      tickSize: settings.tick,
+      lad: S.ladderRows(raw, mid, tick, 14),
+      best, mid, spread: reads.spread, tobImb: reads.tobImb, depthImb: reads.depthImb,
+      imprint, walls: wallRows, tickSize: tick, cumOn: settings.domCum,
       nakedPocs: (isBybit && levelsDrawOn) ? nakedPocs() : [],
     });
   }
 
   const tapeView = V.TapeView();
   const tapeMinInput = $('set-tape-min');
+  const tapeMarketSel = $('set-tape-market');
+  const tapeVenueSel = $('set-tape-venue');
+  const tapeMetricSel = $('set-tape-metric');
   tapeMinInput.value = String(settings.tapeMin);
+  tapeMarketSel.value = settings.tapeMarket;
+  tapeVenueSel.value = settings.tapeVenue;
+  tapeMetricSel.value = settings.tapeMetric;
   tapeView.mount($('view-tape'), {
     filterInput: tapeMinInput,   // the input lives in the settings row; the view owns its behavior
     onFilter: (v) => { settings.tapeMin = v; saveSettings(); dirty.tape = true; },
-    whaleUsd: 250000,            // §4 whale emphasis threshold
+    marketSel: tapeMarketSel,
+    onMarket: (v) => { if (TAPE_MARKETS.indexOf(v) >= 0) { settings.tapeMarket = v; saveSettings(); dirty.tape = true; } },
+    venueSel: tapeVenueSel,
+    onVenue: (v) => { if (TAPE_VENUES.indexOf(v) >= 0) { settings.tapeVenue = v; saveSettings(); dirty.tape = true; } },
+    metricSel: tapeMetricSel,
+    onMetric: (v) => { if (TAPE_METRICS.indexOf(v) >= 0) { settings.tapeMetric = v; saveSettings(); dirty.tape = true; } },
   });
+
+  /** Compact USD for the tape honesty line ($100k / $1M / $5M). */
+  function usdShort(x) {
+    if (!Number.isFinite(x)) return '—';
+    const a = Math.abs(x);
+    if (a >= 1e9) return '$' + (a / 1e9).toFixed(2) + 'B';
+    if (a >= 1e6) return '$' + (a / 1e6).toFixed(a >= 1e7 ? 0 : 1) + 'M';
+    if (a >= 1e3) return '$' + (a / 1e3).toFixed(0) + 'k';
+    return '$' + a.toFixed(0);
+  }
+
+  /** Which ENABLED trade legs feed the merged tape (honesty line, §4i):
+   *  binance·fut is excluded — no futures trades flow on this network (§0.2),
+   *  so it contributes nothing to the tape and listing it would overstate it. */
+  function tapeLegsNote() {
+    const legs = [];
+    for (const key of LEG_KEYS) {
+      if (key === 'binancef' || !legReg.isEnabled(key)) continue;
+      legs.push(LEG_LABEL[key]);
+    }
+    const t = settings.tapeTiers;
+    return 'merges ' + (legs.join(', ') || '— (no trade leg enabled)')
+      + ' · tiers sig ≥ ' + usdShort(t.sig) + ' · large ≥ ' + usdShort(t.large)
+      + ' · huge ≥ ' + usdShort(t.huge) + ' · whale ≥ ' + usdShort(t.whale)
+      + ' — labeled display conventions, not signals (§4i)';
+  }
+
+  /** T-3 (§4i): build the aggregated-tape slice — the ONE TapeAggregator's
+   *  rows filtered by market / single-venue / min-notional (each row is a
+   *  single-venue block, so venue/market filtering is exact), tier-tagged with
+   *  the active thresholds, plus the big-print rail and the honesty line. */
+  function renderTape() {
+    const tiers = settings.tapeTiers;
+    // ex → market label: an ex with no leg key defaults perp (the primary legs
+    // are perp; an unmapped code never masquerades as spot). filterTapeRows
+    // owns the min-notional / single-venue / market filter + tier+market tag.
+    const marketOf = (ex) => { const key = EX_LEG[ex]; return key && !legReg.isPerp(key) ? 'spot' : 'perp'; };
+    const out = S.filterTapeRows(tapeAgg.list(), {
+      market: settings.tapeMarket, venue: settings.tapeVenue, minN: settings.tapeMin,
+      tiers, marketOf,
+    });
+    const rail = bigPrints.list().map((r) => Object.assign({}, r, {
+      market: EX_LEG[r.ex] && legReg.isPerp(EX_LEG[r.ex]) ? 'perp' : 'spot',
+    }));
+    tapeView.render({
+      rows: out, bigPrints: rail, tiers, tick: settings.tick,
+      nowMs: Date.now(), legsNote: tapeLegsNote(), metric: settings.tapeMetric,
+    });
+  }
 
   const liqView = V.LiqFeedView();
   liqView.mount($('view-liq'));
@@ -2729,6 +3034,12 @@
         spotPerpLive: spotPerp.latest() ? 1 : 0,
         enabledLegs: legReg.snapshot().filter((l) => l.enabled).length,
         aggLegs: (() => { let n = 0; for (const [, b] of aggBook.books) if (b.bids.size > 0 || b.asks.size > 0) n++; return n; })(),
+        // T-3 (§4i): aggregated-tape liveness — merged blocks + rail size (rail
+        // is honestly 0 in a short replay with no huge/whale block) + the bybit
+        // imprint level count (rolling volume-at-price the ladder paints).
+        tapeAggRows: tapeAgg.length,
+        bigPrints: bigPrints.length,
+        imprintLevels: imprints.bybit ? imprints.bybit.size : 0,
       };
     },
     sym() { return SYM; },
@@ -2790,6 +3101,56 @@
     pauseBtn.setAttribute('aria-pressed', String(paused));
     if (!paused) dirtyAll();   // repaint everything that moved while frozen
   });
+
+  // ─── T-3 (§4i): tape tier thresholds + audio UX aid (settings row) ───────
+  //
+  // The four size-tier cuts are LABELED DISPLAY CONVENTIONS (not signals) —
+  // editable and persisted. A change re-classifies every block and re-seeds
+  // the big-print rail with the current tiers (honest re-read, nothing
+  // synthesized). Audio is a UX aid, default OFF + muted; toggling it ON is the
+  // gesture that lets the AudioContext start (browser autoplay policy).
+  const tierInputs = { sig: $('set-tier-sig'), large: $('set-tier-large'), huge: $('set-tier-huge'), whale: $('set-tier-whale') };
+  const audioBox = $('set-audio'), audioVol = $('set-audio-vol');
+  function reflectTierInputs() {
+    for (const k in tierInputs) tierInputs[k].value = String(Math.round(settings.tapeTiers[k]));
+  }
+  reflectTierInputs();
+  audioBox.checked = settings.tapeAudio.on;
+  audioVol.value = String(settings.tapeAudio.vol);
+  /** Read the four inputs; adopt ONLY a strictly-increasing positive set
+   *  (a mis-ordered tier would mis-classify blocks — reject, keep the last
+   *  good set, and restore the inputs to it). */
+  function applyTierInputs() {
+    const t = {};
+    for (const k in tierInputs) t[k] = Number(tierInputs[k].value);
+    const ok = ['sig', 'large', 'huge', 'whale'].every((k) => Number.isFinite(t[k]) && t[k] > 0)
+      && t.sig < t.large && t.large < t.huge && t.huge < t.whale;
+    if (!ok) { reflectTierInputs(); return; }   // invalid → revert the inputs
+    settings.tapeTiers = t;
+    rebuildBigPrints();   // re-classify what a "block" is under the new tiers
+    saveSettings();
+    dirty.tape = true;
+  }
+  for (const k in tierInputs) tierInputs[k].addEventListener('change', applyTierInputs);
+  function toggleTapeAudio(force) {
+    const on = typeof force === 'boolean' ? force : !settings.tapeAudio.on;
+    settings.tapeAudio.on = on;
+    if (on) ensureAudioCtx();   // create/resume on the toggle gesture (autoplay policy)
+    audioBox.checked = on;
+    saveSettings();
+  }
+  audioBox.addEventListener('change', () => toggleTapeAudio(audioBox.checked));
+  audioVol.addEventListener('input', () => {
+    const v = Number(audioVol.value);
+    settings.tapeAudio.vol = Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.4;
+    saveSettings();
+  });
+
+  // Palette-reachable setters (also reflect the panel selects) — §4i cmdk adds.
+  function setTapeMarket(v) { if (TAPE_MARKETS.indexOf(v) < 0) return; settings.tapeMarket = v; tapeMarketSel.value = v; saveSettings(); dirty.tape = true; }
+  function setTapeVenue(v) { if (TAPE_VENUES.indexOf(v) < 0) return; settings.tapeVenue = v; tapeVenueSel.value = v; saveSettings(); dirty.tape = true; }
+  function setTapeMetric(v) { if (TAPE_METRICS.indexOf(v) < 0) return; settings.tapeMetric = v; tapeMetricSel.value = v; saveSettings(); dirty.tape = true; }
+  function setDomSource(v) { if (DOM_SOURCES.indexOf(v) < 0) return; settings.domSource = v; domSourceSel.value = v; saveSettings(); dirty.dom = true; }
 
   // ─── T-1 (§4g): symbol picker + switch (the multi-symbol headline) ───────
   //
@@ -3056,6 +3417,15 @@
     for (const name of WORKSPACE_NAMES) {
       items.push({ kind: 'workspace', label: 'Workspace → ' + name, run: () => applyWorkspace(name) });
     }
+    // T-3 (§4i): tape filters, audio toggle, ladder source — view state, so
+    // they work in replay too (no sockets touched). Labels reflect the CURRENT
+    // value (buildCommands re-runs on every open).
+    for (const m of TAPE_MARKETS) items.push({ kind: 'tape', label: 'Tape market → ' + m, run: () => setTapeMarket(m) });
+    for (const v of TAPE_VENUES) items.push({ kind: 'tape', label: 'Tape venue → ' + (v === 'all' ? 'all venues' : (LEG_LABEL[EX_LEG[v]] || v)), run: () => setTapeVenue(v) });
+    for (const mt of TAPE_METRICS) items.push({ kind: 'tape', label: 'Tape metric → ' + mt, run: () => setTapeMetric(mt) });
+    items.push({ kind: 'tape', label: 'Tape audio → ' + (settings.tapeAudio.on ? 'off' : 'on') + ' (UX aid, not a signal)', run: () => toggleTapeAudio() });
+    for (const s of DOM_SOURCES) items.push({ kind: 'ladder', label: 'Ladder source → ' + (s === '__agg' ? 'aggregated same-quote (USDT)' : (LEG_LABEL[EX_LEG[s]] || s)), run: () => setDomSource(s) });
+    items.push({ kind: 'ladder', label: 'Ladder cumulative depth → ' + (settings.domCum ? 'off' : 'on'), run: () => { settings.domCum = !settings.domCum; domCumBox.checked = settings.domCum; saveSettings(); dirty.dom = true; } });
     // T-2 (§4h): leg enable/disable — one entry per matrix leg (label reflects
     // the CURRENT state; buildCommands re-runs on every open). Live only: replay
     // drives all legs deterministically (setLegEnabled no-ops there anyway).
@@ -3547,7 +3917,7 @@
         });
       }
       if (due('tape', now)) {
-        tapeView.render({ trades: tape.filtered(settings.tapeMin), tick: settings.tick });
+        renderTape();   // T-3 (§4i): aggregated tiered tape + big-print rail
       }
       if (due('tapeint', now)) {
         tapeIntView.render({ stats: tapeInt.stats(), spark: tapeInt.sparkline() });
@@ -3561,7 +3931,10 @@
         // live view wants live windows; LiqStore doc invites exactly this).
         liqView.render({
           tick: settings.tick,
-          recent: liq.recent(40),
+          // Tier-tag each row upstream with the pure §4i classifier (the same
+          // pattern as the tape's sizeTier tagging) — the view reads r.tier and
+          // never re-derives a threshold.
+          recent: liq.recent(40).map((l) => Object.assign({}, l, { tier: S.liqTier(l.notionalUsd) })),
           sum1m: liq.sumWindow(60000, now),
           sum5m: liq.sumWindow(300000, now),
         });

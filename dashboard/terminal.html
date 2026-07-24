@@ -123,24 +123,28 @@
     <div class="term-col area-mid" data-sec="orderflow">
       <section class="panel">
         <h2>DOM ladder
-          <span class="signal-tag st-desc" title="Grouped L2 book around the spread + per-level session sold/bought/delta from the footprint ring (last ≤120 bars, not all-of-session once the ring wraps). T-2 (§4h): source-selectable across the matrix books; session columns are bybit-footprint data and render only on the bybit·lin source (another venue's book under bybit session volume would blend venues, §0.7).">descriptive</span>
-          <!-- T-2 (§4h): ladder source — bybit linear stays the default; the
-               new synced books (engine-proven binance/coinbase, seq-chained
-               okx) are selectable. One book at a time, labeled. -->
-          <span class="heat-controls">
-            <label for="set-dom-source">source</label>
-            <select id="set-dom-source">
-              <option value="bybit" selected>bybit·lin</option>
-              <option value="bybit_spot">bybit·spot</option>
-              <option value="binancef">binance·fut</option>
-              <option value="binance_spot">binance·spot</option>
-              <option value="okx">okx·swap</option>
-              <option value="okx_spot">okx·spot</option>
-              <option value="coinbase">coinbase</option>
-            </select>
-          </span>
+          <span class="signal-tag st-desc" title="Full-local-book depth ladder around the spread (§4i): log-scaled depth bars read the maintained-FULL book (display windowed); rolling trade-imprint-at-price (buy/sell mini bars); WallsLedger markers; spread ticks+bps, mid, top-of-book + within-20-tick depth imbalance. Source-selectable across the matrix books OR the aggregated same-quote (USDT) merge (a DISPLAY approximation, loudly caveated). Imprint/walls ride the single-venue source that owns them (§0.7).">descriptive</span>
         </h2>
-        <div class="panel-src" title="Grouped L2 book around the spread + per-level session sold/bought/delta from the footprint ring (last ≤120 bars, not all-of-session once the ring wraps). Session columns are bybit-only footprint data — shown only on the bybit·lin source (§0.7).">grouped L2 around the spread · one source book at a time (§4h) · sold/bought/Δ = bybit footprint, bybit·lin source only</div>
+        <div class="panel-src" title="Full-local-book depth ladder around the spread (§4i): log-scaled depth bars over the maintained-FULL book (display windowed); rolling trade-imprint-at-price; WallsLedger markers; spread/mid/imbalance readouts. Imprint = the source leg's own rolling flow; the walls ledger is bybit-grid (§4g), shown on the bybit·lin source only (§0.7).">full local book, log depth bars · display windowed (§4i) · sell/buy = rolling trade imprint · ‖ = WallsLedger level</div>
+        <!-- T-3 (§4i): ladder source — bybit linear default; any synced venue
+             book, OR the aggregated same-quote (USDT) merge (display-only,
+             caveated). Plus the cumulative-depth toggle. Own row (narrow
+             column). -->
+        <div class="panel-ctl">
+          <label for="set-dom-source">source</label>
+          <select id="set-dom-source">
+            <option value="bybit" selected>bybit·lin</option>
+            <option value="bybit_spot">bybit·spot</option>
+            <option value="binancef">binance·fut</option>
+            <option value="binance_spot">binance·spot</option>
+            <option value="okx">okx·swap</option>
+            <option value="okx_spot">okx·spot</option>
+            <option value="coinbase">coinbase</option>
+            <option value="__agg">aggregated (USDT)</option>
+          </select>
+          <label for="set-dom-cum" title="cumulative resting depth from mid outward (the cum column)">cum</label>
+          <input type="checkbox" id="set-dom-cum" />
+        </div>
         <div id="dom-note" class="chart-na" hidden></div>
         <div id="view-dom" class="dom-wrap"></div>
       </section>
@@ -172,10 +176,40 @@
     <!-- Main row, right column: tape + liquidation feed. -->
     <div class="term-col area-right" data-sec="orderflow">
       <section class="panel">
-        <h2>tape — mixed venues
-          <span class="signal-tag st-desc" title="Mixed-venue time &amp; sales — every print carries its exchange tag (§0.7 per-source labels). Aggressor side normalized per venue (§0.6). ◆ = whale ≥ $250k.">descriptive</span>
+        <h2>tape — aggregated
+          <span class="signal-tag st-desc" title="Aggregated read-the-tape surface (§4i): same-venue/side/price runs merge into one ×N block (never across venues, §0.7); each block is size-TIERED by USD notional (sig/large/huge/whale — LABELED DISPLAY CONVENTIONS, not signals). Colour intensity + row weight + a log-notional bar scale with the tier. Big-print rail = the last N huge/whale blocks. Aggressor side normalized per venue (§0.6).">descriptive</span>
         </h2>
-        <div class="panel-src" title="Mixed-venue time &amp; sales — every print carries its exchange tag (§0.7 per-source labels). Aggressor side normalized per venue (§0.6). ◆ = whale ≥ $250k.">mixed venues, per-print exchange tag (§0.7) · aggressor normalized (§0.6) · ◆ whale ≥ $250k</div>
+        <div class="panel-src" title="Aggregated read-the-tape surface (§4i): same-venue/side/price runs merge into one ×N block (never across venues). Size tiers (sig/large/huge/whale) are labeled display conventions, not signals. Big-print rail pins the last N huge/whale blocks. Aggressor side normalized per venue (§0.6).">aggregated blocks (×N), size-tiered — <span class="src-flag">conventions, not signals</span> · per-block venue tag (§0.7) · aggressor normalized (§0.6)</div>
+        <!-- T-3 (§4i): tape filters — market both/spot/perp, single-venue, and
+             the metric-column toggle. Own row (the narrow right column can't
+             hold them in the h2). Behaviour view-owned, persisted in
+             terminal.js (the tape filter-input split). -->
+        <div class="panel-ctl">
+          <label for="set-tape-market">mkt</label>
+          <select id="set-tape-market" title="filter the merged tape by market: both / spot legs only / perp legs only">
+            <option value="both" selected>both</option>
+            <option value="spot">spot</option>
+            <option value="perp">perp</option>
+          </select>
+          <label for="set-tape-venue">venue</label>
+          <select id="set-tape-venue" title="single-venue filter — show only one leg's prints, or all">
+            <option value="all" selected>all</option>
+            <option value="bybit">bybit·lin</option>
+            <option value="bybit_spot">bybit·spot</option>
+            <option value="binancef">binance·fut</option>
+            <option value="binance_spot">binance·spot</option>
+            <option value="okx">okx·swap</option>
+            <option value="okx_spot">okx·spot</option>
+            <option value="coinbase">coinbase</option>
+          </select>
+          <label for="set-tape-metric">col</label>
+          <select id="set-tape-metric" title="rightmost column: notional $ / avg px (VWAP of the merged run) / cumulative $ / time-ago">
+            <option value="ntl" selected>notional</option>
+            <option value="avg">avg px</option>
+            <option value="cum">cum $</option>
+            <option value="ago">time-ago</option>
+          </select>
+        </div>
         <!-- T-1 (§4g): tape-intensity gauge — trades/sec + notional/sec over
              the rolling 10s window (mixed venues, like the tape itself), z
              vs the session baseline of completed 10s buckets, 60-sample
@@ -643,6 +677,28 @@
         <div class="control">
           <label for="set-tape-min">tape min notional ($)</label>
           <input type="number" id="set-tape-min" min="0" step="1000" value="0" />
+        </div>
+        <!-- T-3 (§4i): the four tape size tiers — LABELED DISPLAY CONVENTIONS
+             (not signals). Persisted; a change re-classifies every block and
+             re-seeds the big-print rail. -->
+        <div class="control control-tiers">
+          <label>tape tiers ($) — sig / large / huge / whale</label>
+          <span class="tier-inputs">
+            <input type="number" id="set-tier-sig" min="1" step="10000" title="sig ≥ (labeled convention)" />
+            <input type="number" id="set-tier-large" min="1" step="10000" title="large ≥" />
+            <input type="number" id="set-tier-huge" min="1" step="50000" title="huge ≥ (rail + audio)" />
+            <input type="number" id="set-tier-whale" min="1" step="100000" title="whale ≥" />
+          </span>
+        </div>
+        <!-- T-3 (§4i): optional audio UX aid — default OFF + muted, persisted.
+             A ping on a huge/whale block, a distinct one on a large liq. NOT a
+             signal. -->
+        <div class="control">
+          <label for="set-audio" title="Web-Audio ping on a huge/whale block + a distinct one on a large liquidation. A UX aid, NOT a signal (§4i). Default off/muted.">tape audio (UX aid)</label>
+          <span class="audio-ctl">
+            <input type="checkbox" id="set-audio" /> <span>vol</span>
+            <input type="range" id="set-audio-vol" min="0" max="1" step="0.05" value="0.4" title="ping volume" />
+          </span>
         </div>
         <div class="control">
           <label>&nbsp;</label>

@@ -3186,6 +3186,428 @@
     return { keys, get, isEnabled, isPerp, setEnabled, setStatus, enabledMap, snapshot };
   }
 
+  // ─── TapeAggregator({aggWindowMs, size}) — merged-tape print aggregation (§4i)
+  //
+  // Ports aggr's aggregated TAPE model (§4i): consecutive prints that are the
+  // SAME venue, SAME aggressor side, at the SAME price and inside a short time
+  // window collapse into ONE row shown `×count` — the "read the tape" surface
+  // where a swept level reads as a single block instead of a blur of dust.
+  // Mirrors aggr's `aggregationLength`. The one rule this store exists to keep:
+  // a run NEVER merges across venues — two exchanges printing the same price in
+  // the same millisecond are two prints, and fusing them would FAKE a single
+  // print that never happened on any one book (§0.7 fabrication — forbidden).
+  //
+  // Boundaries that FLUSH the open row and start a fresh one: a price change, a
+  // side flip, a venue (ex) change, or WINDOW EXPIRY — a same-ex/side/price
+  // print whose ts is more than aggWindowMs past the run's FIRST print (the
+  // window is anchored on the run start, so a stuck price cannot grow one
+  // unbounded row; it splits into ≤ aggWindowMs buckets, aggr's fixed bucket).
+  // The window edge is INCLUSIVE (≤ aggWindowMs merges) — stated convention.
+  //
+  // No clocks, no DOM (file rails): the window is measured on the EVENT ts, and
+  // the open (in-progress) row shows in list() as the newest entry the way
+  // FootprintStore.bars() appends its open bar — the tape must show the block
+  // that is forming, not only completed ones. row.ts is the run's MOST RECENT
+  // print (age reads off the latest activity); the internal startTs anchors the
+  // window. VWAP = Σ(price·qty)/Σqty (equals the shared price on a same-price
+  // run — computed generally, correct either way).
+  function TapeAggregator(opts) {
+    const o = opts || {};
+    const aggWindowMs = finiteOr(o.aggWindowMs, 100);
+    const ring = makeRing(finiteOr(o.size, 200));
+    let open = null; // {startTs, ts, ex, isBuy, priceKey, sumQty, sumPxQty, sumNotional, count}
+
+    /** Freeze the open accumulator into a render row (VWAP price + count). */
+    function materialize(a) {
+      return {
+        ts: a.ts, ex: a.ex, isBuy: a.isBuy,
+        price: a.sumPxQty / a.sumQty,
+        qty: a.sumQty, notional: a.sumNotional, count: a.count,
+      };
+    }
+
+    /** Ingest one normalized trade {ts, ex, isBuy, price, qty, notional}.
+     *  Malformed prints (non-finite ts/price/qty, non-positive qty, or no
+     *  venue label) are DROPPED — an unlabelled or zero-size row cannot be a
+     *  merge-keyed tape print (validTrade / SpotPerpCvdStore hygiene). */
+    function push(trade) {
+      if (!trade) return;
+      const ts = trade.ts, price = trade.price, qty = trade.qty;
+      if (!Number.isFinite(ts) || !Number.isFinite(price) || !Number.isFinite(qty) || qty <= 0) return;
+      if (typeof trade.ex !== 'string' || !trade.ex) return;
+      const ex = trade.ex, isBuy = !!trade.isBuy, pk = roundPx(price);
+      const notl = Number.isFinite(trade.notional) ? trade.notional : price * qty;
+
+      // Mergeable iff same venue + side + price AND still inside the window
+      // anchored on the run's first print. Anything else closes the run.
+      const mergeable = open && open.ex === ex && open.isBuy === isBuy
+        && open.priceKey === pk && (ts - open.startTs) <= aggWindowMs;
+      if (mergeable) {
+        open.ts = ts;
+        open.sumQty += qty;
+        open.sumPxQty += price * qty;
+        open.sumNotional += notl;
+        open.count++;
+        return;
+      }
+      if (open) ring.push(materialize(open)); // flush the closed run
+      open = {
+        startTs: ts, ts, ex, isBuy, priceKey: pk,
+        sumQty: qty, sumPxQty: price * qty, sumNotional: notl, count: 1,
+      };
+    }
+
+    /** Aggregated rows NEWEST-FIRST: the forming open row first (it is the
+     *  most recent activity), then flushed rows newest→oldest. */
+    function list() {
+      const out = ring.toArray();
+      out.reverse();
+      if (open) out.unshift(materialize(open));
+      return out;
+    }
+
+    return { push, list, aggWindowMs, get length() { return ring.length + (open ? 1 : 0); } };
+  }
+
+  // ─── sizeTier(notional, thresholds) — USD-notional print classifier (§4i) ──
+  //
+  // Pure size-tier read for tape emphasis (§4i "read the tape" core): a print's
+  // USD notional → 'baseline' | 'sig' | 'large' | 'huge' | 'whale'. Each cut is
+  // a LABELED DISPLAY CONVENTION, not a signal (§0.1) — BTC-scaled defaults the
+  // caller may override. Boundaries are INCLUSIVE LOWER (≥): a print exactly at
+  // a threshold takes the HIGHER tier (the same ≥ convention as the tiers'
+  // aggr origin). A partial override merges over the defaults so a caller can
+  // move one cut without redeclaring the rest; a non-finite notional is
+  // 'baseline' (a NaN size is not a whale — hygiene, never coerced upward).
+  const SIZE_TIER_DEFAULTS = { sig: 1e5, large: 2.5e5, huge: 1e6, whale: 5e6 };
+
+  function sizeTier(notional, thresholds) {
+    if (!Number.isFinite(notional)) return 'baseline';
+    const t = thresholds ? { ...SIZE_TIER_DEFAULTS, ...thresholds } : SIZE_TIER_DEFAULTS;
+    // Strict top-down cascade: the override cuts MUST stay ascending
+    // (sig < large < huge < whale). A non-monotone override (e.g. whale below
+    // huge) lets the higher cut fire first and SHADOWS the lower tier — it goes
+    // unreachable, silently. Deliberately NOT re-guarded here (a hot per-print
+    // path): the coherence seam is upstream — BOTH the settings load and the
+    // tier-input handler adopt only a strictly-increasing positive set, so
+    // settings.tapeTiers is always monotone; only a direct caller hand-passing
+    // a mis-ordered override (the check group's boundary probe) hits the
+    // shadowing. Documented so an override author knows the ordering is
+    // load-bearing, not incidental.
+    if (notional >= t.whale) return 'whale';
+    if (notional >= t.huge) return 'huge';
+    if (notional >= t.large) return 'large';
+    if (notional >= t.sig) return 'sig';
+    return 'baseline';
+  }
+
+  // ─── liqTier(notional, thresholds) — liquidation notional classifier (§4i) ─
+  //
+  // Liquidations get their OWN notional tiers (§4i), separate from the tape's:
+  // a forced-order's USD notional → 'baseline' | 'big' | 'huge'. Same INCLUSIVE
+  // LOWER (≥) convention and non-finite→baseline hygiene as sizeTier; the cuts
+  // are the same labeled DISPLAY conventions (not signals, §0.1). Pure so the
+  // liq feed's ◆/◇ emphasis AND the audio-ping trigger read ONE classifier
+  // (the ping fires on 'huge'), never a re-derived inline threshold.
+  const LIQ_TIER_DEFAULTS = { big: 2.5e5, huge: 1e6 };
+
+  function liqTier(notional, thresholds) {
+    if (!Number.isFinite(notional)) return 'baseline';
+    const t = thresholds ? { ...LIQ_TIER_DEFAULTS, ...thresholds } : LIQ_TIER_DEFAULTS;
+    if (notional >= t.huge) return 'huge';
+    if (notional >= t.big) return 'big';
+    return 'baseline';
+  }
+
+  // ─── filterTapeRows(rows, opts) — merged-tape row filter + tag (§4i) ───────
+  //
+  // The merged multi-venue tape's row projection (§4i): the ONE aggregator's
+  // rows (each already a single-venue block) filtered by min-notional / single-
+  // venue / market, then tagged with the size tier and a spot|perp MARKET
+  // label. Pure so the market filter (both/spot/perp drops the right side) and
+  // the per-row spot/perp tag have an L0 witness — the enabled-leg half of the
+  // §4i item is enforced UPSTREAM (a disabled leg's socket never opens, so no
+  // print reaches the aggregator; the spot-vs-perp CVD store shares that rule),
+  // not here. `marketOf(ex) → 'perp'|'spot'` is injected (the caller resolves
+  // ex→leg→isPerp against the registry) so this stays registry-free and pure.
+  function filterTapeRows(rows, opts) {
+    const o = opts || {};
+    const market = o.market || 'both';
+    const venue = o.venue || 'all';
+    const minN = o.minN;
+    const tiers = o.tiers;
+    const marketOf = typeof o.marketOf === 'function' ? o.marketOf : () => 'perp';
+    const out = [];
+    for (const r of (Array.isArray(rows) ? rows : [])) {
+      if (!r) continue;
+      if (Number.isFinite(minN) && minN > 0 && r.notional < minN) continue;
+      if (venue !== 'all' && r.ex !== venue) continue;
+      const mkt = marketOf(r.ex) === 'spot' ? 'spot' : 'perp';
+      if (market === 'spot' && mkt !== 'spot') continue;
+      if (market === 'perp' && mkt !== 'perp') continue;
+      out.push({
+        ts: r.ts, ex: r.ex, isBuy: r.isBuy, price: r.price, qty: r.qty,
+        notional: r.notional, count: r.count,
+        tier: sizeTier(r.notional, tiers), market: mkt,
+      });
+    }
+    return out;
+  }
+
+  // ─── BigPrintRail({max, thresholds}) — pinned huge/whale strip (§4i) ───────
+  //
+  // The "don't-miss-the-block" surface (§4i): the last N aggregated tape rows
+  // whose tier is 'huge' or 'whale', newest-first, ring-bounded. Fed the
+  // TapeAggregator's rows; classifies each by sizeTier (thresholds shared with
+  // the tape so the rail and the tape agree on what a block IS) and keeps only
+  // the two top tiers. Descriptive emphasis, not a signal (§0.1).
+  function BigPrintRail(opts) {
+    const o = opts || {};
+    const ring = makeRing(finiteOr(o.max, 12));
+    const thresholds = o.thresholds; // undefined → sizeTier's defaults
+
+    /** Feed one aggregated row; kept iff huge/whale. The stored row is a COPY
+     *  tagged with its tier (callers must not reach into the source row). */
+    function push(row) {
+      if (!row || !Number.isFinite(row.notional)) return;
+      const tier = sizeTier(row.notional, thresholds);
+      if (tier !== 'huge' && tier !== 'whale') return;
+      ring.push({ ...row, tier });
+    }
+
+    /** The kept blocks NEWEST-FIRST, ≤ max (feed-view convention). */
+    function list() { return ring.toArray().reverse(); }
+
+    return { push, list, get length() { return ring.length; } };
+  }
+
+  // ─── TradeImprint({windowMs}) — rolling executed volume-at-price (§4i) ─────
+  //
+  // The tape-meets-DOM surface (§4i): rolling-window executed buy vs sell
+  // volume bucketed by price level, painted on the ladder as a mini
+  // volume-at-price. push(ts, price, qty, isBuy, tickSize) folds one print into
+  // its tick level; levelAt(price)/map() read the current window.
+  //
+  // Rounding convention: a print snaps to the NEAREST tick line
+  // (Math.round(price/tick)) — the ladder row it visually sits on. The Map is
+  // keyed by that INTEGER tick INDEX, never a float price: a key built from
+  // float arithmetic drifts (roundPx header) and would split one level in two;
+  // an integer index cannot. map() re-expands indices to grid prices for the
+  // caller using the last-seen tick (upstream rebuilds the store on a
+  // tick-size change — the honest-restart rule — so the grid is stable within
+  // one store's life). Window is the half-open (ts−windowMs, ts] on EVENT ts
+  // (TapeIntensityStore rule); pruning subtracts each aged print from its
+  // level and DELETES a level once its last print ages out — that clears any
+  // float residue so an empty price never lingers as a phantom bucket.
+  function TradeImprint(opts) {
+    const o = opts || {};
+    const windowMs = posOr(o.windowMs, 60000);
+    const levels = new Map(); // int tick index → {buyQty, sellQty, n}
+    let evs = [];             // {ts, idx, qty, isBuy} ascending — the prune deque
+    let head = 0;
+    let curTick = NaN;        // last push's tick — the grid levelAt()/map() report on
+
+    const tickIdx = (price, tick) => Math.round(price / tick);
+
+    /** Fold one executed print into its tick level, then prune the window. */
+    function push(ts, price, qty, isBuy, tickSize) {
+      if (!Number.isFinite(ts) || !Number.isFinite(price) || !Number.isFinite(qty) || qty <= 0) return;
+      const tick = posOr(tickSize, NaN);
+      if (!Number.isFinite(tick)) return; // no grid → cannot bucket (never a zeroed level)
+      curTick = tick;
+      const idx = tickIdx(price, tick);
+      let cell = levels.get(idx);
+      if (!cell) { cell = { buyQty: 0, sellQty: 0, n: 0 }; levels.set(idx, cell); }
+      if (isBuy) cell.buyQty += qty; else cell.sellQty += qty;
+      cell.n++;
+      evs.push({ ts, idx, qty, isBuy });
+      // Prune (ts−windowMs, ts]; a level whose last print ages out is deleted
+      // (n→0) rather than left at a float-residue ~0 — see header.
+      while (head < evs.length && evs[head].ts <= ts - windowMs) {
+        const e = evs[head++];
+        const c = levels.get(e.idx);
+        if (c) {
+          if (e.isBuy) c.buyQty -= e.qty; else c.sellQty -= e.qty;
+          if (--c.n <= 0) levels.delete(e.idx);
+        }
+      }
+      if (head > 2048) { evs = evs.slice(head); head = 0; } // compact consumed head — O(1) amortized
+    }
+
+    /** {buyQty, sellQty} at price's tick level (a COPY), or zeros if untouched
+     *  / before any push (a level with no prints genuinely has 0 volume). */
+    function levelAt(price) {
+      if (!Number.isFinite(price) || !Number.isFinite(curTick)) return { buyQty: 0, sellQty: 0 };
+      const c = levels.get(tickIdx(price, curTick));
+      return c ? { buyQty: c.buyQty, sellQty: c.sellQty } : { buyQty: 0, sellQty: 0 };
+    }
+
+    /** Snapshot Map<gridPrice, {buyQty, sellQty}> — indices re-expanded to
+     *  prices on the current tick grid; fresh objects (no internal handles). */
+    function map() {
+      const out = new Map();
+      if (!Number.isFinite(curTick)) return out;
+      for (const [idx, c] of levels) out.set(roundPx(idx * curTick), { buyQty: c.buyQty, sellQty: c.sellQty });
+      return out;
+    }
+
+    return { push, levelAt, map, windowMs, get size() { return levels.size; } };
+  }
+
+  // ─── DepthLadder helpers — pure reads over a best-first book snapshot (§4i)
+  //
+  // All three take a book snapshot {bids:[[px,qty]…] DESC, asks:[[px,qty]…]
+  // ASC} — exactly the shape terminal-books.js topN()/BookStore.grouped()
+  // materialize at paint cadence — and compute pure ladder reads. No clocks,
+  // no venue logic here: the cross-venue aggregated ladder is mergeSameQuoteBooks
+  // below (and is loudly caveated there); these operate on ONE book.
+
+  /** ladderRows(book, mid, tickSize, nRows) → {bids:[…], asks:[…]} where each
+   *  side holds ≤ nRows rows {side, price, qty, cum, ticks} from mid OUTWARD.
+   *  Venue levels are bucketed onto the absolute tick grid (snapped toward the
+   *  price-improving side — asks up, bids down, the file's snapTick convention
+   *  — so a coarse tick-group selector merges sub-tick levels into one row);
+   *  the book arrives best-first so insertion order IS mid-outward, and `cum`
+   *  is the running qty from mid out to and including each row. `ticks` is the
+   *  row's tick distance from mid (what makes mid load-bearing here). */
+  function ladderRows(book, mid, tickSize, nRows) {
+    const out = { bids: [], asks: [] };
+    const tick = posOr(tickSize, NaN);
+    if (!book || !Number.isFinite(mid) || !Number.isFinite(tick)) return out;
+    const n = Math.max(0, Math.floor(finiteOr(nRows, 0)));
+
+    const build = (levels, isBid) => {
+      const grid = new Map(); // gridPrice → summed qty
+      const seq = [];         // grid prices in first-seen (mid-outward) order
+      for (const lvl of (Array.isArray(levels) ? levels : [])) {
+        if (!lvl) continue;
+        const p = Number(lvl[0]), q = Number(lvl[1]);
+        if (!Number.isFinite(p) || !Number.isFinite(q) || q <= 0) continue;
+        const gp = snapTick(p, tick, !isBid); // asks up, bids down
+        if (!grid.has(gp)) { grid.set(gp, 0); seq.push(gp); }
+        grid.set(gp, grid.get(gp) + q);
+      }
+      const rows = [];
+      let cum = 0;
+      for (const gp of seq) {
+        if (rows.length >= n) break;
+        const qty = grid.get(gp);
+        cum += qty;
+        rows.push({
+          side: isBid ? 'bid' : 'ask',
+          price: gp, qty, cum,
+          ticks: Math.round(Math.abs(gp - mid) / tick),
+        });
+      }
+      return rows;
+    };
+    out.bids = build(book.bids, true);
+    out.asks = build(book.asks, false);
+    return out;
+  }
+
+  /** depthImbalance(book, mid, nTicks, tickSize) → {bidSum, askSum, pct} over
+   *  the levels within nTicks of mid. `pct` is the SIGNED (bidSum−askSum)/
+   *  (bidSum+askSum) in −1..1 — the house convention (terminal.js bookImb10;
+   *  +1 = all bids), NaN when the band is EMPTY (absence, not balance — the
+   *  view scales ×100 for its % label). The band edge is INCLUSIVE: a level
+   *  EXACTLY nTicks out counts (same ≥/≤ boundary convention as sizeTier).
+   *  (Deviation from §4i's bare `within N ticks` sketch: tickSize is a real
+   *  argument — a tick band is undefined without the tick, and reinterpreting
+   *  nTicks as a raw price width would silently mis-scale it.) */
+  function depthImbalance(book, mid, nTicks, tickSize) {
+    const out = { bidSum: 0, askSum: 0, pct: NaN };
+    const tick = posOr(tickSize, NaN);
+    if (!book || !Number.isFinite(mid) || !Number.isFinite(tick)) return out;
+    const n = Math.max(0, finiteOr(nTicks, 0));
+    const band = n * tick;
+    const eps = tick * 1e-9; // float slack so an exact-tick edge lands inside
+    for (const lvl of (Array.isArray(book.bids) ? book.bids : [])) {
+      if (!lvl) continue;
+      const p = Number(lvl[0]), q = Number(lvl[1]);
+      if (!Number.isFinite(p) || !Number.isFinite(q) || q <= 0) continue;
+      if (p <= mid + eps && p >= mid - band - eps) out.bidSum += q; // within band, at/below mid
+    }
+    for (const lvl of (Array.isArray(book.asks) ? book.asks : [])) {
+      if (!lvl) continue;
+      const p = Number(lvl[0]), q = Number(lvl[1]);
+      if (!Number.isFinite(p) || !Number.isFinite(q) || q <= 0) continue;
+      if (p >= mid - eps && p <= mid + band + eps) out.askSum += q; // within band, at/above mid
+    }
+    const tot = out.bidSum + out.askSum;
+    out.pct = tot > 0 ? (out.bidSum - out.askSum) / tot : NaN;
+    return out;
+  }
+
+  /** logBarWidth(qty, maxQty) → depth-bar fraction in 0..1, LOG-scaled:
+   *  log1p(qty)/log1p(maxQty). Log so one whale wall does not flatten every
+   *  other level to an invisible sliver (§4i). Monotone in qty; clamped to
+   *  [0,1] (qty > maxQty → 1); 0 for empty/non-positive/non-finite inputs
+   *  (a bar with no size, never NaN width). */
+  function logBarWidth(qty, maxQty) {
+    if (!Number.isFinite(qty) || !Number.isFinite(maxQty) || maxQty <= 0 || qty <= 0) return 0;
+    const w = Math.log1p(qty) / Math.log1p(maxQty);
+    return w < 0 ? 0 : w > 1 ? 1 : w;
+  }
+
+  /** mergeSameQuoteBooks(booksByLeg, legMeta) → {book, includedLegs,
+   *  excludedLegs} — the aggregated-ladder builder (§4i source-select).
+   *
+   *  LOUD CAVEAT (§4i, kept on the panel): cross-venue depth is a DISPLAY
+   *  APPROXIMATION, NEVER a merged truth. Books from different matching engines
+   *  do not share a queue; summing them onto one grid is a reading aid, not a
+   *  real order book. The one hard rule that keeps it honest: ONLY same-quote
+   *  (USDT) legs are summed — a coin/USD leg (coinbase BTC-USD) is EXCLUDED,
+   *  not silently rescaled by a spot FX rate we do not have (§0.7; that would
+   *  fabricate depth at fictitious prices).
+   *
+   *  booksByLeg: {legKey: {bids, asks}}. legMeta: {legKey: {quote, tickSize,
+   *  primary?}}. The common grid is the leg flagged `primary` (its tickSize),
+   *  falling back to the first included USDT leg's tick — stated, because a
+   *  wrong grid would misalign every summed level. A leg with unknown/non-USDT
+   *  quote is reported in excludedLegs and contributes nothing to the sum. */
+  function mergeSameQuoteBooks(booksByLeg, legMeta) {
+    const books = booksByLeg || {};
+    const meta = legMeta || {};
+    const includedLegs = [], excludedLegs = [], usdt = [];
+    for (const k of Object.keys(books)) {
+      const m = meta[k];
+      if (m && m.quote === 'USDT') { includedLegs.push(k); usdt.push(k); }
+      else excludedLegs.push(k); // non-USDT / unknown-quote — never rescaled onto the sum
+    }
+    // Grid owner: the flagged primary's tick, else the first USDT leg's tick.
+    let gridTick = NaN;
+    for (const k of Object.keys(meta)) {
+      const m = meta[k];
+      if (m && m.primary) { gridTick = posOr(m.tickSize, NaN); break; }
+    }
+    if (!Number.isFinite(gridTick)) {
+      for (const k of usdt) { const t = meta[k] && posOr(meta[k].tickSize, NaN); if (Number.isFinite(t)) { gridTick = t; break; } }
+    }
+
+    const bidGrid = new Map(), askGrid = new Map();
+    const accum = (grid, levels, up) => {
+      for (const lvl of (Array.isArray(levels) ? levels : [])) {
+        if (!lvl) continue;
+        const p = Number(lvl[0]), q = Number(lvl[1]);
+        if (!Number.isFinite(p) || !Number.isFinite(q) || q <= 0) continue;
+        const gp = snapTick(p, gridTick, up);
+        grid.set(gp, (grid.get(gp) || 0) + q);
+      }
+    };
+    if (Number.isFinite(gridTick)) {
+      for (const k of usdt) {
+        const bk = books[k];
+        if (!bk) continue;
+        accum(bidGrid, bk.bids, false); // bids snap down
+        accum(askGrid, bk.asks, true);  // asks snap up
+      }
+    }
+    const bids = [...bidGrid.entries()].map(([p, q]) => [p, q]).sort((a, b) => b[0] - a[0]);
+    const asks = [...askGrid.entries()].map(([p, q]) => [p, q]).sort((a, b) => a[0] - b[0]);
+    return { book: { bids, asks }, includedLegs, excludedLegs, gridTick };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalState = {
@@ -3215,6 +3637,14 @@
     // whose T-1 shape stays frozen for existing consumers — plus the leg
     // registry the terminal's matrix lifecycle consults before any socket.
     deriveLegIds, LegRegistry,
+    // T-3 (§4i): Tape & Ladder Pro pure stores — aggregated-tape merge +
+    // size-tier emphasis (conventions, not signals) + rolling volume-at-price,
+    // and the pure DOM-ladder reads over a best-first book snapshot. The
+    // aggregated-ladder builder carries the cross-venue display-approximation
+    // caveat at its implementation (never a merged truth).
+    TapeAggregator, sizeTier, SIZE_TIER_DEFAULTS, liqTier, LIQ_TIER_DEFAULTS,
+    filterTapeRows, BigPrintRail, TradeImprint,
+    ladderRows, depthImbalance, logBarWidth, mergeSameQuoteBooks,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalState;

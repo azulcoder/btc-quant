@@ -320,6 +320,41 @@
 //                           matches never; NO ping (a re-subscribe nudge
 //                           would re-send the whole snapshot)
 //
+// T-3 additions (DESIGN §4i "check_terminal groups", binding list):
+//  67. TapeAggregator      → a same-ex/side/price run merges (hand VWAP +
+//                           count), each of price change / side flip / ex
+//                           change / window expiry FLUSHES a fresh row, the
+//                           forming row shows in list() newest-first, and a
+//                           cross-ex same-instant print NEVER merges (§0.7)
+//  68. sizeTier            → classification EXACTLY at each boundary notional
+//                           (1e5/2.5e5/1e6/5e6 → the higher tier, inclusive ≥)
+//                           and just below (the lower), partial-override merge,
+//                           non-finite → baseline; defaults object exported
+//  69. BigPrintRail        → only huge/whale kept (large/sig/baseline dropped),
+//                           newest-first, ring-bound at N (oldest evicted),
+//                           each kept row tagged with its tier
+//  70. TradeImprint        → buy/sell split at a tick level, NEAREST-tick
+//                           rounding lands two prices on the right levels, and
+//                           a far-ts push PRUNES the aged window (levels drop
+//                           to the lone survivor); map() re-expands grid prices
+//  71. DepthLadder         → ladderRows cumulative-from-mid sums + ticks by
+//                           hand (nRows-capped); depthImbalance within N ticks
+//                           with the level EXACTLY N ticks out INCLUDED and
+//                           N+1 excluded; logBarWidth monotone + bounded [0,1]
+//                           (value pinned via the ln(1+x) identity, not a
+//                           log1p mirror); mergeSameQuoteBooks sums two USDT
+//                           legs and EXCLUDES a coin/USD leg (never rescaled)
+//  72. liqTier             → liquidation notional tiers (own big/huge cuts,
+//                           separate from the tape): EXACTLY at a cut → higher
+//                           tier (inclusive ≥), just below → lower, partial
+//                           override merge, non-finite → baseline (the audio
+//                           ping's 'huge' gate never fires on NaN/Infinity)
+//  73. filterTapeRows      → merged-tape row projection: both/spot/perp filter
+//                           drops the right market, per-row spot/perp tag +
+//                           sizeTier tag, exact single-venue + min-notional
+//                           gates, unknown ex / no resolver → perp default
+//                           (never a silent spot mislabel)
+//
 // Exit: 0 with one PASS line per group; non-zero with a clear FAIL message
 // (plus stack) if any group breaks. Run: node scripts/check_terminal.cjs
 
@@ -3528,6 +3563,283 @@ group('coinbase l2 adapter: real snapshot+l2update via engine, maker inversion, 
   assert.strictEqual(FX.t2_coinbase_matches[0].type, 'last_match', 'fixture precondition: the seed print is present');
   for (const m of FX.t2_coinbase_matches) ad.onMessage(m, api);
   assert.strictEqual(evts.length, FX.t2_coinbase_matches.length, 'reconnect re-delivery emits ZERO new trades');
+});
+
+// ─── 67. TapeAggregator: merge run + four flush boundaries + no cross-ex (§4i) ─
+group('TapeAggregator: same-ex/side/price run merges (VWAP+count), 4 flushes, no cross-ex', () => {
+  const T = 1783080000000;
+
+  // A same-ex/side/price run collapses to ONE row; window is anchored on the
+  // FIRST print, edge INCLUSIVE — the +100 print at the exact 100 ms edge still
+  // merges. VWAP = Σpx·qty/Σqty = 100 exactly on a same-price run; count = 3.
+  const ta = S.TapeAggregator({ aggWindowMs: 100, size: 8 });
+  ta.push({ ts: T, ex: 'bybit', isBuy: true, price: 100, qty: 1, notional: 100 });
+  ta.push({ ts: T + 50, ex: 'bybit', isBuy: true, price: 100, qty: 3, notional: 300 });
+  ta.push({ ts: T + 100, ex: 'bybit', isBuy: true, price: 100, qty: 2, notional: 200 });
+  let l = ta.list();
+  assert.strictEqual(l.length, 1, 'the run is one forming row, not three');
+  assert.strictEqual(l[0].count, 3, 'count = prints merged');
+  assert.ok(approx(l[0].qty, 6) && approx(l[0].notional, 600), 'qty/notional summed');
+  assert.ok(approx(l[0].price, 100), 'VWAP of a same-price run is the price');
+  assert.strictEqual(l[0].ts, T + 100, 'row ts = most recent print in the run');
+
+  // WINDOW EXPIRY: a same-ex/side/price print 101 ms past the run start is past
+  // the anchored window → flushes the run and opens a fresh row (count 1). The
+  // forming row is newest-first; the flushed run sits behind it.
+  ta.push({ ts: T + 201, ex: 'bybit', isBuy: true, price: 100, qty: 5, notional: 500 });
+  l = ta.list();
+  assert.strictEqual(l.length, 2, 'window expiry flushed the run');
+  assert.strictEqual(l[0].count, 1, 'new forming row after expiry');
+  assert.strictEqual(l[1].count, 3, 'the flushed run kept its merged count');
+
+  // PRICE CHANGE flushes.
+  const pc = S.TapeAggregator();
+  pc.push({ ts: T, ex: 'okx', isBuy: false, price: 100, qty: 1, notional: 100 });
+  pc.push({ ts: T + 1, ex: 'okx', isBuy: false, price: 101, qty: 1, notional: 101 });
+  assert.strictEqual(pc.list().length, 2, 'a price change never merges');
+
+  // SIDE FLIP flushes.
+  const sf = S.TapeAggregator();
+  sf.push({ ts: T, ex: 'okx', isBuy: false, price: 100, qty: 1, notional: 100 });
+  sf.push({ ts: T + 1, ex: 'okx', isBuy: true, price: 100, qty: 1, notional: 100 });
+  assert.strictEqual(sf.list().length, 2, 'a side flip never merges');
+
+  // EX CHANGE flushes — and the §4i hard rule: two venues printing the SAME
+  // price the SAME instant are TWO prints. Merging them would fake one block.
+  const xc = S.TapeAggregator();
+  xc.push({ ts: T, ex: 'bybit', isBuy: true, price: 100, qty: 1, notional: 100 });
+  xc.push({ ts: T, ex: 'binance', isBuy: true, price: 100, qty: 1, notional: 100 });
+  const xl = xc.list();
+  assert.strictEqual(xl.length, 2, 'cross-ex same-instant same-price NEVER merges');
+  assert.deepStrictEqual(xl.map((r) => r.ex), ['binance', 'bybit'], 'newest-first, each venue its own row');
+
+  // Ring bound: flushed rows past `size` evict oldest (open row is extra).
+  const rb = S.TapeAggregator({ aggWindowMs: 0, size: 2 });
+  for (let i = 0; i < 5; i++) rb.push({ ts: T + i * 10, ex: 'x', isBuy: true, price: 100 + i, qty: 1, notional: 100 });
+  assert.ok(rb.list().length <= 3, 'ring bounds flushed rows (+1 forming)');
+
+  // Hygiene: unlabelled / zero-size / non-finite prints are dropped.
+  const hg = S.TapeAggregator();
+  hg.push({ ts: T, ex: '', isBuy: true, price: 100, qty: 1, notional: 100 });
+  hg.push({ ts: T, ex: 'x', isBuy: true, price: 100, qty: 0, notional: 0 });
+  hg.push({ ts: NaN, ex: 'x', isBuy: true, price: 100, qty: 1, notional: 100 });
+  assert.strictEqual(hg.list().length, 0, 'malformed prints never land');
+});
+
+// ─── 68. sizeTier: boundary classification + defaults export (§4i) ───────────
+group('sizeTier: exact-boundary → higher tier, just-below → lower, override merge', () => {
+  const st = S.sizeTier;
+  // Boundaries are INCLUSIVE LOWER (≥): exactly at a cut takes the HIGHER tier.
+  assert.strictEqual(st(1e5), 'sig');
+  assert.strictEqual(st(2.5e5), 'large');
+  assert.strictEqual(st(1e6), 'huge');
+  assert.strictEqual(st(5e6), 'whale');
+  // Just below each cut → the lower tier.
+  assert.strictEqual(st(1e5 - 0.01), 'baseline');
+  assert.strictEqual(st(2.5e5 - 0.01), 'sig');
+  assert.strictEqual(st(1e6 - 0.01), 'large');
+  assert.strictEqual(st(5e6 - 0.01), 'huge');
+  assert.strictEqual(st(1e7), 'whale', 'well above the top cut stays whale');
+
+  // The exported defaults object holds the §4i BTC-scaled conventions.
+  assert.deepStrictEqual(S.SIZE_TIER_DEFAULTS, { sig: 1e5, large: 2.5e5, huge: 1e6, whale: 5e6 });
+
+  // A PARTIAL override merges over the defaults (move one cut, keep the rest).
+  assert.strictEqual(st(3e5, { whale: 2e5 }), 'whale', 'lowered whale cut fires; other cuts still default');
+  assert.strictEqual(st(1.5e5, { whale: 2e5 }), 'sig', 'unchanged cuts keep their default');
+
+  // Non-finite notional → baseline (a NaN/Infinity size is not a whale — the
+  // finiteness rail runs BEFORE the cuts, never coerced upward).
+  assert.strictEqual(st(NaN), 'baseline');
+  assert.strictEqual(st(Infinity), 'baseline', 'non-finite guard precedes the ≥ cuts');
+});
+
+// ─── 69. BigPrintRail: huge/whale only, newest-first, ring-bound (§4i) ───────
+group('BigPrintRail: keeps only huge/whale, newest-first, ring bound at N', () => {
+  const T = 1783080000000;
+  const rail = S.BigPrintRail({ max: 2 });
+  rail.push({ ts: T, ex: 'a', notional: 5e5 });     // large → dropped
+  rail.push({ ts: T + 1, ex: 'b', notional: 2.4e5 }); // sig → dropped
+  rail.push({ ts: T + 2, ex: 'c', notional: 9e4 });   // baseline → dropped
+  assert.strictEqual(rail.list().length, 0, 'sub-huge prints never enter the rail');
+
+  rail.push({ ts: T + 3, ex: 'd', notional: 1e6 });   // huge
+  rail.push({ ts: T + 4, ex: 'e', notional: 6e6 });   // whale
+  rail.push({ ts: T + 5, ex: 'f', notional: 2e6 });   // huge → evicts the oldest (the 1e6)
+  const l = rail.list();
+  assert.strictEqual(l.length, 2, 'ring bound at max=2');
+  assert.deepStrictEqual(l.map((r) => r.notional), [2e6, 6e6], 'newest-first, oldest huge evicted');
+  assert.deepStrictEqual(l.map((r) => r.tier), ['huge', 'whale'], 'each kept row tagged with its tier');
+  assert.strictEqual(l[0].ex, 'f', 'row fields carried through');
+
+  // Non-finite notional never lands.
+  rail.push({ ts: T + 6, ex: 'g', notional: NaN });
+  assert.strictEqual(rail.list()[0].ex, 'f', 'a NaN-notional row is ignored');
+});
+
+// ─── 70. TradeImprint: buy/sell split, tick rounding, window prune (§4i) ─────
+group('TradeImprint: level buy/sell split, nearest-tick rounding, window prune', () => {
+  const T = 1783080000000;
+  const ti = S.TradeImprint({ windowMs: 1000 });
+  // Nearest-tick rounding (tick 1): 100.4 → 100, 99.9 → 100, 100.6 → 101.
+  ti.push(T, 100.4, 2, true, 1);
+  ti.push(T + 10, 100.6, 3, false, 1);
+  ti.push(T + 20, 99.9, 1, true, 1);
+  assert.deepStrictEqual(ti.levelAt(100), { buyQty: 3, sellQty: 0 }, 'two buys round to the 100 level');
+  assert.deepStrictEqual(ti.levelAt(101), { buyQty: 0, sellQty: 3 }, 'the sell rounds to 101');
+  // map() re-expands integer indices to grid prices.
+  const m = ti.map();
+  assert.deepStrictEqual([...m.keys()].sort((a, b) => a - b), [100, 101], 'grid prices, not indices');
+  assert.deepStrictEqual(m.get(100), { buyQty: 3, sellQty: 0 });
+
+  // WINDOW PRUNE (half-open (ts−windowMs, ts]): a print 2000 ms on ages out the
+  // three earlier prints — the 100 level drops to just the new print.
+  ti.push(T + 2000, 100, 5, true, 1);
+  assert.deepStrictEqual(ti.levelAt(100), { buyQty: 5, sellQty: 0 }, 'aged buys pruned, only the survivor remains');
+  assert.strictEqual(ti.size, 1, 'the emptied 101 level is deleted, not left at a phantom 0');
+  assert.deepStrictEqual([...ti.map().keys()], [100], 'snapshot holds only the live level');
+
+  // Hygiene: zero/negative qty, non-finite ts/price, or no tick grid → dropped.
+  const ti2 = S.TradeImprint();
+  ti2.push(T, 100, 0, true, 1);
+  ti2.push(T, 100, 1, true, NaN);
+  ti2.push(NaN, 100, 1, true, 1);
+  assert.strictEqual(ti2.size, 0, 'malformed prints never create a level');
+  assert.deepStrictEqual(ti2.levelAt(100), { buyQty: 0, sellQty: 0 }, 'untouched level reads zeros');
+});
+
+// ─── 71. DepthLadder: ladderRows / depthImbalance / logBarWidth / merge (§4i) ─
+group('DepthLadder: cumulative ladder, N-tick imbalance boundary, log bars, USDT-only merge', () => {
+  // Book best-first: bids DESC, asks ASC. mid 100, tick 1.
+  const book = { bids: [[99, 1], [98, 2], [97, 4]], asks: [[101, 1], [102, 3], [103, 5]] };
+
+  // ladderRows: cumulative qty from mid OUTWARD, nRows-capped, ticks-from-mid.
+  const lad = S.ladderRows(book, 100, 1, 2);
+  assert.deepStrictEqual(lad.asks, [
+    { side: 'ask', price: 101, qty: 1, cum: 1, ticks: 1 },
+    { side: 'ask', price: 102, qty: 3, cum: 4, ticks: 2 },
+  ], 'ask cum 1 then 1+3=4, 103 beyond nRows dropped');
+  assert.deepStrictEqual(lad.bids, [
+    { side: 'bid', price: 99, qty: 1, cum: 1, ticks: 1 },
+    { side: 'bid', price: 98, qty: 2, cum: 3, ticks: 2 },
+  ], 'bid cum 1 then 1+2=3, 97 beyond nRows dropped');
+
+  // Coarse tick-group: tick 2 buckets sub-tick levels onto one grid row (asks
+  // snap UP, bids DOWN — the price-improving convention). 101+102 → grid 102.
+  const grouped = S.ladderRows(book, 100, 2, 3);
+  assert.ok(grouped.asks[0].price === 102 && approx(grouped.asks[0].qty, 4), 'tick-2 groups 101+102 into the 102 row');
+
+  // depthImbalance within 2 ticks of mid 100: bids 99,98 (97 is 3 ticks — OUT),
+  // asks 101,102 (103 is 3 ticks — OUT). The level EXACTLY 2 ticks out (98/102)
+  // is INCLUDED (inclusive band); N+1 is excluded.
+  const di = S.depthImbalance(book, 100, 2, 1);
+  assert.ok(approx(di.bidSum, 3), 'bidSum 1+2, the 3-tick 97 excluded');
+  assert.ok(approx(di.askSum, 4), 'askSum 1+3, the 3-tick 103 excluded');
+  assert.ok(approx(di.pct, (3 - 4) / 7), 'pct = signed (bid−ask)/(bid+ask), house convention');
+  // A tighter band (1 tick) drops the 2-tick levels entirely.
+  const di1 = S.depthImbalance(book, 100, 1, 1);
+  assert.ok(approx(di1.bidSum, 1) && approx(di1.askSum, 1), 'N=1 keeps only the 1-tick levels');
+  // Empty band → NaN pct (absence, not balance).
+  assert.ok(Number.isNaN(S.depthImbalance({ bids: [], asks: [] }, 100, 5, 1).pct), 'empty band → NaN, never a fake 0');
+
+  // logBarWidth: 0 at qty 0, 1 at qty=maxQty, clamps above, monotone, bounded.
+  assert.strictEqual(S.logBarWidth(0, 10), 0);
+  assert.strictEqual(S.logBarWidth(10, 10), 1);
+  assert.strictEqual(S.logBarWidth(20, 10), 1, 'qty > maxQty clamps to 1');
+  assert.strictEqual(S.logBarWidth(-5, 10), 0);
+  assert.strictEqual(S.logBarWidth(5, 0), 0, 'no scale (maxQty ≤ 0) → 0');
+  assert.ok(S.logBarWidth(1, 100) < S.logBarWidth(2, 100), 'monotone in qty');
+  assert.ok(S.logBarWidth(2, 100) < S.logBarWidth(50, 100), 'monotone across the range');
+  const w = S.logBarWidth(5, 10);
+  // Pin the VALUE independently of the impl's log1p call, via the identity
+  // log1p(x) ≡ ln(1+x): ln(6)/ln(11). A plain log1p mirror would only re-derive
+  // the formula (tautology) — this catches a wrong base/offset the bounds and
+  // monotonicity asserts above would miss.
+  assert.ok(w > 0 && w < 1 && approx(w, Math.log(6) / Math.log(11)), 'ln(6)/ln(11) — independent of the log1p call');
+
+  // mergeSameQuoteBooks: two USDT legs SUM onto the primary's grid; a coin/USD
+  // leg is EXCLUDED (not rescaled) — cross-venue depth is a display approx.
+  const booksByLeg = {
+    bybit_linear: { bids: [[100, 1]], asks: [[101, 2]] },
+    okx_swap: { bids: [[100, 3]], asks: [[101, 1]] },
+    coinbase: { bids: [[100, 99]], asks: [[101, 99]] },
+  };
+  const meta = {
+    bybit_linear: { quote: 'USDT', tickSize: 1, primary: true },
+    okx_swap: { quote: 'USDT', tickSize: 1 },
+    coinbase: { quote: 'USD', tickSize: 0.01 },
+  };
+  const merged = S.mergeSameQuoteBooks(booksByLeg, meta);
+  assert.deepStrictEqual(merged.includedLegs, ['bybit_linear', 'okx_swap'], 'only the USDT legs included');
+  assert.deepStrictEqual(merged.excludedLegs, ['coinbase'], 'the coin/USD leg excluded');
+  assert.deepStrictEqual(merged.book.bids, [[100, 4]], 'USDT bids summed (1+3), USD 99 NOT added');
+  assert.deepStrictEqual(merged.book.asks, [[101, 3]], 'USDT asks summed (2+1), USD 99 NOT added');
+  assert.strictEqual(merged.gridTick, 1, 'the flagged primary owns the grid');
+});
+
+// ─── 72. liqTier: liquidation notional boundary classification (§4i) ─────────
+group('liqTier: exact-boundary → higher tier, just-below → lower, non-finite → baseline', () => {
+  const lt = S.liqTier;
+  // Own tiers, SEPARATE from the tape's; same INCLUSIVE LOWER (≥) convention:
+  // exactly at a cut takes the HIGHER tier.
+  assert.strictEqual(lt(2.5e5), 'big');
+  assert.strictEqual(lt(1e6), 'huge');
+  // Just below each cut → the lower tier.
+  assert.strictEqual(lt(2.5e5 - 0.01), 'baseline');
+  assert.strictEqual(lt(1e6 - 0.01), 'big');
+  assert.strictEqual(lt(9e5), 'big', 'between the cuts');
+  assert.strictEqual(lt(4e6), 'huge', 'well above the top cut stays huge');
+
+  // The exported defaults hold the §4i liq conventions (distinct from sizeTier).
+  assert.deepStrictEqual(S.LIQ_TIER_DEFAULTS, { big: 2.5e5, huge: 1e6 });
+
+  // A partial override merges over the defaults.
+  assert.strictEqual(lt(1.2e6, { huge: 2e6 }), 'big', 'raised huge cut: 1.2M no longer huge');
+  assert.strictEqual(lt(2e6, { huge: 2e6 }), 'huge', 'exactly at the raised cut fires');
+
+  // Non-finite → baseline: the audio ping (liqTier === 'huge') must NEVER fire
+  // on a NaN/Infinity notional (the finiteness rail runs BEFORE the ≥ cuts).
+  assert.strictEqual(lt(NaN), 'baseline');
+  assert.strictEqual(lt(Infinity), 'baseline', 'non-finite guard precedes the ≥ cuts');
+});
+
+// ─── 73. filterTapeRows: market filter + spot/perp tag + tier tag (§4i) ──────
+group('filterTapeRows: both/spot/perp filter, spot/perp market tag, venue+minN gates', () => {
+  // A fake ex→market resolver (the controller injects the registry-backed one):
+  // coinbase/binance_spot are spot legs, bybit is a perp leg.
+  const marketOf = (ex) => (ex === 'coinbase' || ex === 'binance_spot') ? 'spot' : 'perp';
+  const rows = [
+    { ts: 1, ex: 'bybit',        isBuy: true,  price: 100, qty: 3, notional: 3e5,   count: 1 },
+    { ts: 2, ex: 'coinbase',     isBuy: false, price: 100, qty: 1, notional: 1.2e6, count: 2 },
+    { ts: 3, ex: 'binance_spot', isBuy: true,  price: 100, qty: 1, notional: 5e4,   count: 1 },
+  ];
+
+  // market 'both' keeps all; each row tagged with its resolved market AND its
+  // sizeTier (3e5 → large, 1.2e6 → huge, 5e4 → baseline; hand-classified).
+  const both = S.filterTapeRows(rows, { market: 'both', venue: 'all', minN: 0, marketOf });
+  assert.strictEqual(both.length, 3);
+  assert.deepStrictEqual(both.map((r) => r.market), ['perp', 'spot', 'spot'], 'spot/perp tag per row');
+  assert.deepStrictEqual(both.map((r) => r.tier), ['large', 'huge', 'baseline'], 'sizeTier tag rides along');
+
+  // market 'spot' drops the perp row; 'perp' drops the spot rows.
+  assert.deepStrictEqual(S.filterTapeRows(rows, { market: 'spot', marketOf }).map((r) => r.ex),
+    ['coinbase', 'binance_spot'], 'spot filter keeps only spot legs');
+  assert.deepStrictEqual(S.filterTapeRows(rows, { market: 'perp', marketOf }).map((r) => r.ex),
+    ['bybit'], 'perp filter keeps only perp legs');
+
+  // Single-venue filter is exact (each row is one venue's block).
+  assert.deepStrictEqual(S.filterTapeRows(rows, { venue: 'coinbase', marketOf }).map((r) => r.ex),
+    ['coinbase'], 'venue filter keeps the one venue');
+
+  // min-notional gate drops sub-threshold rows (the 5e4 binance_spot print).
+  assert.deepStrictEqual(S.filterTapeRows(rows, { minN: 2e5, marketOf }).map((r) => r.notional),
+    [3e5, 1.2e6], 'minN drops the sub-threshold print');
+
+  // An ex the resolver does not know defaults PERP (never masquerades as spot),
+  // and no resolver at all → everything perp: a wiring bug fails toward perp,
+  // never a silent spot mislabel.
+  const dflt = S.filterTapeRows([{ ts: 1, ex: 'mystery', notional: 3e5, count: 1 }], { market: 'both' });
+  assert.strictEqual(dflt[0].market, 'perp', 'unknown ex / no resolver → perp default');
 });
 
 // ─── Verdict ─────────────────────────────────────────────────────────────────
