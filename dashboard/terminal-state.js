@@ -3608,6 +3608,60 @@
     return { book: { bids, asks }, includedLegs, excludedLegs, gridTick };
   }
 
+  // ─── makePanelGuard({threshold}) — per-panel render circuit breaker (N1) ──
+  //
+  // Pure, DOM-free, clock-free companion to the paint loop's per-panel error
+  // boundary (terminal.js safePanel). A closed→open circuit breaker (Nygard,
+  // Release It!): N CONSECUTIVE render throws latch it OPEN ('dead'); one clean
+  // run resets the consecutive count. Once open it STAYS open — a persistent
+  // render fault is a real bug to SURFACE (the dead-panel chip), never a
+  // catch-and-retry that spin-loops and hides the breakage (§N1). We omit
+  // half-open/auto-retry ON PURPOSE: retry against a deterministic render fault
+  // is the exact spin-loop the roadmap item warns against. Revives ONLY on
+  // reset() (symbol-switch re-init rebuilds every store, so the fault's inputs
+  // are gone — a reconnect or un-pause does NOT clear a code fault, so neither
+  // does this). Counts events, never time, so it needs no clock and stays a
+  // pure Node-testable unit.
+  function makePanelGuard(opts) {
+    const o = opts || {};
+    // Clamp ≥ 1: a 0/NaN threshold would be a breaker that never opens — a
+    // silent no-op guard, the opposite of the honesty rail. Default 3: one
+    // transient NaN for a single frame should not quarantine a panel; three
+    // consecutive throws is a reproducible fault, not a one-off.
+    const N = Math.max(1, Math.floor(finiteOr(o.threshold, 3)));
+    let consecutive = 0;   // consecutive throws since the last ok()/reset()
+    let dead = false;      // latched open — surfaced, never auto-retried
+    let failures = 0;      // TOTAL throws ever (diagnostics)
+    let lastError = null;  // message of the most recent throw (chip tooltip)
+
+    return {
+      /** Clean run: the consecutive streak resets. Never revives a dead guard
+       *  (a quarantined panel is not called, so ok() is not reached for it). */
+      ok() { if (!dead) consecutive = 0; },
+
+      /** Record a throw. Returns true ONLY on the false→true transition into
+       *  dead — so the caller logs + flags EXACTLY once; false below threshold
+       *  and false when already dead (rate-limit rail: no per-frame spam). */
+      fail(err) {
+        failures++;
+        lastError = err && err.message ? String(err.message) : String(err);
+        if (dead) return false;
+        consecutive++;
+        if (consecutive >= N) { dead = true; return true; }
+        return false;
+      },
+
+      /** Latched open? The caller skips the whole panel block while true. */
+      isDead() { return dead; },
+
+      /** Explicit revival — symbol-switch re-init only (see header). */
+      reset() { consecutive = 0; dead = false; lastError = null; },
+
+      /** Read-only snapshot for the UI dead-chip + the harness. */
+      stats() { return { dead, consecutive, failures, lastError, threshold: N }; },
+    };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalState = {
@@ -3645,6 +3699,9 @@
     TapeAggregator, sizeTier, SIZE_TIER_DEFAULTS, liqTier, LIQ_TIER_DEFAULTS,
     filterTapeRows, BigPrintRail, TradeImprint,
     ladderRows, depthImbalance, logBarWidth, mergeSameQuoteBooks,
+    // N1: per-panel render circuit breaker (paint-loop error boundary) — pure,
+    // DOM-free, clock-free; wired into terminal.js frame() via safePanel.
+    makePanelGuard,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalState;

@@ -51,7 +51,7 @@ and not an execution engine.
 
 1. **Honesty rails enforced in CI, not in prose.** `heuristic`/`estimated` labels and
    the IC-honesty sentences are asserted VERBATIM via `assert.strictEqual` in the build
-   gate (`scripts/check_terminal.cjs`, 73 assertion groups). Dropping or rewording a
+   gate (`scripts/check_terminal.cjs`, 74 assertion groups). Dropping or rewording a
    label fails the build. The confluence board states its own forward-IC ≈ 0 as a
    permanent label (`terminal-state.js:1595`, `RESEARCH-ic-runlog.md`). A competitor
    that smooths or fabricates fails this gate by construction.
@@ -157,7 +157,10 @@ sequence to the calendar, not to enthusiasm.
 
 ### NEAR — deploy-hardening + honesty rescope (weeks, all high-impact / low-effort)
 
-- [ ] **N1. Isolate the paint loop, with quarantine.** Wrap each `view.render()` so a
+- [x] **N1. Isolate the paint loop, with quarantine.** (done 2026-07-25 — pure
+      `makePanelGuard` circuit breaker + `safePanel` per-panel boundary + top-level
+      `finally` so `scheduleFrame()` always re-arms + honest dead-panel chip + guarded
+      fault-injection hook; check gate 73→74.) Wrap each `view.render()` so a
       throw is caught and rate-limit-logged per panel, and `scheduleFrame()` always runs
       in a `finally`. Disable a panel after N consecutive throws and surface a dead-panel
       chip (not catch-and-retry, which spin-loops and hides a broken panel). *Accept:* a
@@ -262,7 +265,7 @@ sequence to the calendar, not to enthusiasm.
 ## 7. Sustainable process (standing gates)
 
 - **Verification harness L0-L3 as a non-negotiable CI gate.** L0 (208 pytest + parity to
-  machine-eps + the 73-group verbatim-assert gate over real wire frames), L1 (deterministic
+  machine-eps + the 74-group verbatim-assert gate over real wire frames), L1 (deterministic
   browser replay: REPLAY MODE + zero console error + non-blank canvas), L2 (live-wire
   invariants: book never crossed, mid coherent), L3 (tick-store gap census — report, never
   fill). Every new panel carries one group; accept the linear carrying cost as the price of

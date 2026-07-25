@@ -204,16 +204,266 @@ def shoot_panels(page, out_dir, tag):
     return paths, fails
 
 
+# N1 dead-surface model — mirrors terminal.js markPanelDead(). A faulted key's
+# honest DOM footprint is NOT always one .panel:
+#   • 'fp' paints TWO panels (the footprint AND the CVD subchart it draws into
+#     view-cvd) → BOTH go .panel--dead with a 'stalled' chip; both canvases die
+#     before a first good frame, so both are legitimately blank.
+#   • 'tape'/'tapeint' SHARE one .panel → the faulted sub-container goes
+#     .unit--dead (NEVER .panel--dead — that would flag the live sibling), the
+#     chip in the shared <h2> names the sub-unit, and the SIBLING sub-unit must
+#     stay live (undimmed). This is the finding-3 crux the harness now proves.
+#   • any other key → its own .panel goes .panel--dead + 'stalled'.
+#   panels = anchor ids that must sit inside a .panel--dead (each with a chip)
+#   units  = element ids that must carry .unit--dead (chip in the shared <h2>)
+#   live   = element ids that MUST stay undimmed (the still-painting sibling)
+#   chip   = expected text on the faulted key's chip
+# Witness keys must be FAST-cadence (dirty set most frames) so the breaker reaches
+# N consecutive throws inside the sample window — fp/tape/tapeint/heat qualify. A
+# sparse-cadence panel like 'det' (dirty only on a new detection event) may never
+# reach 3 in a short replay; its surface mapping would be identical to 'heat''s
+# (one own .panel--dead), so it adds no coverage and is left out on purpose.
+DEAD_SURFACE = {
+    "fp":      {"panels": ["view-footprint", "view-cvd"], "units": [],               "live": [],               "chip": "stalled"},
+    "tape":    {"panels": [],                             "units": ["view-tape"],    "live": ["view-tapeint"], "chip": "tape stalled"},
+    "tapeint": {"panels": [],                             "units": ["view-tapeint"], "live": ["view-tape"],     "chip": "tape speed stalled"},
+    "heat":    {"panels": ["view-bookheat"],             "units": [],               "live": [],               "chip": "stalled"},
+}
+
+
+def dead_surface(key):
+    return DEAD_SURFACE.get(key, {"panels": ["view-" + key], "units": [], "live": [], "chip": "stalled"})
+
+
+def fault_blanks(key):
+    """Canvas host-ids the faulted key legitimately blanks (its own units) — used
+    to scope the sibling non-blank check; every OTHER canvas must keep painting."""
+    s = dead_surface(key)
+    return set(s["panels"]) | set(s["units"])
+
+
+def run_fault(sync_playwright, args) -> int:
+    """N1 paint-loop quarantine proof (L1, separate from the standard green run).
+
+    Opens ?replay=1&fault=<key> so terminal.js forces that ONE panel to throw on
+    every paint (a slice-build-style throw, BEFORE render, via safePanel), and
+    proves the quarantine end-to-end in a real browser:
+      (a) the faulted key's dead-surface matches DEAD_SURFACE exactly — the right
+          panel(s)/sub-unit(s) carry the '.st-dead' chip + dimming, NO chip
+          mislabels another key, and any shared-panel SIBLING stays live
+          (findings 3/4: fp chips both panels; a tape fault never dims tapeint);
+      (b) the throw was CAUGHT — ZERO uncaught pageerror (the whole point of N1:
+          one bad panel can no longer blackout the loop);
+      (c) telemetry is rate-limited — EXACTLY ONE console.error, naming the key
+          and 'quarantined' (once on death, never per frame);
+      (d) SIBLINGS keep painting — every judged canvas except the faulted key's
+          own units is non-blank;
+      (e) the rAF loop is STILL running after quarantine — the frames() heartbeat
+          advances across a ~1.2 s sample.
+    """
+    key = args.fault
+    blanks = fault_blanks(key)
+
+    server, port = start_server()
+    url = f"http://127.0.0.1:{port}/dashboard/terminal.html?replay=1&fault={key}"
+    print(f"serving {ROOT} at http://127.0.0.1:{port}/ (localhost only)")
+    print(f"N1 FAULT-INJECTION PROOF — opening {url}")
+
+    fails: list[str] = []
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+    shots: list[str] = []
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page(viewport={"width": 1680, "height": 1400})
+        page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: page_errors.append(str(e)))
+
+        page.goto(url, wait_until="domcontentloaded")
+
+        # Ready gate: ingestion is independent of the faulted panel's render, so
+        # tapeRows>0 && heatSamples>=3 must still be reached (proof the pipeline
+        # kept flowing while one panel threw every frame).
+        try:
+            page.wait_for_function(READY_JS, timeout=READY_TIMEOUT_MS)
+            print(f"PASS ready: pipeline flowed despite fault (tapeRows>0, heatSamples>=3)")
+        except Exception:
+            dbg = page.evaluate("() => window.__BTCQ_TERMINAL_DEBUG ? __BTCQ_TERMINAL_DEBUG.guards() : null")
+            fails.append(f"ready: page never reached tapeRows>0 && heatSamples>=3 (guards: {dbg})")
+
+        # Quarantine is CADENCE-gated: a panel only throws when it is due(), so a
+        # slower-cadence key (e.g. 'det') needs several due-fires to reach N
+        # consecutive. Wait for the breaker to actually latch before asserting its
+        # surface — makes the proof independent of any panel's MIN_MS.
+        try:
+            page.wait_for_function(
+                "(k) => { const d = window.__BTCQ_TERMINAL_DEBUG;"
+                " return d && d.guards()[k] && d.guards()[k].dead; }",
+                arg=key, timeout=15_000)
+        except Exception:
+            g = page.evaluate("(k) => window.__BTCQ_TERMINAL_DEBUG ? __BTCQ_TERMINAL_DEBUG.guards()[k] : null", key)
+            fails.append(f"quarantine: guard[{key!r}] never latched dead within 15s (cadence too slow?): {g}")
+
+        # ── (a) the faulted key's dead-surface matches DEAD_SURFACE exactly ──
+        exp = dead_surface(key)
+        n0 = len(fails)
+        snap = page.evaluate(
+            "() => {"
+            " const chip = (c) => ({ key: c.getAttribute('data-key'), text: c.textContent, title: c.title });"
+            " return {"
+            "  chips: [...document.querySelectorAll('.st-dead')].map(chip),"
+            "  panelsDead: [...document.querySelectorAll('.panel--dead')].map("
+            "    (p) => [...p.querySelectorAll('[id]')].map((e) => e.id).filter((s) => s.startsWith('view-'))),"
+            "  unitsDead: [...document.querySelectorAll('.unit--dead')].map((u) => u.id) }; }")
+        panels_flat = sorted({a for grp in snap["panelsDead"] for a in grp})
+        units_flat = sorted(snap["unitsDead"])
+        if panels_flat != sorted(exp["panels"]):
+            fails.append(f"dead panels: expected {sorted(exp['panels'])}, got {panels_flat}")
+        if units_flat != sorted(exp["units"]):
+            fails.append(f"dead units: expected {sorted(exp['units'])}, got {units_flat}")
+        # No chip may belong to a different key — that is the finding-3 mislabel
+        # (a live sibling wearing 'stalled').
+        foreign = [(c["key"], c["text"]) for c in snap["chips"] if c["key"] != key]
+        if foreign:
+            fails.append(f"dead chip mislabels other key(s): {foreign}")
+        own = [c for c in snap["chips"] if c["key"] == key]
+        if not own:
+            fails.append(f"dead chip: no .st-dead chip for faulted key {key!r}")
+        else:
+            if any(c["text"] != exp["chip"] for c in own):
+                fails.append(f"dead chip text: expected {exp['chip']!r}, got {[c['text'] for c in own]}")
+            if any((not c["title"]) or "quarantined" not in c["title"] or "LAST GOOD frame" not in c["title"] for c in own):
+                fails.append(f"dead chip title missing honesty text: {[c['title'] for c in own]}")
+        # Finding-3 crux: a shared-panel sibling must stay LIVE (undimmed).
+        for live_id in exp["live"]:
+            st = page.evaluate(
+                "(id) => { const e = document.getElementById(id); if (!e) return { missing: true };"
+                " const p = e.closest('.panel');"
+                " return { unitDead: e.classList.contains('unit--dead'),"
+                "   panelDead: !!(p && p.classList.contains('panel--dead')) }; }", live_id)
+            if st.get("missing"):
+                fails.append(f"live sibling {live_id}: element missing")
+            elif st["unitDead"] or st["panelDead"]:
+                fails.append(f"live sibling {live_id} falsely quarantined "
+                             f"(unitDead={st['unitDead']}, panelDead={st['panelDead']}) — "
+                             f"a still-painting panel must never read stale (§0)")
+        if len(fails) == n0:
+            title0 = own[0]["title"] if own else ""
+            print(f"PASS dead surface: panels={panels_flat} units={units_flat}, "
+                  f"chip {exp['chip']!r}, siblings live — {title0[:60]}…")
+
+        # ── guard state: faulted key dead (failures>=threshold), siblings alive ──
+        guards = page.evaluate("() => window.__BTCQ_TERMINAL_DEBUG ? __BTCQ_TERMINAL_DEBUG.guards() : null")
+        if not guards:
+            fails.append("guards: __BTCQ_TERMINAL_DEBUG.guards() missing")
+        elif key not in guards:
+            fails.append(f"guards: faulted key {key!r} not among {list(guards)}")
+        else:
+            g = guards[key]
+            others_dead = [k for k, v in guards.items() if k != key and v.get("dead")]
+            if not g.get("dead"):
+                fails.append(f"guard[{key}]: expected dead=True, got {g}")
+            elif g.get("failures", 0) < g.get("threshold", 3):
+                fails.append(f"guard[{key}]: failures {g.get('failures')} < threshold "
+                             f"{g.get('threshold')} — loop died before reaching quarantine")
+            elif others_dead:
+                fails.append(f"quarantine leaked: sibling guards also dead: {others_dead}")
+            else:
+                print(f"PASS guard[{key}]: dead after {g['failures']} throws (threshold "
+                      f"{g['threshold']}); all {len(guards) - 1} siblings alive")
+
+        # t0 screenshots — the visual witness (faulted panel + live siblings).
+        p, f = shoot_panels(page, args.out, f"fault-{key}-t0")
+        shots += p
+        fails += f
+
+        # ── (d) SIBLINGS keep painting: every judged canvas but the faulted
+        # panel's own must be non-blank ──
+        sib_ok = 0
+        for c in page.evaluate(CANVAS_JS):
+            if c["id"] in blanks or c.get("skipped") or c["nonBgPct"] is None:
+                continue
+            if c["nonBgPct"] <= 2.0:
+                fails.append(f"sibling canvas [{c['id']}] {c['w']}x{c['h']}: blank "
+                             f"({c['nonBgPct']:.2f}%) — quarantine should not have touched it")
+            else:
+                sib_ok += 1
+        if sib_ok >= 2:
+            print(f"PASS siblings: {sib_ok} non-faulted canvas stacks still painting")
+        else:
+            fails.append(f"siblings: only {sib_ok} live canvas stacks (expected >=2)")
+
+        # ── (e) rAF loop STILL running after quarantine: heartbeat advances ──
+        f0 = page.evaluate("() => __BTCQ_TERMINAL_DEBUG.frames()")
+        page.wait_for_timeout(1200)
+        f1 = page.evaluate("() => __BTCQ_TERMINAL_DEBUG.frames()")
+        if f1 - f0 >= 5:
+            print(f"PASS loop alive: frames() advanced {f0} -> {f1} (+{f1 - f0}) after quarantine")
+        else:
+            fails.append(f"loop: frames() barely advanced {f0} -> {f1} — rAF loop may be dead")
+
+        # A second store count must also have moved (a live panel's data grows).
+        c0 = page.evaluate("() => __BTCQ_TERMINAL_DEBUG.counts().heatSamples")
+        p, f = shoot_panels(page, args.out, f"fault-{key}-t1")
+        shots += p
+        fails += f
+        c1 = page.evaluate("() => __BTCQ_TERMINAL_DEBUG.counts().heatSamples")
+        print(f"note: heatSamples {c0} -> {c1} (sampler kept running through the fault)")
+
+        # ── (b) throw CAUGHT: zero uncaught pageerror ──
+        if page_errors:
+            for e in page_errors:
+                fails.append(f"pageerror (throw ESCAPED the boundary — N1 broken): {e}")
+        else:
+            print("PASS caught: 0 uncaught pageerror — the throw stayed inside safePanel")
+
+        # ── (c) telemetry rate-limited: EXACTLY ONE quarantine console.error ──
+        quar = [e for e in console_errors if "quarantined" in e and f'"{key}"' in e]
+        other = [e for e in console_errors if e not in quar]
+        if len(quar) != 1:
+            fails.append(f"telemetry: expected exactly 1 quarantine log for {key!r}, "
+                         f"got {len(quar)}: {quar}")
+        elif other:
+            fails.append(f"telemetry: unexpected extra console errors: {other}")
+        else:
+            print(f"PASS telemetry: exactly 1 quarantine log — {quar[0]}")
+
+        browser.close()
+
+    server.shutdown()
+    print(f"\nscreenshots ({len(shots)}) in {args.out}")
+    if fails:
+        print(f"\nFAIL — {len(fails)} problem(s):")
+        for f in fails:
+            print(f"  FAIL {f}")
+        return 1
+    print(f"\nOK — N1 quarantine proven: panel '{key}' quarantined, siblings live, loop survived.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", default=os.path.join(ROOT, "reports", "verify"),
                     help="screenshot directory (default: reports/verify/)")
     ap.add_argument("--keep-server", action="store_true",
                     help="keep serving after the checks for interactive debugging (Ctrl+C to stop)")
+    ap.add_argument("--fault", metavar="PANEL_KEY", default=None,
+                    help="N1 paint-loop quarantine proof: open ?replay=1&fault=<key> "
+                         "(e.g. --fault fp) and assert the faulted panel is quarantined "
+                         "(dead chip) while every SIBLING keeps painting and the rAF loop "
+                         "survives. A SEPARATE run from the standard green path — this one "
+                         "expects exactly one quarantine console.error, never zero.")
     args = ap.parse_args()
 
     sync_playwright = _require_playwright()
     os.makedirs(args.out, exist_ok=True)
+
+    # N1: the fault-injection proof is its own self-contained run so it never
+    # perturbs the standard zero-error L1 gate (§N1 telemetry vs the zero-console
+    # gate: a quarantine logs exactly once, by design).
+    if args.fault:
+        return run_fault(sync_playwright, args)
 
     server, port = start_server()
     url = f"http://127.0.0.1:{port}/dashboard/terminal.html?replay=1"

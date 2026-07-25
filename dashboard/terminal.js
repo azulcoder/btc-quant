@@ -569,6 +569,146 @@
   };
   function dirtyAll() { for (const k in dirty) dirty[k] = true; }
 
+  // ─── N1: paint-loop quarantine — per-panel render circuit breakers ───────
+  //
+  // Gap 2 (STRATEGY §3): frame() paints ~34 panels and scheduleFrame() was its
+  // LAST statement, so ONE throw anywhere before it froze every panel forever.
+  // Ingest is hardened (livewire.js try/catch); paint was not. The fix is two
+  // orthogonal layers: (1) a top-level try/finally in frame() so the loop always
+  // re-arms, and (2) this per-panel error boundary so a faulting panel is
+  // isolated while its SIBLINGS keep painting.
+  //
+  // One breaker per view key, keyed off dirty{} (the existing 34-key source of
+  // truth — no new parallel table, Gap 4 not worsened). The isolation UNIT is
+  // the whole per-panel block (slice-build + render), not just render(): a throw
+  // can originate in S.stackedImbalances(), keyLevelMarks(), cvds[ex].series(),
+  // a map over bars — all inside the block but outside view.render() — so the
+  // wrapper must wrap the whole block (safePanel below does exactly that).
+  const guards = {};
+  for (const k in dirty) guards[k] = S.makePanelGuard({ threshold: 3 });
+  // N1 (findings 1/6): the per-frame INGESTION prologue (flushBookLegs /
+  // sampleDepth / maybeEstimateLiq / maybeIntel) runs BEFORE any panel and is
+  // shared code with a real throw surface (maybeIntel → S.confluenceReads etc.,
+  // no inner try/catch). A throw there is re-armed by the frame() try/finally,
+  // but a finally does NOT suppress it — un-guarded it re-raised out of frame()
+  // EVERY frame (unbounded uncaught-pageerror spam) and unwound before any panel
+  // painted. Its own breaker isolates it the same way safePanel isolates a
+  // panel: caught, logged ONCE, surfaced on the header. Not in dirty{} (it is
+  // not a paintable view), so it is added by hand.
+  guards.ingest = S.makePanelGuard({ threshold: 3 });
+  // N1: loop heartbeat — incremented once per frame() invocation. Read-only via
+  // the debug hook (frames()); the L1 fault-injection proof samples it twice to
+  // show the rAF loop is STILL running after a panel was quarantined.
+  let frameCount = 0;
+
+  // ─── Dead-panel DOM surface: mark EVERY unit a key paints, at the right grain ─
+  //
+  // A render key is NOT 1:1 with one <section.panel> — two realities the naive
+  // closest('.panel') got wrong, both §0 honesty bugs (findings 3/4):
+  //   • 'fp' paints TWO panels: fpView.render draws the footprint AND the CVD
+  //     subchart (cvdEl: view-cvd, a SEPARATE .panel). Quarantining fp must
+  //     chip+dim BOTH, or a FROZEN CVD curve sits beside the chipped footprint
+  //     wearing no 'stalled' label — the §0.7 silent-stale-surface N1 exists to
+  //     prevent. (view-cvd is the one cross-panel paint — mapped explicitly.)
+  //   • view-tape + view-tapeint SHARE one .panel (the tape + its speed strip).
+  //     Marking that shared .panel would dim+chip the still-LIVE sibling — a
+  //     false 'stalled' on live data, §0 honesty inverted (crying wolf). So a
+  //     unit that shares its panel dims only ITS OWN sub-container (.unit--dead),
+  //     never the section; the chip in the shared <h2> names which sub-unit died.
+  //
+  // Shared-ness is DETECTED at mark time (another render unit lives in the same
+  // .panel), not hard-coded — the unit set is VIEW_ANCHOR's values plus view-cvd.
+  // All read at call time (VIEW_ANCHOR + the DOM exist long before a quarantine).
+  function renderUnitIds() { return Object.values(VIEW_ANCHOR).concat(['view-cvd']); }
+  // Every DOM element a key paints. Default: its one VIEW_ANCHOR element (header
+  // and the 'ingest' pseudo-key have none → the header panel). fp is the lone
+  // cross-panel exception.
+  function panelUnitsOf(key) {
+    const ids = key === 'fp' ? ['view-footprint', 'view-cvd']
+              : [VIEW_ANCHOR[key] || 'view-header'];
+    return ids.map((id) => $(id)).filter(Boolean);
+  }
+  // Human names for the sub-unit / pseudo keys whose raw key reads badly — used
+  // in the shared-panel chip label and in every tooltip.
+  const UNIT_LABEL = { tape: 'tape', tapeint: 'tape speed', ingest: 'data intake', header: 'header' };
+
+  // §0 honesty (§0.1/§0.7, cf. terminal-views.js 'never carry a silently-broken
+  // chart'): a quarantined unit keeps its LAST GOOD frame on screen — that is
+  // stale, so it MUST announce it, never pass stale pixels off as live. The
+  // 'stalled' chip rides the .signal-tag taxonomy (st-dead = error palette).
+  // Idempotent per key: safePanel flags once (fail()'s death transition), and a
+  // re-mark for the same key stays a no-op.
+  function markPanelDead(key, err) {
+    const last = err && err.message ? err.message : String(err);
+    const N = guards[key] ? guards[key].stats().threshold : 3;
+    const label = UNIT_LABEL[key] || key;
+    for (const el of panelUnitsOf(key)) {
+      const panel = el.closest('.panel');
+      if (!panel) continue;
+      // Shared .panel (another render unit sits in it) → dim only THIS
+      // sub-container so a faulting sibling never dims the live one; sole owner
+      // → dim the whole panel body.
+      const shared = renderUnitIds().some((id) => {
+        const u = $(id);
+        return u && u !== el && panel.contains(u);
+      });
+      (shared ? el : panel).classList.add(shared ? 'unit--dead' : 'panel--dead');
+      // Chip host: the panel <h2> (NEVER the dimmed sub-container — opacity on
+      // the parent would fade the chip too). The header panel has no <h2> → its
+      // chip rides .term-chips, right where connection health lives, so a dead
+      // header/ingest is loud, not silent. Last resort: the panel itself.
+      const host = panel.querySelector('h2') || panel.querySelector('.term-chips') || panel;
+      if (host.querySelector('.st-dead[data-key="' + key + '"]')) continue;  // already flagged for this key
+      const chip = document.createElement('span');
+      chip.className = 'signal-tag st-dead';
+      chip.setAttribute('data-key', key);
+      // Shared chips name the sub-unit (two can share one <h2>); a sole owner
+      // just says 'stalled' — its whole panel is dimmed, so there is no ambiguity.
+      chip.textContent = shared ? label + ' stalled' : 'stalled';
+      // .title is a property, not innerHTML — no escaping needed for err.message.
+      chip.title = 'render fault — ' + label + ' was quarantined after ' + N
+        + ' consecutive paint errors so the rest of the terminal keeps painting. '
+        + 'Showing the LAST GOOD frame, not live data (§0). Switch symbol or reload '
+        + 'to reset. Last error: ' + last;
+      host.appendChild(chip);
+    }
+  }
+  function clearPanelDead(key) {
+    for (const el of panelUnitsOf(key)) {
+      const panel = el.closest('.panel');
+      if (!panel) continue;
+      el.classList.remove('unit--dead');
+      panel.classList.remove('panel--dead');
+      const chip = panel.querySelector('.st-dead[data-key="' + key + '"]');
+      if (chip) chip.remove();
+    }
+  }
+  // The per-panel error boundary. Runs the whole block (slice-build + render)
+  // inside the panel's breaker: a throw ANYWHERE in it is caught, counted, and
+  // after N consecutive throws the breaker latches — we log ONCE (the death
+  // transition, not per frame — §N1 anti-spin-loop rail), flag the panel, and
+  // stop calling it (no retry; the chip carries the state). Below threshold, or
+  // once dead, siblings are untouched. The arrow is allocated only when due()
+  // already fired, so a skipped panel costs nothing extra.
+  function safePanel(key, fn) {
+    const g = guards[key];
+    if (g.isDead()) return;                 // quarantined: last good frame stays, no retry
+    try {
+      // N1 verification hook (inert in production — see FAULT_KEY): forces this
+      // ONE panel to throw BEFORE fn(), mimicking a slice-build throw so the
+      // proof exercises the whole-block boundary, not just render().
+      if (key === FAULT_KEY) throw new Error('fault-injection: forced throw (?fault=' + key + ', verification only §N1)');
+      fn();
+      g.ok();
+    } catch (err) {
+      if (g.fail(err)) {                     // true ONLY on the death transition
+        markPanelDead(key, err);
+        console.error('panel "' + key + '" quarantined after ' + g.stats().threshold
+          + ' consecutive render faults: ' + (err && err.message ? err.message : err));
+      }
+    }
+  }
+
   // ─── T-3 (§4i): optional audio UX aid — Web-Audio ping, NO assets ────────
   //
   // Default OFF + muted, persisted (settings.tapeAudio). A short synthesized
@@ -1152,6 +1292,12 @@
   // 'replay', never 'live'. The startLeg indirection is the WHOLE seam: same
   // adapter, same api, only the transport differs.
   const REPLAY = window.BTCQ_TERMINAL_REPLAY && window.BTCQ_TERMINAL_REPLAY.active();
+  // N1 verification hook: ?fault=<panelKey> under ?replay=1 forces that ONE
+  // panel to throw on every paint, to PROVE the paint-loop quarantine in the
+  // browser (L1). DOUBLE-gated on REPLAY — inert in production: with no ?replay
+  // this is null, and ?fault alone (REPLAY false) is null, so it can NEVER fire
+  // on a live page. Consumed in safePanel().
+  const FAULT_KEY = REPLAY ? new URLSearchParams(location.search).get('fault') : null;
   function startLeg(name, adapter, api) {
     // O-3 BYOD seam (§4c): sink rides along as the optional 4th arg — under
     // ?replay=byod the driver feeds collector rows to the sink DIRECTLY
@@ -3043,6 +3189,17 @@
       };
     },
     sym() { return SYM; },
+    // N1: per-panel render-guard snapshot for the L1 fault-injection proof —
+    // {key: {dead, consecutive, failures, threshold}}. Read-only (stats() is a
+    // pure snapshot); mutates nothing.
+    guards() {
+      const out = {};
+      for (const k in guards) out[k] = guards[k].stats();
+      return out;
+    },
+    // N1: monotonic frame() invocation count — the loop's heartbeat. The L1
+    // fault proof samples it twice to show the rAF loop survived quarantine.
+    frames() { return frameCount; },
     // T-2 (§4h): per-leg matrix snapshot — {enabled, kind (chip state), hasBook}
     // keyed by leg key. The live-check harness asserts ≥5 legs synced from this.
     legs() {
@@ -3264,6 +3421,12 @@
     loadAuctionSource(auctionSource);        // I-1: renders the §4g honest note when sym ≠ BTCUSDT
     if (SYM === 'BTCUSDT' && apiUp === true) pollLevels();
     dirtyAll();
+    // N1: symbol-switch re-init rebuilds EVERY store above, so a render fault's
+    // stale inputs are gone — the one moment a quarantined panel legitimately
+    // revives. Clear each breaker + drop its dead-chip so the new symbol paints
+    // fresh (a reconnect/un-pause does NOT reach here — a code fault must not
+    // clear on those, only on a full re-init or reload).
+    for (const k in guards) { guards[k].reset(); clearPanelDead(k); }
   }
 
   if (REPLAY) {
@@ -3824,278 +3987,301 @@
 
   function frame() {
     const now = Date.now();
-    // INGESTION-SIDE work runs on every tick unconditionally — §4e.2 honesty:
-    // the visibility gates below skip PAINT only, never data. These keep
-    // sampling/evaluating while the tab is hidden (frame() then ticks on the
-    // background timer in scheduleFrame instead of rAF).
-    flushBookLegs(now);   // T-2 (§4h): engine books → depth events (before the sampler reads them)
-    sampleDepth();
-    maybeEstimateLiq();
-    maybeIntel();   // O-4 (§4d): confluence + alert evaluation on the 5s event-ts gate
+    frameCount++;   // N1: loop heartbeat (see frames() debug hook)
+    // N1: the WHOLE frame body runs in a try/finally so scheduleFrame() —
+    // the loop's ONLY re-arm — ALWAYS fires, even if ingestion or shared code
+    // throws before the paint section (Gap 2: a throw before the old last-
+    // statement scheduleFrame() froze every panel permanently). safePanel below
+    // is the fine-grained per-panel boundary; this is the coarse backstop.
+    try {
+      // INGESTION-SIDE work runs on every tick unconditionally — §4e.2 honesty:
+      // the visibility gates below skip PAINT only, never data. These keep
+      // sampling/evaluating while the tab is hidden (frame() then ticks on the
+      // background timer in scheduleFrame instead of rAF).
+      //
+      // N1 (findings 1/6): the prologue is SHARED code that runs BEFORE any
+      // panel, so it gets its own breaker ('ingest') — same idiom as safePanel
+      // for a panel. Un-guarded, a persistent throw here re-raised out of
+      // frame() every frame (the finally re-arms but does not suppress) and
+      // unwound before any panel painted. Guarded: caught, logged ONCE, and
+      // surfaced on the header (stats dim; the connection chips stay bright — a
+      // dead feed must never hide). Once quarantined the WS-fed stores keep
+      // updating; only the flush-derived views stall, honestly, rather than the
+      // whole frame aborting on every tick.
+      safePanel('ingest', () => {
+        flushBookLegs(now);   // T-2 (§4h): engine books → depth events (before the sampler reads them)
+        sampleDepth();
+        maybeEstimateLiq();
+        maybeIntel();   // O-4 (§4d): confluence + alert evaluation on the 5s event-ts gate
+      });
 
-    // §4e.2: document.hidden pauses ALL painting (nobody is looking; browser
-    // notifications from the alert engine cover the hidden-tab case) — the
-    // same presentation-only rule as the pause button, and dirtyAll() on
-    // visibilitychange repaints everything that moved the moment eyes return.
-    if (document.hidden) { scheduleFrame(); return; }
+      // §4e.2: document.hidden pauses ALL painting (nobody is looking; browser
+      // notifications from the alert engine cover the hidden-tab case) — the
+      // same presentation-only rule as the pause button, and dirtyAll() on
+      // visibilitychange repaints everything that moved the moment eyes return.
+      if (document.hidden) return;
 
-    // The header (with its conn chips) renders even while paused: pause
-    // freezes the MARKET panels, never connection health — a paused page that
-    // also froze its chips could hide a dead feed behind the pause button.
-    if (due('header', now)) {
-      // §0 honesty rail note: no chip relabeling happens here anymore —
-      // HeaderStatsView now renders the status MESSAGE the transport itself
-      // supplied ('replay' from terminal-replay.js, 'live feed connected'
-      // from livewire.js), so replay is labeled at the source instead of
-      // being patched over after the fact. verify_terminal_browser.py still
-      // asserts no chip ever says 'live' in replay.
-      headerView.render({ marks, ois, statuses, sessionHigh, sessionLow, opening: openingSlice(), tickSize: settings.tick, base: BASE, nowMs: now });
-      // T-2 (§4h): keep the open leg-manager's status dots live at the header
-      // cadence (change-keyed inside — a no-op when nothing moved).
-      if (legsPopOpen) renderLegRows();
-      // §4g: decimals resolve one tick of the current grid — the fixed 1 dp
-      // rendered every sub-$1 symbol's price as $0.0.
-      const pxDp = settings.tick >= 1 ? 1 : Math.min(8, Math.ceil(-Math.log10(settings.tick)));
-      priceEl.textContent = Number.isFinite(lastPrice)
-        ? '$' + lastPrice.toLocaleString('en-US', { minimumFractionDigits: pxDp, maximumFractionDigits: pxDp })
-        : '—';
+      // The header (with its conn chips) renders even while paused: pause
+      // freezes the MARKET panels, never connection health — a paused page that
+      // also froze its chips could hide a dead feed behind the pause button.
+      if (due('header', now)) safePanel('header', () => {
+        // §0 honesty rail note: no chip relabeling happens here anymore —
+        // HeaderStatsView now renders the status MESSAGE the transport itself
+        // supplied ('replay' from terminal-replay.js, 'live feed connected'
+        // from livewire.js), so replay is labeled at the source instead of
+        // being patched over after the fact. verify_terminal_browser.py still
+        // asserts no chip ever says 'live' in replay.
+        headerView.render({ marks, ois, statuses, sessionHigh, sessionLow, opening: openingSlice(), tickSize: settings.tick, base: BASE, nowMs: now });
+        // T-2 (§4h): keep the open leg-manager's status dots live at the header
+        // cadence (change-keyed inside — a no-op when nothing moved).
+        if (legsPopOpen) renderLegRows();
+        // §4g: decimals resolve one tick of the current grid — the fixed 1 dp
+        // rendered every sub-$1 symbol's price as $0.0.
+        const pxDp = settings.tick >= 1 ? 1 : Math.min(8, Math.ceil(-Math.log10(settings.tick)));
+        priceEl.textContent = Number.isFinite(lastPrice)
+          ? '$' + lastPrice.toLocaleString('en-US', { minimumFractionDigits: pxDp, maximumFractionDigits: pxDp })
+          : '—';
+      });
+
+      if (!paused) {
+        if (due('fp', now)) safePanel('fp', () => {
+          // cvd: per-leg series map (§4b/§4h) — the view draws one labeled
+          // line per trade leg, the exact Σ, and the bybit by-size bucket lines.
+          const cvdExs = {};
+          for (const ex of CVD_LEG_EXS) cvdExs[ex] = cvds[ex].series();
+          const fpBars = footprint.bars();
+          // I-1 (§4f): feed the absorption detector every NEWLY finished bar
+          // (onBar wants each exactly once, in order — absFedT tracks it), then
+          // compose the pro-footprint slice: zones + heuristic flags + cumΔ,
+          // all from the tested pure builders.
+          for (const b of fpBars) {
+            if (b.finished && Number.isFinite(b.t) && b.t > absFedT) { absDet.onBar(b); absFedT = b.t; }
+          }
+          fpView.render({
+            bars: fpBars,
+            profile: profile.profile(),
+            cvd: { exs: cvdExs },
+            tickSize: settings.tick,
+            nowMs: now,
+            zones: S.stackedImbalances(fpBars, { k: 3, minRun: 3, tickSize: settings.tick, minVol: 1 }),
+            absorb: absDet.events(),
+            cum: S.cumDelta(fpBars),
+            keyLevels: keyLevelMarks(),   // T-1 (§4g): registry + live-IB markers (toggle, default on)
+          });
+        });
+        if (due('dom', now)) safePanel('dom', () => {
+          // T-2 (§4h): source-selectable ladder. bybit·lin is the default and the
+          // only source that carries the session sold/bought/Δ columns — those are
+          // bybit FOOTPRINT data, and pouring another venue's book into bybit's
+          // session volume would blend venues (§0.7), so the other sources render
+          // book-only and the note says why. A source with no synced book yet (or a
+          // disabled leg) shows an honest note instead of an empty ladder.
+          renderDom();
+        });
+        if (due('agg', now)) safePanel('agg', () => {
+          // T-2 (§4h): include filter (display-side merge; books keep ingesting)
+          // + the honest per-leg depth-quality strip (synced/syncing/desync ×N/
+          // disabled — resync counts visible by contract).
+          aggView.render({
+            grouped: aggBook.grouped(settings.tick, 14, aggIncludeExs()),
+            tick: settings.tick,
+            legQuality: legQualityRows(),
+          });
+        });
+        if (due('spcvd', now)) safePanel('spcvd', () => {
+          // T-2 (§4h): spot vs perp CVD strip — Σ enabled spot legs vs perp legs,
+          // with the live composition; descriptive lead/lag, never a signal.
+          spotPerpView.render({
+            list: spotPerp.list(),
+            latest: spotPerp.latest(),
+            comp: spotPerpComp(),
+            nowMs: now,
+          });
+        });
+        if (due('tape', now)) safePanel('tape', () => {
+          renderTape();   // T-3 (§4i): aggregated tiered tape + big-print rail
+        });
+        if (due('tapeint', now)) safePanel('tapeint', () => {
+          tapeIntView.render({ stats: tapeInt.stats(), spark: tapeInt.sparkline() });
+        });
+        if (due('walls', now)) safePanel('walls', () => {
+          wallsView.render({ entries: walls.list(), tickSize: settings.tick });
+        });
+        if (due('liq', now)) safePanel('liq', () => {
+          // Wall-clock nowTs so the rolling 1m/5m sums DECAY during quiet spells
+          // (the store's default anchor is the last event — replay-honest but a
+          // live view wants live windows; LiqStore doc invites exactly this).
+          liqView.render({
+            tick: settings.tick,
+            // Tier-tag each row upstream with the pure §4i classifier (the same
+            // pattern as the tape's sizeTier tagging) — the view reads r.tier and
+            // never re-derives a threshold.
+            recent: liq.recent(40).map((l) => Object.assign({}, l, { tier: S.liqTier(l.notionalUsd) })),
+            sum1m: liq.sumWindow(60000, now),
+            sum5m: liq.sumWindow(300000, now),
+          });
+        });
+        if (due('heat', now)) safePanel('heat', () => {
+          const dh = depthHist[heatVenue];
+          const dhSamples = dh.samples();
+          bookHeatView.render({
+            samples: dhSamples,
+            range: dh.priceRange(),
+            tickSize: settings.tick,
+            trail: priceTrail[heatVenue],   // empty for binancef (no trades leg, §0.2) — honestly absent
+            // Detector markers belong to the venue they were computed on: shown
+            // on the BYBIT heatmap only (drawing bybit flags over another
+            // venue's book would misattribute them, §0.7 per-source rail).
+            events: heatVenue === 'bybit' ? detector.events() : [],
+            ex: heatVenue,
+            base: BASE,
+            // I-1 (§4f): Asia/London/NY boxes over the sample span (pure UTC
+            // arithmetic — deterministic in replay too).
+            sessions: sessionBoxes(dhSamples),
+          });
+        });
+        if (due('liqmap', now)) safePanel('liqmap', () => {
+          liqHeatView.render({
+            est: liqEst,
+            mark: marks.bybit ? marks.bybit.mark : NaN,
+            tickSize: settings.tick,
+          });
+        });
+        if (due('det', now)) safePanel('det', () => {
+          detView.render({ events: detector.events(), tickSize: settings.tick, base: BASE });
+        });
+        // O-3 STRUCTURE panels (§4c) — null views in replay (honest notes were
+        // rendered instead; the dirty flags simply expire unread).
+        if (histView && due('hist', now)) safePanel('hist', () => {
+          // I-1 (§4f): + VWAP band series (AnchoredVwap samples) and the
+          // LevelsView overlay — both composed here, painted by the view.
+          histView.render({ bars: histBars, vwap: vwapSlice(), overlays: overlayLevels() });
+        });
+        if (tpoView && due('tpo', now)) safePanel('tpo', () => {
+          tpoView.render({ sessions: tpoSessions, tickSize: tpoTick });
+        });
+        if (vpView && due('vp', now)) safePanel('vp', () => {
+          vpView.render({ vp: vpData, tick: vpTick, lastPrice, interval: histInterval });
+        });
+        if (farbView && due('farb', now)) safePanel('farb', () => {
+          farbView.render(farbSlice(now));
+        });
+        if (macroView && due('macro', now)) safePanel('macro', () => {
+          macroView.render(macroSlice());
+        });
+        // T-1 (§4g): basis/funding mini-chart — store-fed, runs in replay too.
+        if (due('basis', now)) safePanel('basis', () => {
+          basisView.render({ list: basisSeries.list(), nowMs: now });
+        });
+        // I-1 AUCTION panels (§4f) — null views in replay (honest notes were
+        // rendered instead; the dirty flags simply expire unread).
+        if (auctionView && due('auct', now)) safePanel('auct', () => {
+          auctionView.render({
+            profile: auctionState.profile,
+            delta: auctionState.delta,
+            naked: nakedPocs(),   // the §4f naked-POC overlay is part of the panel, not toggle-gated
+            label: auctionState.label,
+            note: auctionState.note,
+            status: auctionState.status,
+            tick: LEVELS_TICK,
+            bucketLabels: AUCTION_BUCKET_LABELS,
+          });
+        });
+        if (levelsView && due('lvls', now)) safePanel('lvls', () => {
+          // §4g: with another symbol selected the registry table shows the
+          // honest note through the view's existing note path (days: null).
+          levelsView.render(SYM === 'BTCUSDT'
+            ? { days: levelsDays, note: apiUp === false ? API_OFFLINE_NOTE : levelsNote }
+            : { days: null, note: byodSymNote() });
+        });
+        // T-1 (§4g): key-levels strip + VPIN — store/registry-fed, both modes
+        // (the registry portion degrades to its honest note in replay/non-BTC).
+        if (due('klev', now)) safePanel('klev', () => {
+          klevView.render(klevSlice());
+        });
+        if (due('vpin', now)) safePanel('vpin', () => {
+          vpinView.render({
+            vpin: vpin ? vpin.vpin() : null,
+            buckets: vpin ? vpin.buckets() : [],
+            bucketVol: vpin ? vpin.bucketVol : NaN,
+            note: vpin ? '' : 'estimating V from the first 5 min of session flow — VPIN accrues from arming (nothing backfilled)',
+          });
+        });
+        if (microView && due('micro', now)) safePanel('micro', () => {
+          const best = bybitBook.best();
+          const mid = (best && best.bid && best.ask) ? (best.bid[0] + best.ask[0]) / 2 : NaN;
+          const mpNow = S.microprice(bybitBook);
+          microView.render({
+            tickSize: settings.tick,
+            ofi: ofi.series(60000),
+            mp: mpHist,
+            z: ofi.zscore(300),
+            micro: mpNow === null ? NaN : mpNow,
+            mid,
+            imb: bookImb10(),
+            nowMs: now,
+          });
+        });
+        // O-4 INTELLIGENCE panels (§4d). REST-fed views are null in replay
+        // (honest notes were rendered instead); conf/alerts run in both modes.
+        if (screenerView && due('scr', now)) safePanel('scr', () => {
+          const topN = settings.screenerTop === 'all' ? 0 : 40;   // buildScreener: topN ≤ 0 → whole universe
+          const scr = S.buildScreener(tickerRows || [], { topN });
+          screenerView.render({ rows: scr.rows, total: scr.total, topMode: settings.screenerTop, sym: SYM, base: BASE });
+        });
+        if (rsiView && due('rsi', now)) safePanel('rsi', () => {
+          rsiView.render(rsiState);
+        });
+        if (optionsView && due('opts', now)) safePanel('opts', () => {
+          // nowTs rides the slice (frame clock) — the view must not read
+          // Date.now() itself for T-to-expiry (§4d GEX contract).
+          optionsView.render({ chain: chainData, dvol: dvolVal, nowTs: now });
+        });
+        if (whaleView && due('whale', now)) safePanel('whale', () => {
+          const entries = settings.whaleAddrs.map((a) => {
+            const st = whaleState.get(a);
+            return { addr: a, positions: st ? st.positions : undefined, ts: st ? st.ts : NaN };
+          });
+          whaleView.render({ entries, discovering: whaleDiscovering, note: whaleNote });
+        });
+        if (due('conf', now)) safePanel('conf', () => {
+          confView.render({ conf: confData });
+        });
+        if (due('alerts', now)) safePanel('alerts', () => {
+          alertsView.render({ events: alertEngine.events(), fresh: alertFresh.splice(0) });
+        });
+        // O-5 PORTFOLIO panels (§4e). Journal + calendar run in both modes
+        // (localStorage-fed); poly/news/econ are null in replay (honest notes
+        // were rendered instead). Stats/calendar recompute on render — pure
+        // functions over ≤ a few hundred journal rows, gated by dirty.jour/cal
+        // which only user actions flip.
+        if (due('jour', now)) safePanel('jour', () => {
+          journalView.render({
+            trades: journalTrades,
+            stats: S.journalStats(journalTrades),
+            note: journalNote,
+            importErrors,
+          });
+        });
+        if (due('cal', now)) safePanel('cal', () => {
+          calView.render({ cal: S.calendarReturns(journalTrades), nowMs: now });
+        });
+        if (polyView && due('poly', now)) safePanel('poly', () => {
+          polyView.render({ events: polyEvents, nowMs: now });
+        });
+        if (newsView && due('news', now)) safePanel('news', () => {
+          newsView.render({ items: newsItems, nowMs: now });
+        });
+        if (econView && due('econ', now)) safePanel('econ', () => {
+          econView.render({ data: econData, nowMs: now });
+        });
+      }
+    } finally {
+      // N1: single re-arm site — runs on the document.hidden early return, on a
+      // throw that escaped a panel wrapper (ingestion/shared code), and on the
+      // normal path. The loop can no longer die.
+      scheduleFrame();
     }
-
-    if (!paused) {
-      if (due('fp', now)) {
-        // cvd: per-leg series map (§4b/§4h) — the view draws one labeled
-        // line per trade leg, the exact Σ, and the bybit by-size bucket lines.
-        const cvdExs = {};
-        for (const ex of CVD_LEG_EXS) cvdExs[ex] = cvds[ex].series();
-        const fpBars = footprint.bars();
-        // I-1 (§4f): feed the absorption detector every NEWLY finished bar
-        // (onBar wants each exactly once, in order — absFedT tracks it), then
-        // compose the pro-footprint slice: zones + heuristic flags + cumΔ,
-        // all from the tested pure builders.
-        for (const b of fpBars) {
-          if (b.finished && Number.isFinite(b.t) && b.t > absFedT) { absDet.onBar(b); absFedT = b.t; }
-        }
-        fpView.render({
-          bars: fpBars,
-          profile: profile.profile(),
-          cvd: { exs: cvdExs },
-          tickSize: settings.tick,
-          nowMs: now,
-          zones: S.stackedImbalances(fpBars, { k: 3, minRun: 3, tickSize: settings.tick, minVol: 1 }),
-          absorb: absDet.events(),
-          cum: S.cumDelta(fpBars),
-          keyLevels: keyLevelMarks(),   // T-1 (§4g): registry + live-IB markers (toggle, default on)
-        });
-      }
-      if (due('dom', now)) {
-        // T-2 (§4h): source-selectable ladder. bybit·lin is the default and the
-        // only source that carries the session sold/bought/Δ columns — those are
-        // bybit FOOTPRINT data, and pouring another venue's book into bybit's
-        // session volume would blend venues (§0.7), so the other sources render
-        // book-only and the note says why. A source with no synced book yet (or a
-        // disabled leg) shows an honest note instead of an empty ladder.
-        renderDom();
-      }
-      if (due('agg', now)) {
-        // T-2 (§4h): include filter (display-side merge; books keep ingesting)
-        // + the honest per-leg depth-quality strip (synced/syncing/desync ×N/
-        // disabled — resync counts visible by contract).
-        aggView.render({
-          grouped: aggBook.grouped(settings.tick, 14, aggIncludeExs()),
-          tick: settings.tick,
-          legQuality: legQualityRows(),
-        });
-      }
-      if (due('spcvd', now)) {
-        // T-2 (§4h): spot vs perp CVD strip — Σ enabled spot legs vs perp legs,
-        // with the live composition; descriptive lead/lag, never a signal.
-        spotPerpView.render({
-          list: spotPerp.list(),
-          latest: spotPerp.latest(),
-          comp: spotPerpComp(),
-          nowMs: now,
-        });
-      }
-      if (due('tape', now)) {
-        renderTape();   // T-3 (§4i): aggregated tiered tape + big-print rail
-      }
-      if (due('tapeint', now)) {
-        tapeIntView.render({ stats: tapeInt.stats(), spark: tapeInt.sparkline() });
-      }
-      if (due('walls', now)) {
-        wallsView.render({ entries: walls.list(), tickSize: settings.tick });
-      }
-      if (due('liq', now)) {
-        // Wall-clock nowTs so the rolling 1m/5m sums DECAY during quiet spells
-        // (the store's default anchor is the last event — replay-honest but a
-        // live view wants live windows; LiqStore doc invites exactly this).
-        liqView.render({
-          tick: settings.tick,
-          // Tier-tag each row upstream with the pure §4i classifier (the same
-          // pattern as the tape's sizeTier tagging) — the view reads r.tier and
-          // never re-derives a threshold.
-          recent: liq.recent(40).map((l) => Object.assign({}, l, { tier: S.liqTier(l.notionalUsd) })),
-          sum1m: liq.sumWindow(60000, now),
-          sum5m: liq.sumWindow(300000, now),
-        });
-      }
-      if (due('heat', now)) {
-        const dh = depthHist[heatVenue];
-        const dhSamples = dh.samples();
-        bookHeatView.render({
-          samples: dhSamples,
-          range: dh.priceRange(),
-          tickSize: settings.tick,
-          trail: priceTrail[heatVenue],   // empty for binancef (no trades leg, §0.2) — honestly absent
-          // Detector markers belong to the venue they were computed on: shown
-          // on the BYBIT heatmap only (drawing bybit flags over another
-          // venue's book would misattribute them, §0.7 per-source rail).
-          events: heatVenue === 'bybit' ? detector.events() : [],
-          ex: heatVenue,
-          base: BASE,
-          // I-1 (§4f): Asia/London/NY boxes over the sample span (pure UTC
-          // arithmetic — deterministic in replay too).
-          sessions: sessionBoxes(dhSamples),
-        });
-      }
-      if (due('liqmap', now)) {
-        liqHeatView.render({
-          est: liqEst,
-          mark: marks.bybit ? marks.bybit.mark : NaN,
-          tickSize: settings.tick,
-        });
-      }
-      if (due('det', now)) {
-        detView.render({ events: detector.events(), tickSize: settings.tick, base: BASE });
-      }
-      // O-3 STRUCTURE panels (§4c) — null views in replay (honest notes were
-      // rendered instead; the dirty flags simply expire unread).
-      if (histView && due('hist', now)) {
-        // I-1 (§4f): + VWAP band series (AnchoredVwap samples) and the
-        // LevelsView overlay — both composed here, painted by the view.
-        histView.render({ bars: histBars, vwap: vwapSlice(), overlays: overlayLevels() });
-      }
-      if (tpoView && due('tpo', now)) {
-        tpoView.render({ sessions: tpoSessions, tickSize: tpoTick });
-      }
-      if (vpView && due('vp', now)) {
-        vpView.render({ vp: vpData, tick: vpTick, lastPrice, interval: histInterval });
-      }
-      if (farbView && due('farb', now)) {
-        farbView.render(farbSlice(now));
-      }
-      if (macroView && due('macro', now)) {
-        macroView.render(macroSlice());
-      }
-      // T-1 (§4g): basis/funding mini-chart — store-fed, runs in replay too.
-      if (due('basis', now)) {
-        basisView.render({ list: basisSeries.list(), nowMs: now });
-      }
-      // I-1 AUCTION panels (§4f) — null views in replay (honest notes were
-      // rendered instead; the dirty flags simply expire unread).
-      if (auctionView && due('auct', now)) {
-        auctionView.render({
-          profile: auctionState.profile,
-          delta: auctionState.delta,
-          naked: nakedPocs(),   // the §4f naked-POC overlay is part of the panel, not toggle-gated
-          label: auctionState.label,
-          note: auctionState.note,
-          status: auctionState.status,
-          tick: LEVELS_TICK,
-          bucketLabels: AUCTION_BUCKET_LABELS,
-        });
-      }
-      if (levelsView && due('lvls', now)) {
-        // §4g: with another symbol selected the registry table shows the
-        // honest note through the view's existing note path (days: null).
-        levelsView.render(SYM === 'BTCUSDT'
-          ? { days: levelsDays, note: apiUp === false ? API_OFFLINE_NOTE : levelsNote }
-          : { days: null, note: byodSymNote() });
-      }
-      // T-1 (§4g): key-levels strip + VPIN — store/registry-fed, both modes
-      // (the registry portion degrades to its honest note in replay/non-BTC).
-      if (due('klev', now)) {
-        klevView.render(klevSlice());
-      }
-      if (due('vpin', now)) {
-        vpinView.render({
-          vpin: vpin ? vpin.vpin() : null,
-          buckets: vpin ? vpin.buckets() : [],
-          bucketVol: vpin ? vpin.bucketVol : NaN,
-          note: vpin ? '' : 'estimating V from the first 5 min of session flow — VPIN accrues from arming (nothing backfilled)',
-        });
-      }
-      if (microView && due('micro', now)) {
-        const best = bybitBook.best();
-        const mid = (best && best.bid && best.ask) ? (best.bid[0] + best.ask[0]) / 2 : NaN;
-        const mpNow = S.microprice(bybitBook);
-        microView.render({
-          tickSize: settings.tick,
-          ofi: ofi.series(60000),
-          mp: mpHist,
-          z: ofi.zscore(300),
-          micro: mpNow === null ? NaN : mpNow,
-          mid,
-          imb: bookImb10(),
-          nowMs: now,
-        });
-      }
-      // O-4 INTELLIGENCE panels (§4d). REST-fed views are null in replay
-      // (honest notes were rendered instead); conf/alerts run in both modes.
-      if (screenerView && due('scr', now)) {
-        const topN = settings.screenerTop === 'all' ? 0 : 40;   // buildScreener: topN ≤ 0 → whole universe
-        const scr = S.buildScreener(tickerRows || [], { topN });
-        screenerView.render({ rows: scr.rows, total: scr.total, topMode: settings.screenerTop, sym: SYM, base: BASE });
-      }
-      if (rsiView && due('rsi', now)) {
-        rsiView.render(rsiState);
-      }
-      if (optionsView && due('opts', now)) {
-        // nowTs rides the slice (frame clock) — the view must not read
-        // Date.now() itself for T-to-expiry (§4d GEX contract).
-        optionsView.render({ chain: chainData, dvol: dvolVal, nowTs: now });
-      }
-      if (whaleView && due('whale', now)) {
-        const entries = settings.whaleAddrs.map((a) => {
-          const st = whaleState.get(a);
-          return { addr: a, positions: st ? st.positions : undefined, ts: st ? st.ts : NaN };
-        });
-        whaleView.render({ entries, discovering: whaleDiscovering, note: whaleNote });
-      }
-      if (due('conf', now)) {
-        confView.render({ conf: confData });
-      }
-      if (due('alerts', now)) {
-        alertsView.render({ events: alertEngine.events(), fresh: alertFresh.splice(0) });
-      }
-      // O-5 PORTFOLIO panels (§4e). Journal + calendar run in both modes
-      // (localStorage-fed); poly/news/econ are null in replay (honest notes
-      // were rendered instead). Stats/calendar recompute on render — pure
-      // functions over ≤ a few hundred journal rows, gated by dirty.jour/cal
-      // which only user actions flip.
-      if (due('jour', now)) {
-        journalView.render({
-          trades: journalTrades,
-          stats: S.journalStats(journalTrades),
-          note: journalNote,
-          importErrors,
-        });
-      }
-      if (due('cal', now)) {
-        calView.render({ cal: S.calendarReturns(journalTrades), nowMs: now });
-      }
-      if (polyView && due('poly', now)) {
-        polyView.render({ events: polyEvents, nowMs: now });
-      }
-      if (newsView && due('news', now)) {
-        newsView.render({ items: newsItems, nowMs: now });
-      }
-      if (econView && due('econ', now)) {
-        econView.render({ data: econData, nowMs: now });
-      }
-    }
-
-    scheduleFrame();
   }
 
   // §4e.2 scheduling seam: rAF while visible (paint-synced), a coarse 500ms

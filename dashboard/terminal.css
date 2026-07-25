@@ -105,6 +105,21 @@ header.topbar .subtitle { color: var(--muted); font-size: var(--fs-sm); font-wei
 .signal-tag.st-est  { color: var(--warn-fg); border: 1px solid var(--warn-fg); background: transparent; }
 .signal-tag.st-cite { color: var(--accent-2); border: 1px solid var(--accent-2); background: transparent; }
 .signal-tag.st-jour { color: var(--c1);      border: 1px solid var(--c1);      background: transparent; }
+/* N1: a panel whose render guard latched OPEN (N consecutive paint faults)
+   wears a stark error chip — the paint loop quarantined it so its siblings keep
+   painting, and its body now shows its LAST GOOD frame, not live data. §0
+   no-silently-broken-surface (§0.1/§0.7): a frozen panel must ANNOUNCE it, never
+   pass stale pixels off as current. Error palette (--down), same taxonomy. */
+.signal-tag.st-dead { color: var(--down); border: 1px solid var(--down); background: transparent; font-weight: 700; }
+/* Dim the quarantined panel body so the frozen (last-good) pixels read as
+   inactive next to the live panels around it — the chip states WHY. */
+.panel--dead > *:not(h2):not(.term-chips) { opacity: .5; }
+/* A quarantined render unit that SHARES its .panel with a live sibling (the
+   tape and its speed strip live in one section): dim ONLY this sub-container,
+   never the whole section, or the still-live sibling would read stale too (§0
+   crying wolf). The chip rides the shared <h2>, outside the dimmed unit, so it
+   stays full-opacity. */
+.unit--dead { opacity: .5; }
 
 /* One-line muted SOURCE line under each panel title: the re-homed long
    source/formula text (nothing deleted — full text also rides the title

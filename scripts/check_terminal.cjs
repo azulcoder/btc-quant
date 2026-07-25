@@ -3842,6 +3842,57 @@ group('filterTapeRows: both/spot/perp filter, spot/perp market tag, venue+minN g
   assert.strictEqual(dflt[0].market, 'perp', 'unknown ex / no resolver → perp default');
 });
 
+// ─── N1: makePanelGuard circuit breaker (paint-loop error boundary) ──────────
+// The pure primitive behind terminal.js safePanel: closed→open per-panel render
+// breaker. Pure/DOM-free/clock-free → directly require-able. Pins the reset
+// policy (N consecutive → open; ok() resets the streak; open latched until
+// reset()) and the fail()-returns-true-once-on-death contract the log rate-limit
+// depends on.
+group('makePanelGuard circuit breaker (N1)', () => {
+  const E = () => new Error('boom');
+
+  // below-threshold throws stay CLOSED (N-1 of N=3), fail() returns false
+  const g1 = S.makePanelGuard({ threshold: 3 });
+  assert.strictEqual(g1.fail(E()), false); assert.strictEqual(g1.isDead(), false);
+  assert.strictEqual(g1.fail(E()), false); assert.strictEqual(g1.isDead(), false);
+
+  // the Nth consecutive throw OPENS it and returns the death transition ONCE
+  assert.strictEqual(g1.fail(E()), true, 'Nth consecutive throw opens the breaker');
+  assert.strictEqual(g1.isDead(), true);
+  assert.strictEqual(g1.fail(E()), false, 'already-dead fail() returns false (log once)');
+
+  // a clean run RESETS the consecutive streak — 2 + ok() + 2 never reaches 3
+  const g2 = S.makePanelGuard({ threshold: 3 });
+  g2.fail(E()); g2.fail(E()); g2.ok();
+  g2.fail(E()); g2.fail(E());
+  assert.strictEqual(g2.isDead(), false, 'ok() cleared the streak — 2+2 never reaches 3');
+  assert.strictEqual(g2.fail(E()), true, 'a fresh run of 3 opens it');
+
+  // open STAYS open — ok() never revives; only reset() does (symbol-switch)
+  g2.ok(); assert.strictEqual(g2.isDead(), true, 'ok() never revives a dead guard');
+  g2.reset(); assert.strictEqual(g2.isDead(), false, 'reset() revives (symbol-switch re-init)');
+  assert.strictEqual(g2.stats().consecutive, 0, 'reset() clears the consecutive count');
+
+  // stats() exposes the UI-chip shape; lastError carries the message
+  const g3 = S.makePanelGuard({ threshold: 1 });
+  assert.strictEqual(g3.fail(new Error('NaN into canvas path')), true, 'threshold 1 opens on the first throw');
+  const s = g3.stats();
+  assert.strictEqual(s.dead, true);
+  assert.strictEqual(s.threshold, 1);
+  assert.strictEqual(s.lastError, 'NaN into canvas path');
+  assert.ok(s.failures >= 1 && typeof s.consecutive === 'number', 'stats carries failures + consecutive');
+
+  // a non-Error throw still yields a string lastError (never crashes the chip)
+  const g4 = S.makePanelGuard({ threshold: 1 });
+  g4.fail('bare string');
+  assert.strictEqual(g4.stats().lastError, 'bare string', 'non-Error throw stringified');
+
+  // default threshold = 3; non-finite/0 clamps to ≥1 (never a 0-threshold no-op)
+  assert.strictEqual(S.makePanelGuard().stats().threshold, 3, 'default threshold 3');
+  assert.strictEqual(S.makePanelGuard({ threshold: 0 }).stats().threshold, 1, '0 clamps to 1');
+  assert.strictEqual(S.makePanelGuard({ threshold: NaN }).stats().threshold, 3, 'NaN → default 3');
+});
+
 // ─── Verdict ─────────────────────────────────────────────────────────────────
 if (failures) {
   console.error('\ncheck_terminal: ' + failures + ' group(s) FAILED');
