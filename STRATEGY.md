@@ -51,7 +51,7 @@ and not an execution engine.
 
 1. **Honesty rails enforced in CI, not in prose.** `heuristic`/`estimated` labels and
    the IC-honesty sentences are asserted VERBATIM via `assert.strictEqual` in the build
-   gate (`scripts/check_terminal.cjs`, 74 assertion groups). Dropping or rewording a
+   gate (`scripts/check_terminal.cjs`, 77 assertion groups). Dropping or rewording a
    label fails the build. The confluence board states its own forward-IC ≈ 0 as a
    permanent label (`terminal-state.js:1595`, `RESEARCH-ic-runlog.md`). A competitor
    that smooths or fabricates fails this gate by construction.
@@ -191,9 +191,22 @@ sequence to the calendar, not to enthusiasm.
       gate. Justified on feature-integrity + data-irreplaceability. *Accept:* one week of
       continuous capture with the gap census clean. Priority #1 functional item for
       "before server deploy."
-- [ ] **N5. Surface the silent-catch counter** (dropped-frame / normalization-error,
-      rate-limited, to a status chip) so post-deploy regressions are visible, not
-      swallowed. Folds in the N1 residuals (N1 set this up — `guard.stats().failures`
+- [x] **N5. Surface the silent-catch counter** (done 2026-07-26 — `makeHealthCounter`
+      accumulator + an OPTIONAL `api.onDropped(reason)` hook on the SHARED livewire socket
+      (app.js passes none → byte-unaffected), wired once in `startLeg`; livewire's two
+      onmessage catches now report `parse`/`handler` drops instead of swallowing them
+      silently. Header `.st-health` chip is silent at count 0 and shows amber
+      `degraded: N dropped · M render faults` only when real; rate-limited to the header
+      cadence (`due()`/`MIN_MS`), observability-only. Folds in both N1 residuals: (a) the
+      ingest latch now cascades a `frozen` st-stale chip to the six prologue-fed views
+      (`heat/micro/liqmap/det/walls/conf`) — agg/dom/vpin/alerts excluded, grounded: each
+      stays sink-fed-live or is a log, so a chip there would cry wolf; (b) the amber render-
+      fault count reads the guards' own `stats().failures` for LIVE (non-latched) guards, so
+      a non-latching flap is surfaced once, a dead panel only via its red chip. REPLAY-gated
+      proof seams `?drop` / `?flap` / `?fault=ingest`, all inert in production; deferred the
+      adapter `normSkip` kind (per-level non-finite skip is routine hygiene, not a fault —
+      counting it would break silent-when-healthy; one-line add if data ever shows it firing).
+      Check gate 74→77.) Folds in the N1 residuals (N1 set this up — `guard.stats().failures`
       already accrues, ready to read): (a) a persistent ingest-prologue fault still
       freezes the flush-derived views (DOM/heat/agg/liq/micro) — cascade a stale chip to
       them, not only the header; (b) a non-latching (alternating throw/success) render
@@ -281,7 +294,7 @@ sequence to the calendar, not to enthusiasm.
 ## 7. Sustainable process (standing gates)
 
 - **Verification harness L0-L3 as a non-negotiable CI gate.** L0 (208 pytest + parity to
-  machine-eps + the 74-group verbatim-assert gate over real wire frames), L1 (deterministic
+  machine-eps + the 77-group verbatim-assert gate over real wire frames), L1 (deterministic
   browser replay: REPLAY MODE + zero console error + non-blank canvas), L2 (live-wire
   invariants: book never crossed, mid coherent), L3 (tick-store gap census — report, never
   fill). Every new panel carries one group; accept the linear carrying cost as the price of

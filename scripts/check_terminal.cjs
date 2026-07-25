@@ -364,6 +364,10 @@ const assert = require('assert');
 
 const A = require(path.join(__dirname, '..', 'dashboard', 'terminal-adapters.js'));
 const S = require(path.join(__dirname, '..', 'dashboard', 'terminal-state.js'));
+// N5: the shared reconnect/backoff/watchdog socket — dual-exported (module.exports
+// alongside the window global), so the livewire onDropped group can drive its two
+// onmessage catches directly with a WebSocket stub (no bundler, no network).
+const LW = require(path.join(__dirname, '..', 'dashboard', 'livewire.js'));
 const H = require(path.join(__dirname, '..', 'dashboard', 'terminal-hist.js'));
 const R = require(path.join(__dirname, '..', 'dashboard', 'terminal-replay.js'));
 // I-1 (§4f Wave 2): hyparquet is resolved LAZILY inside terminal-hfdata.js, so
@@ -3891,6 +3895,151 @@ group('makePanelGuard circuit breaker (N1)', () => {
   assert.strictEqual(S.makePanelGuard().stats().threshold, 3, 'default threshold 3');
   assert.strictEqual(S.makePanelGuard({ threshold: 0 }).stats().threshold, 1, '0 clamps to 1');
   assert.strictEqual(S.makePanelGuard({ threshold: NaN }).stats().threshold, 3, 'NaN → default 3');
+});
+
+group('makeHealthCounter accumulator (N5)', () => {
+  // bump accrues by kind + sub-reason; count/snapshot read the running totals.
+  const h = S.makeHealthCounter();
+  assert.strictEqual(h.count('droppedFrame'), 0, 'unbumped kind reads 0');
+  h.bump('droppedFrame', 'parse');
+  h.bump('droppedFrame', 'parse');
+  h.bump('droppedFrame', 'handler');
+  assert.strictEqual(h.count('droppedFrame'), 3, 'three drops → count 3');
+  assert.strictEqual(h.snapshot().kinds.droppedFrame, 3, 'snapshot kinds total matches count');
+  assert.deepStrictEqual(h.snapshot().detail.droppedFrame, { parse: 2, handler: 1 },
+    'per-reason detail splits 2 parse / 1 handler (the header chip tooltip)');
+
+  // falsy kind is a no-op (a guard against a bad call site adding a phantom count).
+  const before = JSON.stringify(h.snapshot().kinds);
+  h.bump('');
+  h.bump(null);
+  h.bump(undefined);
+  assert.strictEqual(JSON.stringify(h.snapshot().kinds), before, 'falsy kind never mutates the tally');
+
+  // snapshot is a COPY — mutating it can never corrupt the live counter (pure).
+  const snap = h.snapshot();
+  snap.kinds.droppedFrame = 999;
+  snap.detail.droppedFrame.parse = 999;
+  assert.strictEqual(h.count('droppedFrame'), 3, 'mutating a snapshot leaves the counter untouched');
+  assert.deepStrictEqual(h.snapshot().detail.droppedFrame, { parse: 2, handler: 1 }, 'detail is deep-copied');
+
+  // generic BY KIND: normSkip (the deferred adapter per-level skip) lands under
+  // its own kind without disturbing droppedFrame — the one-line future add works.
+  h.bump('normSkip', 'bybit');
+  assert.strictEqual(h.count('normSkip'), 1, 'a new kind counts independently');
+  assert.strictEqual(h.count('droppedFrame'), 3, 'the new kind does not touch droppedFrame');
+
+  // reset() zeroes everything (symbol-switch re-init).
+  h.reset();
+  assert.strictEqual(h.count('droppedFrame'), 0, 'reset zeroes droppedFrame');
+  assert.strictEqual(h.count('normSkip'), 0, 'reset zeroes every kind');
+  assert.deepStrictEqual(h.snapshot().kinds, {}, 'reset empties the kinds map');
+  assert.deepStrictEqual(h.snapshot().detail, {}, 'reset empties the detail map');
+});
+
+group('livewire onDropped silent-catch hook (N5)', () => {
+  // Minimal WebSocket stub: captures the instance makeSocket constructs so we can
+  // fire ws.onmessage(...) by hand — the exact frame livewire hands the socket.
+  // No auto-open (we never call onopen → no heartbeat interval); the watchdog
+  // interval each makeSocket starts is cleared by handle.close() at the end (or
+  // the process would hang on the pending timer).
+  let captured = null;
+  function StubWS(url) { this.url = url; this.readyState = 0; captured = this; }
+  StubWS.OPEN = 1;
+  StubWS.prototype.close = function () { this.readyState = 3; };
+  const prevWS = global.WebSocket;
+  global.WebSocket = StubWS;
+  try {
+    // (a) parse-fail → onDropped('parse'), fired once, no throw escapes onmessage.
+    let reasons = [];
+    const h1 = LW.makeSocket({ url: 'ws://x', subscribe() {}, onMessage() {} },
+      { onStatus() {}, onDropped(r) { reasons.push(r); } });
+    assert.doesNotThrow(() => captured.onmessage({ data: 'not json{' }), 'bad JSON never throws out of onmessage');
+    assert.deepStrictEqual(reasons, ['parse'], 'JSON.parse failure → onDropped("parse") once');
+    h1.close();
+
+    // (b) handler throw → onDropped('handler'), fired once, no throw escapes.
+    reasons = [];
+    const h2 = LW.makeSocket({ url: 'ws://x', subscribe() {}, onMessage() { throw new Error('bad frame'); } },
+      { onStatus() {}, onDropped(r) { reasons.push(r); } });
+    assert.doesNotThrow(() => captured.onmessage({ data: '{"ok":1}' }), 'a throwing handler never kills the socket');
+    assert.deepStrictEqual(reasons, ['handler'], 'adapter.onMessage throw → onDropped("handler") once');
+    h2.close();
+
+    // (c) healthy frame → onDropped NEVER called (silent when healthy).
+    reasons = [];
+    const h3 = LW.makeSocket({ url: 'ws://x', subscribe() {}, onMessage() {} },
+      { onStatus() {}, onDropped(r) { reasons.push(r); } });
+    captured.onmessage({ data: '{"ok":1}' });
+    assert.deepStrictEqual(reasons, [], 'a good frame through a healthy handler drops nothing');
+    h3.close();
+
+    // (d) BACKWARD-COMPAT (proves app.js is unaffected): api WITHOUT onDropped,
+    // throwing handler — both the parse-fail and handler-throw catches swallow
+    // silently, nothing throws, the socket survives every frame.
+    const h4 = LW.makeSocket({ url: 'ws://x', subscribe() {}, onMessage(m) { if (m.boom) throw new Error('boom'); } },
+      { onStatus() {} });   // no onDropped — exactly like app.js
+    assert.doesNotThrow(() => {
+      captured.onmessage({ data: 'not json{' });   // parse-fail path, onDropped absent
+      captured.onmessage({ data: '{"boom":1}' });  // handler-throw path, onDropped absent
+      captured.onmessage({ data: '{"ok":1}' });    // healthy
+    }, 'no onDropped (app.js path) → both catches swallow silently, socket never dies');
+    h4.close();
+
+    // (e) a THROWING onDropped can never kill the socket — telemetry is never fatal.
+    const h5 = LW.makeSocket({ url: 'ws://x', subscribe() {}, onMessage() {} },
+      { onStatus() {}, onDropped() { throw new Error('telemetry blew up'); } });
+    assert.doesNotThrow(() => captured.onmessage({ data: 'not json{' }), 'a throwing onDropped is caught — socket survives');
+    h5.close();
+  } finally {
+    global.WebSocket = prevWS;
+  }
+});
+
+group('startLeg drop-wiring composition: makeHealthCounter ← onDropped ← livewire (N5)', () => {
+  // The live glue in terminal.js startLeg —
+  //   if (!api.onDropped) api.onDropped = (reason) => { health.bump('droppedFrame', reason); dirty.header = true; };
+  // — installs the counter onto the leg's api, which livewire.drop() then feeds.
+  // startLeg itself lives inside terminal.js's browser-only IIFE (not loadable in
+  // Node), so this composes the REAL pieces it wires — a genuine makeHealthCounter,
+  // the exact install idiom, and the REAL livewire onmessage catches — and asserts
+  // the whole chain end-to-end. It locks the contract that IF startLeg installs
+  // this callback the swallowed frame lands as droppedFrame/<reason>; the literal
+  // startLeg line stays covered by inspection only (the documented Gap-8 e2e seam).
+  let captured = null;
+  function StubWS(url) { this.url = url; this.readyState = 0; captured = this; }
+  StubWS.OPEN = 1;
+  StubWS.prototype.close = function () { this.readyState = 3; };
+  const prevWS = global.WebSocket;
+  global.WebSocket = StubWS;
+  try {
+    // (a) INSTALL-IF-ABSENT + reason passthrough → the real counter increments.
+    const health = S.makeHealthCounter();
+    const api = { onStatus() {} };                                   // a leg api WITHOUT onDropped (the common case)
+    if (!api.onDropped) api.onDropped = (reason) => { health.bump('droppedFrame', reason); };   // the startLeg idiom
+    const h1 = LW.makeSocket({ url: 'ws://x', subscribe() {}, onMessage() { throw new Error('bad'); } }, api);
+    captured.onmessage({ data: 'not json{' });   // parse-fail  → drop('parse')
+    captured.onmessage({ data: '{"x":1}' });      // handler-throw → drop('handler')
+    assert.strictEqual(health.count('droppedFrame'), 2, 'two swallowed frames reach the real counter through the real socket');
+    assert.deepStrictEqual(health.snapshot().detail.droppedFrame, { parse: 1, handler: 1 },
+      'the drop reason is passed through to the counter verbatim (parse / handler)');
+    h1.close();
+
+    // (b) IDEMPOTENT: a caller that already set onDropped keeps THEIRS (app.js
+    //     never reaches startLeg, but a future caller pre-wiring must not be
+    //     clobbered) — the `if (!api.onDropped)` guard is the whole point.
+    let mine = 0;
+    const api2 = { onStatus() {}, onDropped() { mine++; } };
+    const health2 = S.makeHealthCounter();
+    if (!api2.onDropped) api2.onDropped = (reason) => { health2.bump('droppedFrame', reason); };   // guard MUST skip
+    const h2 = LW.makeSocket({ url: 'ws://x', subscribe() {}, onMessage() {} }, api2);
+    captured.onmessage({ data: 'not json{' });
+    assert.strictEqual(mine, 1, "a pre-set onDropped is preserved — the install guard did not overwrite it");
+    assert.strictEqual(health2.count('droppedFrame'), 0, 'the health counter was NOT wired in when the caller already had one');
+    h2.close();
+  } finally {
+    global.WebSocket = prevWS;
+  }
 });
 
 // ─── Verdict ─────────────────────────────────────────────────────────────────

@@ -3662,6 +3662,50 @@
     };
   }
 
+  // ─── makeHealthCounter() — silent-catch accumulator (N5) ──────────────────
+  //
+  // Pure/DOM-free/clock-free companion to the header health chip. Accumulates
+  // the swallowed events that today have NO surface: socket-level dropped frames
+  // (livewire.js's two onmessage catches — a JSON.parse failure and an
+  // adapter.onMessage throw, both silently `return`/swallowed so a bad frame can
+  // never kill the socket). Generic BY KIND so normSkip (the adapter per-level
+  // `continue`) is a one-line future add IF post-deploy data ever shows it
+  // firing. The NON-LATCHING panel-fault surface is deliberately NOT stored here
+  // — it is READ from the render guards (their stats().failures is the source of
+  // truth, §N1); folding it in would double-count / drift. Counts events, never
+  // time; needs no clock; Node-testable.
+  function makeHealthCounter() {
+    const byKind = Object.create(null);   // kind → total count
+    const detail = Object.create(null);   // kind → { subKey → count }   (chip tooltip)
+    return {
+      /** Record one swallowed event. kind e.g. 'droppedFrame'; subKey e.g. the
+       *  drop reason ('parse' | 'handler'). Falsy kind is a no-op. */
+      bump(kind, subKey) {
+        if (!kind) return;
+        byKind[kind] = (byKind[kind] || 0) + 1;
+        if (subKey != null) {
+          const d = detail[kind] || (detail[kind] = Object.create(null));
+          d[subKey] = (d[subKey] || 0) + 1;
+        }
+      },
+      /** One kind's running total (0 if never bumped). */
+      count(kind) { return byKind[kind] || 0; },
+      /** Pure deep-copied snapshot for the chip: { kinds:{k:n}, detail:{k:{sub:n}} }. */
+      snapshot() {
+        const kinds = {}, det = {};
+        for (const k in byKind) kinds[k] = byKind[k];
+        for (const k in detail) { det[k] = {}; for (const s in detail[k]) det[k][s] = detail[k][s]; }
+        return { kinds, detail: det };
+      },
+      /** Symbol-switch re-init: a full re-init starts a fresh session (the render
+       *  guards reset the same moment) — zero the tally too. */
+      reset() {
+        for (const k in byKind) delete byKind[k];
+        for (const k in detail) delete detail[k];
+      },
+    };
+  }
+
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalState = {
@@ -3702,6 +3746,10 @@
     // N1: per-panel render circuit breaker (paint-loop error boundary) — pure,
     // DOM-free, clock-free; wired into terminal.js frame() via safePanel.
     makePanelGuard,
+    // N5: silent-catch accumulator (dropped-frame counts) behind the header
+    // health chip — pure, DOM-free, clock-free; wired into terminal.js via the
+    // optional livewire onDropped hook.
+    makeHealthCounter,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalState;

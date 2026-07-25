@@ -600,6 +600,38 @@
   // the debug hook (frames()); the L1 fault-injection proof samples it twice to
   // show the rAF loop is STILL running after a panel was quarantined.
   let frameCount = 0;
+  // N5: silent-catch accumulator — the swallowed events that today have no
+  // surface (livewire's two onmessage catches, fed via the optional onDropped
+  // hook wired in startLeg). Reset on symbol-switch beside the guards. Pure;
+  // the header chip READS it, nothing here writes a datum.
+  const health = S.makeHealthCounter();
+  // N5: the prologue-fed views to cascade a 'frozen' chip to when the INGEST
+  // guard latches dead. Each is painted ONLY from the per-frame ingest prologue
+  // (sampleDepth / maybeEstimateLiq / maybeIntel); with ingest quarantined the
+  // prologue is skipped, their dirty flags stop being set, and they legitimately
+  // freeze on their last good frame while sink-fed price keeps moving beside
+  // them — a stale reading shown as current unless the chip announces it (§0.7).
+  //   • heat/micro/liqmap/det/walls — sampleDepth/maybeEstimateLiq-derived (the
+  //     task's "flush-derived" shorthand; det/walls are sampleDepth-derived too).
+  //   • conf — the confluence composite is written ONLY in maybeIntel (confData,
+  //     inside this same 'ingest' breaker). When ingest dies it freezes on its
+  //     last 9-read composite while lastPrice (sink-fed, §sink) keeps ticking, so
+  //     a stale read reads as live — exactly the silent-stale N5 exists to close.
+  // DELIBERATELY EXCLUDED — each stays genuinely LIVE when ingest is dead, so a
+  // 'frozen' chip there would cry wolf (§0):
+  //   • agg/dom — sink() applies bybit/okx depth to aggBook DIRECTLY (§sink), off
+  //     the prologue, so both keep repainting fresh primary data. (Caveat: agg's
+  //     binance/coinbase legs reach it via flushBookLegs INSIDE the dead prologue,
+  //     so those segments do go stale — but the panel is still visibly repainting
+  //     its primary venues, so a whole-panel freeze chip would misread; the header
+  //     STALLED chip already announces the global intake fault. dom has no such
+  //     nuance — its only source is the bybit book via sink.)
+  //   • vpin — the VPIN store is pushed on every primary trade in sink() (dirty.
+  //     vpin set there, §sink), not in the prologue; it keeps updating live.
+  //   • alerts — a timestamped LOG, not a current reading. Frozen (no new alerts
+  //     firing) is indistinguishable from a quiet market, so a chip would cry wolf;
+  //     the header STALLED chip already carries the global 'engine stalled' signal.
+  const CASCADE_KEYS = ['heat', 'micro', 'liqmap', 'det', 'walls', 'conf'];
 
   // ─── Dead-panel DOM surface: mark EVERY unit a key paints, at the right grain ─
   //
@@ -672,6 +704,11 @@
         + 'to reset. Last error: ' + last;
       host.appendChild(chip);
     }
+    // N5: cascade a 'frozen' chip to the flush-derived views the moment the
+    // INGEST guard latches dead. markPanelDead('ingest') is called exactly once
+    // (the fail()-returns-true-once contract), so this fires once per death;
+    // clearPanelDead('ingest') and the symbol-switch reset undo it symmetrically.
+    if (key === 'ingest') for (const k of CASCADE_KEYS) markPanelStale(k);
   }
   function clearPanelDead(key) {
     for (const el of panelUnitsOf(key)) {
@@ -680,6 +717,41 @@
       el.classList.remove('unit--dead');
       panel.classList.remove('panel--dead');
       const chip = panel.querySelector('.st-dead[data-key="' + key + '"]');
+      if (chip) chip.remove();
+    }
+    // N5: lift the cascaded stale chips when ingest revives (symbol-switch).
+    if (key === 'ingest') for (const k of CASCADE_KEYS) clearPanelStale(k);
+  }
+  // N5: cascade a 'frozen' chip to a FLUSH-DERIVED view (heat/micro/liqmap/det/
+  // walls) whose upstream ingest guard latched dead. Honest because the view IS
+  // frozen: with the prologue skipped its per-frame sampler stops producing
+  // samples, dirty flags stop being set, and it stays on its last good frame —
+  // the chip ANNOUNCES those stale pixels rather than passing them off as live
+  // (§0.7). Idempotent per key; simpler than markPanelDead (no shared-panel case
+  // — each cascade key owns its whole .panel, verified in terminal.html).
+  function markPanelStale(key) {
+    for (const el of panelUnitsOf(key)) {
+      const panel = el.closest('.panel');
+      if (!panel) continue;
+      panel.classList.add('panel--stale');
+      const host = panel.querySelector('h2') || panel;
+      if (host.querySelector('.st-stale[data-key="' + key + '"]')) continue;  // already flagged
+      const chip = document.createElement('span');
+      chip.className = 'signal-tag st-stale';
+      chip.setAttribute('data-key', key);
+      chip.textContent = 'frozen';
+      chip.title = 'frozen — data intake was quarantined upstream (§0.7); this view is '
+        + 'fed by the per-frame depth sampler, which stops the moment ingest is dead. '
+        + 'Showing the LAST GOOD frame, not live data. Switch symbol or reload to reset.';
+      host.appendChild(chip);
+    }
+  }
+  function clearPanelStale(key) {
+    for (const el of panelUnitsOf(key)) {
+      const panel = el.closest('.panel');
+      if (!panel) continue;
+      panel.classList.remove('panel--stale');
+      const chip = panel.querySelector('.st-stale[data-key="' + key + '"]');
       if (chip) chip.remove();
     }
   }
@@ -694,6 +766,16 @@
     const g = guards[key];
     if (g.isDead()) return;                 // quarantined: last good frame stays, no retry
     try {
+      // N5 verification hook (inert in production — DOUBLE-gated on REPLAY like
+      // FAULT_KEY): ?flap=<key> throws on every ODD EVALUATION of that panel, so
+      // the intervening even evaluation runs cleanly and resets the consecutive
+      // streak — the guard NEVER latches dead (failures climbs forever while dead
+      // stays false). This is the non-latching render fault N5 surfaces, the
+      // deliberate complement to FAULT_KEY's latching throw (N1 proves quarantine,
+      // N5 proves the invisible-until-now accrual). A DEDICATED eval counter, not
+      // frameCount parity: parity between successive due()-fires drifts and could
+      // latch the guard by luck — the counter makes the alternation deterministic.
+      if (key === FLAP_KEY && (++flapTick & 1)) throw new Error('flap-injection: intermittent throw (?flap=' + key + ', verification only §N5)');
       // N1 verification hook (inert in production — see FAULT_KEY): forces this
       // ONE panel to throw BEFORE fn(), mimicking a slice-build throw so the
       // proof exercises the whole-block boundary, not just render().
@@ -1298,6 +1380,17 @@
   // this is null, and ?fault alone (REPLAY false) is null, so it can NEVER fire
   // on a live page. Consumed in safePanel().
   const FAULT_KEY = REPLAY ? new URLSearchParams(location.search).get('fault') : null;
+  // N5 verification seams — DOUBLE-gated on REPLAY, inert in production exactly
+  // like FAULT_KEY (no ?replay → null/false; the flag alone can never fire live).
+  // ?flap=<key> drives the non-latching render fault (safePanel above); ?drop
+  // injects swallowed frames into the health counter at boot via the SAME
+  // health.bump path production's onDropped uses — livewire is not in the replay
+  // transport, so this is the faithful stand-in for a malformed wire frame (the
+  // real onmessage catches are proven in the Node livewire group instead).
+  const FLAP_KEY = REPLAY ? new URLSearchParams(location.search).get('flap') : null;
+  let flapTick = 0;   // N5: per-evaluation counter for the deterministic flap (see safePanel)
+  const DROP_INJECT = REPLAY ? new URLSearchParams(location.search).has('drop') : false;
+  if (DROP_INJECT) { health.bump('droppedFrame', 'parse'); health.bump('droppedFrame', 'parse'); health.bump('droppedFrame', 'handler'); }
   function startLeg(name, adapter, api) {
     // O-3 BYOD seam (§4c): sink rides along as the optional 4th arg — under
     // ?replay=byod the driver feeds collector rows to the sink DIRECTLY
@@ -1306,6 +1399,17 @@
     // Returns the socket handle ({close}) so a symbol switch can close the
     // leg (§4g); replay legs have no handle — switching is disabled there.
     if (REPLAY) { window.BTCQ_TERMINAL_REPLAY.drive(name, adapter, api, sink); return null; }
+    // N5: single-point drop wiring — startLeg IS the whole live seam, so every
+    // leg's socket reports a swallowed frame (livewire's two onmessage catches)
+    // into the health counter here. Optional + idempotent: app.js never reaches
+    // this file, and a caller that already set onDropped keeps theirs; `name`
+    // (the leg) stays in scope for a future per-leg subKey (name + '/' + reason).
+    // The dirty.header nudge surfaces the count at the NEXT header cadence rather
+    // than waiting on an unrelated repaint — it matters only in the degenerate
+    // 'socket open, every frame fails JSON.parse, no valid frames flow' case
+    // (normally marks/trades dirty the header ~1/s). Still rate-limited: due()/
+    // MIN_MS.header throttle the actual repaint, so a drop flood never spins.
+    if (!api.onDropped) api.onDropped = (reason) => { health.bump('droppedFrame', reason); dirty.header = true; };
     return LW.makeSocket(adapter, api);
   }
 
@@ -3200,6 +3304,18 @@
     // N1: monotonic frame() invocation count — the loop's heartbeat. The L1
     // fault proof samples it twice to show the rAF loop survived quarantine.
     frames() { return frameCount; },
+    // N5: read-only silent-catch snapshot for the browser proof (verify --n5) —
+    // dropped-frame total + per-reason breakdown, the NON-LATCHING panel-fault
+    // total (the chip's number: guards' failures minus the ingest pseudo-key AND
+    // minus any latched-dead guard — a dead panel wears its own red chip, §N5
+    // healthSlice), the raw all-guards total for diagnostics (faultsInclIngest),
+    // and the cascade key list. Mutates nothing (snapshot()/stats() are copies).
+    health() {
+      const s = health.snapshot();
+      let faults = 0, faultsInclIngest = 0;
+      for (const k in guards) { const st = guards[k].stats(); faultsInclIngest += st.failures; if (k !== 'ingest' && !st.dead) faults += st.failures; }
+      return { dropped: health.count('droppedFrame'), drops: s.detail.droppedFrame || {}, faults, faultsInclIngest, cascade: CASCADE_KEYS };
+    },
     // T-2 (§4h): per-leg matrix snapshot — {enabled, kind (chip state), hasBook}
     // keyed by leg key. The live-check harness asserts ≥5 legs synced from this.
     legs() {
@@ -3427,6 +3543,10 @@
     // fresh (a reconnect/un-pause does NOT reach here — a code fault must not
     // clear on those, only on a full re-init or reload).
     for (const k in guards) { guards[k].reset(); clearPanelDead(k); }
+    // N5: a full re-init starts a fresh session — zero the silent-catch tally so
+    // the header health chip reflects only the NEW symbol's drops/faults (the
+    // cascade chips were already lifted by clearPanelDead('ingest') above).
+    health.reset();
   }
 
   if (REPLAY) {
@@ -4051,6 +4171,31 @@
     dirty.liqmap = true;
   }
 
+  // N5: the header health slice — silent-catch counts for the honest chip. Two
+  // surfaces, both READ (never re-accumulated): dropped frames (the counter,
+  // fed by livewire's onDropped), and the NON-LATCHING panel-fault total, summed
+  // straight from the render guards' own stats().failures (§N1 source of truth —
+  // so a flapping fault is surfaced with zero double-count). Two guards are held
+  // OUT of the amber total so it stays honestly "degraded, recoverable":
+  //   • 'ingest' — its own red header dead-chip + the cascade already carry it.
+  //   • any guard already LATCHED DEAD (stats().dead) — it wears its OWN red
+  //     st-dead 'stalled' chip, a non-recoverable state; folding its failures
+  //     into the amber "N render faults" count would announce the same fault
+  //     twice AND understate a red panel as amber. So the amber count is exactly
+  //     the true non-latching residual: live guards that threw but never
+  //     quarantined (the recurring-intermittent fault N5 goal (b) surfaces).
+  // Observability only: this reads counters and mutates no store.
+  function healthSlice() {
+    let faults = 0;
+    for (const k in guards) {
+      if (k === 'ingest') continue;
+      const st = guards[k].stats();
+      if (st.dead) continue;
+      faults += st.failures;
+    }
+    return { dropped: health.count('droppedFrame'), faults, drops: health.snapshot().detail.droppedFrame || {} };
+  }
+
   function frame() {
     const now = Date.now();
     frameCount++;   // N1: loop heartbeat (see frames() debug hook)
@@ -4097,7 +4242,7 @@
         // from livewire.js), so replay is labeled at the source instead of
         // being patched over after the fact. verify_terminal_browser.py still
         // asserts no chip ever says 'live' in replay.
-        headerView.render({ marks, ois, statuses, sessionHigh, sessionLow, opening: openingSlice(), tickSize: settings.tick, base: BASE, nowMs: now });
+        headerView.render({ marks, ois, statuses, sessionHigh, sessionLow, opening: openingSlice(), tickSize: settings.tick, base: BASE, nowMs: now, health: healthSlice() });
         // T-2 (§4h): keep the open leg-manager's status dots live at the header
         // cadence (change-keyed inside — a no-op when nothing moved).
         if (legsPopOpen) renderLegRows();

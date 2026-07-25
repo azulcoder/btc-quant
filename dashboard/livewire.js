@@ -11,6 +11,12 @@
 // PUBLIC channels only — no keys, no signing. This module never fabricates
 // data; it only moves frames and reports honest connection status
 // (open / stale / reconnecting / error) through api.onStatus.
+//
+// OPTIONAL telemetry (N5): a caller MAY pass api.onDropped(reason) to observe
+// the frames the socket had to swallow — reason 'parse' (JSON.parse failed) or
+// 'handler' (adapter.onMessage threw). Silent when absent: app.js passes no
+// onDropped, so its path is byte-unaffected; the terminal passes one to feed
+// the header health chip. Observability only — it never changes what is moved.
 'use strict';
 
 (function (global) {
@@ -30,6 +36,13 @@
     const MAX_BACKOFF = 30000, STALE_MS = 12000, DEAD_MS = 40000, WATCHDOG_MS = 2000;
 
     function clearHeartbeat() { if (hbTimer) { clearInterval(hbTimer); hbTimer = null; } }
+
+    // N5: OPTIONAL silent-catch telemetry. A frame the socket had to swallow is
+    // otherwise invisible; a caller may pass api.onDropped(reason) to count it.
+    // Guarded + try-wrapped: absent (app.js) → nothing runs, byte-unaffected; a
+    // throwing onDropped can NEVER kill the socket (the whole point of the two
+    // onmessage catches is that no bad frame — or bad telemetry — takes it down).
+    function drop(reason) { if (api.onDropped) { try { api.onDropped(reason); } catch (_) { /* telemetry never kills the socket */ } } }
 
     // Adapter calls this on a healthy-feed frame (ticker tick / heartbeat). Recovery
     // is a single clean transition back to green — no flicker.
@@ -72,8 +85,8 @@
         }
       };
       ws.onmessage = (ev) => {
-        let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
-        try { adapter.onMessage(msg, liveApi); } catch (_) { /* never let a bad frame kill the socket */ }
+        let msg; try { msg = JSON.parse(ev.data); } catch (_) { drop('parse'); return; }
+        try { adapter.onMessage(msg, liveApi); } catch (_) { drop('handler'); /* never let a bad frame kill the socket */ }
       };
       ws.onerror = () => { /* onclose fires next; handled there */ };
       ws.onclose = () => { clearHeartbeat(); scheduleReconnect(); };

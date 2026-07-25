@@ -12,7 +12,7 @@ un-validated). **O-5 shipped 2026-07-05** (§4e portfolio & research — trade j
 returns, Polymarket crowd-implied panel, ToA news feed, local-mirror econ calendar
 (`make econ` — faireconomy has no CORS), + the elite pass: sticky section nav w/
 persisted collapse, hidden-tab/offscreen paint gating (ingestion never pauses), and
-`check_terminal.cjs` (74 groups) promoted to a CI build gate). **The terminal feature
+`check_terminal.cjs` (77 groups) promoted to a CI build gate). **The terminal feature
 plan (§5) is complete** — further work follows the DEVELOPMENT.md §6 greenlight ritual;
 the T-1 Trader's Edge pass (§4g) added multi-symbol + the delta/intensity/walls/VPIN/
 opening-type/key-levels/basis surfaces on top of it.
@@ -872,7 +872,7 @@ prevent AC sleep. `make check-ticks` weekly is the standing quality ritual.
 Layer 0 (static, every commit): `python -m pytest` (incl. collector tests; network-free);
 `node --check` on every dashboard JS file; `node scripts/check_terminal.cjs` (fixture
 smoke: adapters + stores + O-3/O-4 normalizers/builders replayed over the REAL captured
-frames/responses, 74 assertion groups incl. the T-1 §4g + T-2 §4h + T-3 §4i adds — a CI build gate since
+frames/responses, 77 assertion groups incl. the T-1 §4g + T-2 §4h + T-3 §4i + N1/N5 adds — a CI build gate since
 O-5, §4e.3).
 
 - **L1 — deterministic browser harness** (`make verify-browser`,

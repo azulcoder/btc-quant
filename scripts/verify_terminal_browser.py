@@ -670,6 +670,205 @@ def run_a11y(sync_playwright, args) -> int:
     return 0
 
 
+# N5 (Gap 8) silent-catch proof — surface the swallowed events that today have no
+# on-page witness. Three REPLAY-gated seams, all inert in production:
+#   INJECT  (?replay=1&drop&flap=dom): a dropped-frame count (2 parse + 1 handler,
+#           the same health.bump path production's onDropped uses) AND a
+#           NON-LATCHING render fault (dom throws on every odd evaluation, so the
+#           guard's failures climb while dead stays false). Asserts the HEADER
+#           health chip appears reading "3 dropped · N render faults", the counts
+#           match __BTCQ_TERMINAL_DEBUG.health(), the flapped guard never latched,
+#           and NO throw escaped / logged (a flap is caught below threshold).
+#   CLEAN   (?replay=1): the same page with no seam — 0 console/page errors AND
+#           the health chip is ABSENT (silent when healthy — the whole honesty
+#           rail: count 0 = no chip).
+#   CASCADE (?replay=1&fault=ingest): the N1 ingest latch fires the N5 cascade —
+#           the six PROLOGUE-FED views (heat/micro/liqmap/det/walls + conf, the
+#           maybeIntel-written confluence composite) wear a 'frozen' st-stale chip,
+#           while agg/dom carry NONE (sink feeds them directly, so they stay live —
+#           a stale chip there would cry wolf, §0; vpin/alerts likewise excluded).
+FLAP_KEY_N5 = "dom"       # fast-cadence (120 ms), safePanel-wrapped, always laid out
+CASCADE_STALE = {"heat": "view-bookheat", "micro": "view-micro", "liqmap": "view-liqheat",
+                 "det": "view-detect", "walls": "view-walls", "conf": "view-conf"}
+CASCADE_LIVE = {"agg": "view-aggbook", "dom": "view-dom"}   # must NEVER be cascaded (grounded §A.3)
+
+
+def run_n5(sync_playwright, args) -> int:
+    server, port = start_server()
+    base = f"http://127.0.0.1:{port}/dashboard/terminal.html"
+    print(f"serving {ROOT} at http://127.0.0.1:{port}/ (localhost only)")
+    print("N5 SILENT-CATCH PROOF — inject / clean / cascade")
+    fails: list[str] = []
+    shots: list[str] = []
+
+    def health_chip(page):
+        """The header .st-health chip's {present, visible, text, title} — present
+        is the element existing, visible is it not [hidden] (silent-when-healthy)."""
+        return page.evaluate(
+            "() => { const c = document.querySelector('.st-health');"
+            " if (!c) return { present: false };"
+            " return { present: true, visible: !c.hidden, text: c.textContent, title: c.title }; }")
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+
+        # ── INJECT: dropped-frame count + non-latching render fault → chip ──
+        url = f"{base}?replay=1&drop&flap={FLAP_KEY_N5}"
+        print(f"\n[inject] opening {url}")
+        page = browser.new_page(viewport={"width": 1680, "height": 1400})
+        cerr: list[str] = []
+        perr: list[str] = []
+        page.on("console", lambda m: cerr.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: perr.append(str(e)))
+        page.goto(url, wait_until="domcontentloaded")
+        try:
+            page.wait_for_function(READY_JS, timeout=READY_TIMEOUT_MS)
+        except Exception:
+            fails.append("[inject] ready: pipeline never flowed (tapeRows>0, heatSamples>=3)")
+        # the flap must actually accrue faults (dom is due ~8×/s → a couple of
+        # seconds is plenty); wait for the DEBUG surface rather than a fixed sleep.
+        try:
+            page.wait_for_function(
+                "() => { const d = window.__BTCQ_TERMINAL_DEBUG;"
+                " return d && d.health().dropped === 3 && d.health().faults > 0; }",
+                timeout=15_000)
+        except Exception:
+            h = page.evaluate("() => window.__BTCQ_TERMINAL_DEBUG ? __BTCQ_TERMINAL_DEBUG.health() : null")
+            fails.append(f"[inject] counts never reached dropped==3 && faults>0: {h}")
+
+        dbg = page.evaluate("() => __BTCQ_TERMINAL_DEBUG.health()")
+        if dbg.get("dropped") != 3:
+            fails.append(f"[inject] dropped: expected 3, got {dbg.get('dropped')} ({dbg.get('drops')})")
+        if dbg.get("drops", {}).get("parse") != 2 or dbg.get("drops", {}).get("handler") != 1:
+            fails.append(f"[inject] drop reasons: expected 2 parse / 1 handler, got {dbg.get('drops')}")
+        if not dbg.get("faults", 0) > 0:
+            fails.append(f"[inject] faults: expected >0 from the flap, got {dbg.get('faults')}")
+        # the crux: the flapped guard accrued failures but NEVER latched dead.
+        gd = page.evaluate("(k) => __BTCQ_TERMINAL_DEBUG.guards()[k]", FLAP_KEY_N5)
+        if gd.get("dead") is not False:
+            fails.append(f"[inject] flap guard[{FLAP_KEY_N5}] latched dead — the fault was supposed to be NON-latching: {gd}")
+        elif not gd.get("failures", 0) > 0:
+            fails.append(f"[inject] flap guard[{FLAP_KEY_N5}]: failures never climbed: {gd}")
+        else:
+            print(f"[inject] PASS non-latching: guard[{FLAP_KEY_N5}] failures={gd['failures']}, "
+                  f"consecutive={gd['consecutive']}, dead=False")
+
+        # the HEADER health chip is visible and reads the counts.
+        hc = health_chip(page)
+        if not hc.get("present"):
+            fails.append("[inject] health chip: .st-health element missing from the header")
+        elif not hc.get("visible"):
+            fails.append("[inject] health chip: present but [hidden] despite dropped==3 (should be visible)")
+        else:
+            txt = hc.get("text", "")
+            if "3 dropped" not in txt:
+                fails.append(f"[inject] health chip text missing '3 dropped': {txt!r}")
+            if "render fault" not in txt:
+                fails.append(f"[inject] health chip text missing 'render fault': {txt!r}")
+            if "Observability only" not in hc.get("title", ""):
+                fails.append(f"[inject] health chip title missing the observability-only honesty line: {hc.get('title')!r}")
+            if not fails or "3 dropped" in txt:
+                print(f"[inject] PASS health chip visible: {txt!r}")
+        # the flap throws are CAUGHT below threshold — no escape, no quarantine log.
+        if perr:
+            fails.append(f"[inject] pageerror (a flap throw ESCAPED the boundary): {perr}")
+        if cerr:
+            fails.append(f"[inject] console error (flap should log NOTHING — it never latches): {cerr}")
+        if not perr and not cerr:
+            print("[inject] PASS caught: 0 pageerror, 0 console error (flap stayed below threshold)")
+        p, f = shoot_panels(page, args.out, "n5-inject")
+        shots += p
+        fails += f
+        page.close()
+
+        # ── CLEAN: silent when healthy — no seam, no chip, no errors ──
+        url = f"{base}?replay=1"
+        print(f"\n[clean] opening {url}")
+        page = browser.new_page(viewport={"width": 1680, "height": 1400})
+        cerr = []
+        perr = []
+        page.on("console", lambda m: cerr.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: perr.append(str(e)))
+        page.goto(url, wait_until="domcontentloaded")
+        try:
+            page.wait_for_function(READY_JS, timeout=READY_TIMEOUT_MS)
+        except Exception:
+            fails.append("[clean] ready: pipeline never flowed")
+        page.wait_for_timeout(1500)   # let a few header cadences pass — a spurious chip would have shown
+        dbg = page.evaluate("() => __BTCQ_TERMINAL_DEBUG.health()")
+        if dbg.get("dropped") or dbg.get("faults"):
+            fails.append(f"[clean] counts non-zero on a healthy run (fabricated problem?): {dbg}")
+        hc = health_chip(page)
+        if hc.get("present") and hc.get("visible"):
+            fails.append(f"[clean] health chip VISIBLE on a healthy run — silent-when-healthy violated: {hc.get('text')!r}")
+        else:
+            print("[clean] PASS silent: health chip absent/hidden on a healthy run")
+        if cerr or perr:
+            fails.append(f"[clean] not clean: {len(cerr)} console + {len(perr)} page errors: {(cerr + perr)[:3]}")
+        else:
+            print("[clean] PASS clean: 0 console errors, 0 page errors")
+        p, f = shoot_panels(page, args.out, "n5-clean")
+        shots += p
+        fails += f
+        page.close()
+
+        # ── CASCADE: ingest latch → 'frozen' chip on the 5 flush-derived views ──
+        url = f"{base}?replay=1&fault=ingest"
+        print(f"\n[cascade] opening {url}")
+        page = browser.new_page(viewport={"width": 1680, "height": 1400})
+        page.goto(url, wait_until="domcontentloaded")
+        try:
+            page.wait_for_function(
+                "() => { const d = window.__BTCQ_TERMINAL_DEBUG;"
+                " return d && d.guards().ingest && d.guards().ingest.dead; }",
+                timeout=15_000)
+            print("[cascade] PASS ingest guard latched dead (drives the cascade)")
+        except Exception:
+            g = page.evaluate("() => window.__BTCQ_TERMINAL_DEBUG ? __BTCQ_TERMINAL_DEBUG.guards().ingest : null")
+            fails.append(f"[cascade] ingest guard never latched dead: {g}")
+        snap = page.evaluate(
+            "() => ({"
+            " stale: [...document.querySelectorAll('.st-stale')].map("
+            "   (c) => ({ key: c.getAttribute('data-key'), text: c.textContent,"
+            "     panel: (c.closest('.panel') && [...c.closest('.panel').querySelectorAll('[id]')]"
+            "       .map((e) => e.id).filter((s) => s.startsWith('view-'))) || [] })),"
+            " stalePanels: [...document.querySelectorAll('.panel--stale')].map("
+            "   (p) => [...p.querySelectorAll('[id]')].map((e) => e.id).filter((s) => s.startsWith('view-'))) })")
+        got_keys = sorted({c["key"] for c in snap["stale"]})
+        if got_keys != sorted(CASCADE_STALE):
+            fails.append(f"[cascade] stale chip keys: expected {sorted(CASCADE_STALE)}, got {got_keys}")
+        for c in snap["stale"]:
+            if c["text"] != "frozen":
+                fails.append(f"[cascade] stale chip for {c['key']!r} text {c['text']!r} != 'frozen'")
+            anchor = CASCADE_STALE.get(c["key"])
+            if anchor and anchor not in c["panel"]:
+                fails.append(f"[cascade] stale chip {c['key']!r} on wrong panel {c['panel']} (want {anchor})")
+        # the honesty crux: agg/dom stay LIVE — no stale chip, no frozen panel.
+        stale_anchors = {a for grp in snap["stalePanels"] for a in grp}
+        for key, anchor in CASCADE_LIVE.items():
+            if anchor in stale_anchors:
+                fails.append(f"[cascade] {anchor} ({key}) wrongly frozen — sink feeds it directly, it is LIVE (§0 cry-wolf)")
+        if got_keys == sorted(CASCADE_STALE) and not (stale_anchors & set(CASCADE_LIVE.values())):
+            print(f"[cascade] PASS {len(CASCADE_STALE)} frozen chips on {got_keys}; agg/dom stayed live")
+        p, f = shoot_panels(page, args.out, "n5-cascade")
+        shots += p
+        fails += f
+        page.close()
+
+        browser.close()
+
+    server.shutdown()
+    print(f"\nscreenshots ({len(shots)}) in {args.out}")
+    if fails:
+        print(f"\nFAIL — {len(fails)} problem(s):")
+        for f in fails:
+            print(f"  FAIL {f}")
+        return 1
+    print("\nOK — N5 silent-catch proven: dropped/fault counts surface on the header chip, "
+          "silent when healthy, and the ingest latch freezes only the flush-derived views.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", default=os.path.join(ROOT, "reports", "verify"),
@@ -687,6 +886,12 @@ def main() -> int:
                          "terminal and assert the palette flips on documentElement, reaches the "
                          "footprint pixels, mutates NO datum, and persists across a reload from "
                          "the shared LS keys. A SEPARATE run — it deliberately mutates view state.")
+    ap.add_argument("--n5", action="store_true",
+                    help="N5 (Gap 8) silent-catch proof: three REPLAY-gated seams — inject "
+                         "(?drop&flap=dom) surfaces a dropped-frame count + a NON-latching render "
+                         "fault on the header health chip; clean (?replay=1) proves it is silent "
+                         "when healthy; cascade (?fault=ingest) freezes only the flush-derived "
+                         "views (agg/dom stay live). A SEPARATE run — it drives injected faults.")
     args = ap.parse_args()
 
     sync_playwright = _require_playwright()
@@ -703,6 +908,12 @@ def main() -> int:
     # gate may do.
     if args.a11y:
         return run_a11y(sync_playwright, args)
+
+    # N5: the silent-catch proof is self-contained — it injects a dropped-frame
+    # count and a non-latching render fault, which the standard zero-count green
+    # run must never see; run it separately, like --fault/--a11y.
+    if args.n5:
+        return run_n5(sync_playwright, args)
 
     server, port = start_server()
     url = f"http://127.0.0.1:{port}/dashboard/terminal.html?replay=1"

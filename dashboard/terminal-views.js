@@ -1417,6 +1417,7 @@
     let root = null;
     const cells = {};   // key → value <span>
     const chips = {};   // ex → { el, text }
+    let healthChip = null;   // N5: silent-catch health chip (created hidden in mount)
 
     /** grp (optional, presentation only): venue-eyebrow tag rendered on the
      *  FIRST cell of each venue cluster (BYBIT / SESSION / BINANCEF) — same
@@ -1447,6 +1448,14 @@
         chipRow.appendChild(chip);
         chips[ex] = { el: chip, text: chip.querySelector('.chip-text') };
       }
+      // N5: silent-catch health chip — lives in the SAME chip row as connection
+      // health (a dropped frame / render fault must be as visible as a dead feed).
+      // Created hidden; render() reveals it ONLY when a count > 0 (silent when
+      // healthy). Sits between the conn chips and the chips-note.
+      healthChip = document.createElement('span');
+      healthChip.className = 'signal-tag st-health';
+      healthChip.hidden = true;
+      chipRow.appendChild(healthChip);
       chipRow.insertAdjacentHTML('beforeend',
         '<span class="chips-note">bybit·lin = primary WS (trades/book/liq/mark/OI) · binance·fut = diff-depth book + REST mark/OI (no WS trades on this network, §0.2) '
         + '· okx legs = seq-chained books + trades · coinbase = full l2 book + matches · spot legs (§4h) = display/ingest only — the collector still records BTCUSDT bybit-primary</span>');
@@ -1544,6 +1553,30 @@
           // transports that error without prose (same honesty rule as the
           // kind-'open' branch above: the transport speaks, we don't dub it).
           chip.el.classList.add('error'); chip.text.textContent = exLabel(ex) + ': ' + (s.msg || 'offline');
+        }
+      }
+
+      // N5 health chip: silent when healthy (count 0 → hidden), VISIBLE only when
+      // a frame was genuinely dropped or a render fault fired — never fabricated.
+      // Rate-limited to THIS header cadence (render runs inside safePanel('header')
+      // gated by due(), ~≥400ms), never per-event. Observability only: it reads
+      // the counts the slice carried, changes no datum. Badge taxonomy: warn/amber
+      // (degraded but recoverable), distinct from the st-dead red quarantine chip.
+      const h = slice.health;
+      if (healthChip) {
+        if (h && (h.dropped || h.faults)) {
+          const parts = [];
+          if (h.dropped) parts.push(h.dropped + ' dropped');
+          if (h.faults) parts.push(h.faults + ' render fault' + (h.faults === 1 ? '' : 's'));
+          healthChip.textContent = 'degraded: ' + parts.join(' · ');
+          healthChip.title = 'silent-catch counter (§N5) since load — '
+            + h.dropped + ' frame(s) the socket swallowed'
+            + (h.drops ? ' (' + (h.drops.parse || 0) + ' parse-error, ' + (h.drops.handler || 0) + ' handler-throw)' : '')
+            + '; ' + h.faults + ' render fault(s) caught by the paint-loop breaker. '
+            + 'Observability only — no market data changed.';
+          healthChip.hidden = false;
+        } else {
+          healthChip.hidden = true;
         }
       }
     }
