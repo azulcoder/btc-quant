@@ -166,7 +166,10 @@ sequence to the calendar, not to enthusiasm.
       chip (not catch-and-retry, which spin-loops and hides a broken panel). *Accept:* a
       deliberately-throwing panel goes stale + flagged while every other panel keeps
       painting; harness group added. Blocking before deploy.
-- [ ] **N2. Rescope `DESIGN` §0 — name the execution wall.** Add an explicit rail, peer
+- [x] **N2. Rescope `DESIGN` §0 — name the execution wall.** (done 2026-07-25 — added
+      rail `§0.8` "The terminal is an OBSERVATION surface, not an execution venue", peer to
+      the §0.1 backtest wall; README positioning reframed to the research-workbench claim.)
+      Add an explicit rail, peer
       to the existing backtest wall (§0.1): observation/research surface, not an execution
       venue; informed strategies execute elsewhere (a separate native process). Separate
       "surpass Exocharts/aggr for display" from "not an HFT engine" — both stated, never

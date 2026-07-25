@@ -59,6 +59,15 @@ liquidations, BYOD HTTP protocol). We adapt the *capabilities* into btc-quant's 
 7. **No fabricated history.** The terminal renders only what arrived over the wire this
    session (plus what the local collector genuinely recorded). No backfill from mixed
    sources into one series without an explicit per-source label.
+8. **The terminal is an OBSERVATION surface, not an execution venue.** It holds no keys and
+   places no orders — verified zero signing/order/hmac path in `dashboard/terminal*.js`, kept
+   as a rail so it stays true, not merely today's state. A GC'd single-thread JS event loop
+   painting at rAF over a 100 ms-batched keyless feed (§0.2) is eyes, not hands; the strategies
+   it informs execute ELSEWHERE, in a separate native process. HFT and market-making EXECUTION
+   are a category boundary for this substrate — sub-µs tick-to-trade, colocation, kernel-bypass,
+   C++/Rust/FPGA, a different machine and not a slower version of this one — a design line, not
+   a roadmap gap to close by increment. Stated separately and never conflated: surpassing
+   Exocharts/aggr on order-flow DISPLAY and research is a real, live goal (STRATEGY §1, §4).
 
 ## 1. Architecture
 
