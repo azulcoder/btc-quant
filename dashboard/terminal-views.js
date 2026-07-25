@@ -15,7 +15,9 @@
 //
 // Color discipline (§4): every hue comes from styles.css custom properties —
 // --up/--down for aggressor/P&L semantics (CVD-safe pair, survives the
-// body.cvd-strict Okabe-Ito toggle because we read the vars at draw time),
+// CVD-safe Okabe-Ito toggle because pal() re-reads the props off
+// documentElement at draw time — N3 keys .cvd-strict on documentElement, not
+// <body>, precisely so this canvas reader picks it up; see terminal.css §N3),
 // --c1…--c6 for categorical series (exchanges, CVD buckets), --accent for
 // reference markers (POC), --accent-2 for secondary annotations. NO new hues.
 // Color is never the only cue: sell/buy also differ by POSITION (left/right of
@@ -127,8 +129,10 @@
   }
 
   /** Read the live palette each draw (cheap: ~15 var reads at a few Hz). Read
-   *  fresh, not cached at mount, so a body.cvd-strict toggle or theme change
-   *  takes effect without a reload — same reasoning as app.js COLOR(). */
+   *  fresh, not cached at mount, so a CVD-safe (documentElement.cvd-strict)
+   *  toggle or theme change takes effect without a reload — same reasoning as
+   *  app.js COLOR(). Reads off documentElement, which is where N3 keys the
+   *  class, so a toggle actually reaches this canvas reader. */
   function pal() {
     return {
       up: cssVar('--up', '#26A69A'), down: cssVar('--down', '#EF5350'),

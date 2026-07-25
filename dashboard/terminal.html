@@ -69,6 +69,16 @@
           <option value="auction-focus">AUCTION-focus</option>
           <option value="last">last (custom)</option>
         </select>
+        <!-- N3 (Gap 7): a11y toggles ported from the analytics page. Same
+             localStorage keys (btcq-cvd / btcq-density) → set once, applies on
+             both pages. CVD-safe swaps the footprint/heatmap up/down to the
+             Okabe-Ito pair for colour-blind readability; compact tightens the
+             spacing + type scale. Presentation only — no datum changes.
+             Shortcuts: v (CVD-safe), d (density). terminal.js owns the wiring. -->
+        <label class="ux-a11y" title="CVD-safe palette (Okabe-Ito): recolours the footprint/heatmap up/down for colour-blind readability. Presentation only — no datum changes. Shortcut: v. Shared with the analytics page (btcq-cvd).">
+          <input type="checkbox" id="set-cvd-strict" /> CVD-safe</label>
+        <label class="ux-a11y" title="Compact density: tightens the spacing + type scale a touch. Presentation only. Shortcut: d. Shared with the analytics page (btcq-density).">
+          <input type="checkbox" id="set-density-compact" /> compact</label>
         <!-- T-1 (§4g): ⌘K command palette — index.html §5.1 idiom. -->
         <button id="cmdk-open" type="button" class="ux-btn" title="Command palette — jump to a panel, switch symbol/workspace, toggle sections (Cmd/Ctrl-K)">⌘K</button>
         <!-- Mirror of index.html's "terminal →" link (DESIGN §4). -->
@@ -724,6 +734,8 @@
         <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
         <span><kbd>↵</kbd> run</span>
         <span><kbd>esc</kbd> close</span>
+        <!-- N3 (Gap 7): global a11y shortcuts (guarded to fire only outside inputs). -->
+        <span><kbd>v</kbd> CVD-safe · <kbd>d</kbd> density</span>
       </div>
     </div>
   </div>

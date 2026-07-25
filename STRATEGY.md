@@ -174,7 +174,15 @@ sequence to the calendar, not to enthusiasm.
       venue; informed strategies execute elsewhere (a separate native process). Separate
       "surpass Exocharts/aggr for display" from "not an HFT engine" — both stated, never
       conflated. *Accept:* §0 states the boundary; README positioning line updated.
-- [ ] **N3. Port CVD-safe + density toggles to the terminal.** Mirror `applyCvd`/
+- [x] **N3. Port CVD-safe + density toggles to the terminal.** (done 2026-07-25 —
+      CVD-safe (Okabe-Ito) + density toggles in the topbar + Cmd-K + shortcuts, sharing
+      the analytics `btcq-cvd`/`btcq-density` LS keys so the preference is cross-page.
+      Research beat caught the real bug empirically: the class must key on
+      `documentElement` (not `<body>`) or the canvas palette reader — which reads vars
+      off `:root` at draw time — never sees it; a body-only toggle is a silent no-op.
+      Presentation-only, proven by 17 store counts byte-identical across the toggle; the
+      standing browser harness gained an `--a11y` pass that also guards the Okabe-Ito
+      literal against drift between styles.css and terminal.css.) Mirror `applyCvd`/
       `applyDensity` from `app.js`, read `btcq-cvd`/`btcq-density` at boot, expose in the
       settings row + Cmd-K + shortcuts. *Accept:* colour-blind mode visibly changes
       footprint/heatmap on the terminal and persists; browser-harness screenshot verifies.

@@ -442,6 +442,234 @@ def run_fault(sync_playwright, args) -> int:
     return 0
 
 
+# N3 (Gap 7) a11y proof — footprint up/buy fill sampler. The buy side is drawn
+# in --up (rgba(p.up, aB) fills + full-opacity imbalance strokes / delta text);
+# "green-family" = green is the max channel and clearly above red, whether the
+# palette is the teal default (#26A69A) or the Okabe-Ito bluish-green (#009E73).
+# Averaging those pixels gives a palette signature the toggle MOVES (red channel
+# drops teal→Okabe) but replay data volume does NOT (new bars paint in the
+# CURRENT palette too, so more data never reintroduces teal). Vermillion/red
+# down pixels have G-R < 0 and are excluded, so this isolates the up semantic.
+FOOTPRINT_GREEN_JS = """
+(sel) => {
+  const host = document.querySelector(sel);
+  if (!host) return { err: 'no footprint host' };
+  let best = null;
+  host.querySelectorAll('canvas').forEach((cv) => {
+    if (cv.width < 2 || cv.height < 2) return;
+    if (!best || cv.width * cv.height > best.width * best.height) best = cv;
+  });
+  if (!best) return { err: 'no footprint canvas' };
+  let ctx;
+  try { ctx = best.getContext('2d'); } catch (e) { return { err: 'no 2d ctx' }; }
+  const d = ctx.getImageData(0, 0, best.width, best.height).data;
+  let n = 0, r = 0, g = 0, b = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] < 40) continue;                       // near-transparent → bg
+    const R = d[i], G = d[i + 1], B = d[i + 2];
+    if (G > 60 && G >= B && G - R > 24) { n++; r += R; g += G; b += B; }
+  }
+  return n ? { n, r: r / n, g: g / n, b: b / n } : { n: 0 };
+}
+"""
+
+
+def run_a11y(sync_playwright, args) -> int:
+    """N3 (Gap 7) a11y proof — the STANDING guard for the CVD-safe (Okabe-Ito)
+    + density port to the terminal. A SEPARATE flag-gated run (like --fault) so
+    the standard green path stays pristine: this one deliberately mutates view
+    state, reloads, and asserts persistence — things the plain render check must
+    not do.
+
+    Proves the N3 accept clause end-to-end ("colour-blind mode visibly changes
+    footprint/heatmap on the terminal and persists; browser-harness screenshot
+    verifies"), and standing-guards the load-bearing choices a future edit could
+    silently break (class on documentElement, the :root.cvd-strict override in
+    terminal.css, the shared LS keys):
+      (a) toggling CVD-safe flips the LIVE palette the canvas reader consumes —
+          getComputedStyle(documentElement) --up/--down 26A69A/EF5350 → the
+          EXACT Okabe-Ito 009E73/D55E00 — and the class lands on documentElement
+          (NOT <body>), which is what terminal-views.js pal() reads at draw time;
+      (b) it reaches PIXELS, not just the CSS var: the footprint's green up-fill
+          recolours (avg green-family pixel shifts off teal toward Okabe-Ito —
+          the red channel drops);
+      (c) presentation ONLY — store counts are byte-identical across the toggle
+          (read → click → read inside ONE synchronous evaluate so no replay tick
+          intervenes): the palette swap touches no datum (§0 honesty rail);
+      (d) density-compact retightens the token scale (--sp-2 8→6px, --fs-base
+          13→12px);
+      (e) both preferences PERSIST — after a reload the boot-apply restores the
+          classes/vars/checkboxes from the shared localStorage keys (btcq-cvd /
+          btcq-density, the same keys the analytics page uses).
+    Screenshots a11y-off / a11y-on / a11y-reload are the visual witness.
+    """
+    def _norm(v):
+        return (v or "").strip().lower()
+
+    def shot(page, tag):
+        paths = []
+        full = os.path.join(args.out, f"a11y-{tag}-full.png")
+        page.screenshot(path=full, full_page=True)
+        paths.append(full)
+        fp = os.path.join(args.out, f"a11y-{tag}-footprint.png")
+        try:
+            page.locator("#view-footprint").screenshot(path=fp, timeout=10_000)
+            paths.append(fp)
+        except Exception as e:  # zero-size / detached = a real page bug
+            fails.append(f"screenshot footprint at {tag}: {type(e).__name__}: {e}")
+        return paths
+
+    server, port = start_server()
+    url = f"http://127.0.0.1:{port}/dashboard/terminal.html?replay=1"
+    print(f"serving {ROOT} at http://127.0.0.1:{port}/ (localhost only)")
+    print(f"N3 A11Y PROOF — opening {url}")
+
+    fails: list[str] = []
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+    shots: list[str] = []
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page(viewport={"width": 1680, "height": 1400})
+        page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: page_errors.append(str(e)))
+
+        page.goto(url, wait_until="domcontentloaded")
+        try:
+            page.wait_for_function(READY_JS, timeout=READY_TIMEOUT_MS)
+            print("PASS ready: tapeRows > 0 and heatSamples >= 3")
+        except Exception:
+            dbg = page.evaluate("() => window.__BTCQ_TERMINAL_DEBUG ? __BTCQ_TERMINAL_DEBUG.counts() : null")
+            fails.append(f"ready: page never reached tapeRows>0 && heatSamples>=3 (counts: {dbg})")
+
+        # Reader for the live palette + tokens off documentElement — EXACTLY the
+        # node terminal-views.js pal() reads its custom props from.
+        VARS_JS = (
+            "() => { const s = getComputedStyle(document.documentElement); const g = (k) =>"
+            " s.getPropertyValue(k).trim(); return { up: g('--up'), down: g('--down'),"
+            " sp2: g('--sp-2'), fsBase: g('--fs-base'),"
+            " cvd: document.documentElement.classList.contains('cvd-strict'),"
+            " dense: document.documentElement.classList.contains('density-compact'),"
+            " cvdBox: !!(document.getElementById('set-cvd-strict')||{}).checked,"
+            " denBox: !!(document.getElementById('set-density-compact')||{}).checked,"
+            " lsCvd: localStorage.getItem('btcq-cvd'), lsDen: localStorage.getItem('btcq-density') }; }"
+        )
+
+        # ── baseline (OFF): default teal palette, no a11y classes ──
+        page.wait_for_timeout(3000)  # let the footprint accumulate up-fill
+        v0 = page.evaluate(VARS_JS)
+        if _norm(v0["up"]) != "#26a69a" or _norm(v0["down"]) != "#ef5350":
+            fails.append(f"baseline palette: expected default 26A69A/EF5350, got {v0['up']!r}/{v0['down']!r}")
+        if v0["cvd"] or v0["dense"]:
+            fails.append(f"baseline classes: expected none, got cvd={v0['cvd']} dense={v0['dense']}")
+        fp0 = page.evaluate(FOOTPRINT_GREEN_JS, "#view-footprint")
+        if not fp0.get("n"):
+            fails.append(f"baseline footprint: no green up-fill pixels to compare ({fp0}) — "
+                         "replay too short or footprint empty")
+        shots += shot(page, "off")
+
+        # ── (c) presentation-only + toggle CVD ON, in ONE synchronous evaluate:
+        # read counts → click the checkbox (fires change → applyCvd synchronously
+        # → classList + LS + dirtyAll, NO recompute) → read counts. No replay
+        # macrotask can preempt a synchronous evaluate, so any delta would be the
+        # toggle mutating a datum — there must be none. ──
+        pres = page.evaluate(
+            "() => { const d = window.__BTCQ_TERMINAL_DEBUG; const before = d.counts();"
+            " document.getElementById('set-cvd-strict').click(); const after = d.counts();"
+            " return { before, after }; }")
+        diffs = {k: [pres["before"][k], pres["after"].get(k)]
+                 for k in pres["before"] if pres["before"][k] != pres["after"].get(k)}
+        if diffs:
+            fails.append(f"presentation-only VIOLATED: store counts changed across the CVD toggle "
+                         f"(§0) — {diffs}")
+        else:
+            print(f"PASS presentation-only: {len(pres['before'])} store counts identical across the toggle")
+
+        # ── (a) the toggle flipped the LIVE palette on documentElement ──
+        page.wait_for_timeout(600)  # one rAF + a repaint so the canvas re-reads
+        v1 = page.evaluate(VARS_JS)
+        if _norm(v1["up"]) != "#009e73" or _norm(v1["down"]) != "#d55e00":
+            fails.append(f"CVD-on palette: expected Okabe-Ito 009E73/D55E00 on documentElement, "
+                         f"got {v1['up']!r}/{v1['down']!r}")
+        elif not v1["cvd"]:
+            fails.append("CVD-on: --up/--down flipped but .cvd-strict class not on documentElement")
+        elif v1["lsCvd"] != "1" or not v1["cvdBox"]:
+            fails.append(f"CVD-on: class set but LS/checkbox not synced (lsCvd={v1['lsCvd']!r}, box={v1['cvdBox']})")
+        else:
+            print("PASS CVD-on: documentElement --up/--down → Okabe-Ito 009E73/D55E00, "
+                  "class + LS(btcq-cvd=1) + checkbox all synced")
+
+        # ── (b) it reached PIXELS: the footprint up-fill recoloured off teal ──
+        fp1 = page.evaluate(FOOTPRINT_GREEN_JS, "#view-footprint")
+        if fp0.get("n") and fp1.get("n"):
+            dist = ((fp0["r"] - fp1["r"]) ** 2 + (fp0["g"] - fp1["g"]) ** 2 + (fp0["b"] - fp1["b"]) ** 2) ** 0.5
+            # Okabe-Ito green has LESS red than teal — the up-fill's red channel
+            # must drop; and the average must move a visible distance.
+            if fp1["r"] < fp0["r"] - 3 and dist > 8:
+                print(f"PASS pixels: footprint up-fill recoloured — avg green-family "
+                      f"({fp0['r']:.0f},{fp0['g']:.0f},{fp0['b']:.0f}) → "
+                      f"({fp1['r']:.0f},{fp1['g']:.0f},{fp1['b']:.0f}), Δ={dist:.1f}, red dropped")
+            else:
+                fails.append(f"pixels: footprint up-fill did NOT recolour toward Okabe-Ito "
+                             f"(off r={fp0['r']:.0f} → on r={fp1['r']:.0f}, Δ={dist:.1f}) — "
+                             "CSS var flipped but the canvas did not follow")
+        elif not fp1.get("n"):
+            fails.append(f"pixels: no green up-fill in the CVD-on footprint ({fp1})")
+        shots += shot(page, "on")
+
+        # ── (d) density → compact retightens the token scale ──
+        page.locator("#set-density-compact").check()
+        page.wait_for_timeout(300)
+        v2 = page.evaluate(VARS_JS)
+        if v2["sp2"] != "6px" or v2["fsBase"] != "12px":
+            fails.append(f"density-compact tokens: expected --sp-2 6px / --fs-base 12px, "
+                         f"got {v2['sp2']!r}/{v2['fsBase']!r}")
+        elif not v2["dense"] or v2["lsDen"] != "compact" or not v2["denBox"]:
+            fails.append(f"density-compact: tokens set but class/LS/checkbox not synced "
+                         f"(dense={v2['dense']}, lsDen={v2['lsDen']!r}, box={v2['denBox']})")
+        else:
+            print("PASS density: --sp-2 8→6px, --fs-base 13→12px, class + LS(btcq-density=compact) + checkbox synced")
+
+        # ── (e) PERSISTENCE: reload → boot-apply restores both from the shared
+        # LS keys (the whole point of reusing btcq-cvd / btcq-density) ──
+        page.reload(wait_until="domcontentloaded")
+        try:
+            page.wait_for_function(READY_JS, timeout=READY_TIMEOUT_MS)
+        except Exception:
+            fails.append("reload: page never reached ready again")
+        v3 = page.evaluate(VARS_JS)
+        ok = (_norm(v3["up"]) == "#009e73" and v3["cvd"] and v3["cvdBox"]
+              and v3["sp2"] == "6px" and v3["dense"] and v3["denBox"])
+        if ok:
+            print("PASS persistence: after reload both prefs restored from LS "
+                  "(cvd-strict + density-compact on documentElement, vars + checkboxes)")
+        else:
+            fails.append(f"persistence: reload did NOT restore both prefs from LS — {v3}")
+        shots += shot(page, "reload")
+
+        # ── zero console errors / uncaught exceptions, NO allowlist ──
+        for e in console_errors:
+            fails.append(f"console error: {e}")
+        for e in page_errors:
+            fails.append(f"pageerror: {e}")
+        if not console_errors and not page_errors:
+            print("PASS console: 0 console errors, 0 page errors")
+
+        browser.close()
+
+    server.shutdown()
+    print(f"\nscreenshots ({len(shots)}) in {args.out}")
+    if fails:
+        print(f"\nFAIL — {len(fails)} problem(s):")
+        for f in fails:
+            print(f"  FAIL {f}")
+        return 1
+    print("\nOK — N3 a11y proven: CVD-safe recolours the footprint on the terminal, "
+          "presentation-only, and both toggles persist across a reload.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", default=os.path.join(ROOT, "reports", "verify"),
@@ -454,6 +682,11 @@ def main() -> int:
                          "(dead chip) while every SIBLING keeps painting and the rAF loop "
                          "survives. A SEPARATE run from the standard green path — this one "
                          "expects exactly one quarantine console.error, never zero.")
+    ap.add_argument("--a11y", action="store_true",
+                    help="N3 (Gap 7) a11y proof: toggle CVD-safe (Okabe-Ito) + density on the "
+                         "terminal and assert the palette flips on documentElement, reaches the "
+                         "footprint pixels, mutates NO datum, and persists across a reload from "
+                         "the shared LS keys. A SEPARATE run — it deliberately mutates view state.")
     args = ap.parse_args()
 
     sync_playwright = _require_playwright()
@@ -464,6 +697,12 @@ def main() -> int:
     # gate: a quarantine logs exactly once, by design).
     if args.fault:
         return run_fault(sync_playwright, args)
+
+    # N3: the a11y toggle proof is likewise self-contained — it mutates view
+    # state, reloads, and asserts persistence, none of which the standard render
+    # gate may do.
+    if args.a11y:
+        return run_a11y(sync_playwright, args)
 
     server, port = start_server()
     url = f"http://127.0.0.1:{port}/dashboard/terminal.html?replay=1"

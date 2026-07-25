@@ -91,7 +91,12 @@
 }
 
 /* §4.1 strict Okabe-Ito alt palette (user toggle: body.cvd-strict).
-   Blue/orange — maximally separable for all CVD types. */
+   Blue/orange — maximally separable for all CVD types.
+   NOTE: the terminal (terminal.css) MIRRORS these literals at :root.cvd-strict
+   (its class is keyed on documentElement, not <body>, so its canvas palette
+   reader picks it up). Keep the two in sync — a drift is caught by the a11y
+   pass in scripts/verify_terminal_browser.py (--a11y). Same for
+   body.density-compact below. */
 body.cvd-strict {
   --up:   #009E73;   /* bluish-green */
   --down: #D55E00;   /* vermillion   */

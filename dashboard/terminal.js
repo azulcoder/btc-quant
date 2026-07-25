@@ -3521,6 +3521,61 @@
   }
   wsSel.addEventListener('change', () => applyWorkspace(wsSel.value));
 
+  // ─── N3 (Gap 7): a11y toggles ported from the analytics page ─────────────
+  //
+  // CVD-safe (Okabe-Ito) palette + compact density — the analytics page has
+  // them (app.js applyCvd/applyDensity); the terminal did not, so a colour-
+  // blind user landed on red/green footprint/heatmap with no escape. These
+  // reuse app.js's semantics and the SAME standalone localStorage keys
+  // (btcq-cvd / btcq-density, separate from the btcq-terminal settings JSON) so
+  // the preference is SHARED across both pages — set once, applies everywhere.
+  //
+  // One deliberate divergence from app.js: it toggles the class on <body>; we
+  // toggle it on documentElement. The footprint/heatmap are canvas views whose
+  // palette reader (terminal-views.js pal() → cssVar()) reads custom props off
+  // getComputedStyle(document.documentElement) at draw time. Custom properties
+  // inherit downward only, so a body-level override never reaches
+  // documentElement — the canvas would not recolour. Keying the class on
+  // documentElement (with the :root.cvd-strict / :root.density-compact rules in
+  // terminal.css) makes the canvas reader see it AND every descendant inherit
+  // it. Presentation only: flips a class + one repaint, never a recompute — no
+  // store, bar, tick grid, or numeric value is touched.
+  const A11Y = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch (_) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* private mode / disabled */ } },
+  };
+  function applyCvd(strict) {
+    document.documentElement.classList.toggle('cvd-strict', !!strict);
+    const b = $('set-cvd-strict'); if (b) b.checked = !!strict;
+    A11Y.set('btcq-cvd', strict ? '1' : '0');
+    dirtyAll();   // force one repaint; the canvas palette re-reads --up/--down next rAF
+  }
+  function toggleCvd() { applyCvd(!document.documentElement.classList.contains('cvd-strict')); }
+  function applyDensity(mode) {
+    const compact = mode === 'compact';
+    document.documentElement.classList.toggle('density-compact', compact);
+    const b = $('set-density-compact'); if (b) b.checked = compact;
+    A11Y.set('btcq-density', mode);
+    dirtyAll();   // compact retightens the token scale → panels re-measure on repaint
+  }
+  function toggleDensity() { applyDensity(document.documentElement.classList.contains('density-compact') ? 'comfortable' : 'compact'); }
+  // Keys never fire while typing in a field (symbol search, cmdk input, whale/
+  // tick/datetime number boxes) — the terminal has no other single-key shortcut.
+  function typingInField(el) {
+    if (!el) return false;
+    const t = (el.tagName || '').toLowerCase();
+    return t === 'input' || t === 'select' || t === 'textarea' || el.isContentEditable;
+  }
+
+  // Restore the shared a11y preference at boot (default comfortable / standard
+  // palette) — reflects a value the user may have set on the analytics page.
+  applyCvd(A11Y.get('btcq-cvd', '0') === '1');
+  applyDensity(A11Y.get('btcq-density', 'comfortable') === 'compact' ? 'compact' : 'comfortable');
+  const cvdBox = $('set-cvd-strict');
+  if (cvdBox) cvdBox.addEventListener('change', () => applyCvd(cvdBox.checked));
+  const denBox = $('set-density-compact');
+  if (denBox) denBox.addEventListener('change', () => applyDensity(denBox.checked ? 'compact' : 'comfortable'));
+
   // ─── T-1 (§4g): command palette — index.html §5.1 idiom (fuzzy filter,
   // arrow nav, Enter runs, Esc closes, focus restored) ─────────────────────
   const cmdk = { items: [], filtered: [], sel: 0, lastFocus: null };
@@ -3589,6 +3644,10 @@
     items.push({ kind: 'tape', label: 'Tape audio → ' + (settings.tapeAudio.on ? 'off' : 'on') + ' (UX aid, not a signal)', run: () => toggleTapeAudio() });
     for (const s of DOM_SOURCES) items.push({ kind: 'ladder', label: 'Ladder source → ' + (s === '__agg' ? 'aggregated same-quote (USDT)' : (LEG_LABEL[EX_LEG[s]] || s)), run: () => setDomSource(s) });
     items.push({ kind: 'ladder', label: 'Ladder cumulative depth → ' + (settings.domCum ? 'off' : 'on'), run: () => { settings.domCum = !settings.domCum; domCumBox.checked = settings.domCum; saveSettings(); dirty.dom = true; } });
+    // N3 (Gap 7): a11y toggles — view state, so they work in replay too (no
+    // sockets/data touched). Labels reflect the CURRENT value (re-runs on open).
+    items.push({ kind: 'a11y', label: 'Colour-blind palette (Okabe-Ito) → ' + (document.documentElement.classList.contains('cvd-strict') ? 'off' : 'on'), run: toggleCvd });
+    items.push({ kind: 'a11y', label: 'Density → ' + (document.documentElement.classList.contains('density-compact') ? 'comfortable' : 'compact'), run: toggleDensity });
     // T-2 (§4h): leg enable/disable — one entry per matrix leg (label reflects
     // the CURRENT state; buildCommands re-runs on every open). Live only: replay
     // drives all legs deterministically (setLegEnabled no-ops there anyway).
@@ -3711,6 +3770,13 @@
         return;
       }
       if (e.key === 'Escape' && open) { e.preventDefault(); closeCmdk(); }
+      // N3 (Gap 7): single-key a11y shortcuts, mirroring analytics v/d. Guarded
+      // — never while the palette is open, never while typing in a field.
+      if (open) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (typingInField(e.target)) return;
+      if (e.key === 'v' || e.key === 'V') { e.preventDefault(); toggleCvd(); }
+      else if (e.key === 'd' || e.key === 'D') { e.preventDefault(); toggleDensity(); }
     });
   }
 

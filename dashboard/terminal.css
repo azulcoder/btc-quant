@@ -1,10 +1,46 @@
 /* terminal.css — orderflow terminal layout + panel styles (DESIGN §4).
    Loaded AFTER styles.css and built ENTIRELY on its custom properties: the
-   grey ladder, --up/--down (CVD-safe, survives body.cvd-strict), the
+   grey ladder, --up/--down (CVD-safe, swapped by :root.cvd-strict §N3 below), the
    categorical --c1…--c6 series palette, spacing/type scales. NO new hues —
    the only literal colors below are rgba() weightings of existing token
    values (same practice as styles.css's own flashUp/flashDown keyframes).
    Data/numbers are monospace tabular (ladder/tape density), prose stays Inter. */
+
+/* ─── N3 (Gap 7): a11y toggles ported from the analytics page ──────────────
+   The CVD-safe (Okabe-Ito) palette + compact-density scale exist on the
+   analytics page (styles.css body.cvd-strict / body.density-compact). The
+   terminal shares the SAME localStorage keys (btcq-cvd / btcq-density) — set
+   once, applies on both pages — but keys the class on the DOCUMENT ELEMENT,
+   not <body>, and mirrors the token overrides here at :root.
+
+   Why documentElement and not body (the load-bearing reason): the footprint
+   and book-heatmap are canvas views whose palette reader (terminal-views.js
+   pal() → cssVar()) reads the custom props off getComputedStyle(document
+   .documentElement) at DRAW time. Custom properties inherit DOWNWARD only, so
+   a value set on body.cvd-strict never reaches documentElement — the canvas
+   reader would see no change (only the DOM below body would recolour). Keying
+   the class on documentElement and these rules at :root fixes both: the canvas
+   reader picks up the override AND every descendant still inherits it.
+
+   Presentation only — recolours the palette / retightens the spacing scale;
+   no datum, store, or bar value is touched (terminal.js applyCvd/applyDensity
+   flip a class + a repaint, never a recompute). Values are quoted VERBATIM
+   from styles.css (§4.1 :96-98, §4.6 :657-662) — no new hues, no new sizes.
+   Specificity :root.cvd-strict (0,2,0) cleanly beats the base :root (0,1,0). */
+:root.cvd-strict {            /* §4.1 strict Okabe-Ito — mirrors styles.css body.cvd-strict */
+  --up:   #009E73;            /* bluish-green */
+  --down: #D55E00;            /* vermillion   */
+  --good: var(--up);
+}
+:root.density-compact {       /* §4.6 — mirrors styles.css body.density-compact */
+  --sp-1: 3px; --sp-2: 6px;  --sp-3: 9px;  --sp-4: 12px;
+  --sp-5: 18px; --sp-6: 24px; --sp-8: 36px;
+  --fs-xs: 10px; --fs-sm: 11px; --fs-base: 12px;
+  --fs-lg: 15px; --fs-xl: 18px; --fs-2xl: 25px;
+}
+/* No separate `main` override (unlike styles.css:663): main.term-main already
+   reads gap:var(--sp-2)/padding:var(--sp-3) and .term-col gap:var(--sp-2), so
+   the token redefinition above tightens the grid automatically. */
 
 /* ─── §0.1 permanent honesty banner — ONE compact bar (presentation pass):
    the NOT-FINANCIAL-ADVICE disclaimer (bold, left) and the research-context
@@ -1367,6 +1403,25 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .sym-list .sym-note { color: var(--muted); cursor: default; grid-template-columns: 1fr; }
 .ws-label { color: var(--g-400); font-family: var(--mono); font-size: var(--fs-xs); }
 .ws-sel { min-width: 118px; font-size: var(--fs-xs); padding: 2px 4px; }
+
+/* N3 (Gap 7): topbar a11y toggles — quiet mono chips matching .ws-label, the
+   terminal's <label><input type=checkbox> settings idiom lifted to the topbar
+   so the CVD-safe escape hatch is reachable without scrolling (where the
+   analytics page keeps its equivalents). Live/replay-agnostic: presentation
+   only. The checkbox rides the muted grey; the label brightens on hover. */
+.ux-a11y {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ux-a11y:hover { color: var(--fg); }
+.ux-a11y input { accent-color: var(--accent); cursor: pointer; margin: 0; }
 
 /* ─── T-1 (§4g): tape-intensity gauge strip (tape panel header) ──────────── */
 .ti-strip {
