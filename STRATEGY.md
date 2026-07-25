@@ -182,7 +182,12 @@ sequence to the calendar, not to enthusiasm.
       "before server deploy."
 - [ ] **N5. Surface the silent-catch counter** (dropped-frame / normalization-error,
       rate-limited, to a status chip) so post-deploy regressions are visible, not
-      swallowed.
+      swallowed. Folds in the N1 residuals (N1 set this up — `guard.stats().failures`
+      already accrues, ready to read): (a) a persistent ingest-prologue fault still
+      freezes the flush-derived views (DOM/heat/agg/liq/micro) — cascade a stale chip to
+      them, not only the header; (b) a non-latching (alternating throw/success) render
+      fault never trips the consecutive breaker and today emits no telemetry — surface it
+      via this counter so a recurring intermittent fault is visible, not silent.
 
 ### MID — close the flywheel + collapse the maintainability tax (1-3 months)
 
@@ -287,3 +292,8 @@ sequence to the calendar, not to enthusiasm.
   asserts store-routing + dirty-flag outcomes (the 4138-line glue is the fragile part with
   no fast test); and `tsc --checkJs` + minimal JSDoc types on the pure stores to catch
   numeric regressions a fixture smoke can miss.
+- **Denser replay fixture for positive-data assertions.** The current short fixture
+  leaves walls/vpin/tapeint/bigprints honest-empty, so the L1 browser gate only witnesses
+  their empty note by screenshot, never asserts they populate. A longer/denser fixture
+  that drives those panels to non-empty upgrades them from "empty-note witness" to a real
+  canvas/data assertion (surfaced by the N1 verification).
