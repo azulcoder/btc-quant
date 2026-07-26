@@ -66,6 +66,15 @@
       toArray() {
         return buf.length < cap ? buf.slice() : buf.slice(start).concat(buf.slice(0, start));
       },
+      /** T-4: the newest element, O(1) and allocation-free — null when empty.
+       *  Exists so a hot per-trade path can read the last item without
+       *  materialising the whole ring (toArray() is O(cap) and the tape ring
+       *  is 1500 deep). Once full the newest sits one slot BEHIND `start`
+       *  (push writes at `start`, then advances it), which wraps to cap-1. */
+      newest() {
+        if (!buf.length) return null;
+        return buf.length < cap ? buf[buf.length - 1] : buf[(start + cap - 1) % cap];
+      },
       get length() { return buf.length; },
     };
   }
@@ -3266,7 +3275,13 @@
       return out;
     }
 
-    return { push, list, aggWindowMs, get length() { return ring.length + (open ? 1 : 0); } };
+    /** T-4: the newest CLOSED block, without materialising the ring. list()[1]
+     *  is the same row whenever an open row exists (it always does right after
+     *  a push, which is the only place this is read), but list() copies the
+     *  whole ring — and the ring is now 1500 deep and read once per trade. */
+    function lastClosed() { return ring.newest(); }
+
+    return { push, list, lastClosed, aggWindowMs, get length() { return ring.length + (open ? 1 : 0); } };
   }
 
   // ─── sizeTier(notional, thresholds) — USD-notional print classifier (§4i) ──
@@ -3352,6 +3367,176 @@
       });
     }
     return out;
+  }
+
+  // ─── tapeFloorSummary(rows, opts) — what the floor took OUT of view (§4j) ──
+  //
+  // T-4: the min-notional floor FILTERS, it must never DISCARD. filterTapeRows
+  // returns what is shown; this pure sibling returns what is not, under the
+  // SAME market/venue projection, so the tape can state its own omission in one
+  // line instead of quietly shrinking (§0 honesty rail — nothing disappears
+  // silently). filterTapeRows' contract is frozen (its own check group + the
+  // terminal's render path depend on the array shape), hence a sibling rather
+  // than a second return value.
+  //
+  // Boundary is filterTapeRows' VERBATIM: `notional < minN` is below the floor,
+  // so a block exactly AT the floor is shown, never double-counted here.
+  // `blocks` and `prints` are two different honest numbers: blocks = aggregated
+  // rows hidden, prints = Σ row.count = the original wire prints behind them.
+  //
+  // Returns null when there is nothing to state — floor off (minN ≤ 0 / non-
+  // finite) or no row below it — because "0 hidden" would imply a floor is
+  // doing work when it is not. Pure, clock-free, DOM-free; input untouched.
+  // → { blocks, prints, notional, buyNotional, sellNotional, share }
+  function tapeFloorSummary(rows, opts) {
+    const o = opts || {};
+    const minN = o.minN;
+    if (!Number.isFinite(minN) || minN <= 0) return null;
+    const market = o.market || 'both';
+    const venue = o.venue || 'all';
+    const marketOf = typeof o.marketOf === 'function' ? o.marketOf : () => 'perp';
+    let blocks = 0, prints = 0, notional = 0, buyNotional = 0, sellNotional = 0;
+    let totalNotional = 0;   // every row passing market/venue — the denominator for share
+    for (const r of (Array.isArray(rows) ? rows : [])) {
+      if (!r) continue;
+      if (venue !== 'all' && r.ex !== venue) continue;
+      const mkt = marketOf(r.ex) === 'spot' ? 'spot' : 'perp';
+      if (market === 'spot' && mkt !== 'spot') continue;
+      if (market === 'perp' && mkt !== 'perp') continue;
+      const n = Number.isFinite(r.notional) ? r.notional : 0;
+      totalNotional += n;
+      // Compare the RAW notional, exactly as filterTapeRows does: `NaN < minN`
+      // is false there, so a NaN-notional row is SHOWN — and it must therefore
+      // not be counted as hidden here, or the kept+hidden invariant would lie.
+      if (!(r.notional < minN)) continue;
+      blocks++;
+      prints += Number.isFinite(r.count) ? r.count : 1;
+      notional += n;
+      if (r.isBuy) buyNotional += n; else sellNotional += n;
+    }
+    if (!blocks) return null;
+    return {
+      blocks, prints, notional, buyNotional, sellNotional,
+      // NaN-safe by construction: blocks > 0 here, so totalNotional > 0 unless
+      // every notional was 0 — in which case the share is genuinely undefined.
+      share: totalNotional > 0 ? notional / totalNotional : NaN,
+    };
+  }
+
+  // ─── News relevance (§4j) — a VISIBLE projection, never a hidden filter ────
+  //
+  // T-4: the Tree of Alpha feed is a raw firehose (145/200 rows are tweets in
+  // the measured sample) and personal chatter crowds out market headlines. The
+  // filter therefore lives HERE, at render time, behind a visible toggle —
+  // never in the normalizer: a filter at ingest could not be turned off, which
+  // is the definition of a hidden filter (§0 honesty rail).
+  //
+  // MEASURED 2026-07-26 (n=200 live rows) — this ordering is data, not taste:
+  //   suggestions[].coin  present on 158/200, coin==='BTC' on 18/200
+  //   symbols[]           present on  18/200, BTC-prefixed on   0/200
+  // so the feed's `symbols` array — what the old view keyed its BTC emphasis
+  // on — is DEAD CODE on the live wire, and `suggestions` is the identifiable
+  // field. The transport `source` is NOT evidence: 'Blogs' is a catch-all that
+  // carries CDC and WHITEHOUSE releases alongside COINDESK.
+  //
+  // ACCOUNT-mapped suggestions are excluded from content evidence upstream (see
+  // normalizeToaNews' `accountCoins`): an @elonmusk Starship tweet is tagged
+  // coin:'DOGE' because of WHO posted it, so honoring it would let the single
+  // largest noise source through untouched — the whole reason the filter exists.
+  //
+  // KNOWN, MEASURED false positives (stated, not hidden): the feed's content
+  // mapper matches bare tickers inside ordinary prose, so "…PASS THE SAVE
+  // AMERICA ACT" is tagged coin:'ACT' and "bridge completes beam erection" is
+  // tagged 'BEAMX'. On two independent 200-row pulls that was 3/200 ≈ 1.5% of
+  // the feed, against 6/200 genuine crypto-project posts that ONLY this rung
+  // catches — so the rung earns its place and the error is reported rather than
+  // patched with an unmeasured heuristic. Each row carries its evidence rung in
+  // a tooltip, so a surprising row explains itself.
+  const NEWS_VENUE_SOURCES = ['Upbit', 'Bithumb'];
+  // Stated lexicon over the title — the ONLY content field a normalized row
+  // carries. Deliberately plain and enumerable rather than clever: a reader can
+  // audit exactly why a headline was kept. Matched case-insensitively on WORD
+  // boundaries so 'eth' never fires inside 'ethical' and 'sec' never inside
+  // 'SECPaulSAtkins'.
+  const NEWS_CRYPTO_WORDS = [
+    'crypto', 'cryptocurrency', 'bitcoin', 'btc', 'satoshi', 'ethereum', 'eth', 'ether',
+    'solana', 'xrp', 'ripple', 'dogecoin', 'doge', 'altcoin', 'memecoin', 'stablecoin',
+    'usdt', 'usdc', 'tether', 'blockchain', 'onchain', 'on-chain', 'defi', 'dex',
+    'token', 'tokens', 'tokenized', 'tokenization', 'nft', 'web3', 'staking', 'airdrop',
+    'mining', 'miner', 'miners', 'hashrate', 'halving', 'wallet', 'custody', 'etf', 'etp',
+    'binance', 'coinbase', 'kraken', 'okx', 'bybit', 'deribit', 'upbit', 'bithumb',
+    'perp', 'perps', 'futures', 'liquidation', 'liquidations', 'exchange', 'exchanges',
+    'sec', 'cftc', 'mica', 'treasury', 'etf inflows',
+  ];
+  const NEWS_BTC_WORDS = ['btc', 'bitcoin', 'xbt', 'satoshi'];
+  // Crypto-press PUBLISHERS, matched only as the title's own leading token
+  // ("COINTELEGRAPH: Fidelity joins push for Senate passage of CLARITY Act").
+  // This is content, not transport: the feed's `source` says 'Blogs' for CDC,
+  // WHITEHOUSE and COINDESK alike, whereas the publisher stamped into the title
+  // is the one field that separates them. Added because the lexicon alone
+  // measurably lost real market headlines (the CLARITY Act row above was a
+  // false negative on the 2026-07-26 sample). The list is exactly what was
+  // OBSERVED on that wire — no speculative entries, so no untested path.
+  const NEWS_CRYPTO_PRESS = ['COINTELEGRAPH', 'COINDESK', 'THE BLOCK', 'DECRYPT', 'CHAINWIRE'];
+  const NEWS_PRESS_RE = /^([A-Z0-9][A-Z0-9 .&'-]{1,24}):/;
+  function wordRe(words) {
+    // Escape nothing on purpose — the lexicon is a literal, in-file constant.
+    return new RegExp('(^|[^a-z0-9])(' + words.join('|').replace(/ /g, '\\s+') + ')([^a-z0-9]|$)', 'i');
+  }
+  const NEWS_CRYPTO_RE = wordRe(NEWS_CRYPTO_WORDS);
+  const NEWS_BTC_RE = wordRe(NEWS_BTC_WORDS);
+
+  /** §4j — descriptive relevance read of ONE normalized ToA row, ordered by
+   *  evidence strength (measured above):
+   *    1 coins    — the feed's own CONTENT-derived coin mapping
+   *    2 symbols  — the feed's listing tags
+   *    3 press    — a crypto-press publisher stamped into the title itself
+   *    4 keyword  — the stated lexicon over the title
+   *    5 venue    — Upbit/Bithumb exchange notices: every row IS a market event
+   *                 (listing, deposit suspension) and their titles are Korean,
+   *                 so no English lexicon can reach them
+   *  Pure, DOM-free, clock-free. → { crypto, btc, why } with why '' when the
+   *  row carries no evidence at all. */
+  function newsRelevance(item) {
+    const it = item || {};
+    const title = typeof it.title === 'string' ? it.title : '';
+    const coins = Array.isArray(it.coins) ? it.coins : [];
+    const symbols = Array.isArray(it.symbols) ? it.symbols : [];
+    const btc = coins.indexOf('BTC') >= 0
+      || symbols.some((s) => typeof s === 'string' && s.indexOf('BTC') === 0)
+      || NEWS_BTC_RE.test(title);
+    if (coins.length) return { crypto: true, btc, why: 'coins' };
+    if (symbols.length) return { crypto: true, btc, why: 'symbols' };
+    const press = NEWS_PRESS_RE.exec(title);
+    if (press && NEWS_CRYPTO_PRESS.indexOf(press[1].trim()) >= 0) return { crypto: true, btc, why: 'press' };
+    if (NEWS_CRYPTO_RE.test(title)) return { crypto: true, btc, why: 'keyword' };
+    if (NEWS_VENUE_SOURCES.indexOf(it.source) >= 0) return { crypto: true, btc, why: 'venue' };
+    return { crypto: false, btc, why: '' };
+  }
+
+  /** §4j — the visible projection. Returns the kept rows AND the counts the
+   *  caption states, so what was taken out of view is always stated on screen
+   *  (kept + filtered === total, always). Rows come back as SHALLOW COPIES
+   *  tagged with `rel` (the filterTapeRows tagged-copy idiom) so the view can
+   *  emphasize BTC rows without re-deriving the read; the input is untouched.
+   *  mode 'all' keeps everything — the toggle must be able to give it all back,
+   *  which is only possible because the normalizer filtered nothing.
+   *  → { rows, total, kept, filtered, btcCount, mode } */
+  function filterNewsRows(items, opts) {
+    const o = opts || {};
+    const mode = o.mode === 'all' ? 'all' : 'crypto';
+    const src = Array.isArray(items) ? items : [];
+    const rows = [];
+    let btcCount = 0;
+    for (const it of src) {
+      if (!it) continue;
+      const rel = newsRelevance(it);
+      if (mode === 'crypto' && !rel.crypto) continue;
+      if (rel.btc) btcCount++;
+      rows.push(Object.assign({}, it, { rel }));
+    }
+    const total = src.filter((x) => !!x).length;
+    return { rows, total, kept: rows.length, filtered: total - rows.length, btcCount, mode };
   }
 
   // ─── BigPrintRail({max, thresholds}) — pinned huge/whale strip (§4i) ───────
@@ -3742,6 +3927,10 @@
     // caveat at its implementation (never a merged truth).
     TapeAggregator, sizeTier, SIZE_TIER_DEFAULTS, liqTier, LIQ_TIER_DEFAULTS,
     filterTapeRows, BigPrintRail, TradeImprint,
+    // T-4 (§4j): what the tape's min-notional floor took OUT of view (stated,
+    // never discarded) + the news relevance read and its VISIBLE projection
+    // (the toggle's 'all' mode must be able to give every row back).
+    tapeFloorSummary, newsRelevance, filterNewsRows,
     ladderRows, depthImbalance, logBarWidth, mergeSameQuoteBooks,
     // N1: per-panel render circuit breaker (paint-loop error boundary) — pure,
     // DOM-free, clock-free; wired into terminal.js frame() via safePanel.

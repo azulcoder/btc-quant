@@ -580,3 +580,135 @@ daily: ξ=0.172; EVT vs historical agree at 99% (cross-validation), diverge at 9
 convention was wrong (E[Y·F], always-degenerate); implementation follows Hosking–Wallis
 `E[Y(1−F)]`, verified vs MLE. Guards: <30 exceedances → NaN; ξ≥1 → ES NaN. Sign matches
 `risk.var/cvar`. See RESEARCH-evt-runlog.md. pytest 207, parity 79.
+
+## 2026-07-26 — T-4 Wave 1 "Truth": the health chip lied, and the Bybit drop is not the ping
+
+**R2 — a regression from `afe817f` (N5), fixed.** OKX answers its keepalive with the plain
+text `pong`. `JSON.parse('pong')` throws, N5 started counting every parse failure, so a
+perfectly healthy terminal wore a permanent amber **"degraded: N dropped"** chip. The
+adapter comment had warned about exactly this ("safely ignored BY CONSTRUCTION… documented
+so nobody 'fixes' it") and N5's own `normSkip` deferral was the precedent that should have
+covered it. Fix: an OPTIONAL `adapter.isControlFrame(rawText)` consulted **inside** the
+parse catch (byte-identical happy path), declared only by the two OKX adapters. A control
+frame is not counted, never reaches `onMessage`, and DOES stamp liveness — which forced a
+second, non-optional change: livewire now keeps `lastAliveAt` (data + control) for `stale`
+and `lastDataAt` (data only) for the `DEAD_MS` force-reconnect. A single stamp would have
+let an OKX leg with a dead subscription pong every 25 s and keep the 40 s watchdog from ever
+firing — planting a worse silent-stale bug than the one being fixed.
+
+**Measured, local build, 400 s live (no replay), 80 samples 5 s apart:**
+
+```
+dropped = 0   drops = {}   faults = 0   health chip hidden = 80/80 samples
+baseline (before the fix): 13 parse-errors / 170 s = 2 okx legs x 25 s ping, exactly
+L2 (verify_wire_live 180 s):  okx ctrl=7  pDrop=0  alive=2081   (7 = 180/25, exact)
+                              bybit/binancef/coinbase ctrl=0  pDrop=0
+```
+
+**R1 — the ping-margin theory is REFUTED as the mechanism; reported as measured, not as a
+fix.** `pingMs` 20000 → 15000 on both Bybit v5 legs is a 5 s jitter margin under the vendor's
+own ≲20 s rule, and it is the right value to sit at — but it did **not** stop the drops, and
+the newly captured CloseEvent says why. `ws.onclose` used to discard the event entirely, so
+this was previously unobservable. Same 400 s run:
+
+```
+bybit·lin   open->stale @95s, ->open @100s ;  open->stale @367s, ->open @382s
+bybit·spot  open->stale @95s, ->open @100s ;  open->stale @367s, ->open @387s
+binance·fut / binance·spot / okx·swap / okx·spot / coinbase   ZERO transitions
+captured close:  bybit / code 1006 / reason "" / wasClean false / visibilityState "visible"
+```
+
+Read against the decision table: **1006 with an empty reason is an abnormal transport close**
+(proxy / NIC / ISP / gateway), not a server-initiated ping timeout — a timeout would arrive
+as 1000/1001 **with** a reason. The tab was **visible**, so background-tab timer throttling
+is not it either. And the 95 s episode produced **no close at all**: the socket stayed OPEN
+while the feed went quiet past `STALE_MS`, which is a different bug class again (a data gap,
+not a disconnect). A 300 s Node A/B earlier the same day ({linear,spot} × {20 s,15 s}) saw
+0 closes and 0 stale on all four sockets with 2–3 ms ping drift, i.e. the drop does not
+reproduce on a clean event loop at either value. **Conclusion: lowering `pingMs` further is
+not indicated.** The remaining candidates are transport-level instability on this network
+path and browser event-loop jitter; the telemetry to discriminate them now exists
+(`__BTCQ_TERMINAL_DEBUG.health().legCloses`, per-leg conn-chip tooltip).
+
+**Signal-to-noise, same wave.** Tape floor `DEFAULTS.tapeMin` 0 → **$10,000** — the repo's
+own `CvdStore` taxonomy cut, not an invented number; $100k (`SIZE_TIER_DEFAULTS.sig`) was
+rejected on measurement (8 blocks/180 s ⇒ ~25 min to fill the panel). Nothing is discarded:
+`tapeFloorSummary` states the residue in the panel — live read, *"below $10.0k · 389 blocks
+(554 prints) · $238.0k = 29% of tape $ · 43% buy — filtered from view, not discarded"*. News
+gains a VISIBLE crypto⇄all toggle over a measured evidence ladder; on n=200 live rows the old
+BTC test (`symbols[]` prefixed 'BTC') fired **0/200** — dead code — while the feed's own
+content-derived `suggestions[].coin` fires 18/200, so BTC emphasis now works at all. Known
+false positives are stated, not patched: the feed's mapper matches bare tickers in prose
+("SAVE AMERICA **ACT**" → `ACT`), 3/200 ≈ 1.5% across two pulls. The three duplicated
+"collector API offline" paragraphs collapse into one local-only strip that names the folded
+features, the cause and the recovery command — and refuses to fold a panel that still has
+data (live read with the API blocked: auction stayed OPEN on the HF archive and the strip
+said so).
+
+**Rails:** presentation-only changes touched no datum; gaps stay gaps; the tape default is
+migrated ONCE via `settingsVer: 4` and the panel SAYS the default moved. check_terminal
+77→81 groups; parity 79 fields; pytest 208; browser harness normal + `--n5` + `--fault` +
+`--a11y` all green; `verify_wire_live` exit 0.
+
+### Review round, same wave — three claims above were wrong and are corrected here
+
+The wave was reviewed before it was committed and the review reproduced three defects the
+first draft had introduced or asserted. Recording them rather than quietly editing the
+paragraphs above, per the audit-trail rail.
+
+**(a) The two-clock split protected only OKX — Bybit, the primary venue, was still on one
+clock.** Bybit v5's pong is valid JSON, so it never reaches `isControlFrame`; it lands in
+the adapter's `onMessage`, which called `api.markAlive()` and therefore stamped `lastDataAt`.
+Reproduced A/B on a stub transport with livewire's real wall clock: a Bybit adapter fed
+*only* `{"success":true,"ret_msg":"pong"}` every 15 s never force-reconnected (it cycled
+stale→"recovered" forever), while an OKX adapter fed only `pong` at 25 s force-reconnected at
+t=40 s. So `DESIGN §4j`'s "collapsing them lets a pongging socket with a dead subscription
+live forever" was true of 2 of 7 legs *as shipped in the draft* — the two measured to drop.
+Fixed by giving livewire an explicit `api.markControlAlive()` and routing both Bybit legs
+through it. **[SUPERSEDED]** the draft's claim that the split closed the hole generally.
+
+**(b) The fix introduced a new false-green.** `markControlAlive()` cleared `stale` and emitted
+`('open', 'live feed recovered')`, and the watchdog's amber text was computed from the same
+answering clock. Reproduced over a 95 s scripted blackout: with the predicate the chip read
+GREEN for 24 s of a 40 s data outage (vs 12 s before the change) and the amber line understated
+the gap by up to `STALE_MS` + the pong period. "live feed recovered" is a claim about DATA that
+a keepalive cannot support — the same class of defect as R2, pointing the other way. Fixed:
+`stale` and `DEAD_MS` both read `lastDataAt`; `lastAliveAt` only appends "(socket still
+answering)" to the amber message; only a data frame retracts amber.
+
+**(c) The tape-floor effect was overstated ~5×, and the constraint was misidentified.** The
+`DEFAULTS.tapeMin` comment claimed "the 60-row window widens 5.4 s → 151 s and carries 5 rows
+at/above `sig` instead of 0". The panel filters at RENDER time over `tapeAgg.list()`, which a
+400-block ring caps — 151 s of tape was unreachable at any floor value. Re-measured 2026-07-27,
+180 s live, six trade legs into the production composition: 1,139 blocks (6.3/s), median block
+$100, p90 $4.4 k; 4.7 % clear $10 k, so 60 rows cost ~1,290 blocks and a 400-block ring rendered
+15 rows into a 60-row box. Corrected the claim and raised the ring 400 → 1500 (inert with the
+floor off; the per-trade path moved to an O(1) `lastClosed()` so the deeper ring costs nothing
+on ingest). End-to-end on the live page afterwards, 180 s, ring at capacity (1,501 blocks):
+**60 of 60 rows rendered**, tiers `{baseline 55, sig 1, large 4}`, caption "below $10.0k ·
+1,372 blocks (1,792 prints) · $1.41M = 17 % of tape $ · 15 % buy — filtered from view, not
+discarded"; health chip hidden, `dropped=0`, 0 console errors, all 7 legs `live`.
+**[SUPERSEDED]** the "5.4 s → 151 s / 5 rows at sig" numbers.
+
+**Also fixed in the same round** (each reproduced by the review): the local-only strip shared
+`grid-area: klev` with the still-visible key-levels panel and painted *behind* it, so the
+offline explanation was invisible in a reachable state — the strip now claims no area and is
+placed at paint time in the cell of a panel it actually folded, with check group 77 pinning
+"no two elements share an `area-*` class"; `.folded-local` on the element carrying
+`id="sec-auction"` made the AUCTION nav link and the ⌘K jump no-ops (anchor moved to a
+`.sec-anchor` span in the eyebrow); folding key levels removed its own §0.7 IB prose from the
+page (the strip now restates it, and names the folded feature "key levels", not "(registry
+half)"); the econ half asserted "no local econ file" for ~1.1 s of every load while the fetch
+was in flight (tri-state `econProbed`, matching the `apiUp === null` rule the same function
+already stated); `legCloses` survived `health.reset()` on a symbol switch so the chip tooltip
+and the debug counter disagreed; the strip's change key omitted `auctionState.profile`, whose
+text it reads; its self-re-arm sat as the LAST statement of its own `safePanel` callback, so
+one throw would have frozen the fold state; `panelUnitsOf('local')` fell through to
+`view-header`, so a quarantined strip would have dimmed the HEADER panel and chipped it
+`stalled`; and the `?replay=1` news-relevance `<select>` was interactive but wired to nothing.
+
+**Also corrected:** check group 74(d)'s comment described "drive the socket into stale, then
+check a control frame clears it" while the code asserted only that a pong on a HEALTHY socket
+is silent — deleting the liveness stamp outright still passed. It now drives livewire's real
+watchdog on a stubbed clock and asserts the full contract; all three regressions above were
+mutation-tested against it and each one fails the group.

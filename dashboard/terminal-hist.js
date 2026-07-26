@@ -483,11 +483,30 @@
   }
 
   /**
-   * Tree of Alpha /api/news → [{ts, title, source, url, symbols}], newest
-   * first. `source` is the transport/category ('Twitter', 'Blogs', …); rows
-   * without a finite ts or a title are dropped (an undatable headline can't
-   * be ordered honestly). RAIL (§4e): a CONTEXT FEED — the NewsView labels
-   * it; headlines are descriptive context, never tradeable information.
+   * Tree of Alpha /api/news → [{ts, title, source, url, symbols, coins,
+   * accountCoins}], newest first. `source` is the transport/category
+   * ('Twitter', 'Blogs', …); rows without a finite ts or a title are dropped
+   * (an undatable headline can't be ordered honestly). RAIL (§4e): a CONTEXT
+   * FEED — the NewsView labels it; headlines are descriptive context, never
+   * tradeable information.
+   *
+   * T-4 (§4j): this normalizer applies NO relevance filter, deliberately. The
+   * relevance projection is a RENDER-time, user-toggleable read (terminal-
+   * state.js filterNewsRows), so the normalizer's job is to carry the evidence
+   * that read needs — a filter here could never be switched off, which is
+   * exactly the hidden filter the honesty rail forbids.
+   *
+   * MEASURED 2026-07-26 (n=200 live rows): `symbols` is present on 18/200 and
+   * carries a BTC-prefixed tag on 0/200, while `suggestions` is present on
+   * 158/200 and carries coin==='BTC' on 18/200 — `suggestions` is the
+   * identifiable field, `symbols` alone is degenerate. `symbols` still passes
+   * through UNCHANGED (its shape is frozen by check group 32).
+   *
+   * `isAccountMapped:true` suggestions are split into their OWN field: that
+   * mapping comes from the ACCOUNT, not the text (an @elonmusk Starship tweet
+   * is tagged coin:'DOGE'), so it is never content evidence. Keeping it rather
+   * than dropping it means a future account-aware read has the datum, and the
+   * relevance filter can stay honest about not using it.
    */
   function normalizeToaNews(json) {
     if (!Array.isArray(json)) return null;
@@ -496,12 +515,24 @@
       if (!r || typeof r.title !== 'string' || r.title === '') continue;
       const ts = Number(r.time);
       if (!Number.isFinite(ts)) continue;
+      const sug = Array.isArray(r.suggestions) ? r.suggestions : [];
+      const coinsOf = (accountMapped) => {
+        const seen = [];
+        for (const s of sug) {
+          if (!s || typeof s.coin !== 'string' || s.coin === '') continue;
+          if ((s.isAccountMapped === true) !== accountMapped) continue;
+          if (seen.indexOf(s.coin) < 0) seen.push(s.coin);
+        }
+        return seen;
+      };
       out.push({
         ts,
         title: r.title,
         source: typeof r.source === 'string' ? r.source : '',
         url: typeof r.url === 'string' ? r.url : '',
         symbols: Array.isArray(r.symbols) ? r.symbols.filter((s) => typeof s === 'string') : [],
+        coins: coinsOf(false),          // CONTENT-derived mapping — the identifiable evidence
+        accountCoins: coinsOf(true),    // ACCOUNT-derived mapping — kept, never content evidence
       });
     }
     out.sort((a, b) => b.ts - a.ts);                   // newest first — deterministic whatever the wire order

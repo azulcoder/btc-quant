@@ -16950,5 +16950,172 @@
    ]
   }
  ],
- "_t2_notes": "T-2 venue-matrix fixtures captured live 2026-07-23 (this network). Trims (fewer REAL rows, rows themselves verbatim): bybit spot orderbook.200 snapshot 200->60 levels/side; okx books snapshots 400->60/side; coinbase level2_batch snapshot 17699b/26431a->100/side (the RAW snapshot frame measured 1,160,901 bytes in ONE WS message -- browser WebSocket has no incoming-size cap; the 1 MiB probe limit was a python-websockets client default). Binance diffs were captured AROUND a same-moment REST depth snapshot (limit=50) so continuity brackets for real: spot U<=lastUpdateId+1<=u, futures pu chain -- BinanceBookSync-verified at capture time. OKX books: the wire checksum field is an UNPOPULATED 0 placeholder on EVERY frame (measured 300+ frames across BTC-USDT-SWAP/BTC-USDT/ETH-USDT-SWAP -- kept verbatim as evidence); seqId/prevSeqId chains intact across the kept frames and is the continuity rail the adapter enforces. Coinbase matches side is the MAKER side (lowercase); the first kept frame is the subscribe-time last_match."
+ "_t2_notes": "T-2 venue-matrix fixtures captured live 2026-07-23 (this network). Trims (fewer REAL rows, rows themselves verbatim): bybit spot orderbook.200 snapshot 200->60 levels/side; okx books snapshots 400->60/side; coinbase level2_batch snapshot 17699b/26431a->100/side (the RAW snapshot frame measured 1,160,901 bytes in ONE WS message -- browser WebSocket has no incoming-size cap; the 1 MiB probe limit was a python-websockets client default). Binance diffs were captured AROUND a same-moment REST depth snapshot (limit=50) so continuity brackets for real: spot U<=lastUpdateId+1<=u, futures pu chain -- BinanceBookSync-verified at capture time. OKX books: the wire checksum field is an UNPOPULATED 0 placeholder on EVERY frame (measured 300+ frames across BTC-USDT-SWAP/BTC-USDT/ETH-USDT-SWAP -- kept verbatim as evidence); seqId/prevSeqId chains intact across the kept frames and is the continuity rail the adapter enforces. Coinbase matches side is the MAKER side (lowercase); the first kept frame is the subscribe-time last_match.",
+ "_t4_notes": "t4_toa_news captured live 2026-07-26 from news.treeofalpha.com/api/news (8 real rows out of a n=200 sample, verbatim). Measured on that sample: symbols[] present 18/200 and BTC-prefixed 0/200 -- dead code as a BTC test; suggestions[] present 158/200 with coin==\"BTC\" on 18/200 -- the identifiable field. 105/200 rows carry an isAccountMapped:true suggestion, which maps the POSTER not the text (the Elon Starship row here is tagged DOGE that way), so it is never content evidence. Rows chosen to cover one case each of the relevance evidence ladder: account-mapped-only, symbols, venue notice (Upbit, Korean title -- no English lexicon can reach it), content-mapped BTC, two non-crypto Blogs releases (WHITEHOUSE/CDC -- proof that the transport \"source\" is not evidence), crypto press, keyword.",
+ "_t4_pong_note": "t4_bybit_pong captured live 2026-07-27 from wss://stream.bybit.com/v5/public/{linear,spot} by sending {op:'ping'} and keeping the first reply VERBATIM. Note the wire reality the adapter comment depends on: the pong is valid JSON (so it can never reach livewire's isControlFrame branch -- it lands in onMessage), and `op` echoes back as \"ping\", NOT \"pong\" -- ret_msg is the field that actually identifies it. The `op === 'pong'` arm of the adapter test is the documented other-gateway fallback and is exercised synthetically in check group 74.",
+ "t4_bybit_pong": [
+  {
+   "success": true,
+   "ret_msg": "pong",
+   "conn_id": "d8bu1olkndm7crnfs1e0-f2y01",
+   "req_id": "",
+   "op": "ping"
+  },
+  {
+   "success": true,
+   "ret_msg": "pong",
+   "conn_id": "d9avtudnm4lujdv9k710-27ktv",
+   "op": "ping"
+  }
+ ],
+ "t4_toa_news": [
+  {
+   "_id": "2081204422281949372",
+   "source": "Twitter",
+   "title": "Elon Musk (@elonmusk): Great video of Starship launching  https://t.co/QRgpOFR2au",
+   "url": "https://twitter.com/elonmusk/status/2081204422281949372",
+   "icon": "https://twproxy.twproxy.workers.dev/?url=https%3A%2F%2Fpbs.twimg.com%2Fprofile_images%2F2053244804520427520%2Fm8mdWZCG_400x400.jpg",
+   "image": "https://twproxy.twproxy.workers.dev/?url=https%3A%2F%2Fpbs.twimg.com%2Famplify_video_thumb%2F2081187613160148992%2Fimg%2Fmjd0OwRccYAi8ihE.jpg",
+   "time": 1785032776213,
+   "info": {
+    "twitterId": "44196397",
+    "isReply": false,
+    "isRetweet": false,
+    "isQuote": false,
+    "isSelfReply": false
+   },
+   "suggestions": [
+    {
+     "found": [
+      "DOGE"
+     ],
+     "coin": "DOGE",
+     "isAccountMapped": true,
+     "symbols": [
+      {
+       "exchange": "binance-futures",
+       "symbol": "DOGEUSDT"
+      },
+      {
+       "exchange": "binance",
+       "symbol": "DOGEUSDT"
+      },
+      {
+       "exchange": "binance",
+       "symbol": "DOGEBTC"
+      },
+      {
+       "exchange": "bybit-perps",
+       "symbol": "DOGEUSDT"
+      }
+     ],
+     "supply": 151773726383
+    }
+   ]
+  },
+  {
+   "title": "THE BLOCK: EU adds HTX to Russia sanctions list, barring transactions starting Aug. 23",
+   "source": "Blogs",
+   "url": "https://www.theblock.co/post/409668/eu-adds-htx-to-russia-sanctions-list-barring-transactions-starting-aug-23",
+   "time": 1785014609680,
+   "symbols": [
+    "THE_USDT"
+   ],
+   "sourceName": "THE BLOCK",
+   "en": "THE BLOCK: EU adds HTX to Russia sanctions list, barring transactions starting Aug. 23",
+   "firstPrice": {
+    "THEUSDT": 0.0548,
+    "THEBTC": 0.00000283
+   },
+   "_id": "1785014609680TBEaHtRslbtsA2",
+   "suggestions": []
+  },
+  {
+   "title": "[\uc774\ubca4\ud2b8] \uc0c8\ub86d\uac8c \ub3cc\uc544\uc628 \uc2a4\ud14c\uc774\ube14 \ucf54\uc778 \uadf8\ub8f9 \ud398\uc5b4 \uac70\ub798 \uc218\uc218\ub8cc \ubb34\ub8cc \uc774\ubca4\ud2b8 \uc548\ub0b4 (07/26 09:00 ~)",
+   "source": "Upbit",
+   "url": "https://upbit.com/service_center/notice?id=644912522",
+   "time": 1785022207534,
+   "symbols": [],
+   "_id": "178502220753400",
+   "en": "[Event] Announcement of the Newly Returned Free Trading Fee Event for Stablecoin Group Pairs (07/26 09:00 ~)",
+   "suggestions": []
+  },
+  {
+   "title": "CROWDFUNDINSIDER: Michael Saylor's Strategy and BlackRock Establish Bitcoin Security Consortium to Tackle Quantum Computing Risks",
+   "source": "Blogs",
+   "url": "https://www.crowdfundinsider.com/2026/07/293417-michael-saylors-strategy-and-blackrock-establish-bitcoin-security-consortium-to-tackle-quantum-computing-risks",
+   "time": 1785030050613,
+   "symbols": [],
+   "sourceName": "CROWDFUNDINSIDER",
+   "en": "CROWDFUNDINSIDER: Michael Saylor's Strategy and BlackRock Establish Bitcoin Security Consortium to Tackle Quantum Computing Risks",
+   "_id": "1785030050613CMSSaBEBSCtTQCR",
+   "suggestions": [
+    {
+     "found": [
+      "Bitcoin"
+     ],
+     "coin": "BTC",
+     "symbols": [
+      {
+       "exchange": "binance-futures",
+       "symbol": "BTCUSDT"
+      },
+      {
+       "exchange": "binance",
+       "symbol": "BTCUSDT"
+      },
+      {
+       "exchange": "bybit-perps",
+       "symbol": "BTCUSDT"
+      }
+     ],
+     "supply": 19948812
+    }
+   ]
+  },
+  {
+   "title": "WHITEHOUSE: Restoring Trust in the Smithsonian Institution E061",
+   "source": "Blogs",
+   "url": "https://www.whitehouse.gov/presidential-actions/2026/07/restoring-trust-in-the-smithsonian-institution-e061",
+   "time": 1784924351573,
+   "symbols": [],
+   "sourceName": "WHITEHOUSE",
+   "en": "WHITEHOUSE: Restoring Trust in the Smithsonian Institution E061",
+   "_id": "1784924351573WRTitSIE",
+   "suggestions": []
+  },
+  {
+   "title": "CDC: Cyclospora outbreak linked to iceberg lettuce expanded to four new states",
+   "source": "Blogs",
+   "url": "https://tools.cdc.gov/api/embed/downloader/download.asp?c=766095&m=132608",
+   "time": 1784928139302,
+   "symbols": [],
+   "sourceName": "CDC",
+   "en": "CDC: Cyclospora outbreak linked to iceberg lettuce expanded to four new states",
+   "_id": "1784928139302CColtiletfns",
+   "suggestions": []
+  },
+  {
+   "title": "COINTELEGRAPH: Fidelity joins push for Senate passage of CLARITY Act",
+   "source": "Blogs",
+   "url": "https://cointelegraph.com/news/fidelity-push-senate-passage-of-clarity-act",
+   "time": 1784979356379,
+   "symbols": [],
+   "sourceName": "COINTELEGRAPH",
+   "en": "COINTELEGRAPH: Fidelity joins push for Senate passage of CLARITY Act",
+   "_id": "1784979356379CFjpfSpoCA",
+   "suggestions": []
+  },
+  {
+   "title": "CNBC: Does crypto make your portfolio less risky? Only if you do it right, experts say",
+   "source": "Blogs",
+   "url": "https://www.cnbc.com/2026/07/25/crypto-diversified-investment-portfolio.html",
+   "time": 1784986208779,
+   "symbols": [],
+   "sourceName": "CNBC",
+   "en": "CNBC: Does crypto make your portfolio less risky? Only if you do it right, experts say",
+   "_id": "1784986208779CDcmyplrOiydires",
+   "suggestions": []
+  }
+ ]
 }

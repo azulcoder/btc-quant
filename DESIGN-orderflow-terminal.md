@@ -819,6 +819,198 @@ trade-imprint-at-price bucketing (buy/sell split, window prune); depth-imbalance
 within-N-ticks math; aggregated-ladder same-quote-only grid merge (a non-USDT leg is
 excluded, not rescaled).
 
+## 4j. T-4 Wave 1 contracts — Truth (binding; probes 2026-07-26)
+
+Wave 1 of T-4 is robustness + signal-to-noise: make the instrument stop accusing
+itself of being broken when it is healthy, make what it drops observable, and stop
+the two panels that drown their own signal. Everything below is live-descriptive
+(§0.1); the tape floor and the news relevance mode are labeled DISPLAY projections,
+never filters at ingest.
+
+### Control frames are not dropped frames (R2)
+
+- **`adapter.isControlFrame(rawText) -> boolean` — OPTIONAL, pure, total.** Given the
+  RAW frame text a `JSON.parse` just rejected: is this the venue's own non-JSON
+  keepalive REPLY rather than a malformed frame? Consulted **inside** livewire's parse
+  catch, never before it — a pre-parse predicate would run on every frame across 7
+  legs of 100 ms book updates, while inside the catch the happy path is byte-identical.
+- **Exact equality only.** The measured wire is the byte string `pong`. A fuzzy match
+  (`trim`/`includes`/case-fold) would swallow a genuinely corrupt frame that happens to
+  contain "pong" — destroying the signal the drop counter exists to raise.
+- **Who may declare it is MEASURED, not guessed.** 2026-07-26, 180 s live: OKX sent 7
+  non-JSON frames per leg; bybit, bybit-spot, binance-fut, binance-spot and coinbase
+  sent **0 of 11,648**. Only `makeOkxAdapter` and `makeOkxBooksAdapter` declare the
+  predicate; check group 74 pins the ABSENCE on the others so a speculative add fails CI.
+- **A control frame stamps liveness, is never counted, and never reaches `onMessage`.**
+  It is not data — so it also never retracts the amber `stale` state and never resets
+  the dead-man timer. See the split below.
+- **A keepalive reply that happens to be VALID JSON takes the same rule.** Bybit v5
+  answers our `{op:'ping'}` with `{success, ret_msg:'pong', op:'ping'}` (real capture:
+  fixture `t4_bybit_pong` — note `op` echoes back `'ping'`, so `ret_msg` is the
+  identifying field). It parses, so it can never reach `isControlFrame`; it lands in
+  the adapter's `onMessage`, which routes it to **`api.markControlAlive()`**, never
+  `api.markAlive()`. Same fact, two transports, one rule — and this is the one that
+  matters most, because Bybit is the PRIMARY venue (§2) and the measured-flakiest leg.
+- **Split liveness in livewire — required, not optional, and only ONE clock is a
+  verdict.** `lastDataAt` (data frames only) drives **both** `stale` and the `DEAD_MS`
+  force-reconnect. `lastAliveAt` (data frames AND control frames) is **diagnostic
+  only**: it appends "(socket still answering)" to the amber message and never
+  retracts it. A single stamp would let a leg whose subscription died pong every
+  15–25 s and keep BOTH the amber chip and the 40 s watchdog from ever firing — the
+  silent-stale hole Module D exists to close, on exactly the two venues that answer
+  our ping. Letting a keepalive clear `stale` is the same error one level up: the chip
+  would go green with "live feed recovered" over a feed that had delivered nothing,
+  a positive claim about DATA that a pong cannot support. **Only a data frame retracts
+  amber.** Adapters with no control frames stamp both clocks together through
+  `markAlive()`, so their behavior is unchanged.
+- **`scripts/verify_wire_live.mjs` holds the identical discipline** — same predicate,
+  same place, same two liveness stamps, with `ctrl` / `pDrop` / `alive` / `cAlive`
+  columns per venue (`alive` = data stamps, `cAlive` = keepalive stamps; a venue with
+  `alive=0, cAlive>0` is precisely the dead subscription the split exists to catch).
+  It must move in the same commit or the L2 probe and production diverge.
+
+### Socket-close telemetry (R1)
+
+- **`api.onClosed({code, reason, clean, by})` — OPTIONAL, same guarded/try-wrapped
+  shape as `onDropped`.** `ws.onclose` used to discard the CloseEvent, so the venue's
+  own close code was unobservable and "the leg dropped" could not be told apart from
+  "the feed stalled".
+- **`by` names the closer: `'us'` | `'watchdog'` | `'venue'`.** `handle.close()` (a
+  symbol switch) and the watchdog's own forced reconnect travel through the SAME
+  `ws.onclose`; only `'venue'` is a venue drop, and the leg wiring filters on it.
+- **Surfaces are the EXISTING ones.** `makeHealthCounter` kind `'socketClose'`, subKey
+  `<leg>/<code>`; the per-leg conn-chip **tooltip**; `__BTCQ_TERMINAL_DEBUG.health()`.
+  Never the health chip text: a reconnect that already recovered is history, not a
+  current defect, and a permanently-on chip is the exact noise R2 removes.
+- **`document.visibilityState` is captured in `terminal.js`, not livewire** — livewire
+  must stay constructible in Node (the check groups drive it with a WS stub).
+- **Bybit v5 `pingMs` 20000 → 15000** on both legs. Bybit is the only venue here whose
+  client ping IS the server's contract (≲20 s); at 20 s the connection was only as
+  punctual as the event loop. It is a **jitter margin, and the theory it came from is
+  REFUTED**: at 15 s both legs still went stale, and the captured close reads
+  `1006 / reason "" / wasClean false / visibilityState "visible"` — an abnormal
+  TRANSPORT close, not a gateway ping timeout (which arrives as 1000/1001 *with* a
+  reason), with background-tab throttling excluded. One episode produced no close at
+  all. 15 s stays because the margin is correct; lowering it further is **not
+  indicated**. See AUDIT_LOG 2026-07-26/27.
+
+### Tape floor (signal, not dust)
+
+- **`DEFAULTS.tapeMin` 0 → 10000** — this repo's OWN taxonomy cut (`CvdStore`: "≤$10k
+  retail, ≤$100k mid, ≤$1M large, >$1M whale"), not an invented number.
+  Measured 2026-07-27, 180 s live, all six trade legs into the production
+  composition: 1,139 blocks (6.3/s), median block $100, p90 $4.4 k, p99 $41 k; floor
+  off, the 60 newest blocks span 16.5 s. **4.7 %** of blocks clear $10 k, so the same
+  60 rows cost ~1,290 blocks of memory. $100 k (`SIZE_TIER_DEFAULTS.sig`) was
+  rejected on the same measurement: 0.18 % clear it, ~1.5 h to fill the panel.
+- **The aggregator ring is the binding constraint, not the DOM budget — `size` 400 →
+  1500.** `filterTapeRows`/`tapeFloorSummary` SELECT from `tapeAgg.list()` at render
+  time; the floor can never reach further back than the ring holds. A 400-block ring
+  is ~80 s of tape at the measured rate and could offer only ~15 rows to the 60-row
+  box. Inert with the floor OFF (the panel still renders the 60 NEWEST blocks), and
+  the per-trade path now reads `TapeAggregator.lastClosed()` — O(1) via
+  `makeRing.newest()` — instead of copying the whole ring on every print.
+  End-to-end on the live page, 180 s, ring at capacity: **60 of 60 rows rendered**,
+  tiers `{baseline 55, sig 1, large 4}` — 5 rows at/above `sig` against 0 before —
+  with the caption reading "below $10.0k · 1,372 blocks (1,792 prints) · $1.41M = 17 %
+  of tape $ · 15 % buy — filtered from view, not discarded".
+  **[SUPERSEDED 2026-07-27]** the first draft of this section claimed "the 60-row
+  window widens 5.4 s → 151 s and carries 5 rows at/above `sig` instead of 0". That
+  was unreachable with a 400-block ring at any floor value; retracted, not rewritten.
+- **`tapeFloorSummary(rows, opts)` (pure).** The sub-floor residue of the SAME
+  market/venue/minN projection `filterTapeRows` applies. The floor FILTERS, it never
+  DISCARDS — the hidden volume is stated in one caption line. Boundary is
+  `filterTapeRows`' verbatim `notional < minN`; `null` when the floor is off or
+  nothing fell below (a "0 hidden" would imply a floor that is not doing work).
+  Invariant: `kept + hidden === rows passing market/venue`.
+- **`TIER_ALPHA.baseline` 0.0 → 0.06** — presentation only. At 0 the log-notional bar
+  computed for every row was never drawn, so the whole sub-`sig` band rendered as
+  untinted filler.
+- **The default is PERSISTED, so the change is migrated and STATED.** `settingsVer: 4`
+  is written into the settings blob; a pre-T4 profile (no `settingsVer`) whose stored
+  floor is `0` adopts the new default once and the tape panel says so until the user
+  touches the input. A non-zero stored floor is an explicit choice and is never touched.
+
+### News relevance (visible projection, never a hidden filter)
+
+- **`normalizeToaNews` filters NOTHING.** It carries the evidence: `coins` (content-
+  derived `suggestions[].coin`) and `accountCoins` (`isAccountMapped:true`, kept
+  separate — that maps the POSTER, not the text). A filter at ingest could not be
+  switched off; that is the definition of a hidden filter.
+- **`newsRelevance(item) -> {crypto, btc, why}`** — evidence ladder, ordered by measured
+  strength (n=200 live rows, 2026-07-26): `coins` (158/200 present, BTC on 18/200) →
+  `symbols` (18/200 present, BTC on **0/200** — the old view's BTC test was dead code)
+  → `press` (a crypto-press publisher stamped into the title itself) → `keyword` (a
+  stated in-file lexicon) → `venue` (Upbit/Bithumb notices: every row IS a market event,
+  and their Korean titles no English lexicon can reach). The transport `source` is NOT
+  evidence — 'Blogs' carries CDC and WHITEHOUSE alongside COINDESK.
+- **`filterNewsRows(items, {mode})` returns the kept rows AND the counts the caption
+  states**; `kept + filtered === total` always, and `mode:'all'` gives every row back.
+- **Toggle is a visible panel control** (default `crypto`, persisted). The caption
+  states the RENDERED count, not the kept count — the list caps at 18 rows.
+- **Known, measured false positives are stated, not patched:** the feed's own mapper
+  matches bare tickers in ordinary prose ("SAVE AMERICA **ACT**" → `ACT`), 3/200 ≈ 1.5%
+  across two independent pulls, against 6/200 genuine crypto posts only that rung
+  catches. Each row carries its evidence rung in a tooltip.
+
+### Local-only strip
+
+- **Fold rule is "this panel has no datum it could render", NOT `apiUp === false`.**
+  Folding on the API alone would hide working features: the auction panel still works
+  from an HF archived day, and key levels has a LIVE half (this session's own IB) that
+  needs no API. `apiUp === null` (probing) and REPLAY fold nothing.
+- **Two strips, two causes.** The collector-API strip and the econ strip are separate
+  because econ is a missing LOCAL FILE (`make econ`, no CORS on faireconomy) — one
+  strip with one explanation would misstate it.
+- **`API_OFFLINE_NOTE` stays ONE constant and is REUSED**, not copied; the four
+  in-place render sites remain as the fallback for an unfolded panel.
+- **A folded panel's own §0.7 gap prose must survive the fold.** The key-levels panel
+  carries live-IB reasons the collector API does not cause ("IB withheld — the page
+  did not witness the 00:00 UTC open", "IB forming", "no prints yet this session").
+  The strip restates that reason verbatim and calls the folded feature `key levels`,
+  not "key levels (registry half)" — the whole panel is gone, both halves.
+- **The strip claims NO grid area; it is PLACED at paint time in the cell of a panel
+  it actually folded.** A static `area-klev` was wrong: the strip turns on when ANY of
+  auct/lvls/klev has nothing to render, while only klev's own panel folds on
+  `st.klev`, and a live IB (no API needed) makes `st.klev` false while the API is
+  down. The two then occupied one cell, stacked, with the strip painting behind the
+  key-levels panel — the offline explanation invisible, the inversion of its purpose.
+  With no `area-*` class the CSS fallback is grid auto-placement, which cannot
+  overlap. Check group 77 pins "no two elements share an `area-*` class".
+- **Folding must never hide a navigation anchor.** `.folded-local` is `display:none`
+  and a hidden element has no layout box, so the AUCTION section anchor moved off the
+  auction-profile panel onto a zero-size `.sec-anchor` span in the section eyebrow
+  (the idiom `#sec-orderflow` already used). Group 77 pins that no foldable panel
+  carries a `sec-*` id.
+- Visibility is class-driven (`.local-only` / `.local-on` / `.folded-local`), never
+  `[hidden]`: `applyCollapse()` owns that property on every `[data-sec]` node.
+- **Both halves are TRI-state.** `apiUp === null` (probing) folds nothing; `econ` gets
+  the same treatment via an `econProbed` flag, because `econData` is `null` both
+  before and after the local read and the strip was otherwise asserting "no local econ
+  file" for ~1 s of every page load (§0.7: not yet asked ≠ absent).
+
+### check_terminal groups (mandatory adds)
+74 `isControlFrame` contract + livewire's control-frame branch (exact `pong`, OKX-only
+by measurement, a control frame is neither dropped nor delivered, a malformed frame
+still counts, an absent predicate is byte-identical to today, a throwing predicate
+counts) **plus the liveness half, driven through the real watchdog on a stubbed clock**
+— a keepalive stamps the answering clock, emits NO status, never retracts amber, and
+never saves a pong-only socket from the `DEAD_MS` force-reconnect; only a data frame
+recovers, once; and Bybit's JSON pong (real captured frames, `t4_bybit_pong`) routes
+through `markControlAlive` while a `tickers` frame still stamps the data clock;
+75 `tapeFloorSummary` (blocks vs prints, buy/sell split, share, the verbatim `<`
+boundary, `null` when off or empty, and the kept+hidden invariant); 76
+`newsRelevance` / `filterNewsRows` over REAL captured rows (`t4_toa_news`); 77 layout
+invariants read out of the shipped markup — no two elements share an `area-*` class,
+the local-only strips claim none, every `area-*` resolves to a `grid-area` rule, and
+no panel the strip folds carries a section-nav anchor id. Plus extensions:
+`makeHealthCounter` counts `'socketClose'` separately from `'droppedFrame'`; the
+`startLeg` wiring group gains the `onClosed` composition and its `by !== 'venue'`
+filter. **CI blind spot named in the group comments:** the browser harness's clean N5
+pass runs under `?replay=1`, where livewire is not in the transport at all — which is
+exactly why the OKX-pong regression reached production unseen — and `renderLocalOnly`
+returns early in replay, so group 77 pins its structure because nothing else can.
+
 ## 5. CryExc → btc-quant feature map & phase plan
 
 | # | CryExc view | Phase | Rail notes |

@@ -2,8 +2,11 @@
 //
 // DESIGN-orderflow-terminal.md §4 + §4b contract: each make*Adapter(symbolOrProduct,
 // sink[, opts]) returns a makeSocket-compatible descriptor { url, pingMs?, subscribe(ws),
-// ping?(ws), onMessage(msg, api) } (the shared socket skeleton lives in livewire.js — extracted
-// verbatim from app.js; adapters never manage reconnection themselves). `sink(evt)`
+// ping?(ws), onMessage(msg, api), isControlFrame?(rawText) } (the shared socket skeleton lives
+// in livewire.js — extracted verbatim from app.js; adapters never manage reconnection
+// themselves). isControlFrame is the OPTIONAL T-4 R2 (§4j) predicate — declared ONLY by a
+// venue whose keepalive reply is not JSON (measured: OKX alone), never speculatively, so an
+// undeclared adapter keeps the drop-counting path exactly as it is. `sink(evt)`
 // receives ONLY the normalized event shapes below — the single vocabulary the stores
 // ever see (DESIGN §4):
 //
@@ -26,9 +29,14 @@
 //     `side` is likewise the TAKER side (use as-is — Bybit family); Coinbase
 //     market_trades `side` is the MAKER side (invert it — DEVELOPMENT.md §5 gotcha).
 //     Each adapter documents its convention inline; the fixture smoke asserts it.
-//   - Liveness: adapters call api.markAlive() on heartbeat-ish frames ONLY — never on
-//     trades. A quiet tape is a quiet market, NOT a stalled socket (app.js watchdog
-//     rule); marking trades alive would mask a genuinely dead subscription.
+//   - Liveness: adapters call api.markAlive() on heartbeat-ish DATA frames ONLY —
+//     never on trades. A quiet tape is a quiet market, NOT a stalled socket (app.js
+//     watchdog rule); marking trades alive would mask a genuinely dead subscription.
+//     A venue's own keepalive REPLY is NOT a data frame and calls api.markControlAlive()
+//     instead (T-4 R2, §4j): it proves the socket, not the subscription, so it may not
+//     touch livewire's dead-man clock. Bybit v5 answers our op:'ping' with JSON, so it
+//     takes that branch here in onMessage; OKX answers plain text, so livewire's
+//     isControlFrame branch handles it. Same fact, two transports, one rule.
 //   - Coded against REAL captured frames in scripts/fixtures_ws.json (DESIGN §2), not
 //     remembered API docs. Wire realities encoded below: Bybit `tickers` sends one
 //     snapshot then PARTIAL deltas (only changed fields — must merge); Bybit
@@ -108,7 +116,29 @@
 
     return {
       url: 'wss://stream.bybit.com/v5/public/linear',
-      pingMs: 20000,   // Bybit v5 requires a client ping ≲ 20s or the server drops the conn
+      // T-4 R1: 15s, not 20s. Bybit v5 is the ONLY venue here whose client ping
+      // IS the server's contract (≲20s or the gateway drops us) — OKX tolerates
+      // ~30s idle and its `books` traffic keeps the socket non-idle anyway,
+      // Coinbase keepalive is the `heartbeats` channel, Binance is protocol-
+      // level. At 20s we sat EXACTLY on that deadline, so the connection was
+      // only as punctual as the event loop — and this page paints 64 canvases on
+      // that same thread. 15s is a 5s jitter margin under a rule we do not
+      // control, which is worth having on its own terms.
+      //
+      // [SUPERSEDED 2026-07-26] this note used to say the close telemetry "is
+      // what WILL settle the mechanism". It has: with pingMs already at 15000,
+      // both Bybit legs still went stale (browser 360s: lin 1 episode, spot 2;
+      // Node 390s: both legs entering stale in the SAME second), and the
+      // captured CloseEvent reads code 1006, reason "", wasClean false,
+      // document.visibilityState "visible". 1006 with an empty reason is an
+      // abnormal TRANSPORT close — a gateway ping timeout arrives as 1000/1001
+      // WITH a reason — and a visible tab excludes background timer throttling.
+      // One episode produced NO close at all (socket stayed OPEN, feed simply
+      // went quiet). So the ping-margin theory is REFUTED as the mechanism; the
+      // shared path to stream.bybit.com is the remaining candidate. 15s stays
+      // because the margin is correct, NOT because it fixed anything — lowering
+      // it further is not indicated (AUDIT_LOG 2026-07-26).
+      pingMs: 15000,
       subscribe(ws) {
         ws.send(JSON.stringify({
           op: 'subscribe',
@@ -124,10 +154,18 @@
       ping(ws) { ws.send(JSON.stringify({ op: 'ping' })); },
       onMessage(msg, api) {
         if (!msg) return;
-        // Pong reply → liveness. (Wire shape is {success,ret_msg:'pong',op:'ping'};
-        // some gateways answer op:'pong' — accept both.) Subscribe acks (fixture
-        // bybit_sub_ack: {success,op:'subscribe'}) carry no data → swallow.
-        if (msg.op === 'pong' || msg.ret_msg === 'pong') { if (api.markAlive) api.markAlive(); return; }
+        // Pong reply → CONTROL liveness, NOT the data clock (T-4 R2). Wire shape
+        // is {success,ret_msg:'pong',op:'ping'}; some gateways answer op:'pong'
+        // — accept both. This is valid JSON, so it reaches onMessage instead of
+        // livewire's isControlFrame branch, but it is the same KIND of frame as
+        // OKX's plain-text 'pong': a reply to OUR ping, proof of the socket and
+        // nothing more. It used to call markAlive(), which stamped lastDataAt
+        // and made the DEAD_MS force-reconnect UNREACHABLE on this leg — a
+        // socket answering our ping every 15s while its publicTrade/orderbook
+        // subscription was dead would have stayed "live" forever, on the
+        // PRIMARY venue (§2). Subscribe acks (fixture bybit_sub_ack:
+        // {success,op:'subscribe'}) carry no data → swallow.
+        if (msg.op === 'pong' || msg.ret_msg === 'pong') { if (api.markControlAlive) api.markControlAlive(); return; }
         if (msg.op) return;
         if (!msg.topic || msg.data === undefined) return;
 
@@ -353,14 +391,26 @@
           ],
         }));
       },
-      // Keepalive quirk, documented so nobody "fixes" it: OKX answers plain-text
-      // 'pong'. makeSocket (livewire.js) JSON.parses EVERY incoming message and
-      // silently drops parse failures, so the 'pong' never reaches onMessage and
-      // needs no branch below — safely ignored BY CONSTRUCTION, not by accident.
-      // Liveness therefore comes from books/trades data frames (markAlive below);
-      // a genuinely stalled feed still trips the watchdog because nothing else
-      // marks this socket alive.
+      // Keepalive quirk: OKX answers the plain text 'pong' — NOT a JSON frame,
+      // so it can never reach onMessage below (makeSocket JSON.parses every
+      // incoming message and 'pong' throws). [SUPERSEDED 2026-07-26] this note
+      // used to say the pong was "safely ignored BY CONSTRUCTION"; that stopped
+      // being true the moment N5 (afe817f) started COUNTING parse failures, and
+      // a healthy terminal grew a permanent amber "degraded: N dropped" chip.
+      // The construction is now explicit instead of implicit: isControlFrame
+      // below tells livewire this frame is a keepalive REPLY, not a malformed
+      // frame — it is not counted, and it stamps socket liveness.
       ping(ws) { ws.send('ping'); },
+      /** T-4 R2 (§4j) — OPTIONAL control-frame predicate. Given the RAW frame
+       *  text a JSON.parse just rejected: is this the venue's own non-JSON
+       *  keepalive reply rather than a malformed frame? Pure, total,
+       *  string→boolean; consulted ONLY inside livewire's parse catch.
+       *  EXACT equality, never trim()/includes(): the measured wire is byte
+       *  'pong' (2026-07-26: 7 per leg per 180s, 0 non-JSON frames from the
+       *  other 11,648). A loose match would swallow a genuinely corrupt frame
+       *  that happens to contain 'pong' — killing the very signal N5 exists to
+       *  raise. */
+      isControlFrame(rawText) { return rawText === 'pong'; },
       onMessage(msg, api) {
         if (!msg) return;
         // Event frames carry no data: sub acks (fixture okx_sub_ack:
@@ -513,7 +563,7 @@
   function makeBybitSpotAdapter(sym, sink) {
     return {
       url: 'wss://stream.bybit.com/v5/public/spot',
-      pingMs: 20000,   // same v5 gateway rule as linear: client ping ≲ 20s
+      pingMs: 15000,   // same v5 gateway rule as linear — same jitter margin, same refutation (T-4 R1 note there)
       subscribe(ws) {
         ws.send(JSON.stringify({
           op: 'subscribe',
@@ -523,7 +573,12 @@
       ping(ws) { ws.send(JSON.stringify({ op: 'ping' })); },
       onMessage(msg, api) {
         if (!msg) return;
-        if (msg.op === 'pong' || msg.ret_msg === 'pong') { if (api.markAlive) api.markAlive(); return; }
+        // CONTROL liveness, same rule and same reason as the linear leg above
+        // (T-4 R2): a pong is a reply to OUR ping, never evidence about the
+        // subscription. This leg's ONLY data-clock stamp is its orderbook
+        // (trades are quiet-tolerated, §0 rail), so routing the pong to
+        // markAlive() would have hidden a dead book behind our own keepalive.
+        if (msg.op === 'pong' || msg.ret_msg === 'pong') { if (api.markControlAlive) api.markControlAlive(); return; }
         if (msg.op) return;
         if (!msg.topic || msg.data === undefined) return;
 
@@ -683,9 +738,13 @@
           ],
         }));
       },
-      // Plain-text pong never survives makeSocket's JSON.parse — safely
-      // ignored BY CONSTRUCTION (see makeOkxAdapter's keepalive note).
+      // Plain-text pong never survives makeSocket's JSON.parse — declared as a
+      // CONTROL frame so livewire neither counts it as dropped nor discards its
+      // liveness (T-4 R2; see makeOkxAdapter's keepalive note). This is the
+      // adapter production actually runs (terminal.js opens both OKX legs
+      // through it), so the declaration must be here, not only there.
       ping(ws) { ws.send('ping'); },
+      isControlFrame(rawText) { return rawText === 'pong'; },
       /** Caller-polled resync request: true from the moment a seq gap is
        *  detected until the next books snapshot re-seeds the chain. */
       bookGapped() { return gapped; },

@@ -333,6 +333,33 @@ main.term-main {
 }
 .sec-hdr::after { content: ''; flex: 1 1 auto; border-top: 1px solid var(--border); }
 
+/* ─── T-4 (§4j) local-only strip ──────────────────────────────────────────
+   ONE panel that names the features the page cannot run right now, their cause
+   and the command that brings them back — replacing the same offline paragraph
+   rendered verbatim in three panels (~500px of duplicated error prose).
+   Visibility is CLASS-driven, never [hidden]: applyCollapse() owns the `hidden`
+   property of every [data-sec] node and would clear it on the next section
+   toggle. .folded-local hides a panel the strip is currently standing in for;
+   it releases the panel untouched the moment it has data again.
+   NO grid-area rule here, deliberately (T-4): renderLocalOnly() writes
+   style.gridArea at paint time with the cell of a panel it actually stands in
+   for. A static `grid-area: klev` put the strip and the still-visible
+   key-levels panel in ONE cell, stacked, with the strip painting behind. The
+   fallback with no rule at all is auto-placement, which cannot overlap. */
+.local-only { display: none; }
+.local-only.local-on { display: block; }
+.folded-local { display: none !important; }
+.local-only h2 { margin-bottom: var(--sp-1); }
+.local-only .lo-list {
+  font-family: var(--mono); font-size: var(--fs-xs); color: var(--fg);
+  padding-bottom: 2px;
+}
+.local-only .lo-why,
+.local-only .lo-ok {
+  font-family: var(--mono); font-size: 10px; line-height: 1.4; color: var(--muted);
+}
+.local-only .lo-ok { color: var(--g-400); padding-top: 3px; border-top: 1px solid var(--border); margin-top: 3px; }
+
 /* §4e.1 collapse: terminal.js sets [hidden] on every [data-sec] element of a
    collapsed section. Some of those elements carry display:flex/grid rules
    that would silently defeat the [hidden] UA default — force it. Collapse
@@ -657,6 +684,20 @@ table.ladder tr.spread .sp-x { color: var(--muted); margin: 0 5px; }
 .bp-chip .bp-px { color: var(--muted); }
 .bp-chip .bp-age { color: var(--muted); font-size: 9px; }
 .bp-chip.tier-whale { border-color: var(--accent); }
+
+/* T-4 (§4j) sub-floor caption: what the min-notional floor took OUT of view.
+   Sits directly under the list and above the honesty footer, in the same quiet
+   register — it is a statement of omission, never a data row (a row inside the
+   list would read as a print). .sf-notice is the one-shot "the default moved"
+   line and is allowed to be louder, because a changed default the user never
+   sees is indistinguishable from a bug. */
+.tape-subfloor {
+  display: flex; flex-direction: column; gap: 1px;
+  color: var(--muted); font-family: var(--mono); font-size: 10px; line-height: 1.35;
+  padding: 3px 2px 0; margin-top: 2px; border-top: 1px dashed var(--border);
+}
+.tape-subfloor[hidden] { display: none; }
+.tape-subfloor .sf-notice { color: var(--warn-fg); }
 
 /* Honesty line: which legs feed the merged tape + that tiers are conventions. */
 .tape-hon {
@@ -1255,6 +1296,12 @@ table.farb-table tr.farb-spread td {
 .poly-vol { color: var(--g-400); text-align: right; }
 
 /* ── News (§4e): ToA context feed ── */
+/* T-4 (§4j): the relevance caption — states how many rows are shown and how
+   many were taken out of view, so the toggle can never become a silent filter. */
+.news-cap {
+  color: var(--muted); font-family: var(--mono); font-size: 10px;
+  padding: 0 2px 3px; border-bottom: 1px solid var(--border); margin-bottom: 2px;
+}
 .news-list { max-height: 260px; overflow-y: auto; font-family: var(--mono); font-size: var(--fs-xs); }
 .news-row {
   display: grid;

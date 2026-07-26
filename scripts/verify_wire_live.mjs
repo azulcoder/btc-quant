@@ -20,12 +20,20 @@
 // The socket loop is OURS, not livewire.js's: makeSocket owns reconnect/
 // backoff/watchdog for a long-lived page, while this is a bounded probe — a
 // leg that dies mid-run just stops counting frames and the per-venue table
-// says so. Adapters receive the fake api {markAlive(){}, onStatus(){}}
-// (the only two members they ever touch — see check_terminal.cjs nullApi).
-// Parse discipline mirrors livewire.js: every incoming message is
-// JSON.parse'd and parse failures are dropped silently — that is exactly how
-// OKX's plain-text 'pong' is ignored BY CONSTRUCTION in production
-// (terminal-adapters.js §4b keepalive note), so we must do the same.
+// says so. Adapters receive a per-venue fake api {markAlive(),
+// markControlAlive(), onStatus()} (the only members they ever touch — see
+// check_terminal.cjs nullApi) whose two liveness stamps TALLY instead of
+// no-op'ing, so the table can show which stamp each venue actually uses —
+// livewire drives them to different clocks and only the DATA one resets the
+// dead-man timer (T-4 R2, §4j).
+// Parse discipline mirrors livewire.js VERBATIM: every incoming message is
+// JSON.parse'd, and a parse failure is offered to the adapter's OPTIONAL
+// isControlFrame(rawText) predicate INSIDE the catch. A control frame (OKX's
+// plain-text 'pong') is counted as `ctrl` and stamps CONTROL liveness; anything
+// else is counted as `parseDrops`. Production and this probe MUST agree here —
+// they used to diverge silently ("parse failures are dropped silently" was the
+// old rule, and it is exactly the rule that turned OKX's keepalive into a
+// permanent "degraded" chip in the terminal).
 //
 // Honesty rails (§0) this file holds itself to:
 //   - LIVE-DESCRIPTIVE observation only. NO writes anywhere — no DB, no
@@ -336,7 +344,23 @@ function sink(ev) {
 // ─── Venue wiring — the terminal's exact legs (terminal.js SYM/SPOT/OKX_INST) ─
 // The fake api per the L2 contract: adapters only ever touch markAlive/onStatus
 // (check_terminal.cjs nullApi precedent); this probe has no watchdog to feed.
-const fakeApi = { markAlive() {}, onStatus() {} };
+// T-4 R2: markAlive TALLIES per venue instead of no-op'ing. The control-frame
+// half of livewire's contract ("a keepalive reply stamps liveness") cannot be
+// asserted cheaply in Node — it needs livewire's 12s STALE_MS wall clock, the
+// documented Gap-8 seam — so this counter is the L2 evidence for it: an OKX
+// leg must show ctrl > 0 AND alive > ctrl (data frames stamp it too).
+// T-4 R2 (second half): markControlAlive is the adapter's CONTROL-frame stamp —
+// Bybit v5 answers our op:'ping' with JSON, so its pong never reaches the
+// isControlFrame branch below; it lands in onMessage and must call this instead
+// of markAlive, or livewire's dead-man clock is reset by our own keepalive. The
+// column separates the two so the wire proves which stamp each venue uses.
+function fakeApiFor(venue) {
+  return {
+    markAlive() { venue.alive = (venue.alive || 0) + 1; },
+    markControlAlive() { venue.cAlive = (venue.cAlive || 0) + 1; },
+    onStatus() {},
+  };
+}
 
 const VENUES = [
   // Bybit v5 linear — PRIMARY (§2): publicTrade/orderbook.200/tickers/allLiquidation.
@@ -350,8 +374,13 @@ const VENUES = [
 ];
 for (const v of VENUES) {
   v.frames = 0;        // raw WS messages received (parse failures included — liveness measure)
+  v.ctrl = 0;          // T-4 R2: non-JSON frames the adapter CLAIMED as its keepalive reply
+  v.parseDrops = 0;    // T-4 R2: non-JSON frames nobody claimed — genuinely malformed
+  v.alive = 0;         // markAlive() calls the adapter made — DATA frames only (T-4 R2)
+  v.cAlive = 0;        // markControlAlive() calls — keepalive REPLIES only (never the dead-man clock)
   v.opened = false;
   v.status = 'connecting';
+  v.api = fakeApiFor(v);
 }
 
 function connect(venue) {
@@ -368,9 +397,12 @@ function connect(venue) {
     venue.status = 'open';
     console.log('  [' + venue.ex + '] connected ' + venue.adapter.url);
     try { venue.adapter.subscribe(ws); } catch (e) { venue.status = 'subscribe-error: ' + e.message; }
-    // Honor each adapter's keepalive contract (Bybit JSON op ping ≤20s, OKX
-    // plain-text 'ping' ~25s, Coinbase heartbeat re-subscribe; Binance none —
-    // protocol-level pings are answered by the WS implementation itself).
+    // Honor each adapter's keepalive contract, cadence included, straight off
+    // the descriptor (Bybit v5 JSON op ping — 15s since T-4 R1, a jitter margin
+    // under the gateway's ≲20s rule; OKX plain-text 'ping' ~25s; Coinbase
+    // heartbeat re-subscribe; Binance none — protocol-level pings are answered
+    // by the WS implementation itself). Reading adapter.pingMs rather than
+    // restating it is what keeps this probe honest when production changes.
     if (venue.adapter.pingMs && venue.adapter.ping) {
       venue.pingTimer = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -382,9 +414,24 @@ function connect(venue) {
   ws.addEventListener('message', (m) => {
     venue.frames++;
     let frame;
-    try { frame = JSON.parse(m.data); } catch (_) { return; } // livewire.js discipline — OKX text 'pong' lands here
+    try { frame = JSON.parse(m.data); }
+    catch (_) {
+      // livewire.js discipline VERBATIM (§4j): same predicate, same place
+      // (inside the catch), same liveness stamp — or probe and production
+      // diverge and this file stops being evidence about production.
+      if (venue.adapter.isControlFrame) {
+        let ctrl = false;
+        try { ctrl = !!venue.adapter.isControlFrame(m.data); } catch (_) { ctrl = false; }
+        // markControlAlive, NOT markAlive: livewire routes this to the
+        // answering clock only, so the probe must too or `alive` would claim a
+        // dead subscription is delivering.
+        if (ctrl) { venue.ctrl++; venue.api.markControlAlive(); return; }
+      }
+      venue.parseDrops++;
+      return;
+    }
     try {
-      venue.adapter.onMessage(frame, fakeApi);
+      venue.adapter.onMessage(frame, venue.api);
     } catch (e) {
       // An adapter THROWING on a live frame is itself API drift (production
       // code choking on production wire) — count it against check 3's home
@@ -399,7 +446,16 @@ function connect(venue) {
     venue.status = 'error: ' + ((e && (e.message || (e.error && e.error.message))) || 'socket error');
   });
   ws.addEventListener('close', (e) => {
-    if (venue.status === 'open') venue.status = 'closed (code ' + (e && e.code) + ')';
+    // T-4 R1: keep the code AND the reason AND wasClean. A bare code cannot
+    // separate "the venue closed us deliberately (1000/1001 + a reason, e.g. a
+    // ping timeout)" from "abnormal transport close (1006, empty reason)" —
+    // and that separation is the whole evidence for whether the Bybit ping
+    // margin is the mechanism or an unrelated transport drop.
+    if (venue.status === 'open') {
+      const code = e && Number.isFinite(e.code) ? e.code : '?';
+      const why = (e && e.reason) ? ' "' + e.reason + '"' : ' (no reason)';
+      venue.status = 'closed (code ' + code + why + (e && e.wasClean ? ', clean' : ', abnormal') + ')';
+    }
   });
 }
 
@@ -486,20 +542,37 @@ function report(reason) {
 
   console.log('\n== per-venue wire activity ==');
   const kinds = ['trade', 'depth', 'mark', 'oi', 'liq'];
-  console.log(pad('venue', 10) + padL('frames', 8) + kinds.map((k) => padL(k, 8)).join('') + '  status');
+  console.log(pad('venue', 10) + padL('frames', 8) + kinds.map((k) => padL(k, 8)).join('')
+    + padL('ctrl', 7) + padL('pDrop', 7) + padL('alive', 8) + padL('cAlive', 8) + '  status');
   for (const v of VENUES) {
     const m = eventCounts.get(v.ex) || new Map();
     console.log(pad(v.ex, 10) + padL(v.frames, 8)
       + kinds.map((k) => padL(m.get(k) || 0, 8)).join('')
+      + padL(v.ctrl, 7) + padL(v.parseDrops, 7) + padL(v.alive, 8) + padL(v.cAlive, 8)
       + '  ' + v.status + (v.adapterErrors ? ' · adapter-errors=' + v.adapterErrors : ''));
   }
   console.log('(binancef mark/oi come from ONE REST poll each — premiumIndex + openInterest, §2;'
     + ' binancef trades are absent by topic-filter reality §0.2, expected)');
+  console.log('(ctrl = non-JSON keepalive replies the adapter claimed via isControlFrame — OKX'
+    + ' answers plain-text "pong" ~1/25s; pDrop = non-JSON frames NOBODY claimed, i.e. genuinely'
+    + ' malformed: expected 0 everywhere. Both mirror livewire.js exactly, §4j.)');
+  console.log('(alive = markAlive() from a DATA frame — the ONLY stamp that resets livewire\'s'
+    + ' dead-man clock; cAlive = markControlAlive() from a keepalive REPLY, which proves the'
+    + ' socket and nothing more. Bybit answers our ping in JSON, so it shows ctrl=0 with'
+    + ' cAlive≈run/15s; OKX answers in plain text, so ctrl≈cAlive≈run/25s. A venue with alive=0'
+    + ' and cAlive>0 is a socket whose SUBSCRIPTION is dead — the case the split exists to catch.)');
 
   // Warnings — connectivity facts, not invariant failures (see header).
   const warns = [];
   for (const v of VENUES) {
     if (v.frames === 0) warns.push(v.ex + ': 0 frames (' + v.status + ') — leg unverified this run');
+    // T-4 R2: a WARN, not a FAIL — a malformed frame is a wire fact, not an
+    // invariant this file can prove broken. It is the number the terminal's
+    // health chip is allowed to be non-zero for, so it must be visible here.
+    if (v.parseDrops > 0) {
+      warns.push(v.ex + ': ' + v.parseDrops + ' non-JSON frame(s) NOT claimed as a control frame'
+        + ' — either genuinely malformed or an undeclared keepalive shape (§4j)');
+    }
   }
   const binDepth = (eventCounts.get('binancef') || new Map()).get('depth') || 0;
   const bin = VENUES.find((v) => v.ex === 'binancef');

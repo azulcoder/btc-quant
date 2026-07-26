@@ -447,13 +447,37 @@
          live-local endpoints + live book reads have no deterministic replay
          story (§7 L1). ═══ -->
 
-    <div class="sec-hdr hd-au" data-sec="auction">auction</div>
+    <!-- T-4: the AUCTION section anchor lives on the eyebrow, not on a panel.
+         It used to be the id of the auction-profile panel itself, which
+         .folded-local hides (display:none) — a hidden element has no layout
+         box, so `#sec-auction` from the section nav and the ⌘K jump landed
+         nowhere while the strip stood in for that panel. Same zero-size
+         `.sec-anchor` idiom the ORDERFLOW anchor already uses. -->
+    <div class="sec-hdr hd-au" data-sec="auction"><span id="sec-auction" class="sec-anchor" aria-hidden="true"></span>auction</div>
 
     <!-- T-1 (§4g): key-levels strip — prior-day H/L/C, POC, VAH/VAL, naked
          POCs (age) and the weekly open from the /v1/levels registry (BTCUSDT
          only — the collector records nothing else), plus the LIVE session
          Initial Balance (first 2×30min UTC range) from this session's bybit
          prints once elapsed. Reference levels, never signals. -->
+    <!-- T-4 (§4j): the LOCAL-ONLY strip for the collector-API panels. It claims
+         NO grid area of its own — no template edit, desktop or mobile. Instead
+         renderLocalOnly() assigns it, at paint time, the cell of a panel it is
+         actually STANDING IN FOR (that panel is folded, so the cell is free).
+         It carries no `area-*` class on purpose: an earlier draft hard-coded
+         `area-klev` and asserted "the two are never visible together", which is
+         false — the strip turns on when ANY of auct/lvls/klev has nothing to
+         render, while only klev's own panel folds on st.klev, and a live
+         Initial Balance (no API needed) makes st.klev false while the API is
+         down. The two then occupied the same cell and the strip painted BEHIND
+         the key-levels panel: the offline explanation became invisible, the
+         exact opposite of what it exists to do. Without a class the fallback is
+         grid AUTO-placement, which by definition never overlaps.
+         Hidden by CSS (.local-only) until terminal.js adds .local-on; `hidden`
+         is NOT used because applyCollapse() owns that property on [data-sec]
+         nodes. -->
+    <section class="panel local-only" id="local-only-api" data-sec="auction"></section>
+
     <section class="panel area-klev" data-sec="auction">
       <h2>key levels — registry + live IB
         <span class="signal-tag st-desc" title="Registry rows (/v1/levels, recorded bybit BTCUSDT days): prior-day H/L/C, POC, VAH/VAL, naked POCs with age, weekly open = the registry's Monday row open (UTC-week convention, honestly absent if that Monday wasn't recorded). Live IB = high/low of THIS session's bybit prints in the first 2×30min after 00:00 UTC, shown once the hour elapsed and only if the page witnessed the open. Reference levels — not signals.">descriptive</span>
@@ -466,7 +490,7 @@
     </section>
 
     <!-- Row A, left ~2/3: the auction profile centerpiece. -->
-    <section class="panel area-auct" id="sec-auction" data-sec="auction">
+    <section class="panel area-auct" data-sec="auction">
       <h2>auction profile — recorded ticks
         <span class="signal-tag st-desc" title="Tick-EXACT volume-at-price over the collector's recorded trades (bybit leg): today/local days via the BYOD API's /v1/profile (DuckDB aggregation, §4f), archived days read straight from the HF dataset in-browser (hyparquet, size-gated before download). POC/VAH/VAL use the ProfileStore-parity 70% expansion. Descriptive — recorded history, never a backtest input (§0.1).">descriptive</span>
       </h2>
@@ -650,11 +674,32 @@
 
     <section class="panel area-news" data-sec="portfolio">
       <h2>news — Tree of Alpha
-        <span class="signal-tag st-desc" title="§4e: REST poll of news.treeofalpha.com (CORS *), 30s. A context feed: headlines are descriptive context, never tradeable information. BTC-tagged items are emphasized using the feed's own symbol tags.">descriptive</span>
+        <span class="signal-tag st-desc" title="§4e: REST poll of news.treeofalpha.com (CORS *), 30s. A context feed: headlines are descriptive context, never tradeable information. BTC items are emphasized using the feed's own CONTENT-derived coin mapping (suggestions[].coin, measured 79% coverage) — account-mapped suggestions are excluded, they tag the poster not the text.">descriptive</span>
+        <!-- T-4 (§4j): the relevance projection is a VISIBLE control. Nothing
+             is filtered at ingest, so 'all' returns every row instantly. -->
+        <span class="heat-controls">
+          <label title="crypto = keep rows carrying crypto/market evidence, in this order: the feed's own content-derived coin mapping, its listing symbols, a crypto-press publisher in the title, a stated keyword lexicon, or an exchange-notice source (Upbit/Bithumb). all = no filter. The caption states how many rows were taken out of view — nothing is hidden silently.">relevance
+            <select id="set-news-rel">
+              <option value="crypto" selected>crypto</option>
+              <option value="all">all</option>
+            </select>
+          </label>
+        </span>
       </h2>
       <div class="panel-src" title="§4e: REST poll of news.treeofalpha.com (CORS *), 30s. A context feed: headlines are descriptive context, never tradeable information. BTC-tagged items are emphasized using the feed's own symbol tags.">context feed · 30s poll — headlines are context, never tradeable information</div>
       <div id="view-news" class="news-wrap"></div>
     </section>
+
+    <!-- T-4 (§4j): the econ half of the local-only strip. Separate from the
+         collector-API strip ON PURPOSE — its cause is different (a missing
+         LOCAL FILE, `make econ`, because faireconomy sends no CORS header), and
+         one strip with one explanation would misstate it. Same placement rule
+         as the API strip: no `area-*` class, renderLocalOnly() assigns the cell
+         of the panel it stands in for. Here the exclusion IS provable (one
+         st.econ drives both the strip and the fold) — it carries no class
+         anyway, so the invariant "no two elements share a grid area" holds
+         structurally instead of by an argument that has to stay true. -->
+    <section class="panel local-only" id="local-only-econ" data-sec="portfolio"></section>
 
     <section class="panel area-econ" data-sec="portfolio">
       <h2>econ calendar — ForexFactory mirror
@@ -686,7 +731,11 @@
         </div>
         <div class="control">
           <label for="set-tape-min">tape min notional ($)</label>
-          <input type="number" id="set-tape-min" min="0" step="1000" value="0" />
+          <!-- T-4 (§4j): default 10000 = this repo's own "≤$10k retail" cut
+               (terminal-state.js CvdStore), not an invented number. terminal.js
+               rewrites this from settings on load; the literal keeps the
+               pre-script markup consistent with the default. 0 still means off. -->
+          <input type="number" id="set-tape-min" min="0" step="1000" value="10000" />
         </div>
         <!-- T-3 (§4i): the four tape size tiers — LABELED DISPLAY CONVENTIONS
              (not signals). Persisted; a change re-classifies every block and

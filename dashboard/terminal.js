@@ -122,8 +122,44 @@
   // thresholds separate from the tape's) — ONE classifier for the feed's ◆/◇
   // emphasis and the audio-ping trigger, never a re-derived inline threshold.
 
+  // T-4 (§4j): news relevance projection — a VISIBLE toggle, never a hidden
+  // filter. 'crypto' is the default because the raw feed is a firehose (145 of
+  // 200 measured rows were tweets); 'all' gives every row back, which is only
+  // possible because normalizeToaNews filters nothing.
+  const NEWS_RELS = ['crypto', 'all'];
+  // T-4: settings blob schema version. Introduced so a DEFAULT can be changed
+  // without either silently overwriting a user's own stored choice or leaving
+  // every existing profile behind forever. Bumped ONLY alongside a migration.
+  const SETTINGS_VER = 4;
+
   const DEFAULTS = {
-    tick: 10, barMs: 60000, tapeMin: 0, liqRange: 'pct6',
+    // T-4 (§4j) tapeMin 0 → 10000: the floor was OFF, and `DEFAULTS.tapeMin: 0`
+    // + TIER_ALPHA.baseline meant the 60-row DOM budget was spent on seconds of
+    // sub-$100 dust with ZERO rows above the 'sig' tier. $10,000 is not a new
+    // number — it is this repo's OWN taxonomy cut (terminal-state.js CvdStore:
+    // "≤$10k retail, ≤$100k mid, ≤$1M large, >$1M whale").
+    //
+    // MEASURED 2026-07-27, 180s live, all six trade legs pushed into the
+    // production composition: 1,139 blocks (6.3/s), median block $100, p90
+    // $4.4k, p99 $41k. Floor OFF the 60 newest blocks span 16.5s of tape. At
+    // $10k, 4.7% of blocks clear the floor, so the SAME 60 rows need ~1,290
+    // blocks of memory — which is why the aggregator ring moved 400 → 1500 in
+    // this same change (a 400-block ring held ~80s at that rate and could only
+    // offer 15 rows to a 60-row box). $100k (= SIZE_TIER_DEFAULTS.sig) was
+    // rejected on the same measurement: 0.18% clear it, ~1.5h to fill the panel.
+    // End-to-end in the browser on the live page, 180s, ring at capacity (1,501
+    // blocks): 60 of 60 rows rendered, tiers {baseline 55, sig 1, large 4} — so
+    // 5 rows at/above 'sig' against 0 before, and the caption read "below
+    // $10.0k · 1,372 blocks (1,792 prints) · $1.41M = 17% of tape $ · 15% buy".
+    // [SUPERSEDED 2026-07-27] an earlier draft of this note claimed the 60-row
+    // window "widens 5.4s → 151s and carries 5 rows at/above 'sig' instead of
+    // 0". That was not reachable with a 400-block ring at any floor — the ring,
+    // not the DOM budget, is the binding constraint — and it is retracted
+    // rather than quietly rewritten. Nothing is discarded either way:
+    // tapeFloorSummary states the sub-floor volume in the panel (§0 rail).
+    tick: 10, barMs: 60000, tapeMin: 10000, liqRange: 'pct6',
+    // T-4 (§4j): news relevance mode — see NEWS_RELS above.
+    newsRel: 'crypto',
     // O-4 (§4d): screener slice, whale watchlist (+BTC filter), alert rules.
     screenerTop: '40', whaleBtcOnly: true, whaleAddrs: [], alertRules: DEFAULT_RULES,
     // O-5 (§4e.1): per-section collapse state (all expanded by default).
@@ -151,6 +187,12 @@
   // T-2 (§4h): the matrix leg keys — ONE source (deriveLegIds' shape), so the
   // settings whitelist, the registry and the lifecycle can never disagree.
   const LEG_KEYS = Object.keys(S.deriveLegIds(''));
+
+  // T-4: set by loadSettings when the one-shot tapeMin migration fired, so the
+  // tape panel can STATE that its default moved (a changed default the user
+  // never sees is indistinguishable from a bug). Cleared for good the moment
+  // the user touches the floor input.
+  let tapeMinMigrated = false;
 
   function loadSettings() {
     const s = Object.assign({}, DEFAULTS);
@@ -186,7 +228,20 @@
           if (typeof j.lastCollapsed[sec] === 'boolean') s.lastCollapsed[sec] = j.lastCollapsed[sec];
         }
       }
-      if (Number.isFinite(j.tapeMin) && j.tapeMin >= 0) s.tapeMin = j.tapeMin;
+      // T-4 (§4j) tapeMin, with a ONE-SHOT, IDEMPOTENT, VISIBLE migration.
+      // A stored 0 written before T-4 is ambiguous: saveSettings writes the
+      // WHOLE blob on any settings change, so almost every stored 0 means "the
+      // default, never chosen" rather than "I want the floor off". Silently
+      // keeping it leaves the instrument broken for exactly the people who use
+      // it most; silently overwriting it would trample a real choice. So: a
+      // PRE-T4 profile (no settingsVer) whose stored floor is 0 adopts the new
+      // default AND says so in the panel until the user touches the input. A
+      // non-zero stored floor is an explicit choice and is never touched.
+      if (Number.isFinite(j.tapeMin) && j.tapeMin >= 0) {
+        if (j.settingsVer === undefined && j.tapeMin === 0) tapeMinMigrated = true;
+        else s.tapeMin = j.tapeMin;
+      }
+      if (NEWS_RELS.indexOf(j.newsRel) >= 0) s.newsRel = j.newsRel;
       if (LIQ_RANGES.indexOf(j.liqRange) >= 0) s.liqRange = j.liqRange;
       // O-4 whitelists (same rule as above: only recognized values return
       // from storage — a hand-edited blob can't smuggle an unsupported state):
@@ -257,7 +312,11 @@
   function saveSettings() {
     try {
       localStorage.setItem(LS_KEY, JSON.stringify({
+        // T-4: schema version FIRST — its absence is what identifies a pre-T4
+        // profile, so writing it is what makes the tapeMin migration one-shot.
+        settingsVer: SETTINGS_VER,
         tick: settings.tick, barMs: settings.barMs, tapeMin: settings.tapeMin,
+        newsRel: settings.newsRel,
         liqRange: settings.liqRange,
         screenerTop: settings.screenerTop, whaleBtcOnly: settings.whaleBtcOnly,
         whaleAddrs: settings.whaleAddrs,
@@ -274,6 +333,10 @@
       }));
     } catch (_) { /* private mode / quota — settings just don't persist */ }
   }
+  // T-4: stamp the version NOW when the migration fired, so it is genuinely
+  // one-shot (a later load reads settingsVer and leaves the floor alone). The
+  // runtime flag stays set for THIS session — that is what shows the caption.
+  if (tapeMinMigrated) saveSettings();
 
   // T-1 (§4g): adopt the persisted symbol + derive the venue legs. In replay
   // the symbol is FORCED to BTCUSDT — the fixtures are recorded BTCUSDT
@@ -385,21 +448,31 @@
     // enabled perp legs vs the enabled spot legs (descriptive lead/lag read;
     // the strip itself lands with the UI wave, the session accumulates NOW).
     spotPerp = B.SpotPerpCvdStore({});
-    tapeAgg = S.TapeAggregator({ aggWindowMs: 100, size: 400 });   // §4i aggr default window
+    // §4i aggr default window. T-4: ring 400 → 1500. The min-notional floor
+    // SELECTS from this ring at render time — it can never reach further back
+    // than the ring holds — and at the measured $10k clear rate (4.7% of
+    // blocks, 2026-07-27) a 400-block ring could only ever offer ~15 rows to a
+    // 60-row DOM budget. 1500 is what 60 rows costs at that rate, with margin.
+    // Inert with the floor OFF: the panel still renders the 60 NEWEST blocks,
+    // byte-identical. The cost is bounded — the per-trade path reads
+    // lastClosed() (O(1)), and the render path already walked the ring once.
+    tapeAgg = S.TapeAggregator({ aggWindowMs: 100, size: 1500 });
     bigPrints = S.BigPrintRail({ max: 12, thresholds: settings.tapeTiers });
     railFedSig = null;
   }
   rebuildFlowStores();
 
   /** Feed BigPrintRail the aggregator's newly-FLUSHED rows (§4i). Once any
-   *  trade is seen the aggregator's open row is list()[0] forever, so
-   *  list()[1] is ALWAYS the newest CLOSED block — push it once (signature
+   *  trade is seen the aggregator's open row is list()[0] forever, so the ring's
+   *  newest entry is ALWAYS the newest CLOSED block — push it once (signature
    *  dedup) each time a fresh block flushes. Returns the flushed block's tier
-   *  (the audio-ping trigger reads it), or null when nothing new flushed. */
+   *  (the audio-ping trigger reads it), or null when nothing new flushed.
+   *  T-4: reads lastClosed() rather than list()[1] — identical row (this runs
+   *  only right after a push, so an open row always exists), but O(1) instead
+   *  of copying the whole 1500-block ring on EVERY trade. */
   function feedRailFromTape() {
-    const rs = tapeAgg.list();
-    if (rs.length < 2) return null;
-    const c = rs[1];
+    const c = tapeAgg.lastClosed();
+    if (!c) return null;
     const sig = c.ex + '|' + c.isBuy + '|' + c.price + '|' + c.ts + '|' + c.count;
     if (sig === railFedSig) return null;
     railFedSig = sig;
@@ -564,6 +637,7 @@
     auct: true, lvls: true, micro: true,   // I-1 AUCTION panels (§4f)
     scr: true, rsi: true, opts: true, whale: true, alerts: true, conf: true,   // O-4 INTELLIGENCE panels (§4d)
     jour: true, cal: true, poly: true, news: true, econ: true,   // O-5 PORTFOLIO panels (§4e)
+    local: true,   // T-4 (§4j): the local-only strip (see renderLocalOnly)
     tapeint: true, walls: true, vpin: true, klev: true, basis: true,   // T-1 Trader's Edge panels (§4g)
     spcvd: true,   // T-2 (§4h): spot-vs-perp CVD strip
   };
@@ -656,13 +730,19 @@
   // and the 'ingest' pseudo-key have none → the header panel). fp is the lone
   // cross-panel exception.
   function panelUnitsOf(key) {
+    // T-4: 'local' is deliberately absent from VIEW_ANCHOR (see there) and so
+    // would fall through to the 'view-header' default — a quarantined strip
+    // would then dim the HEADER panel and hang a red 'stalled' chip in
+    // .term-chips, claiming §0 staleness about the one panel that must never
+    // lie about connection health. It owns two elements of its own; name them.
     const ids = key === 'fp' ? ['view-footprint', 'view-cvd']
+              : key === 'local' ? ['local-only-api', 'local-only-econ']
               : [VIEW_ANCHOR[key] || 'view-header'];
     return ids.map((id) => $(id)).filter(Boolean);
   }
   // Human names for the sub-unit / pseudo keys whose raw key reads badly — used
   // in the shared-panel chip label and in every tooltip.
-  const UNIT_LABEL = { tape: 'tape', tapeint: 'tape speed', ingest: 'data intake', header: 'header' };
+  const UNIT_LABEL = { tape: 'tape', tapeint: 'tape speed', ingest: 'data intake', header: 'header', local: 'local-only strip' };
 
   // §0 honesty (§0.1/§0.7, cf. terminal-views.js 'never carry a silently-broken
   // chart'): a quarantined unit keeps its LAST GOOD frame on screen — that is
@@ -1238,7 +1318,10 @@
   tapeMetricSel.value = settings.tapeMetric;
   tapeView.mount($('view-tape'), {
     filterInput: tapeMinInput,   // the input lives in the settings row; the view owns its behavior
-    onFilter: (v) => { settings.tapeMin = v; saveSettings(); dirty.tape = true; },
+    // T-4: touching the floor retires the migration caption for good — the user
+    // has now made the floor their own choice, so announcing our default change
+    // would be noise (silent-when-healthy applies to notices too).
+    onFilter: (v) => { settings.tapeMin = v; tapeMinMigrated = false; saveSettings(); dirty.tape = true; },
     marketSel: tapeMarketSel,
     onMarket: (v) => { if (TAPE_MARKETS.indexOf(v) >= 0) { settings.tapeMarket = v; saveSettings(); dirty.tape = true; } },
     venueSel: tapeVenueSel,
@@ -1283,16 +1366,26 @@
     // are perp; an unmapped code never masquerades as spot). filterTapeRows
     // owns the min-notional / single-venue / market filter + tier+market tag.
     const marketOf = (ex) => { const key = EX_LEG[ex]; return key && !legReg.isPerp(key) ? 'spot' : 'perp'; };
-    const out = S.filterTapeRows(tapeAgg.list(), {
-      market: settings.tapeMarket, venue: settings.tapeVenue, minN: settings.tapeMin,
-      tiers, marketOf,
-    });
+    const rows = tapeAgg.list();
+    const proj = { market: settings.tapeMarket, venue: settings.tapeVenue, minN: settings.tapeMin, marketOf };
+    const out = S.filterTapeRows(rows, Object.assign({ tiers }, proj));
+    // T-4 (§4j): the floor FILTERS, it never DISCARDS — the same projection's
+    // sub-floor residue rides along so the panel can state what it is not
+    // showing. null when the floor is off or nothing fell below it (no caption
+    // rather than a "0 hidden" that would imply a floor is doing work).
+    const below = S.tapeFloorSummary(rows, proj);
     const rail = bigPrints.list().map((r) => Object.assign({}, r, {
       market: EX_LEG[r.ex] && legReg.isPerp(EX_LEG[r.ex]) ? 'perp' : 'spot',
     }));
     tapeView.render({
       rows: out, bigPrints: rail, tiers, tick: settings.tick,
       nowMs: Date.now(), legsNote: tapeLegsNote(), metric: settings.tapeMetric,
+      minN: settings.tapeMin, below,
+      // One-shot, self-retiring notice — see the loadSettings migration.
+      floorNotice: tapeMinMigrated
+        ? 'tape floor set to ' + usdShort(settings.tapeMin) + ' (T-4 default — it used to be off). '
+          + 'Change or clear it in settings ↓'
+        : '',
     });
   }
 
@@ -1391,6 +1484,12 @@
   let flapTick = 0;   // N5: per-evaluation counter for the deterministic flap (see safePanel)
   const DROP_INJECT = REPLAY ? new URLSearchParams(location.search).has('drop') : false;
   if (DROP_INJECT) { health.bump('droppedFrame', 'parse'); health.bump('droppedFrame', 'parse'); health.bump('droppedFrame', 'handler'); }
+  // T-4 R1: leg (ex code) → LATEST venue-initiated close + a running count for
+  // that leg. Latest-wins on purpose: the per-leg conn chip tooltip answers
+  // "what killed this leg, and was the tab hidden when it happened?", and a
+  // close that has already recovered is history, not a current defect — so it
+  // rides a tooltip, never a chip that would shout at a healthy terminal.
+  const legCloses = {};
   function startLeg(name, adapter, api) {
     // O-3 BYOD seam (§4c): sink rides along as the optional 4th arg — under
     // ?replay=byod the driver feeds collector rows to the sink DIRECTLY
@@ -1410,6 +1509,27 @@
     // (normally marks/trades dirty the header ~1/s). Still rate-limited: due()/
     // MIN_MS.header throttle the actual repaint, so a drop flood never spins.
     if (!api.onDropped) api.onDropped = (reason) => { health.bump('droppedFrame', reason); dirty.header = true; };
+    // T-4 R1: the same single-point, optional, idempotent wiring for socket
+    // CLOSES. livewire used to discard the CloseEvent, so "bybit went stale"
+    // could not be told apart from "bybit was closed by the venue with code X"
+    // — the ping-margin theory was untestable by construction. Only a close the
+    // VENUE initiated is a venue drop: 'us' (symbol switch) and 'watchdog' (our
+    // own DEAD_MS force-reconnect) are ours and must never inflate the count.
+    // document.visibilityState is captured HERE, not in livewire (which must
+    // stay Node-constructible): background-tab timer throttling is the leading
+    // remaining candidate mechanism, so the page state AT the close is the
+    // discriminator that makes the theory falsifiable.
+    if (!api.onClosed) api.onClosed = (info) => {
+      if (!info || info.by !== 'venue') return;
+      health.bump('socketClose', name + '/' + (info.code == null ? 'unknown' : info.code));
+      legCloses[name] = {
+        n: (legCloses[name] ? legCloses[name].n : 0) + 1,
+        code: info.code, reason: info.reason, clean: info.clean,
+        vis: (typeof document !== 'undefined' ? document.visibilityState : null),
+        ts: Date.now(),
+      };
+      dirty.header = true;   // rate-limited by due()/MIN_MS.header, exactly like the drop path
+    };
     return LW.makeSocket(adapter, api);
   }
 
@@ -2309,6 +2429,10 @@
   let polyEvents = null;   // normalizePolymarketEvents() result (null → 'awaiting')
   let newsItems = null;    // normalizeToaNews() result
   let econData = null;     // normalizeEconLocal() result (null → the make-econ note)
+  // T-4: has the local-file read ANSWERED yet? econData is null both before and
+  // after, so this is the "absent" vs "not yet asked" discriminator the fold
+  // rule needs (§0.7 — an unanswered probe is not a missing file).
+  let econProbed = false;
   if (REPLAY) {
     // Honest replay note (same text discipline as the O-3/O-4 notes): these
     // panels stay empty in replay and SAY WHY (§0.7 — empty-but-honest).
@@ -2322,11 +2446,35 @@
       const panel = el.closest('.panel');
       if (panel) panel.classList.add('panel--empty');
     }
+    // T-4 (§4j): the relevance select is emitted unconditionally in the news
+    // <h2>, but newsView — and therefore its change wiring — only exists in the
+    // live branch. Left enabled it was a fully interactive control that never
+    // reflected the persisted setting and did nothing when changed: a visible
+    // control implying a capability the mode does not have. Disable it and say
+    // why, the same discipline as every other replay-disabled control.
+    {
+      const relSel = $('set-news-rel');
+      if (relSel) {
+        relSel.disabled = true;
+        relSel.title = 'relevance filtering is disabled in replay — the news panel has no feed here (§7 L1)';
+      }
+    }
   } else {
     polyView = V.PolymarketView();
     polyView.mount($('view-polymarket'));
     newsView = V.NewsView();
-    newsView.mount($('view-news'));
+    // T-4 (§4j): the relevance projection is a VISIBLE control in the panel
+    // header (the heat-controls idiom every other panel uses) — a filter the
+    // reader cannot see and cannot switch off is a hidden filter. Ingest keeps
+    // every row, so flipping the toggle is instant and needs no refetch.
+    {
+      const relSel = $('set-news-rel');
+      if (relSel) relSel.value = settings.newsRel;
+      newsView.mount($('view-news'), {
+        relSel,
+        onRel: (v) => { if (NEWS_RELS.indexOf(v) >= 0) { settings.newsRel = v; saveSettings(); dirty.news = true; } },
+      });
+    }
     econView = V.EconView();
     econView.mount($('view-econ'));
 
@@ -2342,7 +2490,10 @@
     // the make-econ how-to), so it is assigned through — and re-checked every
     // 5min so running `make econ` in a shell shows up without a page reload.
     function pollEcon() {
-      HIST.fetchEconLocal().then((d) => { econData = d; dirty.econ = true; });
+      // econProbed flips on the FIRST answer and stays true: from then on a
+      // null econData genuinely means "no local file" (fetchEconLocal swallows
+      // its own errors and resolves null — an absent file is not an error).
+      HIST.fetchEconLocal().then((d) => { econData = d; econProbed = true; dirty.econ = true; dirty.local = true; });
     }
     pollPolymarket();
     setInterval(pollPolymarket, 60000);
@@ -2741,6 +2892,145 @@
         'composite · ' + ok.map((r) => r.date).join(' + ') + ' (client-side merge)',
         skipped.length ? skipped.length + ' day(s) skipped: ' + skipped.map((r) => r.err).join(' · ') : '');
     });
+  }
+
+  // ─── T-4 (§4j): the LOCAL-ONLY strip ──────────────────────────────────────
+  //
+  // Measured on a public Pages load: THREE panels (key levels, auction profile,
+  // daily levels) rendered the same two-line "collector API offline" paragraph
+  // verbatim, plus a third variant in econ — ~500px of duplicated error prose
+  // inside one section. API_OFFLINE_NOTE was already ONE constant; the
+  // duplication was at RENDER time, across four call sites. This folds the
+  // panels that currently have nothing to draw into ONE strip that names the
+  // features, the cause and the recovery command, and gives every panel back
+  // untouched the moment it has data again.
+  //
+  // The fold rule is NOT `apiUp === false`. It is "this panel has no datum it
+  // could render", because folding on the API alone would HIDE WORKING
+  // FEATURES:
+  //   • the auction panel still works with the API down when an HF archived day
+  //     is reachable (loadAuctionSource → loadArchivedDay);
+  //   • key levels has a LIVE half — this session's own IB from bybit prints —
+  //     that needs no API at all;
+  //   • econ is not the collector API at all. It reads a local file written by
+  //     `make econ` (faireconomy sends no CORS header), so folding it into one
+  //     strip with one cause would MISSTATE why it is empty — hence two strips,
+  //     each stating its own cause.
+  // apiUp === null (probe in flight) folds NOTHING: a transient state is not a
+  // degraded one, and the in-place "probing collector API…" note covers it.
+  // REPLAY folds nothing either — those panels already carry their own honest
+  // replay notes, and this must not overwrite them.
+  //
+  // Honesty rail: a feature is STATED as unavailable with its cause and its
+  // recovery command; it is never quietly removed. The "still working here"
+  // line only names things that are on screen and can be checked.
+  const localStripEls = { api: null, econ: null };
+  const localFoldEls = {};
+  let localOnlyKey = '';
+
+  /** Which of the collector-API panels currently have NOTHING to render, plus
+   *  the local econ file's own state. Pure read over existing state.
+   *  `klevWhy` carries the folded key-levels panel's OWN §0.7 gap prose (see
+   *  below) — the strip restates it, so folding never silences it. */
+  function localFoldState() {
+    const st = { auct: false, lvls: false, klev: false, econ: false, klevWhy: '' };
+    if (REPLAY) return st;
+    // §4g: with another symbol selected the registry panels state the SYMBOL as
+    // the cause (byodSymNote) — that is the accurate one, so we leave them be.
+    if (apiUp === false && SYM === 'BTCUSDT') {
+      st.auct = !auctionState.profile && !(archDates && archDates.length);
+      st.lvls = !levelsDays || !levelsDays.length;
+      const k = klevSlice();
+      st.klev = !k.prior && !k.ib;
+      // Folding the panel removes klevSlice()'s honest-absence line ("IB
+      // withheld — the page did not witness the 00:00 UTC open (§0.7)", "IB
+      // forming", "no prints yet") from the page. The API is NOT the cause of
+      // that half's absence, so the strip must carry the real reason rather
+      // than let one cause stand for two (§0.7: a gap keeps its explanation).
+      if (st.klev) st.klevWhy = k.ibNote || '';
+    }
+    // T-4: econ is a TRI-state, exactly like apiUp. econData is null both
+    // before and after the fetch, so `!econData` asserted "no local econ file"
+    // for the ~1s the same-origin read was still in flight — folding the real
+    // panel behind a cause that was not yet known to be true. The strip's own
+    // rule ("a transient state is not a degraded one") applies to both halves.
+    st.econ = econProbed && !econData;
+    return st;
+  }
+
+  function renderLocalOnly() {
+    if (REPLAY) return;
+    if (!localStripEls.api) {
+      localStripEls.api = $('local-only-api');
+      localStripEls.econ = $('local-only-econ');
+      // Every fold target is resolved through its VIEW element's .panel, never
+      // through a section id: `#sec-auction` is the AUCTION section's nav
+      // anchor, and hiding the element that carries it makes both the nav link
+      // and the ⌘K jump land nowhere (T-4 — the anchor now lives on the
+      // eyebrow, and this lookup no longer depends on which element holds it).
+      localFoldEls.auct = $('view-auction') && $('view-auction').closest('.panel');
+      localFoldEls.lvls = $('view-levels') && $('view-levels').closest('.panel');
+      localFoldEls.klev = $('view-keylevels') && $('view-keylevels').closest('.panel');
+      localFoldEls.econ = $('view-econ') && $('view-econ').closest('.panel');
+    }
+    if (!localStripEls.api || !localStripEls.econ) return;   // markup absent → nothing to do
+    const st = localFoldState();
+    // The key must contain every datum the rendered TEXT reads, not just the
+    // fold booleans — an early version keyed on the booleans alone, so loading
+    // an archived day (auctionState.profile flips, st.auct does not) left the
+    // strip telling the reader to go pick a source that was already picked.
+    const key = [st.auct, st.lvls, st.klev, st.econ, apiUp, !!auctionState.profile, st.klevWhy].join('|');
+    if (key === localOnlyKey) return;   // fold state unchanged → touch no DOM
+    localOnlyKey = key;
+
+    // Fold via a CLASS, never [hidden]: applyCollapse() owns the `hidden`
+    // property of every [data-sec] element and would fight us on the next
+    // section toggle.
+    for (const k of ['auct', 'lvls', 'klev', 'econ']) {
+      if (localFoldEls[k]) localFoldEls[k].classList.toggle('folded-local', st[k]);
+    }
+
+    const anyApi = st.auct || st.lvls || st.klev;
+    localStripEls.api.classList.toggle('local-on', anyApi);
+    if (anyApi) {
+      // Stand in the cell of a panel we ACTUALLY folded — that cell is free by
+      // construction, so the strip can never be superimposed on a live panel
+      // (see terminal.html). Preference order is widest-first: klev is a
+      // full-width row, auct is ~2/3, lvls is the narrow 2-row column.
+      localStripEls.api.style.gridArea = st.klev ? 'klev' : st.auct ? 'auct' : 'lvls';
+      const folded = [];
+      // The label names what is GONE from the page. When st.klev is true the
+      // WHOLE key-levels panel folds, live-IB half included, so "(registry
+      // half)" would understate it.
+      if (st.auct) folded.push('auction profile');
+      if (st.lvls) folded.push('daily levels registry');
+      if (st.klev) folded.push('key levels');
+      const working = [];
+      if (!st.auct) working.push(auctionState.profile ? 'auction profile (a day is loaded)' : 'auction profile — HF archived days (source select)');
+      if (!st.lvls) working.push('daily levels registry');
+      if (!st.klev) working.push("key levels — live IB from this session's own prints");
+      localStripEls.api.innerHTML = '<h2>local-only features</h2>'
+        + '<div class="lo-list">' + escapeHtml(folded.join(' · ')) + '</div>'
+        // ONE constant, reused — not a fourth copy of the prose (that was the bug).
+        + '<div class="lo-why">' + escapeHtml(API_OFFLINE_NOTE) + '</div>'
+        // §0.7: the key-levels panel's live half has its OWN reason for being
+        // empty, and it is not the collector API. Carry it verbatim rather than
+        // let the API note stand in for a gap it did not cause.
+        + (st.klevWhy ? '<div class="lo-why">key levels, live half: ' + escapeHtml(st.klevWhy) + '</div>' : '')
+        + (working.length
+          ? '<div class="lo-ok">still working here: ' + escapeHtml(working.join(' · ')) + '</div>'
+          : '');
+    }
+
+    localStripEls.econ.classList.toggle('local-on', st.econ);
+    if (st.econ) {
+      localStripEls.econ.style.gridArea = 'econ';   // the cell of the panel it stands in for (folded below)
+      localStripEls.econ.innerHTML = '<h2>local-only features</h2>'
+        + '<div class="lo-list">econ calendar</div>'
+        + '<div class="lo-why">no local econ file — run <b>make econ</b> (faireconomy\'s JSON sends no CORS '
+        + 'header, so the browser cannot fetch it directly; scripts/fetch_econ.py writes '
+        + 'dashboard/econ_calendar.json same-origin).</div>';
+    }
   }
 
   function loadAuctionSource(src) {
@@ -3314,7 +3604,14 @@
       const s = health.snapshot();
       let faults = 0, faultsInclIngest = 0;
       for (const k in guards) { const st = guards[k].stats(); faultsInclIngest += st.failures; if (k !== 'ingest' && !st.dead) faults += st.failures; }
-      return { dropped: health.count('droppedFrame'), drops: s.detail.droppedFrame || {}, faults, faultsInclIngest, cascade: CASCADE_KEYS };
+      // T-4 R1: `closes` is the evidence the ping-margin theory stands or falls
+      // on — {leg/code: n} from the counter plus the per-leg latest close (code,
+      // reason, wasClean, page visibility). Additive: every N5 key is untouched.
+      return {
+        dropped: health.count('droppedFrame'), drops: s.detail.droppedFrame || {},
+        faults, faultsInclIngest, cascade: CASCADE_KEYS,
+        closes: s.detail.socketClose || {}, legCloses: JSON.parse(JSON.stringify(legCloses)),
+      };
     },
     // T-2 (§4h): per-leg matrix snapshot — {enabled, kind (chip state), hasBook}
     // keyed by leg key. The live-check harness asserts ≥5 legs synced from this.
@@ -3547,6 +3844,12 @@
     // the header health chip reflects only the NEW symbol's drops/faults (the
     // cascade chips were already lifted by clearPanelDead('ingest') above).
     health.reset();
+    // T-4 R1: legCloses is the SECOND surface of the same fact (the conn-chip
+    // tooltip; health.reset() zeroes the counter behind __BTCQ_TERMINAL_DEBUG).
+    // Leaving it would make the two disagree and would attribute the PREVIOUS
+    // symbol's closes — and a pre-switch timestamp driving the tooltip's
+    // "Ns ago" — to a session that says "this session". Same zeroing, same line.
+    for (const k in legCloses) delete legCloses[k];
   }
 
   if (REPLAY) {
@@ -3922,6 +4225,11 @@
     // O-5 budgets: jour/cal move on user actions; poly/news/econ at their
     // 30–60s poll cadence — budgets just cap redraw bursts.
     jour: 400, cal: 600, poly: 1000, news: 800, econ: 1000,
+    // T-4: the local-only strip re-evaluates at 1Hz and writes DOM only when
+    // its fold state actually changes (renderLocalOnly keys on it), so the API
+    // coming back — or a live IB arriving — restores full panels without a
+    // reload and without a dedicated cadence.
+    local: 1000,
     // T-1 budgets (§4g): tapeint ticks with the tape burst (a text strip +
     // 120px spark — cheap); walls/klev move at the 1/s sampler / 5min poll;
     // vpin per completed bucket; basis at the ~1s mark cadence (the view
@@ -3935,7 +4243,7 @@
     hist: 0, tpo: 0, vp: 0, farb: 0, macro: 0,
     auct: 0, lvls: 0, micro: 0,
     scr: 0, rsi: 0, opts: 0, whale: 0, alerts: 0, conf: 0,
-    jour: 0, cal: 0, poly: 0, news: 0, econ: 0,
+    jour: 0, cal: 0, poly: 0, news: 0, econ: 0, local: 0,
     tapeint: 0, walls: 0, vpin: 0, klev: 0, basis: 0,
     spcvd: 0,
   };
@@ -3965,6 +4273,13 @@
     jour: 'portfolio', cal: 'portfolio', poly: 'portfolio', news: 'portfolio', econ: 'portfolio',
     tapeint: 'orderflow', walls: 'orderflow', basis: 'structure', klev: 'auction', vpin: 'auction',
     spcvd: 'orderflow',   // T-2 (§4h): spot-vs-perp CVD strip (ORDERFLOW section)
+    // 'local' is DELIBERATELY absent from SEC_OF and VIEW_ANCHOR (T-4): it
+    // spans TWO sections (auction + portfolio), so a single section gate would
+    // freeze the other half, and its own DOM node is display:none while nothing
+    // is folded — an IntersectionObserver on a hidden element never intersects,
+    // which would latch the strip off forever once it had painted once. It
+    // therefore runs on the plain due()/MIN_MS budget with no visibility gate,
+    // and paints only when its fold key changes.
   };
   const VIEW_ANCHOR = {
     fp: 'view-footprint', dom: 'view-dom', tape: 'view-tape', agg: 'view-aggbook',
@@ -4193,7 +4508,15 @@
       if (st.dead) continue;
       faults += st.failures;
     }
-    return { dropped: health.count('droppedFrame'), faults, drops: health.snapshot().detail.droppedFrame || {} };
+    // T-4 R1: `closes` rides the SAME slice — the header view puts it in the
+    // per-leg chip TOOLTIP, never in the health chip text. A reconnect that has
+    // already recovered is not a current defect, and a permanently-on chip is
+    // exactly the noise R2 was raised to remove.
+    return {
+      dropped: health.count('droppedFrame'), faults,
+      drops: health.snapshot().detail.droppedFrame || {},
+      closes: legCloses,
+    };
   }
 
   function frame() {
@@ -4481,11 +4804,31 @@
           polyView.render({ events: polyEvents, nowMs: now });
         });
         if (newsView && due('news', now)) safePanel('news', () => {
-          newsView.render({ items: newsItems, nowMs: now });
+          // T-4 (§4j): filterNewsRows returns the kept rows AND the counts the
+          // caption states, so the panel always says how many rows it took out
+          // of view. items null (pre-first-fetch) stays null — an absent feed
+          // is not an empty one (§0.7).
+          newsView.render({
+            view: newsItems ? S.filterNewsRows(newsItems, { mode: settings.newsRel }) : null,
+            nowMs: now,
+          });
         });
         if (econView && due('econ', now)) safePanel('econ', () => {
-          econView.render({ data: econData, nowMs: now });
+          econView.render({ data: econData, probed: econProbed, nowMs: now });
         });
+        // T-4 (§4j): the local-only strip. Self-rearming (dirty stays set) so it
+        // re-evaluates at its 1s budget and restores full panels the moment the
+        // API answers or a live IB arrives — renderLocalOnly writes DOM only
+        // when the fold state actually changed, so the steady state is free.
+        // Re-arm BEFORE the render, never after it: 'local' has no data path
+        // that re-dirties it and is deliberately absent from SEC_OF (so the
+        // section-expand re-dirty loop misses it too), which made the re-arm as
+        // the callback's LAST statement single-point-of-failure — one throw
+        // inside renderLocalOnly and safePanel would swallow it with dirty.local
+        // never set again, freezing the fold state until a dirtyAll(). Panels
+        // could then stay hidden after the API came back, which is exactly the
+        // "a feature is never quietly removed" rail this strip exists to serve.
+        if (due('local', now)) safePanel('local', () => { dirty.local = true; renderLocalOnly(); });
       }
     } finally {
       // N1: single re-arm site — runs on the document.hidden early return, on a

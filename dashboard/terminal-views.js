@@ -1070,12 +1070,19 @@
   // metric-column toggle (notional / avg px / cum $ / time-ago). The actual
   // filtering happens upstream — the view renders an already-filtered slice.
   function TapeView() {
-    let root = null, rail = null, list = null, hon = null;
+    let root = null, rail = null, list = null, hon = null, sub = null;
     const MAX_ROWS = 60;   // DOM budget; the store holds more, the eye doesn't
 
     // Bar-background alpha per tier (over the aggressor hue) — the second,
     // redundant cue next to the ◆/▲▼ glyphs and row weight (WCAG 1.4.1).
-    const TIER_ALPHA = { baseline: 0.0, sig: 0.14, large: 0.26, huge: 0.42, whale: 0.60 };
+    // T-4: baseline 0.0 → 0.06. At alpha 0 the `barBg` branch below emits NO
+    // gradient at all, so every sub-'sig' row drew as untinted full-height
+    // filler — and with the new $10k floor the baseline band spans $10k–$100k,
+    // a 10× range that deserves to be readable. 0.06 is a whisper: the tier
+    // LADDER still reads (0.06 → 0.14 → 0.26 → 0.42 → 0.60) and the log-notional
+    // bar that was already computed for every row finally gets drawn.
+    // Presentation only — no datum changes.
+    const TIER_ALPHA = { baseline: 0.06, sig: 0.14, large: 0.26, huge: 0.42, whale: 0.60 };
 
     function mount(el, opts) {
       root = el;
@@ -1103,6 +1110,14 @@
       list = document.createElement('div');
       list.className = 'tape-list';
       root.appendChild(list);
+      // T-4 (§4j): the sub-floor caption — a CAPTION, deliberately not a row in
+      // the list (a row inside the list reads as a print, and this is the
+      // opposite: it is what the list is NOT showing). Sits between the list
+      // and the honesty footer, hidden while it has nothing to say.
+      sub = document.createElement('div');
+      sub.className = 'tape-subfloor';
+      sub.hidden = true;
+      root.appendChild(sub);
       hon = document.createElement('div');
       hon.className = 'tape-hon';
       root.appendChild(hon);
@@ -1145,10 +1160,13 @@
       rail.innerHTML = html;
     }
 
-    /** slice = { rows, bigPrints, tiers, tick, nowMs, legsNote, metric }
+    /** slice = { rows, bigPrints, tiers, tick, nowMs, legsNote, metric,
+     *            minN, below, floorNotice }
      *  rows: aggregated blocks NEWEST-FIRST, already market/venue/min filtered,
      *  each tagged {ts, ex, isBuy, price, qty, notional, count, tier, market}.
-     *  metric ∈ ntl|avg|cum|ago — the toggleable right column. */
+     *  metric ∈ ntl|avg|cum|ago — the toggleable right column.
+     *  below: tapeFloorSummary of the SAME projection (null = nothing to state).
+     *  floorNotice: the one-shot "the default changed" line, '' when retired. */
     function render(slice) {
       if (!list) return;
       const tiers = slice.tiers || { sig: 1e5, large: 2.5e5, huge: 1e6, whale: 5e6 };
@@ -1157,6 +1175,29 @@
       const metric = slice.metric || 'ntl';
       renderRail(slice.bigPrints, tiers, nowMs, dp);
       hon.textContent = slice.legsNote || '';
+
+      // T-4 (§0 honesty rail): state the residue BEFORE the early return — when
+      // the floor filters everything out, "no blocks clear the filter" plus this
+      // line is the whole truth; the note alone would look like a dead feed.
+      if (sub) {
+        const b = slice.below;
+        const notice = slice.floorNotice || '';
+        let txt = '';
+        if (b && b.blocks > 0) {
+          const signed = b.buyNotional + b.sellNotional;
+          const buyShare = signed > 0 ? b.buyNotional / signed : NaN;
+          txt = 'below ' + fmtCompactUsd(slice.minN) + ' · ' + b.blocks.toLocaleString('en-US')
+            + ' block' + (b.blocks === 1 ? '' : 's')
+            + ' (' + b.prints.toLocaleString('en-US') + ' print' + (b.prints === 1 ? '' : 's') + ') · '
+            + fmtCompactUsd(b.notional)
+            + (Number.isFinite(b.share) ? ' = ' + (b.share * 100).toFixed(0) + '% of tape $' : '')
+            + (Number.isFinite(buyShare) ? ' · ' + (buyShare * 100).toFixed(0) + '% buy' : '')
+            + ' — filtered from view, not discarded';
+        }
+        sub.innerHTML = (txt ? '<span class="sf-line">' + esc(txt) + '</span>' : '')
+          + (notice ? '<span class="sf-notice">' + esc(notice) + '</span>' : '');
+        sub.hidden = !txt && !notice;
+      }
 
       const rows = (slice.rows || []).slice(0, MAX_ROWS);
       setPanelEmpty(root, !rows.length);   // presentation-only compact toggle
@@ -1530,10 +1571,26 @@
       // 'reconnecting' share the amber dot ('reconnecting' is just stale with
       // intent); 'error' is red; anything unseen stays grey "connecting…".
       const st = slice.statuses || {};
+      // T-4 R1: per-leg close telemetry lives in the chip TOOLTIP. Not in the
+      // chip TEXT (the harness asserts that text verbatim), and not in the
+      // health chip (a reconnect that already recovered is history, not a
+      // current defect — turning it into a permanent badge would re-commit the
+      // exact sin R2 removes). Available on demand, silent otherwise.
+      const closes = (slice.health && slice.health.closes) || {};
       for (const ex in chips) {
         const s = st[ex];
         const chip = chips[ex];
         chip.el.classList.remove('live', 'stale', 'error');
+        const cl = closes[ex];
+        chip.el.title = cl
+          ? exLabel(ex) + ' — ' + cl.n + ' venue close' + (cl.n === 1 ? '' : 's') + ' this session · last '
+            + (cl.code == null ? 'unknown code' : 'code ' + cl.code)
+            + (cl.reason ? ' "' + cl.reason + '"' : ' (no reason given)')
+            + (cl.clean ? ', clean' : ', abnormal')
+            + (cl.vis ? ', tab ' + cl.vis : '')
+            + ', ' + ago(slice.nowMs - cl.ts) + ' ago'
+            + ' — closes WE initiate (symbol switch, watchdog) are excluded'
+          : '';
         if (!s) continue;
         // kind 'open' renders the transport's OWN message, never a hardcoded
         // 'live' (§0 honesty rail): livewire.js says 'live feed connected',
@@ -4445,11 +4502,24 @@
   }
 
   // ═══ NewsView — Tree of Alpha context feed (§4e) ═══
+  //
+  // T-4 (§4j): the relevance projection is applied UPSTREAM (filterNewsRows)
+  // and this view states its result in a caption above the list. The toggle is
+  // a visible panel control, and 'all' returns every row — a filter the reader
+  // cannot see or switch off would be a hidden filter (§0 honesty rail).
   function NewsView() {
-    let root = null, listEl = null;
+    let root = null, listEl = null, capEl = null;
+    const MAX_ROWS = 18;   // DOM budget — and it is STATED in the caption, see render()
 
-    function mount(el) {
+    function mount(el, opts) {
       root = el;
+      const o = opts || {};
+      if (o.relSel && typeof o.onRel === 'function') {
+        o.relSel.addEventListener('change', () => o.onRel(o.relSel.value));
+      }
+      capEl = document.createElement('div');
+      capEl.className = 'news-cap';
+      root.appendChild(capEl);
       listEl = document.createElement('div');
       listEl.className = 'news-list';
       root.appendChild(listEl);
@@ -4458,26 +4528,48 @@
         '<div class="farb-note">Tree of Alpha — context feed. Headlines are descriptive context, never tradeable information.</div>');
     }
 
-    /** slice = { items (normalizeToaNews output | null), nowMs }. */
+    /** slice = { view (filterNewsRows output | null), nowMs }. */
     function render(slice) {
       if (!listEl) return;
-      const items = slice.items;
+      const view = slice.view;
+      const items = view ? view.rows : null;
       setPanelEmpty(root, !items || !items.length);   // presentation-only compact toggle
-      if (!items) {
+      if (!view) {
+        capEl.textContent = '';
         listEl.innerHTML = '<div class="chart-na">awaiting Tree of Alpha headlines (30s poll).</div>';
         return;
       }
+      // The caption states what is ON SCREEN and what is not. `shown` is the
+      // rendered count, NOT the kept count: the list has always capped at
+      // MAX_ROWS, and a caption reading "30 shown" over 18 visible rows would
+      // be its own small lie. 'all' carries no "0 filtered" — that would imply
+      // a filter is running when none is.
+      const shown = Math.min(view.kept, MAX_ROWS);
+      capEl.textContent = view.mode === 'all'
+        ? 'all · ' + shown + ' shown of ' + view.total + ' headlines'
+        : 'crypto · ' + shown + ' shown of ' + view.kept + ' relevant / ' + view.total
+          + ' headlines · ' + view.filtered + ' filtered (no crypto/market evidence — switch to all)';
       if (!items.length) {
-        listEl.innerHTML = '<div class="chart-na">no headlines returned.</div>';
+        listEl.innerHTML = view.total
+          ? '<div class="chart-na">no headline carries crypto/market evidence right now — switch relevance to <b>all</b> to see all '
+            + view.total + '.</div>'
+          : '<div class="chart-na">no headlines returned.</div>';
         return;
       }
       let html = '';
-      for (const it of items.slice(0, 18)) {
-        // §4e: whale-emphasis on BTC-symbol items — the feed tags symbols
-        // itself; we only style the tag it already carries.
-        const btc = it.symbols.some((s) => s.indexOf('BTC') === 0);
+      for (const it of items.slice(0, MAX_ROWS)) {
+        // §4e/§4j: whale-emphasis on BTC items. Was `symbols.some(s => …'BTC')`,
+        // which measured 0/200 on the live wire — dead code. The emphasis now
+        // rides the relevance read, whose BTC evidence is the feed's own
+        // content-derived coin mapping first (18/200), symbols second.
+        const btc = !!(it.rel && it.rel.btc);
         const title = it.title.length > 180 ? it.title.slice(0, 177) + '…' : it.title;
-        html += '<div class="news-row' + (btc ? ' news-btc' : '') + '">'
+        // Say WHY the row survived the filter. The feed's own content mapper is
+        // the strongest rung but it is not perfect — it matched the bare word
+        // "ACT" in a filibuster tweet (measured: 3 such rows per 200) — so the
+        // reader gets the evidence rung on hover instead of a mystery.
+        const why = it.rel && it.rel.why ? ' title="kept: ' + esc(it.rel.why) + ' evidence"' : '';
+        html += '<div class="news-row' + (btc ? ' news-btc' : '') + '"' + why + '>'
           + '<span class="ts">' + esc(ago(slice.nowMs - it.ts)) + '</span>'
           + '<span class="news-src">' + esc(it.source || '?') + '</span>'
           + '<span class="news-title">'
@@ -4509,7 +4601,11 @@
         '<div class="farb-note">ForexFactory mirror · fetched locally (no CORS) — a context feed; scheduled events, not predictions.</div>');
     }
 
-    /** slice = { data (normalizeEconLocal output | null), nowMs }. */
+    /** slice = { data (normalizeEconLocal output | null), probed, nowMs }.
+     *  probed=false means the local read has not ANSWERED yet — data null is
+     *  then "not yet asked", not "absent" (§0.7), and the panel says so
+     *  instead of naming a cause it cannot know. Same tri-state discipline as
+     *  the collector API's `apiUp === null` "probing…" note. */
     function render(slice) {
       if (!listEl) return;
       const d = slice.data;
@@ -4518,10 +4614,14 @@
         // §4e honest-absence note: the browser CANNOT fetch faireconomy
         // directly (no CORS header) — the local mirror is the design, and
         // its absence gets a how-to, not a blank.
+        // T-4 (§4j): one line here — the cause + recovery command moved to the
+        // local-only strip, which is what the reader actually sees while the
+        // file is missing (this panel is folded then). Kept, not deleted: the
+        // panel must still explain itself if it is ever rendered unfolded.
         stampEl.textContent = '';
-        listEl.innerHTML = '<div class="chart-na">no local econ file — run <b>make econ</b> to fetch this+next week '
-          + '(faireconomy JSON has no CORS header, so the browser cannot fetch it directly; '
-          + 'scripts/fetch_econ.py writes dashboard/econ_calendar.json same-origin).</div>';
+        listEl.innerHTML = slice.probed === false
+          ? '<div class="chart-na">reading local econ file…</div>'
+          : '<div class="chart-na">no local econ file — run <b>make econ</b> (faireconomy JSON has no CORS header).</div>';
         return;
       }
       // Fetch-age stamp (§4e): a calendar of unknown age is a stale-data trap.

@@ -213,6 +213,36 @@ sequence to the calendar, not to enthusiasm.
       fault never trips the consecutive breaker and today emits no telemetry — surface it
       via this counter so a recurring intermittent fault is visible, not silent.
 
+- [x] **T-4 Wave 1 "Truth"** (done 2026-07-26 — five items, all measured before they were
+      built; see DESIGN §4j + AUDIT_LOG). (1) **The health chip lied** — N5 (`afe817f`)
+      counted OKX's plain-text `pong` as a dropped frame, so a healthy terminal wore a
+      permanent amber chip. An OPTIONAL `adapter.isControlFrame(rawText)` consulted INSIDE
+      livewire's parse catch (byte-identical happy path; app.js declares none, so its path
+      is untouched) fixes it, and forced a non-optional split of livewire's liveness into
+      `lastAliveAt` (stale) vs `lastDataAt` (dead) — without it a pong every 25 s would
+      have kept the 40 s force-reconnect from ever firing. Live proof: 400 s, 80 samples,
+      `dropped=0`, chip hidden throughout; L2 `verify_wire_live` gained `ctrl`/`pDrop`/
+      `alive` columns and holds the identical discipline. (2) **Bybit ping margin: the
+      theory is refuted, and the refutation is the deliverable.** `pingMs` 20000→15000 on
+      both v5 legs is a correct jitter margin, but the drops persisted — and the newly
+      captured CloseEvent (previously discarded) says code **1006, empty reason, not clean,
+      tab visible**: an abnormal TRANSPORT close, not a ping timeout, and not background-tab
+      throttling. One stale episode produced no close at all (socket open, feed silent) —
+      a third bug class. Lowering `pingMs` further is NOT indicated; the telemetry to
+      discriminate now exists. (3) Tape floor 0→**$10k** (the repo's own `CvdStore`
+      taxonomy cut; $100k measured to empty the panel), with the sub-floor volume SUMMARISED
+      in the panel and the changed default migrated once via `settingsVer:4` and stated.
+      (4) News relevance as a VISIBLE crypto⇄all toggle over a measured evidence ladder —
+      the old BTC test fired 0/200 on the live wire (dead code); known 1.5% false positives
+      stated, not patched. (5) Three duplicated "collector API offline" paragraphs → ONE
+      local-only strip that refuses to fold a panel which still has data. Check gate 77→81.
+      Reviewed before commit, and the review found three of the claims above wrong — the
+      split had left BYBIT (the primary venue) on one clock, the fix introduced a new
+      false-green ("live feed recovered" on a keepalive), and the tape-floor effect was
+      ~5× overstated because the 400-block aggregator ring, not the 60-row DOM budget, is
+      the binding constraint. All three corrected and mutation-tested; the superseded
+      numbers are kept in AUDIT_LOG rather than edited away.)
+
 ### MID — close the flywheel + collapse the maintainability tax (1-3 months)
 
 - [ ] **M1. Build the keystone `btcquant/orderflow.py`.** Read day-file/HF parquet, emit

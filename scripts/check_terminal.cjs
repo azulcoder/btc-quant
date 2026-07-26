@@ -354,6 +354,38 @@
 //                           sizeTier tag, exact single-venue + min-notional
 //                           gates, unknown ex / no resolver → perp default
 //                           (never a silent spot mislabel)
+//  74. isControlFrame      → T-4 R2: the OPTIONAL control-frame predicate and
+//                           livewire's branch for it — exact 'pong' equality,
+//                           only OKX declares it (measured), a control frame is
+//                           NOT a dropped frame and NOT a message, a genuinely
+//                           malformed frame still counts, an absent predicate
+//                           is byte-identical to today (app.js unaffected);
+//                           plus the LIVENESS half driven through the real
+//                           watchdog on a stubbed clock: a keepalive stamps the
+//                           answering clock, never retracts amber, and never
+//                           saves a pong-only socket from the DEAD_MS force-
+//                           reconnect — and Bybit's JSON pong (real captured
+//                           frames) takes the same route via markControlAlive
+//  75. tapeFloorSummary    → T-4: the sub-floor residue the min-notional floor
+//                           takes out of view — blocks vs prints, buy/sell
+//                           split, share, filterTapeRows' verbatim `<` boundary,
+//                           null when the floor is off or nothing fell below,
+//                           and the kept+hidden === passed invariant that proves
+//                           nothing vanishes silently
+//  76. news relevance      → T-4: newsRelevance evidence ladder over REAL
+//                           captured rows (t4_toa_news) — account-mapped
+//                           suggestions are NOT content evidence, transport
+//                           'source' is not evidence, venue notices pass,
+//                           BTC rides coins not the 0/200 symbols array; and
+//                           filterNewsRows' visible counts (kept+filtered
+//                           === total always, 'all' gives everything back)
+//  77. layout invariants   → T-4: the ONE structural fact the local-only strip
+//                           depends on and nothing else could witness (it is
+//                           `if (REPLAY) return`, so the ?replay=1 browser
+//                           harness cannot reach it) — no two elements share a
+//                           grid area, the strips claim none at all, every
+//                           area-* class has a grid-area rule, and no panel the
+//                           strip folds carries a section-nav anchor id
 //
 // Exit: 0 with one PASS line per group; non-zero with a clear FAIL message
 // (plus stack) if any group breaks. Run: node scripts/check_terminal.cjs
@@ -3929,6 +3961,17 @@ group('makeHealthCounter accumulator (N5)', () => {
   assert.strictEqual(h.count('normSkip'), 1, 'a new kind counts independently');
   assert.strictEqual(h.count('droppedFrame'), 3, 'the new kind does not touch droppedFrame');
 
+  // T-4 R1: socket closes ride the SAME generic-by-kind counter — no second
+  // telemetry path in the store. subKey is '<leg>/<code>' so the per-leg, per-
+  // code breakdown the chip tooltip needs falls straight out of detail{}.
+  h.bump('socketClose', 'bybit/1006');
+  h.bump('socketClose', 'bybit/1006');
+  h.bump('socketClose', 'bybit_spot/1000');
+  assert.strictEqual(h.count('socketClose'), 3, 'closes accumulate under their own kind');
+  assert.strictEqual(h.count('droppedFrame'), 3, 'a close is NOT a dropped frame — the counts stay separate');
+  assert.deepStrictEqual(h.snapshot().detail.socketClose, { 'bybit/1006': 2, 'bybit_spot/1000': 1 },
+    'per-leg/per-code detail is what makes the ping-margin theory testable');
+
   // reset() zeroes everything (symbol-switch re-init).
   h.reset();
   assert.strictEqual(h.count('droppedFrame'), 0, 'reset zeroes droppedFrame');
@@ -4037,8 +4080,485 @@ group('startLeg drop-wiring composition: makeHealthCounter ← onDropped ← liv
     assert.strictEqual(mine, 1, "a pre-set onDropped is preserved — the install guard did not overwrite it");
     assert.strictEqual(health2.count('droppedFrame'), 0, 'the health counter was NOT wired in when the caller already had one');
     h2.close();
+
+    // (c) T-4 R1 close-wiring: the same install idiom for api.onClosed, with
+    //     the `by !== 'venue'` filter that keeps OUR OWN closes out of the
+    //     venue tally. This is the half that decides whether the telemetry
+    //     tells the truth: handle.close() (a symbol switch) and the watchdog's
+    //     forced reconnect both travel through the very same ws.onclose, so
+    //     without the filter every symbol switch would read as a venue drop.
+    const health3 = S.makeHealthCounter();
+    const seen = [];
+    const api3 = { onStatus() {} };
+    if (!api3.onClosed) {
+      api3.onClosed = (info) => {                                   // the startLeg idiom
+        if (!info || info.by !== 'venue') return;
+        health3.bump('socketClose', 'okx/' + (info.code == null ? 'unknown' : info.code));
+        seen.push(info.by + ':' + info.code);
+      };
+    }
+    const h3 = LW.makeSocket({ url: 'ws://x', subscribe() {}, onMessage() {} }, api3);
+    captured.onclose({ code: 1006, reason: '', wasClean: false });   // the venue/transport dropped us
+    assert.strictEqual(health3.count('socketClose'), 1, 'a venue close reaches the counter through the real socket');
+    assert.deepStrictEqual(health3.snapshot().detail.socketClose, { 'okx/1006': 1 }, 'subKey is <leg>/<code>');
+    assert.deepStrictEqual(seen, ['venue:1006'], 'by:"venue" — nobody on our side closed it');
+    // OUR OWN close: handle.close() sets closedByUs, so the SAME onclose path
+    // must report by:'us' and the leg filter must swallow it.
+    h3.close();
+    captured.onclose({ code: 1000, reason: 'client', wasClean: true });
+    assert.strictEqual(health3.count('socketClose'), 1, 'our own close is NOT counted as a venue drop');
+
+    // (d) an ABSENT onClosed is the app.js path: nothing runs, nothing throws.
+    const h4b = LW.makeSocket({ url: 'ws://x', subscribe() {}, onMessage() {} }, { onStatus() {} });
+    assert.doesNotThrow(() => captured.onclose({ code: 1006, reason: '', wasClean: false }),
+      'no onClosed (app.js path) → the close telemetry is inert');
+    h4b.close();
+
+    // (e) a THROWING onClosed can never kill the socket (telemetry rule).
+    const h5b = LW.makeSocket({ url: 'ws://x', subscribe() {}, onMessage() {} },
+      { onStatus() {}, onClosed() { throw new Error('telemetry blew up'); } });
+    assert.doesNotThrow(() => captured.onclose({ code: 1006, reason: '', wasClean: false }),
+      'a throwing onClosed is caught — the reconnect path survives');
+    h5b.close();
   } finally {
     global.WebSocket = prevWS;
+  }
+});
+
+// ─── 74. isControlFrame contract + livewire's control-frame branch (T-4 R2) ──
+//
+// WHY THIS GROUP EXISTS, and why CI missed the regression it locks down: the
+// browser harness's clean N5 pass runs under ?replay=1, where livewire is not
+// in the transport at all — so OKX's plain-text 'pong' can never appear there,
+// and the permanent amber "degraded" chip on the LIVE page was invisible to the
+// whole gate. This group is the Node-side witness that closes that blind spot.
+group('isControlFrame: exact pong, OKX-only, control frame is neither dropped nor delivered (T-4 R2)', () => {
+  // ── the predicate itself ──
+  const okx = A.makeOkxAdapter('BTC-USDT-SWAP', () => {});
+  const okxBooks = A.makeOkxBooksAdapter('BTC-USDT-SWAP', () => {}, { ctVal: 0.01 });
+  for (const [name, ad] of [['makeOkxAdapter', okx], ['makeOkxBooksAdapter', okxBooks]]) {
+    assert.strictEqual(typeof ad.isControlFrame, 'function', name + ' declares isControlFrame');
+    assert.strictEqual(ad.isControlFrame('pong'), true, name + ": the measured wire is byte 'pong'");
+    // EXACT equality is the contract. A loose match (trim/includes/case-fold)
+    // would swallow a genuinely corrupt frame that merely contains 'pong' —
+    // destroying the very signal the drop counter exists to raise.
+    for (const bad of ['pong ', ' pong', 'PONG', 'Pong', 'pongs', '{"op":"pong"}', 'not json{', '', null, undefined, 0]) {
+      assert.strictEqual(ad.isControlFrame(bad), false,
+        name + ': ' + JSON.stringify(bad) + ' is NOT a control frame (exact equality, never fuzzy)');
+    }
+  }
+
+  // ── who may declare it: MEASURED, not guessed ──
+  // 2026-07-26, 180s live probe: OKX sent 7 non-JSON frames per leg; bybit,
+  // bybit-spot, binance-fut, binance-spot and coinbase sent ZERO out of 11,648
+  // (Bybit's pong is a JSON frame, {success, ret_msg:'pong'}, already handled in
+  // onMessage). Pinning the ABSENCE keeps a future "let's add it everywhere"
+  // from creating adapter paths that no wire ever exercises.
+  const noCtrl = [
+    ['makeBybitAdapter', A.makeBybitAdapter('BTCUSDT', () => {})],
+    ['makeBybitSpotAdapter', A.makeBybitSpotAdapter('BTCUSDT', () => {})],
+    ['makeBinanceDepthAdapter', A.makeBinanceDepthAdapter('BTCUSDT', () => {})],
+    ['makeBinanceSpotAdapter', A.makeBinanceSpotAdapter('BTCUSDT', () => {})],
+    ['makeBinanceFutDepthDiff', A.makeBinanceFutDepthDiff('BTCUSDT', () => {})],
+    ['makeCoinbaseAdapter', A.makeCoinbaseAdapter('BTC-USD', () => {})],
+    ['makeCoinbaseL2Adapter', A.makeCoinbaseL2Adapter('BTC-USD', () => {})],
+  ];
+  for (const [name, ad] of noCtrl) {
+    assert.strictEqual(ad.isControlFrame, undefined,
+      name + ' must NOT declare isControlFrame — 0 non-JSON frames measured on its wire');
+  }
+
+  // ── T-4 R1: the Bybit v5 legs carry the jitter margin, not the deadline ──
+  assert.strictEqual(A.makeBybitAdapter('BTCUSDT', () => {}).pingMs, 15000, 'bybit linear ping = 15s (≲20s vendor rule, 5s margin)');
+  assert.strictEqual(A.makeBybitSpotAdapter('BTCUSDT', () => {}).pingMs, 15000, 'bybit spot ping = 15s (same v5 gateway)');
+  assert.strictEqual(okx.pingMs, 25000, 'OKX keepalive cadence unchanged (~30s idle drop)');
+
+  // ── livewire's branch: same stub idiom as the N5 group ──
+  let captured = null;
+  function StubWS(url) { this.url = url; this.readyState = 0; captured = this; }
+  StubWS.OPEN = 1;
+  StubWS.prototype.close = function () { this.readyState = 3; };
+  const prevWS = global.WebSocket;
+  global.WebSocket = StubWS;
+  try {
+    // (a) a control frame is NEITHER a dropped frame NOR a message: nothing is
+    //     counted and the adapter's onMessage is never reached (a 'pong' is not
+    //     data and must not be normalized).
+    const drops = [];
+    let delivered = 0;
+    const h1 = LW.makeSocket(
+      { url: 'ws://x', subscribe() {}, onMessage() { delivered++; }, isControlFrame: (t) => t === 'pong' },
+      { onStatus() {}, onDropped(r) { drops.push(r); } });
+    captured.onmessage({ data: 'pong' });
+    assert.deepStrictEqual(drops, [], 'a keepalive reply is NOT a dropped frame (the whole R2 regression)');
+    assert.strictEqual(delivered, 0, 'a control frame never reaches adapter.onMessage');
+    // and a genuinely malformed frame on the SAME socket still counts.
+    captured.onmessage({ data: 'not json{' });
+    assert.deepStrictEqual(drops, ['parse'], 'a truly malformed frame still increments the counter');
+    h1.close();
+
+    // (b) an adapter WITHOUT the predicate behaves exactly as before — this is
+    //     the app.js byte-unaffected proof (app.js adapters declare none).
+    const drops2 = [];
+    const h2 = LW.makeSocket({ url: 'ws://x', subscribe() {}, onMessage() {} },
+      { onStatus() {}, onDropped(r) { drops2.push(r); } });
+    captured.onmessage({ data: 'pong' });
+    assert.deepStrictEqual(drops2, ['parse'], 'no predicate → "pong" is an ordinary parse failure, exactly as today');
+    h2.close();
+
+    // (c) a THROWING predicate falls through to drop('parse'): we could not
+    //     classify the frame, so we say so rather than assume it was benign.
+    const drops3 = [];
+    const h3 = LW.makeSocket(
+      { url: 'ws://x', subscribe() {}, onMessage() {}, isControlFrame() { throw new Error('bad predicate'); } },
+      { onStatus() {}, onDropped(r) { drops3.push(r); } });
+    assert.doesNotThrow(() => captured.onmessage({ data: 'pong' }), 'a throwing predicate never kills the socket');
+    assert.deepStrictEqual(drops3, ['parse'], 'unclassifiable → counted, never silently forgiven');
+    h3.close();
+
+    // (d) THE LIVENESS HALF OF THE CONTRACT, driven through the REAL watchdog.
+    //     An earlier version of this sub-test described "reach the stale state
+    //     the way the watchdog does, then check that a control frame clears it"
+    //     and then asserted only that a pong on a HEALTHY socket is silent — so
+    //     deleting the control-frame liveness stamp entirely still passed, and
+    //     the one clause DESIGN §4j marks binding had zero CI witness. It also
+    //     described the WRONG behavior: a control frame must NOT clear 'stale',
+    //     because "live feed recovered" is a claim about DATA that a keepalive
+    //     cannot support.
+    //     No 40s test and no timer games: the watchdog's own callback is
+    //     captured off setInterval (WATCHDOG_MS) and Date.now is stubbed, so
+    //     the REAL 12s/40s thresholds and the REAL message text are exercised
+    //     on a virtual clock.
+    const prevSI = global.setInterval, prevCI = global.clearInterval, prevNow = Date.now;
+    let wd = null, t = 1700000000000;
+    global.setInterval = (fn, ms) => { if (ms === 2000) wd = fn; return { fake: true }; };
+    global.clearInterval = () => {};
+    Date.now = () => t;
+    try {
+      const statuses = [];
+      const ctrlAdapter = {
+        url: 'ws://x', subscribe() {}, onMessage(m, api) { api.markAlive(); },
+        isControlFrame: (x) => x === 'pong',
+      };
+      const h4 = LW.makeSocket(ctrlAdapter, { onStatus(kind, msg) { statuses.push(kind + ':' + msg); } });
+      captured.readyState = StubWS.OPEN;
+      captured.onopen();
+      assert.ok(typeof wd === 'function', 'the watchdog interval callback was captured');
+      const T0 = t;
+      captured.onmessage({ data: '{"topic":"books"}' });   // a DATA frame: both clocks fresh
+      assert.deepStrictEqual(statuses, ['open:live feed connected'], 'a healthy open says exactly one thing');
+
+      // 13s with NO data → amber, and the message names the DATA gap.
+      t = T0 + 13000; wd();
+      assert.deepStrictEqual(statuses.slice(1), ['stale:stale — no data for 13s'],
+        'the watchdog goes amber on the DATA clock and states the data gap');
+
+      // A control frame lands. It must stamp liveness and say NOTHING: before
+      // this fix it emitted ('open', 'live feed recovered') and the chip went
+      // GREEN over a feed that had delivered nothing for 13s.
+      const beforePong = statuses.length;
+      captured.onmessage({ data: 'pong' });
+      assert.strictEqual(statuses.length, beforePong,
+        'a keepalive reply NEVER emits a recovery status — a pong is not evidence about the feed');
+
+      // …and the stamp IS real: 2s later the amber line reports the socket is
+      // still answering, which is only derivable from the control clock. That
+      // suffix is the positive witness that markControlAlive() ran.
+      t = T0 + 15000; wd();
+      assert.strictEqual(statuses[statuses.length - 1], 'stale:stale — no data for 15s (socket still answering)',
+        'the control stamp shows up as DIAGNOSTIC context, never as a retraction');
+
+      // Pong all the way to DEAD_MS: the force-reconnect must still fire. This
+      // is the whole reason the clocks are split — a pongging socket with a
+      // dead subscription may not live forever.
+      t = T0 + 39000; captured.onmessage({ data: 'pong' }); wd();
+      assert.ok(statuses[statuses.length - 1].indexOf('stale:') === 0,
+        'still only amber one second before the dead-man threshold');
+      t = T0 + 40000; captured.onmessage({ data: 'pong' }); wd();
+      assert.strictEqual(statuses[statuses.length - 1], 'reconnecting:live feed stalled — reconnecting',
+        'a pong-only socket is force-reconnected on schedule (DEAD_MS reads the DATA clock)');
+      h4.close();
+
+      // Recovery is a DATA event, and it is a single clean transition.
+      const st2 = [];
+      const h5 = LW.makeSocket(ctrlAdapter, { onStatus(kind, msg) { st2.push(kind + ':' + msg); } });
+      captured.readyState = StubWS.OPEN;
+      captured.onopen();
+      const T1 = t;
+      captured.onmessage({ data: '{"topic":"books"}' });
+      t = T1 + 13000; wd();
+      assert.strictEqual(st2[st2.length - 1], 'stale:stale — no data for 13s', 'amber again');
+      captured.onmessage({ data: 'pong' });
+      assert.strictEqual(st2.length, 2, 'a pong still does not retract amber');
+      captured.onmessage({ data: '{"topic":"books"}' });
+      assert.strictEqual(st2[st2.length - 1], 'open:live feed recovered',
+        'ONLY a data frame retracts amber — it is the only evidence about the subscription');
+      t = T1 + 14000; wd();
+      assert.strictEqual(st2.length, 3, 'and recovery is a single transition, not a per-tick repeat');
+      h5.close();
+    } finally {
+      global.setInterval = prevSI; global.clearInterval = prevCI; Date.now = prevNow;
+    }
+
+    // (e) a venue whose keepalive reply IS valid JSON takes the SAME rule
+    //     through onMessage. Bybit v5 answers our {op:'ping'} with
+    //     {success, ret_msg:'pong', op:'ping'} — REAL captured frames, one per
+    //     leg (fixture t4_bybit_pong; note `op` echoes 'ping', so ret_msg is
+    //     what identifies it). It must stamp CONTROL liveness only: routing it
+    //     to markAlive() stamped the data clock and made the DEAD_MS force-
+    //     reconnect unreachable on the PRIMARY venue (§2) — the split proven in
+    //     (d) would have protected the OKX legs and nobody else.
+    const bybitPongs = FX.t4_bybit_pong;
+    assert.strictEqual(bybitPongs.length, 2, 'fixture precondition: one captured pong per Bybit leg');
+    for (const [name, ad] of [['makeBybitAdapter', A.makeBybitAdapter('BTCUSDT', () => {})],
+      ['makeBybitSpotAdapter', A.makeBybitSpotAdapter('BTCUSDT', () => {})]]) {
+      const seen = [];
+      const api = { markAlive() { seen.push('data'); }, markControlAlive() { seen.push('ctrl'); }, onStatus() {} };
+      for (const f of bybitPongs) ad.onMessage(f, api);
+      ad.onMessage({ op: 'pong' }, api);   // the documented other-gateway shape
+      assert.deepStrictEqual(seen, ['ctrl', 'ctrl', 'ctrl'],
+        name + ': a pong stamps CONTROL liveness and must NEVER touch the data clock');
+      for (const f of FX.bybit_sub_ack) ad.onMessage(f, api);
+      assert.deepStrictEqual(seen, ['ctrl', 'ctrl', 'ctrl'], name + ': a subscribe ack stamps nothing at all');
+    }
+    // The positive control: a real DATA frame on the same adapter still stamps
+    // the DATA clock, so the change narrowed nothing but the pong.
+    {
+      const seen = [];
+      const api = { markAlive() { seen.push('data'); }, markControlAlive() { seen.push('ctrl'); }, onStatus() {} };
+      const ad = A.makeBybitAdapter('BTCUSDT', () => {});
+      for (const f of FX.bybit_tickers_snapshot) ad.onMessage(f, api);
+      assert.deepStrictEqual(seen, ['data'], 'a tickers frame is DATA — it still stamps the dead-man clock');
+    }
+  } finally {
+    global.WebSocket = prevWS;
+  }
+});
+
+// ─── 75. tapeFloorSummary: the floor filters, it never discards (T-4) ────────
+group('tapeFloorSummary: sub-floor residue is summarised, never dropped', () => {
+  const marketOf = (ex) => (ex === 'coinbase' || ex === 'binance_spot' ? 'spot' : 'perp');
+  // Six hand-built rows: three below a $10k floor, one EXACTLY at it, two above.
+  const rows = [
+    { ts: 1, ex: 'bybit', isBuy: true, price: 100, qty: 1, notional: 1000, count: 3 },
+    { ts: 2, ex: 'bybit', isBuy: false, price: 100, qty: 1, notional: 2500, count: 1 },
+    { ts: 3, ex: 'coinbase', isBuy: true, price: 100, qty: 1, notional: 500, count: 2 },
+    { ts: 4, ex: 'bybit', isBuy: true, price: 100, qty: 1, notional: 10000, count: 1 },   // EXACTLY at the floor
+    { ts: 5, ex: 'okx', isBuy: false, price: 100, qty: 1, notional: 50000, count: 4 },
+    { ts: 6, ex: 'coinbase', isBuy: true, price: 100, qty: 1, notional: 36000, count: 1 },
+  ];
+  const opts = { market: 'both', venue: 'all', minN: 10000, marketOf };
+  const s = S.tapeFloorSummary(rows, opts);
+  assert.strictEqual(s.blocks, 3, 'three aggregated rows fell below the floor');
+  assert.strictEqual(s.prints, 6, 'prints = Σ count (3+1+2) — a different, equally honest number');
+  assert.strictEqual(s.notional, 4000, 'sub-floor notional summed exactly');
+  assert.strictEqual(s.buyNotional, 1500, 'buy side split (1000 + 500)');
+  assert.strictEqual(s.sellNotional, 2500, 'sell side split');
+  // share denominator = every row passing market/venue, INCLUDING the kept ones.
+  assert.ok(Math.abs(s.share - 4000 / 100000) < 1e-12, 'share = sub-floor $ / total $ of the same projection');
+
+  // Boundary is filterTapeRows' VERBATIM: `< minN` is below, so the row exactly
+  // AT the floor is SHOWN and must not also appear in the residue.
+  const kept = S.filterTapeRows(rows, opts);
+  assert.deepStrictEqual(kept.map((r) => r.notional), [10000, 50000, 36000],
+    'a block exactly AT the floor is shown (inclusive), matching filterTapeRows');
+  // The invariant that proves nothing vanishes silently.
+  assert.strictEqual(kept.length + s.blocks, rows.length,
+    'kept + hidden === every row passing market/venue — no row is unaccounted for');
+
+  // The SAME projection applies: a venue/market filter narrows both halves.
+  const spot = { market: 'spot', venue: 'all', minN: 10000, marketOf };
+  const sSpot = S.tapeFloorSummary(rows, spot);
+  assert.strictEqual(sSpot.blocks, 1, 'market filter applies to the residue too (only the coinbase $500)');
+  assert.strictEqual(sSpot.prints, 2);
+  assert.ok(Math.abs(sSpot.share - 500 / 36500) < 1e-12, 'share denominator is the FILTERED total, not the raw tape');
+  assert.strictEqual(S.filterTapeRows(rows, spot).length + sSpot.blocks, 2, 'kept + hidden invariant holds per projection');
+
+  // null, never a "0 hidden" object: a floor that is off, or one nothing fell
+  // below, has nothing to state — a zero would imply a filter is doing work.
+  assert.strictEqual(S.tapeFloorSummary(rows, { minN: 0, marketOf }), null, 'floor off (0) → null');
+  assert.strictEqual(S.tapeFloorSummary(rows, { minN: -5, marketOf }), null, 'negative floor → null');
+  assert.strictEqual(S.tapeFloorSummary(rows, { minN: NaN, marketOf }), null, 'non-finite floor → null');
+  assert.strictEqual(S.tapeFloorSummary(rows, {}), null, 'absent floor → null');
+  assert.strictEqual(S.tapeFloorSummary(rows, { minN: 400, marketOf }), null, 'nothing below the floor → null, not a zero object');
+  assert.strictEqual(S.tapeFloorSummary(null, { minN: 10000 }), null, 'no rows → null');
+
+  // Hygiene: a row with no `count` counts as one print; a NaN notional is NOT
+  // silently binned below the floor (`< minN` is false for NaN — deliberate).
+  const odd = S.tapeFloorSummary(
+    [{ ts: 1, ex: 'bybit', isBuy: true, notional: 5, count: undefined },
+      { ts: 2, ex: 'bybit', isBuy: true, notional: NaN, count: 9 }],
+    { minN: 100, marketOf });
+  assert.strictEqual(odd.blocks, 1, 'the NaN-notional row is not counted as sub-floor');
+  assert.strictEqual(odd.prints, 1, 'a missing count is one print');
+
+  // Purity: the input rows are never mutated.
+  const snapshot = JSON.stringify(rows);
+  S.tapeFloorSummary(rows, opts);
+  assert.strictEqual(JSON.stringify(rows), snapshot, 'input rows untouched (pure)');
+});
+
+// ─── 76. news relevance: evidence ladder + visible counts (T-4 §4j) ──────────
+group('newsRelevance / filterNewsRows: evidence order over REAL rows, counts always stated', () => {
+  // REAL captured rows (fixtures_ws.json t4_toa_news, 2026-07-26) — the repo's
+  // fixture discipline: measured wire, never synthesized shapes.
+  const raw = FX.t4_toa_news;
+  assert.strictEqual(raw.length, 8, 'fixture precondition: 8 captured rows');
+  const rows = H.normalizeToaNews(raw);
+  assert.strictEqual(rows.length, 8, 'every captured row has a title and a finite time');
+  const byTitle = (frag) => {
+    const hit = rows.filter((r) => r.title.indexOf(frag) >= 0);
+    assert.strictEqual(hit.length, 1, 'fixture precondition: exactly one row matching ' + JSON.stringify(frag));
+    return hit[0];
+  };
+
+  // ── normalizer: the evidence is carried through, split by provenance ──
+  const elon = byTitle('Starship launching');
+  assert.deepStrictEqual(elon.coins, [], 'an ACCOUNT-mapped suggestion is not content evidence');
+  assert.deepStrictEqual(elon.accountCoins, ['DOGE'], "…but it is kept — @elonmusk is tagged DOGE by WHO he is");
+  const btcRow = byTitle('Michael Saylor');
+  assert.deepStrictEqual(btcRow.coins, ['BTC'], 'a content-derived suggestion lands in coins[]');
+  assert.deepStrictEqual(btcRow.accountCoins, []);
+
+  // ── the ladder, one fixture row per rung ──
+  const rel = (r) => S.newsRelevance(r);
+  assert.deepStrictEqual(rel(btcRow), { crypto: true, btc: true, why: 'coins' },
+    'coins[] is the strongest evidence (79% coverage on the live wire)');
+  assert.strictEqual(rel(byTitle('EU adds HTX')).why, 'symbols',
+    'symbols[] is consulted next — even though this title also carries a crypto-press prefix');
+  assert.strictEqual(rel(byTitle('CLARITY Act')).why, 'press',
+    'a crypto-press publisher stamped INTO the title is content, and rescues a real market headline');
+  assert.strictEqual(rel(byTitle('Does crypto make your portfolio')).why, 'keyword',
+    'the stated lexicon catches a crypto headline from a general-press publisher');
+  const upbit = rows.find((r) => r.source === 'Upbit');
+  assert.strictEqual(rel(upbit).why, 'venue',
+    'an exchange-notice source passes on the venue rung — its Korean title no English lexicon can reach');
+
+  // ── what must NOT pass ──
+  assert.strictEqual(rel(elon).crypto, false,
+    'the account-mapped Starship tweet is filtered — honoring isAccountMapped would let the loudest noise source straight through');
+  for (const frag of ['Smithsonian', 'Cyclospora']) {
+    assert.strictEqual(rel(byTitle(frag)).crypto, false,
+      'the transport source is NOT evidence: "Blogs" carries WHITEHOUSE and CDC alongside COINDESK (' + frag + ')');
+  }
+
+  // BTC emphasis rides coins, NOT the symbols array — measured 0/200 BTC-
+  // prefixed symbols on the live wire, i.e. the old view test was dead code.
+  assert.strictEqual(rows.filter((r) => rel(r).btc).length, 1, 'exactly one BTC row in the fixture');
+  assert.strictEqual(rows.filter((r) => r.symbols.some((s) => s.indexOf('BTC') === 0)).length, 0,
+    'and ZERO of them would have been found by the old symbols-prefixed test');
+
+  // ── the visible projection ──
+  const crypto = S.filterNewsRows(rows, { mode: 'crypto' });
+  assert.strictEqual(crypto.total, 8);
+  assert.strictEqual(crypto.kept, 5, '5 of the 8 captured rows carry crypto/market evidence');
+  assert.strictEqual(crypto.filtered, 3, 'the Elon tweet + the two non-crypto releases');
+  assert.strictEqual(crypto.kept + crypto.filtered, crypto.total, 'kept + filtered === total — nothing goes unaccounted');
+  assert.strictEqual(crypto.btcCount, 1);
+  assert.strictEqual(crypto.mode, 'crypto');
+  assert.ok(crypto.rows.every((r) => r.rel && r.rel.crypto), 'every kept row carries its relevance read');
+
+  const all = S.filterNewsRows(rows, { mode: 'all' });
+  assert.strictEqual(all.kept, all.total, "mode 'all' gives every row back — the toggle can undo itself");
+  assert.strictEqual(all.filtered, 0, "…and states no phantom 'filtered' count");
+  assert.strictEqual(S.filterNewsRows(rows, {}).mode, 'crypto', 'default mode is crypto');
+  assert.strictEqual(S.filterNewsRows(rows, { mode: 'nonsense' }).mode, 'crypto', 'an unknown mode falls back, never filters by accident');
+  assert.deepStrictEqual(S.filterNewsRows(null, { mode: 'all' }), { rows: [], total: 0, kept: 0, filtered: 0, btcCount: 0, mode: 'all' },
+    'no items → empty projection, not a throw');
+
+  // Purity: shallow-copied rows, input untouched (the filterTapeRows idiom).
+  const snapshot = JSON.stringify(rows);
+  crypto.rows[0].title = 'MUTATED';
+  assert.strictEqual(JSON.stringify(rows), snapshot, 'the returned rows are copies — the store is never mutated');
+
+  // The normalizer STILL filters nothing but its own drop rails (a relevance
+  // filter at ingest could never be switched off — that is the hidden filter
+  // the honesty rail forbids). Synthetic rows here on purpose: an empty title
+  // and a non-finite time are shapes the live wire does not hand out.
+  const drops = H.normalizeToaNews([
+    { title: 'Elon says hi', time: 5, source: 'Twitter', suggestions: [{ coin: 'DOGE', isAccountMapped: true }] },
+    { title: '', time: 6, source: 'Blogs' },
+    { title: 'no time', source: 'Blogs' },
+  ]);
+  assert.strictEqual(drops.length, 1, 'only the untitled/undatable rails drop rows — relevance never does');
+  assert.strictEqual(S.newsRelevance(drops[0]).crypto, false, 'and the surviving noise row is filtered at RENDER time, where it can be undone');
+});
+
+// ─── 77. Layout invariants the local-only strip rests on (T-4 §4j) ──────────
+//
+// WHY THIS GROUP EXISTS: `renderLocalOnly()` and `localFoldState()` both open
+// with `if (REPLAY) return`, and the browser harness only ever runs ?replay=1 —
+// so the entire strip has NO runtime coverage anywhere in the gate. That is the
+// same blind-spot shape that let the OKX-pong regression ship (group 74's
+// header), repeated in a new feature. What CAN be pinned cheaply and exactly is
+// the STRUCTURE the feature rests on, read straight out of the shipped markup:
+// the first version hard-coded `area-klev` on the strip while the real
+// key-levels panel already owned that cell, so whenever the strip stood in for
+// auct/lvls but NOT klev the two were superimposed and the strip — earlier in
+// DOM order — painted behind. The offline explanation became invisible, which
+// is the precise inversion of what it exists to do.
+group('layout: one element per grid area, strips place themselves, anchors survive folding', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'terminal.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'terminal.css'), 'utf8');
+
+  // ── one element per named grid cell ──
+  // Two items in one `grid-area` do not lay out side by side — they STACK, and
+  // the later one in DOM order wins. Read from class attributes only, so prose
+  // in a comment or a title can never trip this.
+  const areaUse = new Map();
+  for (const m of html.matchAll(/class="([^"]*)"/g)) {
+    for (const cls of m[1].split(/\s+/)) {
+      if (/^area-[a-z0-9]+$/.test(cls)) areaUse.set(cls, (areaUse.get(cls) || 0) + 1);
+    }
+  }
+  assert.ok(areaUse.size >= 30, 'sanity: the page really does place its panels by area-* class');
+  const shared = [...areaUse.entries()].filter(([, n]) => n > 1).map(([c, n]) => c + '×' + n);
+  assert.deepStrictEqual(shared, [],
+    'no two elements may carry the same area-* class — same cell means superimposed, not adjacent');
+
+  // Every area-* class in the markup resolves to a real grid-area rule (a typo
+  // would silently auto-place the panel at the end of the grid instead).
+  for (const cls of areaUse.keys()) {
+    assert.ok(new RegExp('\\.' + cls + '\\s*\\{[^}]*grid-area:').test(css),
+      cls + ' has a matching grid-area rule in terminal.css');
+  }
+
+  // ── the strips claim no cell of their own ──
+  // renderLocalOnly writes style.gridArea with the cell of a panel it ACTUALLY
+  // folded (that cell is free by construction). With no class the CSS fallback
+  // is grid auto-placement, which by definition cannot overlap.
+  for (const id of ['local-only-api', 'local-only-econ']) {
+    const tag = html.match(new RegExp('<section[^>]*id="' + id + '"[^>]*>'));
+    assert.ok(tag, id + ' exists in the markup');
+    assert.ok(/class="[^"]*\blocal-only\b/.test(tag[0]), id + ' carries .local-only (hidden until .local-on)');
+    assert.ok(!/class="[^"]*\barea-/.test(tag[0]),
+      id + ' must claim NO grid area — its placement is decided at paint time');
+  }
+  assert.ok(!/\.local-only\s*\{[^}]*grid-area:/.test(css),
+    'and no grid-area sneaks back in through the .local-only rule');
+
+  // ── folding must never take a navigation anchor off the page ──
+  // .folded-local is display:none, and a hidden element has no layout box, so
+  // an `href="#sec-…"` link and the ⌘K jump into it land nowhere. The panels
+  // renderLocalOnly folds are resolved exactly as it resolves them: the .panel
+  // that CONTAINS each view element.
+  const sections = html.split(/<section\b/).slice(1).map((p) => {
+    const gt = p.indexOf('>');
+    return { attrs: p.slice(0, gt), body: p.slice(gt + 1) };
+  });
+  for (const view of ['view-auction', 'view-levels', 'view-keylevels', 'view-econ']) {
+    const sec = sections.find((s) => s.body.indexOf('id="' + view + '"') >= 0);
+    assert.ok(sec, view + ' lives inside a <section class="panel">');
+    const anchor = /id="(sec-[a-z]+)"/.exec(sec.attrs);
+    assert.strictEqual(anchor, null,
+      view + "'s panel is foldable, so it must not carry a section-nav anchor id"
+      + (anchor ? ' (found ' + anchor[1] + ')' : ''));
+  }
+  // …and every anchor the section nav links to still exists somewhere.
+  const navTargets = [...html.matchAll(/href="#(sec-[a-z]+)"/g)].map((m) => m[1]);
+  assert.ok(navTargets.length >= 5, 'sanity: the section nav really does link by hash');
+  for (const t of navTargets) {
+    assert.ok(new RegExp('id="' + t + '"').test(html), t + ' is a live anchor, not a dead link');
   }
 });
 

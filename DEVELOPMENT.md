@@ -265,6 +265,63 @@ was dividing the downside variance by the downside count instead of the full sam
   strengthen. `compare.py` prints `NW t(k=3)`/`NW p(k=3)` (overlap-corrected) beside the retained
   `IC-IR t(k=3)` (non-overlapping block). IC is an eval layer — no quant.js mirror, not in parity.
 
+- **A venue's keepalive REPLY is a CONTROL frame, not a dropped frame (T-4 R2, binding).** OKX
+  answers its plain-text `ping` with the plain text `pong`. `JSON.parse('pong')` throws, so it
+  lands in livewire's parse catch — and the moment N5 started counting that catch, a perfectly
+  healthy terminal wore a permanent amber "degraded: N dropped" chip. The predicate
+  `adapter.isControlFrame(rawText)` is consulted **inside** the catch (never before it: a
+  pre-parse predicate would run on every frame across 7 legs of 100 ms book updates), matches the
+  wire byte string **exactly** (`=== 'pong'`, never trim/includes — a fuzzy match would swallow a
+  genuinely corrupt frame), and is declared **only** by adapters measured to send non-JSON frames:
+  OKX sent 7 per leg per 180 s, the other five legs sent 0 of 11,648. check group 74 pins that
+  absence. A control frame stamps liveness but must NEVER reset the dead-man timer, and must
+  never retract the amber `stale` state either — hence livewire's two clocks, of which only ONE
+  is a verdict: `lastDataAt` (data frames only) drives BOTH `stale` and the `DEAD_MS`
+  force-reconnect, while `lastAliveAt` (data + control) is diagnostic and merely appends
+  "(socket still answering)" to the amber message. Collapsing them lets a pongging socket with a
+  dead subscription live forever; letting a pong clear `stale` prints "live feed recovered" over
+  a feed that has delivered nothing, which is the same lie pointing the other way. **The rule is
+  not OKX-specific:** Bybit v5's pong is valid JSON, so it never reaches `isControlFrame` — its
+  adapter must call `api.markControlAlive()` in `onMessage`, or the PRIMARY venue is the one leg
+  the watchdog cannot judge.
+- **`?replay=1` does not exercise livewire at all.** The browser harness's clean N5 pass runs in
+  replay, where the replay driver feeds adapters directly — so no socket-level behavior (parse
+  drops, control frames, closes, the watchdog) is observable there. That blind spot is exactly how
+  the OKX-pong regression shipped. Socket behavior belongs in the Node check groups (WS stub) and
+  in `scripts/verify_wire_live.mjs` (real wire), never only in the browser harness.
+- **ToA `symbols` is 9%-covered and 0% BTC on the live wire; `suggestions[].coin` is the
+  identifiable field — and `isAccountMapped:true` is an ACCOUNT mapping, not content.** Measured
+  n=200, 2026-07-26: `symbols` present on 18/200 and BTC-prefixed on **0/200**, so the news view's
+  original BTC emphasis (`it.symbols.some(s => s.indexOf('BTC') === 0)`) was dead code in
+  production. `suggestions` is present on 158/200 with `coin==='BTC'` on 18/200. But 105/200 rows
+  carry an `isAccountMapped:true` suggestion, which maps the POSTER not the text — an @elonmusk
+  Starship tweet is tagged `DOGE` — so it is kept in its own field and never used as content
+  evidence. Known residual: the feed's content mapper matches bare tickers inside ordinary prose
+  ("SAVE AMERICA **ACT**" → `ACT`), ~1.5% of rows; stated in the UI, not patched away.
+- **`applyCollapse()` owns the `hidden` property of every `[data-sec]` node.** Any other feature
+  that wants to show/hide such a panel must use a CLASS (`.folded-local`, `.local-on`), or the
+  next section toggle silently undoes it. Same reason the local-only strip is not registered in
+  `VIEW_ANCHOR`: an IntersectionObserver on a `display:none` element never intersects, which
+  would latch the strip off permanently after its first paint. Two consequences of being outside
+  `VIEW_ANCHOR`/`SEC_OF` that bit on the first draft and are now handled explicitly: a key with
+  no `VIEW_ANCHOR` entry falls through to `view-header` in `panelUnitsOf`, so a quarantined strip
+  would have dimmed the HEADER panel and chipped it `stalled`; and with no data path re-dirtying
+  it, the self-re-arm must be the FIRST statement of its `safePanel` callback, not the last, or
+  one throw stops it re-evaluating forever.
+- **Hiding a panel hides everything on it, including its anchor and its honest-absence prose.**
+  `display:none` leaves no layout box, so an `href="#…"` or a ⌘K `scrollIntoView` into a folded
+  panel lands nowhere — section anchors belong on a zero-size `.sec-anchor` span in the section
+  eyebrow, never on a panel that something else can fold. And a panel folded by a stand-in strip
+  takes its own §0.7 gap statements off the page with it: the strip must restate them, or one
+  cause silently stands in for another (the collector API is not why this session has no Initial
+  Balance).
+- **Two elements with the same `grid-area` do not sit side by side — they STACK.** A stand-in
+  panel that "shares" a cell is only safe if the two are provably never visible together, and
+  that argument has to keep being true as the fold predicates evolve. Cheaper and structural:
+  claim no area at all (auto-placement cannot overlap) and assign the cell at paint time from
+  the panel actually being stood in for. check group 77 reads the shipped markup and fails if any
+  `area-*` class appears twice.
+
 ## 6. Roadmap / deferred (pre-registered — do NOT start without an explicit greenlight)
 
 - **Part B strategies B1/B2/B3** — already evaluated and **rejected/logged** (B1 tsmom×vol-target = a
