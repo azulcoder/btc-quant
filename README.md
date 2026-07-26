@@ -222,3 +222,11 @@ across both engines (per-period SR, `bias=False` non-excess kurtosis; N = 1 is l
 - No keys, no orders, no authenticated endpoints — pure research.
 
 See [DESIGN.md](DESIGN.md) for module contracts and [RESEARCH.md](RESEARCH.md) for the cited rationale.
+
+## Third-party attribution
+
+- Charts: [TradingView Lightweight Charts™](https://www.tradingview.com/lightweight-charts/) v4.2.0,
+  Apache-2.0 (vendored, `dashboard/vendor/lightweight-charts.js`). The on-canvas watermark is
+  disabled via `layout.attributionLogo` so five stacked marks stop competing with the data; the
+  attribution is carried here and in the terminal page footer instead — relocated, not removed.
+- Fonts: IBM Plex Mono (OFL-1.1) and Inter (OFL-1.1), vendored under `dashboard/vendor/fonts/`.
