@@ -630,17 +630,14 @@
   let storeVwapTxt = null;    // /v1/vwap parity text (one fetch per anchor change, never merged)
 
   // ─── Dirty flags — the ONLY signal that a view needs repainting ─────────
-  const dirty = {
-    fp: true, dom: true, tape: true, agg: true, header: true, liq: true,
-    heat: true, liqmap: true, det: true,   // O-2 panels (§4b)
-    hist: true, tpo: true, vp: true, farb: true, macro: true,   // O-3 STRUCTURE panels (§4c)
-    auct: true, lvls: true, micro: true,   // I-1 AUCTION panels (§4f)
-    scr: true, rsi: true, opts: true, whale: true, alerts: true, conf: true,   // O-4 INTELLIGENCE panels (§4d)
-    jour: true, cal: true, poly: true, news: true, econ: true,   // O-5 PORTFOLIO panels (§4e)
-    local: true,   // T-4 (§4j): the local-only strip (see renderLocalOnly)
-    tapeint: true, walls: true, vpin: true, klev: true, basis: true,   // T-1 Trader's Edge panels (§4g)
-    spcvd: true,   // T-2 (§4h): spot-vs-perp CVD strip
-  };
+  //
+  // M3: derived from S.PANEL_DEFS, the ONE panel registry (terminal-state.js),
+  // together with MIN_MS / lastAt / SEC_OF / VIEW_ANCHOR below. These five
+  // tables each used to repeat the same 33-34 keys as hand-written literals with
+  // nothing checking they agreed — a missing key in one silently disabled that
+  // panel's gate (Gap 4). One descriptor per panel now feeds all five.
+  const PANEL_TABLES = S.panelTables();
+  const dirty = PANEL_TABLES.dirty;
   function dirtyAll() { for (const k in dirty) dirty[k] = true; }
 
   // ─── N1: paint-loop quarantine — per-panel render circuit breakers ───────
@@ -723,21 +720,17 @@
   //     never the section; the chip in the shared <h2> names which sub-unit died.
   //
   // Shared-ness is DETECTED at mark time (another render unit lives in the same
-  // .panel), not hard-coded — the unit set is VIEW_ANCHOR's values plus view-cvd.
-  // All read at call time (VIEW_ANCHOR + the DOM exist long before a quarantine).
-  function renderUnitIds() { return Object.values(VIEW_ANCHOR).concat(['view-cvd']); }
-  // Every DOM element a key paints. Default: its one VIEW_ANCHOR element (header
-  // and the 'ingest' pseudo-key have none → the header panel). fp is the lone
-  // cross-panel exception.
+  // .panel), not hard-coded. M3: the unit set comes from the ONE registry —
+  // every descriptor's anchor plus any `extra` units it owns (fp owns the
+  // footprint canvas AND the CVD strip). Previously 'view-cvd' was spelled inline
+  // in BOTH functions below, so the two could silently disagree.
+  function renderUnitIds() { return S.panelUnitIds(); }
+  // Every DOM element a key paints. A key with no units (header, and the 'ingest'
+  // pseudo-key, which is not in the registry at all) falls back to the header
+  // panel — connection health is always somewhere to point at.
   function panelUnitsOf(key) {
-    // T-4: 'local' is deliberately absent from VIEW_ANCHOR (see there) and so
-    // would fall through to the 'view-header' default — a quarantined strip
-    // would then dim the HEADER panel and hang a red 'stalled' chip in
-    // .term-chips, claiming §0 staleness about the one panel that must never
-    // lie about connection health. It owns two elements of its own; name them.
-    const ids = key === 'fp' ? ['view-footprint', 'view-cvd']
-              : key === 'local' ? ['local-only-api', 'local-only-econ']
-              : [VIEW_ANCHOR[key] || 'view-header'];
+    const units = S.panelUnits(key);
+    const ids = units.length ? units : ['view-header'];
     return ids.map((id) => $(id)).filter(Boolean);
   }
   // Human names for the sub-unit / pseudo keys whose raw key reads badly — used
@@ -4205,48 +4198,11 @@
 
   // ─── Render loop: one rAF, per-view dirty flag AND min-interval gate ────
   //
-  // Intervals are per-view redraw budgets (ms), tuned to each panel's cost:
-  // the footprint repaints hundreds of cells (250ms), the DOM ladder is a
-  // fixed text-pool update (120ms), the CVD chart throttles itself further
-  // inside FootprintView. Event ingestion is NEVER throttled — only paint.
-  // heat/liqmap update at ~1s/5s data cadence anyway — budgets just cap bursts.
-  // O-3 budgets: hist/tpo/vp repaint only on (re)fetch or control changes;
-  // farb ticks with its 1s countdown; macro moves at poll cadence (≥10s).
-  // O-4 budgets: scr/rsi/opts move at REST-poll cadence (30–60s) — budgets
-  // just cap redraw bursts from hover-independent dirty flips; conf/alerts
-  // tick with the 5s intel gate; whale at its 60s/address polls.
-  const MIN_MS = {
-    fp: 250, dom: 120, tape: 180, agg: 220, header: 400, liq: 300, heat: 500, liqmap: 600, det: 250,
-    hist: 500, tpo: 800, vp: 800, farb: 500, macro: 800,
-    // I-1 budgets: auct moves on fetch/60s refresh; lvls at its 5min poll;
-    // micro at the 1/s sampler cadence (the view throttles setData further).
-    auct: 800, lvls: 1000, micro: 500,
-    scr: 800, rsi: 500, opts: 1000, whale: 600, alerts: 300, conf: 800,
-    // O-5 budgets: jour/cal move on user actions; poly/news/econ at their
-    // 30–60s poll cadence — budgets just cap redraw bursts.
-    jour: 400, cal: 600, poly: 1000, news: 800, econ: 1000,
-    // T-4: the local-only strip re-evaluates at 1Hz and writes DOM only when
-    // its fold state actually changes (renderLocalOnly keys on it), so the API
-    // coming back — or a live IB arriving — restores full panels without a
-    // reload and without a dedicated cadence.
-    local: 1000,
-    // T-1 budgets (§4g): tapeint ticks with the tape burst (a text strip +
-    // 120px spark — cheap); walls/klev move at the 1/s sampler / 5min poll;
-    // vpin per completed bucket; basis at the ~1s mark cadence (the view
-    // throttles setData further, the CVD budget).
-    tapeint: 500, walls: 1000, vpin: 800, klev: 1000, basis: 600,
-    // T-2 (§4h): spot-vs-perp CVD strip — the CVD chart's setData budget.
-    spcvd: 600,
-  };
-  const lastAt = {
-    fp: 0, dom: 0, tape: 0, agg: 0, header: 0, liq: 0, heat: 0, liqmap: 0, det: 0,
-    hist: 0, tpo: 0, vp: 0, farb: 0, macro: 0,
-    auct: 0, lvls: 0, micro: 0,
-    scr: 0, rsi: 0, opts: 0, whale: 0, alerts: 0, conf: 0,
-    jour: 0, cal: 0, poly: 0, news: 0, econ: 0, local: 0,
-    tapeint: 0, walls: 0, vpin: 0, klev: 0, basis: 0,
-    spcvd: 0,
-  };
+  // Per-view redraw budgets (MIN_MS) and their per-panel rationale now live with
+  // the descriptors in S.PANEL_DEFS (M3). Event ingestion is NEVER throttled —
+  // only paint (§4e.2).
+  const MIN_MS = PANEL_TABLES.minMs;
+  const lastAt = PANEL_TABLES.lastAt;
 
   // ─── O-5 elite pass (§4e.1 + §4e.2): section collapse + visibility-gated
   // painting ────────────────────────────────────────────────────────────────
@@ -4263,35 +4219,8 @@
   // stats strip carries the connection chips and is exempt from every
   // presentation gate except document.hidden (nobody is looking) — hiding
   // connection health could mask a dead feed (same rule as the pause button).
-  const SEC_OF = {
-    fp: 'orderflow', dom: 'orderflow', tape: 'orderflow', agg: 'orderflow',
-    liq: 'orderflow', heat: 'orderflow', liqmap: 'orderflow', det: 'orderflow',
-    hist: 'structure', tpo: 'structure', vp: 'structure', farb: 'structure', macro: 'structure',
-    auct: 'auction', lvls: 'auction', micro: 'auction',
-    scr: 'intelligence', rsi: 'intelligence', opts: 'intelligence',
-    whale: 'intelligence', alerts: 'intelligence', conf: 'intelligence',
-    jour: 'portfolio', cal: 'portfolio', poly: 'portfolio', news: 'portfolio', econ: 'portfolio',
-    tapeint: 'orderflow', walls: 'orderflow', basis: 'structure', klev: 'auction', vpin: 'auction',
-    spcvd: 'orderflow',   // T-2 (§4h): spot-vs-perp CVD strip (ORDERFLOW section)
-    // 'local' is DELIBERATELY absent from SEC_OF and VIEW_ANCHOR (T-4): it
-    // spans TWO sections (auction + portfolio), so a single section gate would
-    // freeze the other half, and its own DOM node is display:none while nothing
-    // is folded — an IntersectionObserver on a hidden element never intersects,
-    // which would latch the strip off forever once it had painted once. It
-    // therefore runs on the plain due()/MIN_MS budget with no visibility gate,
-    // and paints only when its fold key changes.
-  };
-  const VIEW_ANCHOR = {
-    fp: 'view-footprint', dom: 'view-dom', tape: 'view-tape', agg: 'view-aggbook',
-    liq: 'view-liq', heat: 'view-bookheat', liqmap: 'view-liqheat', det: 'view-detect',
-    hist: 'view-hist', tpo: 'view-tpo', vp: 'view-klinevp', farb: 'view-farb', macro: 'view-macro',
-    auct: 'view-auction', lvls: 'view-levels', micro: 'view-micro',
-    scr: 'view-screener', rsi: 'view-rsi', opts: 'view-options',
-    whale: 'view-whale', alerts: 'view-alerts', conf: 'view-conf',
-    jour: 'view-journal', cal: 'view-calendar', poly: 'view-polymarket', news: 'view-news', econ: 'view-econ',
-    tapeint: 'view-tapeint', walls: 'view-walls', basis: 'view-basis', klev: 'view-keylevels', vpin: 'view-vpin',
-    spcvd: 'view-spotperp',   // T-2 (§4h)
-  };
+  const SEC_OF = PANEL_TABLES.secOf;
+  const VIEW_ANCHOR = PANEL_TABLES.anchors;
   // key → last IntersectionObserver verdict. Defaults TRUE (paint until told
   // otherwise) so the page is never blank if IO is unavailable.
   const onScreen = {};

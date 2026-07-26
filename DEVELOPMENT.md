@@ -74,6 +74,17 @@ panels; its only "math" is reading values out of `Q.*` and `bt.stats`.
 4. If it ships to the dashboard: mirror the builder in `quant.js` (a `sig*` function), add it to the
    `STRATEGIES` registry in `app.js`, and **re-run the JS↔Python parity probe** (§4).
 
+### Add a terminal panel (M3 registry)
+
+The declarative half is single-source now: add ONE descriptor to `PANEL_DEFS` in
+[terminal-state.js](dashboard/terminal-state.js) — `{key, minMs, section, anchor}` (plus `extra: []`
+if the panel owns more than one render unit, as `fp` does) — and `dirty`/`MIN_MS`/`lastAt`/`SEC_OF`/
+`VIEW_ANCHOR` all derive from it. Then: the `frame()` block in `terminal.js`, the panel markup in
+`terminal.html` (the `id` must match `anchor`, or the check gate fails), and its `.area-*` grid slot
+in `terminal.css` (BOTH `grid-template-areas` strings — desktop and the `<1100px` collapse).
+`node scripts/check_terminal.cjs` asserts registry↔DOM consistency in both directions, so a
+mismatched or unclaimed anchor is a build failure rather than a silently ungated panel.
+
 ### Add a dashboard panel
 1. Put the math in `btcquant/features.py` (or `risk.py`) **with pytest** — source of truth.
 2. Mirror it in `quant.js`, export it on the `Quant` object, and **parity-check** vs Python (§4).

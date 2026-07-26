@@ -385,7 +385,18 @@
 //                           harness cannot reach it) — no two elements share a
 //                           grid area, the strips claim none at all, every
 //                           area-* class has a grid-area rule, and no panel the
-//                           strip folds carries a section-nav anchor id
+//                           strip folds carries a section-nav anchor id//  78. PANEL_DEFS         → M3: the ONE panel registry. Keys unique, minMs
+//      registry             positive, sections real; 'header' AND 'local' are the
+//                           only gate-exempt descriptors and each is pinned WITH
+//                           its reason (masking feed health / a display:none node
+//                           an IntersectionObserver would latch off forever);
+//                           every render unit exists as an id in terminal.html AND
+//                           every DOM id="view-*" is claimed by a descriptor;
+//                           fp and local each own TWO units; derived tables OMIT
+//                           nulls, return fresh objects, and reproduce the
+//                           pre-M3 literals against GOLDEN pins (data-level
+//                           equivalence — the L1 harness is not pixel-deterministic,
+//                           ~15% run-to-run on the live-clock panels)
 //
 // Exit: 0 with one PASS line per group; non-zero with a clear FAIL message
 // (plus stack) if any group breaks. Run: node scripts/check_terminal.cjs
@@ -4039,6 +4050,157 @@ group('livewire onDropped silent-catch hook (N5)', () => {
   }
 });
 
+group('PANEL_DEFS registry <-> DOM consistency + derived-table shape (M3)', () => {
+  const DEFS = S.PANEL_DEFS;
+  assert.ok(Array.isArray(DEFS) && DEFS.length >= 30, 'PANEL_DEFS is the registry array');
+
+  // Identity: keys unique. A duplicate would silently make one descriptor win in
+  // every derived table, which is precisely the class of bug the registry exists
+  // to kill — so it must fail loudly here.
+  const keys = DEFS.map((d) => d.key);
+  assert.strictEqual(new Set(keys).size, keys.length, 'panel keys are unique');
+
+  // Budgets: paint budgets must be real positive numbers. A NaN/0 would make
+  // due() either never fire or fire every frame.
+  for (const d of DEFS) {
+    assert.ok(Number.isFinite(d.minMs) && d.minMs > 0, d.key + ': minMs is a positive number');
+  }
+
+  // Sections must be one of the five collapse sections the HTML declares via
+  // data-sec — a typo'd section name would leave a panel permanently ungated.
+  const SECTIONS = ['orderflow', 'structure', 'auction', 'intelligence', 'portfolio'];
+  for (const d of DEFS) {
+    if (d.section !== null) {
+      assert.ok(SECTIONS.indexOf(d.section) >= 0, d.key + ": section '" + d.section + "' is a real section");
+    }
+  }
+
+  // The header exemption is LOAD-BEARING, not an omission: the stats strip
+  // carries the connection chips, so gating it could mask a dead feed. Pin it so
+  // nobody "completes the table" by giving header a section/anchor.
+  // TWO descriptors are gate-exempt, for two DIFFERENT documented reasons. Both
+  // are pinned by name and by reason, because "completing the table" is the
+  // tempting wrong move in each case and neither would fail loudly.
+  const exempt = DEFS.filter((d) => d.section === null || d.anchor === null);
+  assert.deepStrictEqual(exempt.map((d) => d.key).sort(), ['header', 'local'],
+    'exactly two gate-exempt descriptors: header (gating it could mask feed health) '
+    + 'and local (spans two sections; its node is display:none so an IO would latch it off)');
+  const hdr = DEFS.find((d) => d.key === 'header');
+  assert.strictEqual(hdr.section, null, 'header has NO section');
+  assert.strictEqual(hdr.anchor, null, 'header has NO anchor');
+  const loc = DEFS.find((d) => d.key === 'local');
+  assert.strictEqual(loc.section, null, 'local has NO section — it spans auction AND portfolio');
+  assert.strictEqual(loc.anchor, null, 'local has NO anchor — an IO on a display:none node never intersects');
+  // ...but it DOES own render units. anchor and units are independent, which the
+  // old parallel tables could only express by special-casing the key twice.
+  assert.deepStrictEqual(S.panelUnits('local'), ['local-only-api', 'local-only-econ'],
+    'local owns both fold containers despite having no anchor');
+
+  // REGISTRY <-> DOM: every anchor must be an id that actually exists in
+  // terminal.html. A stale anchor silently disables that panel's offscreen
+  // gating — no error, just a panel that repaints while invisible.
+  const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'terminal.html'), 'utf8');
+  for (const d of DEFS) {
+    for (const id of S.panelUnits(d.key)) {
+      assert.ok(html.indexOf('id="' + id + '"') >= 0,
+        d.key + ": render unit '" + id + "' exists in terminal.html");
+    }
+  }
+  // fp is the one panel owning two render units — pinned, because the N1
+  // quarantine's shared-panel logic depends on that set being complete.
+  assert.deepStrictEqual(S.panelUnits('fp'), ['view-footprint', 'view-cvd'],
+    'fp owns BOTH the footprint canvas and the CVD strip');
+  assert.deepStrictEqual(S.panelUnits('header'), [],
+    'header owns no gated render unit (terminal.js falls back to the header panel)');
+  // ...and the reverse direction: every id="view-*" in the HTML must be claimed by
+  // a descriptor, so a panel added to the DOM cannot be left out of the loop.
+  //
+  // ONE documented exception: 'view-header' is the stats strip. terminal.html says
+  // it carries no data-sec because connection health must stay visible, and
+  // terminal.js falls back to 'view-header' for any key with no units. It is
+  // therefore expected to be unclaimed — listed here by name so the reverse check
+  // stays strict for every OTHER panel instead of being weakened to allow it.
+  // ('view-cvd' is NOT here: it is claimed, as fp's `extra` render unit.)
+  const UNGATED_BY_DESIGN = ['view-header'];
+  const domViews = (html.match(/id="(view-[a-z0-9-]+)"/g) || []).map((m) => m.slice(4, -1));
+  const claimed = new Set(S.panelUnitIds());
+  for (const v of domViews) {
+    if (UNGATED_BY_DESIGN.indexOf(v) >= 0) continue;
+    assert.ok(claimed.has(v), 'DOM anchor ' + v + ' is claimed by a PANEL_DEFS descriptor');
+  }
+  // Pin that the exception really is unclaimed — if someone gives header an
+  // anchor, this list is stale and the reader should be told, not silently obeyed.
+  for (const v of UNGATED_BY_DESIGN) {
+    assert.ok(!claimed.has(v), v + ' is ungated BY DESIGN — remove it from UNGATED_BY_DESIGN if that changed');
+  }
+
+  // Derived tables: shapes the render loop depends on.
+  const t = S.panelTables();
+  assert.deepStrictEqual(Object.keys(t.dirty).sort(), keys.slice().sort(), 'dirty covers every panel');
+  assert.ok(Object.values(t.dirty).every((v) => v === true), 'dirty starts all-true (first paint)');
+  assert.ok(Object.values(t.lastAt).every((v) => v === 0), 'lastAt starts all-zero');
+  assert.deepStrictEqual(Object.keys(t.minMs).sort(), keys.slice().sort(), 'minMs covers every panel');
+  // The null-OMISSION contract: consumers test key PRESENCE (`for (const k in
+  // VIEW_ANCHOR)`), so a stored null would silently enrol header in the gate.
+  for (const k of ['header', 'local']) {
+    assert.ok(!(k in t.secOf), 'secOf OMITS ' + k + ' (not a null entry)');
+    assert.ok(!(k in t.anchors), 'anchors OMITS ' + k + ' (not a null entry)');
+  }
+  assert.strictEqual(Object.keys(t.secOf).length, keys.length - exempt.length, 'secOf covers every gated panel');
+  assert.strictEqual(Object.keys(t.anchors).length, keys.length - exempt.length, 'anchors covers every gated panel');
+
+  // Fresh objects per call — these are MUTABLE render state (dirty flips every
+  // frame); a shared object would alias across callers.
+  const t2 = S.panelTables();
+  t2.dirty.fp = false;
+  assert.strictEqual(t.dirty.fp, true, 'panelTables returns fresh objects, never shared state');
+
+  // ── GOLDEN: the registry must derive EXACTLY the hand-written literals it
+  // replaced ────────────────────────────────────────────────────────────────
+  // M3 is a pure refactor, so the bar is "byte-identical behaviour", and the
+  // honest proof is at the DATA level, not the pixel level: the L1 browser
+  // harness is NOT pixel-deterministic (the live-clock panels differ up to ~15%
+  // between two runs of the SAME code — measured), so a screenshot diff cannot
+  // establish equivalence here. These are the pre-M3 values copied verbatim from
+  // terminal.js's five literals; if the registry ever stops reproducing them, the
+  // refactor has changed behaviour and this fails.
+  const GOLDEN_MIN_MS = {
+    fp: 250, dom: 120, tape: 180, agg: 220, header: 400, liq: 300, heat: 500, liqmap: 600, det: 250,
+    hist: 500, tpo: 800, vp: 800, farb: 500, macro: 800,
+    auct: 800, lvls: 1000, micro: 500,
+    scr: 800, rsi: 500, opts: 1000, whale: 600, alerts: 300, conf: 800,
+    jour: 400, cal: 600, poly: 1000, news: 800, econ: 1000, local: 1000,
+    tapeint: 500, walls: 1000, vpin: 800, klev: 1000, basis: 600,
+    spcvd: 600,
+  };
+  const GOLDEN_SEC_OF = {
+    fp: 'orderflow', dom: 'orderflow', tape: 'orderflow', agg: 'orderflow',
+    liq: 'orderflow', heat: 'orderflow', liqmap: 'orderflow', det: 'orderflow',
+    hist: 'structure', tpo: 'structure', vp: 'structure', farb: 'structure', macro: 'structure',
+    auct: 'auction', lvls: 'auction', micro: 'auction',
+    scr: 'intelligence', rsi: 'intelligence', opts: 'intelligence',
+    whale: 'intelligence', alerts: 'intelligence', conf: 'intelligence',
+    jour: 'portfolio', cal: 'portfolio', poly: 'portfolio', news: 'portfolio', econ: 'portfolio',
+    tapeint: 'orderflow', walls: 'orderflow', basis: 'structure', klev: 'auction', vpin: 'auction',
+    spcvd: 'orderflow',
+  };
+  const GOLDEN_VIEW_ANCHOR = {
+    fp: 'view-footprint', dom: 'view-dom', tape: 'view-tape', agg: 'view-aggbook',
+    liq: 'view-liq', heat: 'view-bookheat', liqmap: 'view-liqheat', det: 'view-detect',
+    hist: 'view-hist', tpo: 'view-tpo', vp: 'view-klinevp', farb: 'view-farb', macro: 'view-macro',
+    auct: 'view-auction', lvls: 'view-levels', micro: 'view-micro',
+    scr: 'view-screener', rsi: 'view-rsi', opts: 'view-options',
+    whale: 'view-whale', alerts: 'view-alerts', conf: 'view-conf',
+    jour: 'view-journal', cal: 'view-calendar', poly: 'view-polymarket', news: 'view-news', econ: 'view-econ',
+    tapeint: 'view-tapeint', walls: 'view-walls', basis: 'view-basis', klev: 'view-keylevels', vpin: 'view-vpin',
+    spcvd: 'view-spotperp',
+  };
+  assert.deepStrictEqual(t.minMs, GOLDEN_MIN_MS, 'MIN_MS derives byte-identically to the pre-M3 literal');
+  assert.deepStrictEqual(t.secOf, GOLDEN_SEC_OF, 'SEC_OF derives byte-identically to the pre-M3 literal');
+  assert.deepStrictEqual(t.anchors, GOLDEN_VIEW_ANCHOR, 'VIEW_ANCHOR derives byte-identically to the pre-M3 literal');
+  assert.deepStrictEqual(Object.keys(t.dirty).sort(), Object.keys(GOLDEN_MIN_MS).sort(),
+    'dirty covers exactly the upstream key set (35 panels incl. header and local)');
+});
 group('startLeg drop-wiring composition: makeHealthCounter ← onDropped ← livewire (N5)', () => {
   // The live glue in terminal.js startLeg —
   //   if (!api.onDropped) api.onDropped = (reason) => { health.bump('droppedFrame', reason); dirty.header = true; };
