@@ -267,9 +267,26 @@ sequence to the calendar, not to enthusiasm.
       (`backtest.py:772-831`, currently opt-in and unused). *Accept:* the registry object
       exists, is read by a (future) terminal panel, and refusing an un-cleared signal is a
       mechanical property, not a discipline.
-- [ ] **M3. Collapse the ~9 panel tables into one descriptor registry**
+- [~] **M3. Collapse the ~9 panel tables into one descriptor registry**
       `{key, section, anchor, minMs, factory, render(ctx)}`, mirroring `LegRegistry`.
       *Accept:* adding a panel touches one descriptor; render loop is data-driven.
+      **Declarative half done (T-4, 2026-07-26):** `S.PANEL_DEFS` +
+      `panelTables()`/`panelUnits()`/`panelUnitIds()` in `terminal-state.js` (next to
+      `LegRegistry`, pure data so the node harness can assert it — terminal.js's IIFE
+      could not be). The five hand-synced literals `dirty`/`MIN_MS`/`lastAt`/`SEC_OF`/
+      `VIEW_ANCHOR` are now DERIVED from one descriptor per panel, and `'view-cvd'`
+      (fp's second render unit) stopped being spelled inline in two places. Check gate
+      79→82 groups: registry↔DOM both directions, the load-bearing `header` exemption,
+      and GOLDEN pins reproducing the pre-M3 literals exactly.
+      **Still open — the `render(ctx)` half:** the 34 `frame()` blocks stay
+      block-per-panel. Each carries bespoke slice-building and sits nested inside
+      section/availability gates, so flattening them into descriptor thunks changes
+      control flow rather than moving data; that belongs with **L2** (the `terminal.js`
+      split), which is already sequenced after M3. Adding a panel today touches the
+      descriptor + one `frame()` block + HTML + a CSS area — down from ~9-11 places,
+      not yet one. Note for whoever finishes it: the L1 browser harness is **not
+      pixel-deterministic** (~15% run-to-run on the live-clock panels, measured), so
+      equivalence must be proven at the data level, as the GOLDEN pins do.
 - [ ] **M4. `setData` → `series.update()` incremental** for append-only series
       (CVD/OFI/basis/spot-perp); `setData` only on decimation/reset/symbol-switch;
       `fitContent()` occasional. *Accept:* per-paint cost drops; no visual regression.

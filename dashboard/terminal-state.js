@@ -3847,6 +3847,150 @@
     };
   }
 
+  // ─── PANEL_DEFS / panelTables() — the ONE panel registry (M3) ─────────────
+  //
+  // STRATEGY Gap 4: adding a panel used to mean editing ~9-11 parallel
+  // string-keyed tables by hand and keeping them in sync — `dirty{}`, `MIN_MS{}`,
+  // `lastAt{}`, `SEC_OF{}`, `VIEW_ANCHOR{}` in terminal.js, each repeating the
+  // same 33-34 keys. Nothing checked that they agreed, so a typo in one table
+  // silently disabled a gate for one panel (a missing SEC_OF key = a panel that
+  // ignores its section's collapse; a missing VIEW_ANCHOR key = a panel with no
+  // offscreen gating) with no error anywhere.
+  //
+  // This is the single source, deliberately placed next to LegRegistry and built
+  // the same way (a fixed-order DEFS array of plain data). It lives HERE and not
+  // in terminal.js for two reasons: it is pure data with no DOM or closure
+  // dependency, and terminal.js is a browser-only IIFE that the node harness
+  // cannot require — so a registry defined there could never be asserted.
+  //
+  // Fields:
+  //   key     the view key used by dirty/lastAt/due()/safePanel — the identity.
+  //   minMs   per-view redraw budget (ms). Paint only; ingestion is NEVER
+  //           throttled (§4e.2). Tuned per panel cost, rationale inline below.
+  //   section the collapse-gate section, or null to be EXEMPT from it.
+  //   anchor  the DOM id the IntersectionObserver watches, or null for none.
+  //   extra   OPTIONAL extra DOM ids this key also paints, for a panel that owns
+  //           more than one render unit (only 'fp', which paints the footprint
+  //           canvas AND the CVD strip beneath it). Declared here so the
+  //           quarantine's unit set has ONE source instead of terminal.js
+  //           hard-coding 'view-cvd' in two places.
+  //
+  // 'header' is the one descriptor with section AND anchor null, and that is
+  // load-bearing, not an omission: the stats strip carries the connection chips,
+  // so hiding it behind a presentation gate could mask a dead feed. Same rule as
+  // the pause button. The check gate asserts this explicitly so nobody "fixes"
+  // it by giving header a section.
+  const PANEL_DEFS = [
+    // ORDERFLOW (§4b/§4g/§4h/§4i). fp repaints hundreds of cells; dom is a fixed
+    // text-pool update; heat/liqmap update at ~1s/5s data cadence anyway, so
+    // their budgets just cap bursts.
+    { key: 'header', minMs: 400, section: null, anchor: null },
+    { key: 'fp', minMs: 250, section: 'orderflow', anchor: 'view-footprint', extra: ['view-cvd'] },
+    { key: 'dom', minMs: 120, section: 'orderflow', anchor: 'view-dom' },
+    { key: 'tape', minMs: 180, section: 'orderflow', anchor: 'view-tape' },
+    { key: 'agg', minMs: 220, section: 'orderflow', anchor: 'view-aggbook' },
+    { key: 'liq', minMs: 300, section: 'orderflow', anchor: 'view-liq' },
+    { key: 'heat', minMs: 500, section: 'orderflow', anchor: 'view-bookheat' },
+    { key: 'liqmap', minMs: 600, section: 'orderflow', anchor: 'view-liqheat' },
+    { key: 'det', minMs: 250, section: 'orderflow', anchor: 'view-detect' },
+    // T-1 (§4g): tapeint ticks with the tape burst (text strip + 120px spark —
+    // cheap); walls at the 1/s sampler. T-2 (§4h): spcvd on the CVD setData budget.
+    { key: 'tapeint', minMs: 500, section: 'orderflow', anchor: 'view-tapeint' },
+    { key: 'walls', minMs: 1000, section: 'orderflow', anchor: 'view-walls' },
+    { key: 'spcvd', minMs: 600, section: 'orderflow', anchor: 'view-spotperp' },
+    // STRUCTURE (§4c): hist/tpo/vp repaint only on (re)fetch or control change;
+    // farb ticks with its 1s countdown; macro moves at poll cadence (>=10s);
+    // basis at the ~1s mark cadence (the view throttles setData further).
+    { key: 'hist', minMs: 500, section: 'structure', anchor: 'view-hist' },
+    { key: 'tpo', minMs: 800, section: 'structure', anchor: 'view-tpo' },
+    { key: 'vp', minMs: 800, section: 'structure', anchor: 'view-klinevp' },
+    { key: 'farb', minMs: 500, section: 'structure', anchor: 'view-farb' },
+    { key: 'macro', minMs: 800, section: 'structure', anchor: 'view-macro' },
+    { key: 'basis', minMs: 600, section: 'structure', anchor: 'view-basis' },
+    // AUCTION (I-1 §4f): auct moves on fetch/60s refresh; lvls/klev at the 5min
+    // poll; micro at the 1/s sampler; vpin per completed bucket.
+    { key: 'auct', minMs: 800, section: 'auction', anchor: 'view-auction' },
+    { key: 'lvls', minMs: 1000, section: 'auction', anchor: 'view-levels' },
+    { key: 'micro', minMs: 500, section: 'auction', anchor: 'view-micro' },
+    { key: 'klev', minMs: 1000, section: 'auction', anchor: 'view-keylevels' },
+    { key: 'vpin', minMs: 800, section: 'auction', anchor: 'view-vpin' },
+    // INTELLIGENCE (O-4 §4d): scr/rsi/opts move at REST-poll cadence (30-60s),
+    // so budgets just cap redraw bursts from hover-independent dirty flips;
+    // conf/alerts tick with the 5s intel gate; whale at its 60s/address polls.
+    { key: 'scr', minMs: 800, section: 'intelligence', anchor: 'view-screener' },
+    { key: 'rsi', minMs: 500, section: 'intelligence', anchor: 'view-rsi' },
+    { key: 'opts', minMs: 1000, section: 'intelligence', anchor: 'view-options' },
+    { key: 'whale', minMs: 600, section: 'intelligence', anchor: 'view-whale' },
+    { key: 'alerts', minMs: 300, section: 'intelligence', anchor: 'view-alerts' },
+    { key: 'conf', minMs: 800, section: 'intelligence', anchor: 'view-conf' },
+    // T-4 (§4j) the local-only strip. Exempt from BOTH gates, and unlike header
+    // for a second, separate reason — recorded because it is easy to "tidy" away:
+    // it spans TWO sections (auction + portfolio), so a single section gate would
+    // freeze the other half; and its own DOM node is display:none while nothing is
+    // folded, so an IntersectionObserver on it would never intersect and would
+    // latch the strip off forever once it had painted. It therefore runs on the
+    // plain due()/MIN_MS budget with no visibility gate, re-evaluating at 1Hz and
+    // writing DOM only when its fold state changes — so the API coming back
+    // restores full panels without a reload. It owns two fold containers.
+    { key: 'local', minMs: 1000, section: null, anchor: null,
+      extra: ['local-only-api', 'local-only-econ'] },
+    // PORTFOLIO (O-5 §4e): jour/cal move on user actions; poly/news/econ at
+    // their 30-60s poll cadence.
+    { key: 'jour', minMs: 400, section: 'portfolio', anchor: 'view-journal' },
+    { key: 'cal', minMs: 600, section: 'portfolio', anchor: 'view-calendar' },
+    { key: 'poly', minMs: 1000, section: 'portfolio', anchor: 'view-polymarket' },
+    { key: 'news', minMs: 800, section: 'portfolio', anchor: 'view-news' },
+    { key: 'econ', minMs: 1000, section: 'portfolio', anchor: 'view-econ' },
+  ];
+
+  /** The five per-panel lookups terminal.js's render loop needs, DERIVED from
+   *  PANEL_DEFS so they can never drift from each other again. Byte-identical in
+   *  content to the hand-written literals it replaces (pinned to golden constants
+   *  in check_terminal.cjs); `dirty` starts all-true (first paint) and `lastAt`
+   *  all-zero, exactly as before. secOf/anchors OMIT null entries rather than
+   *  storing null, because the consumers test key presence (`for (const k in
+   *  VIEW_ANCHOR)`) — storing a null would silently enrol 'header' in the
+   *  offscreen gate. Returns fresh objects per call: these are mutable render
+   *  state, never shared. */
+  function panelTables(defs) {
+    const list = Array.isArray(defs) ? defs : PANEL_DEFS;
+    const dirty = {}, minMs = {}, lastAt = {}, secOf = {}, anchors = {};
+    for (const d of list) {
+      dirty[d.key] = true;
+      minMs[d.key] = d.minMs;
+      lastAt[d.key] = 0;
+      if (d.section) secOf[d.key] = d.section;
+      if (d.anchor) anchors[d.key] = d.anchor;
+    }
+    return { dirty, minMs, lastAt, secOf, anchors };
+  }
+
+  /** Every DOM id a panel key paints: its anchor plus any `extra` units it owns.
+   *  ONE source for the N1 quarantine's unit set — terminal.js previously spelled
+   *  'view-cvd' inline in two places (renderUnitIds and panelUnitsOf), so the two
+   *  could disagree. Unknown key → [] (the caller supplies its own fallback). */
+  function panelUnits(key, defs) {
+    const list = Array.isArray(defs) ? defs : PANEL_DEFS;
+    for (const d of list) {
+      if (d.key !== key) continue;
+      const ids = d.anchor ? [d.anchor] : [];
+      return Array.isArray(d.extra) ? ids.concat(d.extra) : ids;
+    }
+    return [];
+  }
+
+  /** Flat list of EVERY render-unit DOM id across the registry — the quarantine's
+   *  shared-panel detection walks this. */
+  function panelUnitIds(defs) {
+    const list = Array.isArray(defs) ? defs : PANEL_DEFS;
+    const out = [];
+    for (const d of list) {
+      if (d.anchor) out.push(d.anchor);
+      if (Array.isArray(d.extra)) for (const e of d.extra) out.push(e);
+    }
+    return out;
+  }
+
   // ─── makeHealthCounter() — silent-catch accumulator (N5) ──────────────────
   //
   // Pure/DOM-free/clock-free companion to the header health chip. Accumulates
@@ -3939,6 +4083,8 @@
     // health chip — pure, DOM-free, clock-free; wired into terminal.js via the
     // optional livewire onDropped hook.
     makeHealthCounter,
+    // M3: the ONE panel registry + its derived render-loop tables / unit sets.
+    PANEL_DEFS, panelTables, panelUnits, panelUnitIds,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = TerminalState;
