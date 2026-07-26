@@ -791,6 +791,12 @@
 
   <footer>
     <p>Live-descriptive orderflow terminal (DESIGN-orderflow-terminal.md). Everything above renders only what arrived over the public wire this session — <b>never a backtest input</b>, never merged into the OOS harness. Feeds (T-2 §4h venue matrix): Bybit v5 linear (primary) + spot, Binance diff-depth books (spot trades; futures trades are topic-filtered on this network, §0.2) + REST mark/OI, OKX v5 swap+spot books/trades (seq-chained), Coinbase Exchange full l2 book + matches, Deribit options REST + Hyperliquid public state (O-4). The matrix is display/ingest only — the collector records BTCUSDT bybit-primary, unchanged. Liq heatmap = <b>model estimate</b>; spoof/iceberg flags = <b>heuristics</b>; screener/confluence/alerts = <b>un-validated descriptive reads</b> (IC run-log ≈ 0) — all labeled in-panel. See <a href="../DISCLAIMER.md">DISCLAIMER.md</a>.</p>
+    <!-- T-4: the library's attribution, ONCE. The five chart panels each carried
+         an on-canvas TradingView watermark (layout.attributionLogo, default true
+         in the vendored v4.2.0); they are off so the marks stop competing with
+         the data, and the credit lives here instead. This is a relocation, not a
+         removal — the Apache-2.0 NOTICE obligation is met in full. -->
+    <p class="attrib">Charts by <a href="https://www.tradingview.com/lightweight-charts/" target="_blank" rel="noopener noreferrer">TradingView Lightweight Charts™</a> (Apache-2.0).</p>
   </footer>
 
   <!-- Script order is a CONTRACT (DESIGN §4/§4c/§4f/§4h): vendor/lightweight-charts.js →

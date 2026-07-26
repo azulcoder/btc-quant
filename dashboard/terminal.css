@@ -424,7 +424,11 @@ main.term-main {
    percentages resolve against the wrap's settled flex height, no feedback. */
 .fp-wrap > .term-canvas, .heat-wrap > .term-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
 /* agg book reserves an 18px bottom strip for its in-panel legend. */
-.agg-wrap > .agg-canvas { position: absolute; top: 0; left: 0; width: 100%; height: calc(100% - 18px); }
+/* The reserved legend strip is MEASURED, not assumed (T-4): the legend carries one
+   chip per live leg, so at 6-7 legs it wraps to a second line and used to overprint
+   the bottom price labels. AggBookView publishes --agg-legend-h from the rendered
+   legend's height; 18px stays the fallback for the first frame. */
+.agg-wrap > .agg-canvas { position: absolute; top: 0; left: 0; width: 100%; height: calc(100% - var(--agg-legend-h, 18px)); }
 .agg-wrap > .term-legend { position: absolute; left: 0; right: 0; bottom: 0; }
 /* O-2 canvas mounts (§4b): book heatmap (wide) + liq heatmap (right column). */
 .heat-wrap    { flex: 1 1 auto; min-height: 380px; position: relative; background: var(--bg); border-radius: var(--radius); }
@@ -652,6 +656,11 @@ table.ladder tr.spread .sp-x { color: var(--muted); margin: 0 5px; }
 .tape-row .ex.spot { text-decoration: underline dotted; text-underline-offset: 2px; }  /* market = second cue */
 .ex-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; flex: none; }
 
+/* T-4 Wave 2: the relocated library attribution (see the terminal.html footer).
+   The five on-canvas TradingView watermarks are off via layout.attributionLogo;
+   the credit lives here once instead. Quiet and secondary to the terminal's own
+   footer prose — it is a credit, not content. */
+footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(--g-400); }
 /* ─── T-3 (§4i): size-tiered tape blocks — colour intensity + weight is the
    redundant cue next to the log-notional bar (the ◆/◇ glyph is the third). ── */
 .tape-row .qty { position: relative; background-clip: padding-box; }
@@ -1364,7 +1373,10 @@ table.farb-table tr.farb-spread td {
 .auction-controls input[type="checkbox"] { vertical-align: middle; margin: 0 2px 0 0; }
 .auction-status { color: var(--accent); }   /* progress/hints — 'something happening' chrome, not P&L */
 .auction-wrap { height: 420px; position: relative; background: var(--bg); border-radius: var(--radius); }
-.auction-wrap > .term-canvas { position: absolute; top: 0; left: 0; width: 100%; height: calc(100% - 18px); }
+/* Measured legend strip (T-4), same reasoning as .agg-wrap: this legend carries
+   two lg-note sentences plus per-mode swatches, so a fixed 18px let it ride up
+   over the canvas and collide with the offline/awaiting note drawn there. */
+.auction-wrap > .term-canvas { position: absolute; top: 0; left: 0; width: 100%; height: calc(100% - var(--auction-legend-h, 18px)); }
 .auction-wrap > .term-legend { position: absolute; left: 0; right: 0; bottom: 0; }
 
 /* Levels registry: ladder-density grid rows; the panel flex-fills its

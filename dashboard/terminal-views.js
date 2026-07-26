@@ -294,6 +294,19 @@
     // like CVD it has no natural zero, so the read is slope/divergence only).
     const ROW_CUM = 34;
     const BAR_W_MIN = 64;      // 'sellVol × buyVol' needs ~9 mono chars + padding
+    // T-4: the OTHER end of the same constraint. barW was plotW/vis.length with
+    // no ceiling, so a session with ONE bar stretched that bar across the entire
+    // panel — half the first screen became a wall of flat colour, which is both
+    // the worst first impression the terminal makes and actively misleading (a
+    // 60-second sample rendered at the visual weight of a full session). A bar is
+    // capped here and the plot stays LEFT-aligned, so a young session reads as a
+    // narrow honest bar with empty space beside it — the space is the truth.
+    // ~2.2x BAR_W_MIN: wide enough that the per-cell 'sell × buy' text still has
+    // room to breathe, narrow enough that one bar never dominates the fold.
+    const BAR_W_MAX = 140;
+    // Ceiling on a single price row. showText needs rowH >= 10, so this leaves
+    // ample headroom while stopping a 1-row range from becoming a monolith.
+    const ROW_H_MAX = 26;
 
     function mount(el, opts) {
       root = el;
@@ -355,7 +368,16 @@
       const p = pal();
       cvdChart = LC.createChart(cvdEl, {
         height: cvdEl.clientHeight || 180,
-        layout: { background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace') },
+        layout: {
+          background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace'),
+          // T-4: drop the on-canvas TradingView watermark (5 panels carried
+          // one each). Supported from lightweight-charts v4.2 — the vendored
+          // build IS v4.2.0, so this is a real option here, not a no-op.
+          // The library's attribution is NOT dropped, only relocated: the
+          // page footer and README carry it once, which satisfies the
+          // Apache-2.0 NOTICE while leaving the data unobscured.
+          attributionLogo: false,
+        },
         grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
         timeScale: { timeVisible: true, secondsVisible: true, borderColor: p.border },
         // scaleMargins keep the ONE lastValue label (the Σ line, below) clear
@@ -526,7 +548,10 @@
       const cellsH = h - ROW_DELTA - ROW_TVOL - extraRows - ROW_CUM - ROW_TIME;
       const nFit = Math.max(1, Math.floor(plotW / BAR_W_MIN));
       const vis = bars.slice(-nFit);
-      const barW = plotW / vis.length;
+      // Capped (T-4): once the session has enough bars to fill the panel this is
+      // plotW/vis.length exactly as before; only the under-filled case changes.
+      const barW = Math.min(BAR_W_MAX, plotW / vis.length);
+      const drawnW = barW * vis.length;   // < plotW while the session is young
 
       // Price range across visible bars, snapped DOWN to the store's tick grid
       // (levels are floor-bucketed — FootprintStore doc) so rows align exactly.
@@ -547,7 +572,15 @@
         ctx.fillText('price range spans ' + nRows + ' rows at $' + tick + ' grouping — pick a coarser tick group', 10, 18);
         return;
       }
-      const rowH = cellsH / nRows;
+      // T-4: capped like barW, and for the same reason. rowH was cellsH/nRows,
+      // so a session that has touched ONE price level drew a single cell over
+      // the panel's whole height — the vertical half of the flat-colour wall.
+      // Capping leaves honest empty space below the touched range instead.
+      // NOTE the footer rows (Δ/vol/Δmm/Δ%/cumΔ) keep using cellsH for their Y
+      // offsets on purpose: anchoring them to the painted height would make the
+      // whole panel layout jump every time the price range grew a row.
+      const rowH = Math.min(ROW_H_MAX, cellsH / nRows);
+      const drawnH = rowH * nRows;   // < cellsH while the range is narrow
       const yOf = (price) => ((maxP - price) / tick) * rowH;   // row TOP edge
       const showText = rowH >= 10 && barW >= 56;
 
@@ -590,12 +623,12 @@
         // Column separator; the OPEN bar gets a dashed border + 'live' tag so a
         // half-formed bar can never be misread as a finished print (§0.1).
         ctx.strokeStyle = p.border; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(x0 + 0.5, 0); ctx.lineTo(x0 + 0.5, cellsH); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x0 + 0.5, 0); ctx.lineTo(x0 + 0.5, drawnH); ctx.stroke();
         if (!b.finished) {
           ctx.save();
           ctx.setLineDash([4, 3]);
           ctx.strokeStyle = p.accent2; ctx.lineWidth = 1;
-          ctx.strokeRect(x0 + 1, 0.5, barW - 2, cellsH - 1);
+          ctx.strokeRect(x0 + 1, 0.5, barW - 2, drawnH - 1);
           ctx.restore();
           font(9, true); ctx.fillStyle = p.accent2; ctx.textAlign = 'center';
           ctx.fillText('live', x0 + half, 7);
@@ -634,7 +667,7 @@
         if (b.finished && (b.unfinishedHigh || b.unfinishedLow)) {
           font(11, true); ctx.fillStyle = p.accent; ctx.textAlign = 'center';
           if (b.unfinishedHigh) ctx.fillText('⌜', x0 + half, Math.max(6, yOf(b.h) - 4));
-          if (b.unfinishedLow) ctx.fillText('⌟', x0 + half, Math.min(cellsH - 4, yOf(b.l) + rowH + 4));
+          if (b.unfinishedLow) ctx.fillText('⌟', x0 + half, Math.min(drawnH - 4, yOf(b.l) + rowH + 4));
         }
       }
 
@@ -653,15 +686,32 @@
         if (z.top < minP || z.bottom > maxP) continue;   // fully outside the visible price window
         const x0 = Math.max(0, startIdx * barW);
         const yT = Math.max(0, yOf(Math.min(z.top, maxP)));
-        const yB = Math.min(cellsH, yOf(Math.max(z.bottom, minP)) + rowH);
-        if (yB <= yT || plotW <= x0) continue;
+        const yB = Math.min(drawnH, yOf(Math.max(z.bottom, minP)) + rowH);
+        // T-4: bands end at drawnW (the last DRAWN bar), not plotW. Beyond it
+        // there is no data this session, and tinting that space would restate
+        // the flat-colour lie the bar cap just removed. Identical once full.
+        if (yB <= yT || drawnW <= x0) continue;
         const col = z.side === 'buy' ? p.up : p.down;
         ctx.fillStyle = rgba(col, z.active ? 0.10 : 0.04);
-        ctx.fillRect(x0, yT, plotW - x0, yB - yT);
+        ctx.fillRect(x0, yT, drawnW - x0, yB - yT);
         if (z.active) {   // active zones get a hairline edge; dead ones stay a faint wash
           ctx.strokeStyle = rgba(col, 0.4); ctx.lineWidth = 1;
-          ctx.strokeRect(x0 + 0.5, yT + 0.5, plotW - x0 - 1, yB - yT - 1);
+          ctx.strokeRect(x0 + 0.5, yT + 0.5, drawnW - x0 - 1, yB - yT - 1);
         }
+      }
+
+      // T-4: when the capped cells occupy only a small part of the panel — a young
+      // session, or a range that has touched few levels — say WHY the space is
+      // empty. Without this, honest emptiness reads as a broken panel, and the
+      // reader cannot tell "no data yet" from "renderer died". Threshold is
+      // generous: in normal use (a $200 range at $10 grouping ≈ 21 rows) the cells
+      // fill most of the box and this never draws.
+      if (drawnH < cellsH * 0.6 || drawnW < plotW * 0.6) {
+        font(11); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+        ctx.fillText('accruing — ' + vis.length + ' bar' + (vis.length === 1 ? '' : 's')
+          + ' · ' + nRows + ' level' + (nRows === 1 ? '' : 's')
+          + ' this session; the panel fills as price and time develop (§0.7)',
+          4, Math.min(cellsH - 8, drawnH + 16));
       }
 
       // ── I-1 (§4f): absorption ◉ flags — HEURISTIC, labeled in the panel
@@ -719,7 +769,7 @@
         ctx.stroke();
         // Endpoint value — the pane is 34px, one label is all it can carry.
         font(8); ctx.fillStyle = p.c1; ctx.textAlign = 'right';
-        ctx.fillText(fmtVol(cumPts[cumPts.length - 1][1]), plotW - 2, yCum(cumPts[cumPts.length - 1][1]));
+        ctx.fillText(fmtVol(cumPts[cumPts.length - 1][1]), drawnW - 2, yCum(cumPts[cumPts.length - 1][1]));
       } else {
         font(8); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
         ctx.fillText('cumΔ accruing…', 4, yCum0 + ROW_CUM / 2);
@@ -827,7 +877,7 @@
       }
 
       // ── Crosshair + readout (cells area only) ──
-      if (mouse && mouse.x >= 0 && mouse.x < plotW && mouse.y >= 0 && mouse.y < cellsH) {
+      if (mouse && mouse.x >= 0 && mouse.x < drawnW && mouse.y >= 0 && mouse.y < drawnH) {
         const bi = Math.min(vis.length - 1, Math.floor(mouse.x / barW));
         const ri = Math.min(nRows - 1, Math.floor(mouse.y / rowH));
         const price = maxP - ri * tick;
@@ -838,7 +888,7 @@
         ctx.setLineDash([3, 3]);
         ctx.strokeStyle = rgba(p.fg, 0.4); ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(0, mouse.y + 0.5); ctx.lineTo(w - GUT_AXIS, mouse.y + 0.5); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(bi * barW + barW / 2, 0); ctx.lineTo(bi * barW + barW / 2, cellsH); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(bi * barW + barW / 2, 0); ctx.lineTo(bi * barW + barW / 2, drawnH); ctx.stroke();
         ctx.restore();
         // Readout box, top-left: bar time · level price · sell×buy · bar Δ.
         const txt = hm(b.t) + (b.finished ? '' : ' (live)') + ' · ' + fmtPx(price, tick)
@@ -1329,6 +1379,15 @@
         legend.innerHTML = exs.map((ex) =>
           '<span><i class="sw" style="background:' + rgba(exColor(p, ex), isSpotVariant(ex) ? 0.45 : 0.8) + '"></i>' + esc(exLabel(ex)) + '</span>'
         ).join('') + '<span class="lg-note">stacked size per $-grouped level · pale = spot leg of the venue hue · line = cumulative depth</span>';
+        // T-4 collision fix: the CSS reserved a FIXED 18px strip for this legend,
+        // but its height is data-dependent — with 6-7 enabled legs it wraps to two
+        // lines and overprinted the bottom price labels. Publish the measured
+        // height so the canvas reserves exactly what the legend needs. Costs one
+        // sync layout read, and only when the leg SET changes (guarded by
+        // legendKey), not per frame. fitCanvas already ran for this frame, so the
+        // canvas picks up the new box on the next paint — imperceptible, and the
+        // agg view repaints on every book flush.
+        root.style.setProperty('--agg-legend-h', Math.ceil(legend.offsetHeight) + 'px');
       }
 
       if (!bids.length && !asks.length) {
@@ -2514,7 +2573,16 @@
       const p = pal();
       chart = LC.createChart(root, {
         height: root.clientHeight || 380,
-        layout: { background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace') },
+        layout: {
+          background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace'),
+          // T-4: drop the on-canvas TradingView watermark (5 panels carried
+          // one each). Supported from lightweight-charts v4.2 — the vendored
+          // build IS v4.2.0, so this is a real option here, not a no-op.
+          // The library's attribution is NOT dropped, only relocated: the
+          // page footer and README carry it once, which satisfies the
+          // Apache-2.0 NOTICE while leaving the data unobscured.
+          attributionLogo: false,
+        },
         grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
         timeScale: { timeVisible: true, secondsVisible: false, borderColor: p.border },
         rightPriceScale: { borderColor: p.border, scaleMargins: { top: 0.06, bottom: 0.22 } },
@@ -2701,6 +2769,10 @@
       for (const r of rows) if (r.periods.length > maxLetters) maxLetters = r.periods.length;
       const plotW = w - GUT_LEFT - GUT_AXIS;
       const charW = Math.max(5, Math.min(10, Math.floor(plotW / maxLetters)));
+      // How many letters actually FIT before the right gutter. charW's 5px floor
+      // means charW * maxLetters can exceed plotW, so this is the real bound —
+      // one less than the raw quotient leaves room for the '›' truncation mark.
+      const maxFitLetters = Math.max(1, Math.floor(plotW / charW) - 1);
       const fpx = Math.max(6, Math.min(10, Math.floor(Math.min(rowH, charW) + 1)));
 
       // Rows: letters column-stacked; VA membership brightens, POC row accents.
@@ -2710,10 +2782,21 @@
         const inVa = r.price >= s.val && r.price <= s.vah;
         font(fpx, r.price === s.poc);
         ctx.textAlign = 'left';
-        for (let k = 0; k < r.periods.length; k++) {
+        // T-4 collision fix: charW has a 5px FLOOR, so it does not guarantee the
+        // row fits — a long period list in a narrow column used to paint letters
+        // straight through `w - GUT_AXIS` and over the POC/VAH/VAL labels living
+        // in that gutter. Bound the row and mark the truncation with '›' instead
+        // of clipping silently: the reader must be able to tell "that is all the
+        // periods" from "there are more than fit".
+        const nDraw = Math.min(r.periods.length, maxFitLetters);
+        for (let k = 0; k < nDraw; k++) {
           const idx = r.periods[k];
           ctx.fillStyle = r.price === s.poc ? p.accent : inVa ? p.fg : p.muted;
           ctx.fillText(LETTERS[idx] || '?', GUT_LEFT + k * charW, y);
+        }
+        if (r.periods.length > nDraw) {
+          ctx.fillStyle = p.accent2;
+          ctx.fillText('›', GUT_LEFT + nDraw * charW, y);
         }
         // Single prints (interior one-period rows): '•' gutter mark — the
         // structure read is "price rejected fast", flagged without color.
@@ -4766,6 +4849,11 @@
       }
       html += '<span class="lg-note">POC solid · VAH/VAL dashed · nPOC = naked prior-day POC (age labeled)</span>';
       legend.innerHTML = html;
+      // T-4 collision fix, same class as AggBookView's: .auction-wrap reserved a
+      // FIXED 18px strip, but this legend carries two lg-note sentences (plus per
+      // mode swatches) and wraps well past that — so it rode up over the canvas,
+      // where the offline/awaiting note is drawn. Reserve what it measures.
+      if (root) root.style.setProperty('--auction-legend-h', Math.ceil(legend.offsetHeight) + 'px');
     }
 
     function draw(slice) {
@@ -5066,7 +5154,16 @@
         const mkChart = (elPane, color) => {
           const c = LC.createChart(elPane, {
             height: elPane.clientHeight || 150,
-            layout: { background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace') },
+            layout: {
+          background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace'),
+          // T-4: drop the on-canvas TradingView watermark (5 panels carried
+          // one each). Supported from lightweight-charts v4.2 — the vendored
+          // build IS v4.2.0, so this is a real option here, not a no-op.
+          // The library's attribution is NOT dropped, only relocated: the
+          // page footer and README carry it once, which satisfies the
+          // Apache-2.0 NOTICE while leaving the data unobscured.
+          attributionLogo: false,
+        },
             grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
             timeScale: { timeVisible: true, secondsVisible: true, borderColor: p.border },
             rightPriceScale: { borderColor: p.border, scaleMargins: { top: 0.12, bottom: 0.12 } },
@@ -5118,6 +5215,13 @@
       lastSetAt = now;
       ofiSeries.setData(lcSecondsSeries(slice.ofi, 'ofi'));
       mpSeries.setData(lcSecondsSeries(slice.mp, 'd'));
+      // T-4: fit to the ACTUAL data span. Without this the panes keep LC's
+      // default bar spacing, so a young session's short series huddles at the
+      // left and ~60% of the pane is dead space that looks like a broken chart.
+      // The time axis states the real (short) span, so nothing is overstated —
+      // and this is already the convention for the CVD and spot/perp panes.
+      ofiChart.timeScale().fitContent();
+      mpChart.timeScale().fitContent();
     }
 
     return { mount, render };
@@ -5411,7 +5515,16 @@
         root.appendChild(cell);
         const c = LC.createChart(pane, {
           height: pane.clientHeight || 150,
-          layout: { background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace') },
+          layout: {
+          background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace'),
+          // T-4: drop the on-canvas TradingView watermark (5 panels carried
+          // one each). Supported from lightweight-charts v4.2 — the vendored
+          // build IS v4.2.0, so this is a real option here, not a no-op.
+          // The library's attribution is NOT dropped, only relocated: the
+          // page footer and README carry it once, which satisfies the
+          // Apache-2.0 NOTICE while leaving the data unobscured.
+          attributionLogo: false,
+        },
           grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
           timeScale: { timeVisible: true, secondsVisible: true, borderColor: p.border },
           rightPriceScale: { borderColor: p.border, scaleMargins: { top: 0.12, bottom: 0.12 } },
@@ -5456,6 +5569,10 @@
         if (Number.isFinite(r.fundingRate)) fund.push({ ts: r.ts, v: r.fundingRate * 100 });
       }
       fundSeries.setData(lcSecondsSeries(fund, 'v'));
+      // T-4: fit both panes to the actual span — same reasoning as the OFI /
+      // microprice panes, same convention as CVD and spot/perp.
+      basisChart.timeScale().fitContent();
+      fundChart.timeScale().fitContent();
     }
 
     return { mount, render };
@@ -5508,7 +5625,16 @@
       root.insertBefore(paneEl, compEl);
       chart = LC.createChart(paneEl, {
         height: paneEl.clientHeight || 150,
-        layout: { background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace') },
+        layout: {
+          background: { color: p.bg }, textColor: p.fg, fontFamily: cssVar('--mono', 'monospace'),
+          // T-4: drop the on-canvas TradingView watermark (5 panels carried
+          // one each). Supported from lightweight-charts v4.2 — the vendored
+          // build IS v4.2.0, so this is a real option here, not a no-op.
+          // The library's attribution is NOT dropped, only relocated: the
+          // page footer and README carry it once, which satisfies the
+          // Apache-2.0 NOTICE while leaving the data unobscured.
+          attributionLogo: false,
+        },
         grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
         timeScale: { timeVisible: true, secondsVisible: true, borderColor: p.border },
         rightPriceScale: { borderColor: p.border, scaleMargins: { top: 0.12, bottom: 0.12 } },

@@ -869,6 +869,150 @@ def run_n5(sync_playwright, args) -> int:
     return 0
 
 
+# ─── T-4: layout census ──────────────────────────────────────────────────────
+#
+# WHY THIS EXISTS: the T-4 review measured a 7,201px page, 35 panels, 13 empty,
+# and three text collisions — all by eye, off screenshots. Those are exactly the
+# numbers the visual work is judged on, and a target nobody can re-measure rots
+# within a release. This pass turns each into a printed number so a regression
+# is a diff, not an argument. It ASSERTS nothing by default (the honest baseline
+# is whatever the page is today); it reports, and --census-max-height turns the
+# page-height target into a gate once a budget is agreed.
+#
+# Overlap detection is deliberately narrow: it compares the bounding boxes of
+# DOM text nodes that are siblings within one panel. Canvas-drawn collisions
+# (TPO letters vs VAH/POC/VAL labels are painted, not DOM) CANNOT be caught this
+# way — those stay screenshot-judged, and this pass says so rather than implying
+# coverage it does not have.
+CENSUS_JS = r"""
+() => {
+  const doc = document;
+  // ALL panels, not just direct grid children: .term-col.area-mid / .area-right
+  // are column containers holding nested <section class="panel"> (28 of the 35
+  // panels are grid children, 7 are nested). Counting only the children
+  // undercounts by 7 and would make an empty-panel percentage wrong.
+  const panels = Array.from(doc.querySelectorAll('main.term-main section.panel'));
+  const gridChildren = Array.from(doc.querySelectorAll('main.term-main > section.panel')).length;
+  const empty = panels.filter((p) => p.classList.contains('panel--empty'));
+  // Candidate text boxes: small inline labels/notes inside a panel body. Two
+  // that overlap by more than a couple of px are colliding text.
+  const overlaps = [];
+  for (const p of panels) {
+    const els = Array.from(p.querySelectorAll('.panel-src, .hint, .farb-note, .chart-na, .local-only .lo-why, .local-only .lo-ok, h2 > span'))
+      .filter((e) => e.offsetParent !== null && e.getClientRects().length);
+    for (let i = 0; i < els.length; i++) {
+      for (let j = i + 1; j < els.length; j++) {
+        const a = els[i].getBoundingClientRect(), b = els[j].getBoundingClientRect();
+        const ox = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+        const oy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+        if (ox > 2 && oy > 2) {
+          overlaps.push({
+            panel: (p.className.match(/area-[a-z0-9-]+/) || ['?'])[0],
+            a: els[i].className || els[i].tagName, b: els[j].className || els[j].tagName,
+            ox: Math.round(ox), oy: Math.round(oy),
+          });
+        }
+      }
+    }
+  }
+  return {
+    scrollHeight: doc.scrollingElement.scrollHeight,
+    viewportHeight: window.innerHeight,
+    docWidth: doc.scrollingElement.scrollWidth,
+    windowWidth: window.innerWidth,
+    panels: panels.length,
+    gridChildren,
+    empty: empty.length,
+    emptyKeys: empty.map((p) => (p.className.match(/area-[a-z0-9-]+/) || ['?'])[0]),
+    hints: doc.querySelectorAll('main.term-main section.panel .hint').length,
+    // The v4.2 attribution logo is an <a> to tradingview.com injected inside the
+    // chart container. Scoped to main so the deliberate ONE credit link in the
+    // page footer is not counted as a watermark — the point of T-4's change is
+    // that the mark moves out of the data, not that attribution disappears.
+    tvLogos: doc.querySelectorAll('main.term-main a[href*="tradingview.com"], main.term-main #tv-attr-logo, main.term-main a[id*="tv-attr"]').length,
+    footerAttrib: doc.querySelectorAll('footer a[href*="tradingview.com"]').length,
+    lwCharts: doc.querySelectorAll('.tv-lightweight-charts').length,
+    dustRows: doc.querySelectorAll('.tape-row.dust').length,
+    localOnlyVisible: !!doc.querySelector('.local-only.local-on'),
+    overlaps,
+  };
+}
+"""
+
+
+def run_census(sync_playwright, args) -> int:
+    """T-4 layout census: page height, panel/empty counts, DOM text collisions."""
+    server, port = start_server()
+    base = f"http://127.0.0.1:{port}/dashboard/terminal.html"
+    url = f"{base}?replay=1"
+    fails: list[str] = []
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            # 1680x1050 is the review's own measurement viewport, so the numbers
+            # printed here are comparable to the figures T-4 was scoped against.
+            page = browser.new_page(viewport={"width": 1680, "height": 1050})
+            print(f"[census] opening {url} at 1680x1050")
+            page.goto(url, wait_until="domcontentloaded")
+            try:
+                page.wait_for_function(READY_JS, timeout=READY_TIMEOUT_MS)
+            except Exception:
+                fails.append("[census] ready: pipeline never flowed")
+            page.wait_for_timeout(2500)   # let the replay accrue + panels settle
+            c = page.evaluate(CENSUS_JS)
+
+            print("\n== layout census (1680x1050, ?replay=1) ==")
+            print(f"  page scrollHeight     {c['scrollHeight']} px"
+                  f"  ({c['scrollHeight'] / max(1, c['viewportHeight']):.1f} viewports)")
+            print(f"  panels                {c['panels']}"
+                  f"  ({c['gridChildren']} grid children + {c['panels'] - c['gridChildren']} nested in term-col)")
+            print(f"  empty (.panel--empty) {c['empty']}"
+                  f"  ({100 * c['empty'] / max(1, c['panels']):.0f}%)")
+            print(f"  .hint coverage        {c['hints']}/{c['panels']}")
+            print(f"  TV watermarks in main {c['tvLogos']}  (across {c['lwCharts']} mounted lw-charts)"
+                  f"; footer credit: {c['footerAttrib']}")
+            if c["lwCharts"] and c["tvLogos"]:
+                fails.append(f"[census] {c['tvLogos']} TradingView watermark(s) still inside the data area "
+                             f"— layout.attributionLogo should be false at every createChart site")
+            if not c["footerAttrib"]:
+                fails.append("[census] no TradingView credit in the footer — the watermark is DISABLED, so "
+                             "the Apache-2.0 attribution must be carried there instead")
+            print(f"  tape dust rows        {c['dustRows']}")
+            print(f"  local-only strip      {'visible' if c['localOnlyVisible'] else 'hidden'}")
+            print(f"  DOM text collisions   {len(c['overlaps'])}")
+            for o in c["overlaps"][:10]:
+                print(f"    {o['panel']}: {o['a']} x {o['b']} overlap {o['ox']}x{o['oy']}px")
+            if c["emptyKeys"]:
+                print(f"  empty panels: {', '.join(c['emptyKeys'])}")
+
+            # Horizontal overflow is never acceptable — the page must not scroll
+            # sideways at a standard desktop width.
+            if c["docWidth"] > c["windowWidth"] + 1:
+                fails.append(f"[census] page scrolls HORIZONTALLY: {c['docWidth']}px > {c['windowWidth']}px viewport")
+
+            if args.census_max_height and c["scrollHeight"] > args.census_max_height:
+                fails.append(f"[census] page height {c['scrollHeight']}px exceeds "
+                             f"--census-max-height {args.census_max_height}px")
+
+            print("\n  NOTE canvas-painted collisions (TPO letters vs VAH/POC/VAL, axis labels)")
+            print("       are NOT covered here — they are drawn, not DOM. Screenshots remain")
+            print("       their only witness; this census does not imply otherwise.")
+
+            p, f = shoot_panels(page, args.out, "census")
+            page.close()
+            browser.close()
+    finally:
+        server.shutdown()
+
+    if fails:
+        print("\n== census FAILURES ==")
+        for x in fails:
+            print("  FAIL " + x)
+        return 1
+    print("\nOK — census recorded (reporting pass; add --census-max-height to gate).")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", default=os.path.join(ROOT, "reports", "verify"),
