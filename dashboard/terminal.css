@@ -356,7 +356,7 @@ main.term-main {
 }
 .local-only .lo-why,
 .local-only .lo-ok {
-  font-family: var(--mono); font-size: 10px; line-height: 1.4; color: var(--muted);
+  font-family: var(--mono); font-size: var(--fs-2xs); line-height: 1.4; color: var(--muted);
 }
 .local-only .lo-ok { color: var(--g-400); padding-top: 3px; border-top: 1px solid var(--border); margin-top: 3px; }
 
@@ -710,7 +710,7 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-2xs); color: var(
    sees is indistinguishable from a bug. */
 .tape-subfloor {
   display: flex; flex-direction: column; gap: 1px;
-  color: var(--muted); font-family: var(--mono); font-size: 10px; line-height: 1.35;
+  color: var(--muted); font-family: var(--mono); font-size: var(--fs-2xs); line-height: 1.35;
   padding: 3px 2px 0; margin-top: 2px; border-top: 1px dashed var(--border);
 }
 .tape-subfloor[hidden] { display: none; }
@@ -1263,7 +1263,7 @@ table.farb-table tr.farb-spread td {
 /* T-4 (§4j): the relevance caption — states how many rows are shown and how
    many were taken out of view, so the toggle can never become a silent filter. */
 .news-cap {
-  color: var(--muted); font-family: var(--mono); font-size: 10px;
+  color: var(--muted); font-family: var(--mono); font-size: var(--fs-2xs);
   padding: 0 2px 3px; border-bottom: 1px solid var(--border); margin-bottom: 2px;
 }
 .news-list { max-height: 260px; overflow-y: auto; font-family: var(--mono); font-size: var(--fs-xs); }
