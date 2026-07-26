@@ -1372,26 +1372,58 @@ def test_cpcv_multipath_dispersion():
 # M4 — purge / embargo / lockbox (default-OFF, correct-by-construction)         #
 # --------------------------------------------------------------------------- #
 def test_m4_purge_embargo_zero_is_byte_identical_golden():
-    """(a) purge=0, embargo=0 reproduces the pre-M4 walk_forward + cpcv numbers
-    BIT-for-BIT — both against the untouched no-arg call AND against pre-registered
-    golden constants (so a silent formula drift, not just a default flip, is caught)."""
+    """(a) purge=0, embargo=0 reproduces the pre-M4 walk_forward + cpcv numbers —
+    BIT-for-BIT against the untouched no-arg call, and to a STATED TOLERANCE against
+    the pre-registered golden constants (so a silent formula drift, not just a
+    default flip, is still caught).
+
+    Why the golden comparison is `approx` and not `==` (2026-07-26). The literals were
+    pinned bit-exactly and that claim was not sustainable: these Sharpes are reduced
+    through numpy/pandas summation, whose ORDER depends on the SIMD/BLAS build, not
+    only on library versions. Measured on three stacks, the same code gives three
+    different last digits:
+
+        pandas 3.0.5 / numpy 2.4.6   oos = -0.6577099382791564   (Δ 2.9e-15)
+        pandas 3.0.5 / numpy 2.5.1   oos = -0.6577099382791564   (Δ 2.9e-15)
+        pandas 2.3.3 / numpy 1.26.4  oos = -0.6577099382791571   (Δ 3.6e-15)
+
+    The last row is requirements.txt's own MINIMUM bounds, so no version pin fixes
+    this — pinning would only hide it on one machine. All four floats drift 2–4e-15
+    absolute / 4–8e-15 relative. `rel=1e-12` is ~1000x headroom over that noise while
+    remaining far tighter than any real formula change (which moves a Sharpe by
+    orders of magnitude), and it is the tolerance this file already uses for the same
+    situation elsewhere. This follows DEVELOPMENT.md §5's standing rule — "State the
+    *real* tolerance; don't claim bit-for-bit" — rather than departing from it.
+
+    What stays EXACT, because it genuinely is: every `wf0 == wfz` / `cp0 == cpz`
+    comparison. Those run in ONE process on ONE stack, so purge=0 ≡ the no-arg call
+    bit-for-bit, and that equality is the actual M4 rail. Only the cross-machine
+    literals are toleranced. Do not relax the `==` comparisons below.
+    """
     px = _make_prices(n=600, seed=42)
     wf_mp = lambda p: (p > p.rolling(50).mean()).astype(float)
     cp_mp = lambda p: (p > p.rolling(30).mean()).astype(float)
 
-    # No-arg (pre-M4 signature) == explicit purge=0/embargo=0 == golden constants.
+    # No-arg (pre-M4 signature) == explicit purge=0/embargo=0, BIT-for-BIT.
     wf0 = backtest.walk_forward(wf_mp, px, n_splits=5)
     wfz = backtest.walk_forward(wf_mp, px, n_splits=5, purge=0, embargo=0)
-    assert wf0["oos"]["sharpe"] == wfz["oos"]["sharpe"] == -0.6577099382791535
-    assert wf0["is_"]["sharpe"] == wfz["is_"]["sharpe"] == -0.5255985161946755
+    assert wf0["oos"]["sharpe"] == wfz["oos"]["sharpe"]
+    assert wf0["is_"]["sharpe"] == wfz["is_"]["sharpe"]
+    # ...and both match the pre-registered goldens to the stated tolerance.
+    assert wf0["oos"]["sharpe"] == pytest.approx(-0.6577099382791535, rel=1e-12)
+    assert wf0["is_"]["sharpe"] == pytest.approx(-0.5255985161946755, rel=1e-12)
 
     cp0 = backtest.cpcv(cp_mp, px, n_blocks=6, k_test=2)
     cpz = backtest.cpcv(cp_mp, px, n_blocks=6, k_test=2, purge=0, embargo=0)
     assert cp0["paths"] == cpz["paths"]
-    assert cp0["median_sharpe"] == cpz["median_sharpe"] == -0.26458498017492493
-    assert cp0["iqr"] == cpz["iqr"] == 0.6414388218458281
+    assert cp0["median_sharpe"] == cpz["median_sharpe"]
+    assert cp0["iqr"] == cpz["iqr"]
+    assert cp0["median_sharpe"] == pytest.approx(-0.26458498017492493, rel=1e-12)
+    assert cp0["iqr"] == pytest.approx(0.6414388218458281, rel=1e-12)
+    # Path COUNT is an integer — exact, on every stack.
     assert cp0["n_paths"] == cpz["n_paths"] == 15
     # OOS headline is invariant to purge/embargo (they touch only the IS statistic).
+    # Same process, so this stays an exact equality.
     wfp = backtest.walk_forward(wf_mp, px, n_splits=5, purge=7, embargo=5)
     assert wfp["oos"]["sharpe"] == wf0["oos"]["sharpe"]
 
