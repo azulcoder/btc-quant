@@ -116,6 +116,8 @@ node dashboard/app.js --check             # ppy guard: ppy()=365 (1d)/8760 (1h);
 python3 scripts/check_parity.py           # JS↔Python mirror parity (79 shared fields; the one rule)
 node scripts/check_terminal.cjs           # orderflow terminal smoke: adapters+stores replayed over REAL captured WS frames (fixtures_ws.json)
 make verify-browser                       # L1: terminal.html?replay=1 in headless Chromium — render + zero-console-error gate + screenshots (needs playwright)
+make verify-census                        # L1b: layout census — page height, panel/empty counts, .hint coverage, TV logos, DOM collisions
+make verify-focus                         # L1c: panel data-tier stamped from the M3 registry + focus/maximize (dblclick header, Esc)
 make verify-wire                          # L2: ~45s live-wire invariants through the PRODUCTION adapters (exit 2 = offline, not a bug)
 make check-ticks                          # L3: tick-store QA report card (gaps/dupes/cadence/coherence — reported, never filled)
 # CSS brace balance:

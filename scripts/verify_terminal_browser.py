@@ -940,6 +940,189 @@ CENSUS_JS = r"""
 """
 
 
+def run_focus(sync_playwright, args) -> int:
+    """T-4: panel hierarchy (data-tier from the M3 registry) + focus/maximize mode.
+
+    A SEPARATE run because it drives interaction and mutates view state (the
+    standard gate may not), exactly like --a11y. Asserts the tier stamp reaches
+    every panel, that double-clicking a header maximizes it, that Esc returns,
+    and — the honesty rail — that focusing MUTATES NO DATUM: the stores keep
+    ingesting while siblings are hidden, so every store count must be unchanged.
+    """
+    server, port = start_server()
+    base = f"http://127.0.0.1:{port}/dashboard/terminal.html"
+    fails: list[str] = []
+    shots: list[str] = []
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page(viewport={"width": 1680, "height": 1050})
+            cerr: list[str] = []
+            perr: list[str] = []
+            page.on("console", lambda m: cerr.append(m.text) if m.type == "error" else None)
+            page.on("pageerror", lambda e: perr.append(str(e)))
+            url = f"{base}?replay=1"
+            print(f"[focus] opening {url}")
+            page.goto(url, wait_until="domcontentloaded")
+            try:
+                page.wait_for_function(READY_JS, timeout=READY_TIMEOUT_MS)
+            except Exception:
+                fails.append("[focus] ready: pipeline never flowed")
+            page.wait_for_timeout(1500)
+
+            # ── tiers: every panel stamped, and the primary set is the instrument ──
+            tiers = page.evaluate("""() => {
+              const out = {primary: [], secondary: [], tertiary: [], missing: []};
+              for (const p of document.querySelectorAll('main.term-main section.panel')) {
+                const t = p.getAttribute('data-tier');
+                const key = (p.className.match(/area-[a-z0-9-]+/) || ['?'])[0];
+                if (!t) out.missing.push(key); else out[t].push(key);
+              }
+              return out;
+            }""")
+            if tiers["missing"]:
+                fails.append(f"[focus] panels with NO data-tier: {tiers['missing']}")
+            else:
+                print(f"[focus] PASS tiers stamped: {len(tiers['primary'])} primary, "
+                      f"{len(tiers['secondary'])} secondary, {len(tiers['tertiary'])} tertiary")
+            # The instrument must be the primary tier — if the footprint/tape/ladder
+            # are not primary, the hierarchy is decorative rather than meaningful.
+            for want in ("area-fp", "area-stats"):
+                if want not in tiers["primary"]:
+                    fails.append(f"[focus] {want} must be data-tier=primary (it is the instrument)")
+
+            # ── store counts BEFORE focusing (the honesty baseline) ──
+            counts_before = page.evaluate("() => __BTCQ_TERMINAL_DEBUG.counts()")
+
+            # ── double-click the footprint header → maximized ──
+            page.dblclick("section.area-fp > h2")
+            page.wait_for_timeout(700)
+            st = page.evaluate("""() => {
+              const main = document.querySelector('main.term-main');
+              const foc = document.querySelectorAll('.panel--focus');
+              const fp = document.querySelector('section.area-fp');
+              // Count VISIBLE panels rather than probing a specific class: 7 of the
+              // 35 panels are bare <section class="panel"> nested in a .term-col
+              // and carry no area-* class, so a class probe silently matches
+              // nothing and the assertion passes for the wrong reason.
+              const all = [...document.querySelectorAll('main.term-main section.panel')];
+              return {
+                mainFocused: main.classList.contains('term-main--focused'),
+                nFocused: foc.length,
+                fpIsFocused: !!fp && fp.classList.contains('panel--focus'),
+                fpH: fp ? Math.round(fp.getBoundingClientRect().height) : 0,
+                nVisible: all.filter((p) => p.offsetParent !== null).length,
+                vh: window.innerHeight,
+              };
+            }""")
+            if not (st["mainFocused"] and st["fpIsFocused"] and st["nFocused"] == 1):
+                fails.append(f"[focus] dblclick did not maximize exactly one panel: {st}")
+            elif st["nVisible"] != 1:
+                fails.append(f"[focus] {st['nVisible']} panels visible while focused — expected exactly 1")
+            elif st["fpH"] < 0.7 * st["vh"]:
+                fails.append(f"[focus] focused panel only {st['fpH']}px of {st['vh']}px viewport")
+            else:
+                print(f"[focus] PASS maximized: fp {st['fpH']}px of {st['vh']}px viewport, siblings hidden")
+
+            # ── Esc restores ──
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(700)
+            back = page.evaluate("""() => {
+              const main = document.querySelector('main.term-main');
+              const all = [...document.querySelectorAll('main.term-main section.panel')];
+              return {
+                mainFocused: main.classList.contains('term-main--focused'),
+                nFocused: document.querySelectorAll('.panel--focus').length,
+                nVisible: all.filter((p) => p.offsetParent !== null).length,
+              };
+            }""")
+            if back["mainFocused"] or back["nFocused"] or back["nVisible"] < 2:
+                fails.append(f"[focus] Esc did not restore the grid: {back}")
+            else:
+                print(f"[focus] PASS Esc restored the grid ({back['nVisible']} panels visible again)")
+
+            # ── the NESTED case, which is the one that actually broke ──
+            # 7 panels live inside .term-col.area-mid/.area-right rather than being
+            # grid children. Hiding every non-focused direct child of <main> hides
+            # the COLUMN holding a focused nested panel — i.e. the panel disappears
+            # when you maximize it. Exercised explicitly because a grid-child test
+            # passes straight through that bug.
+            nested = page.evaluate("""() => {
+              const p = document.querySelector('main.term-main .term-col > section.panel');
+              if (!p) return null;
+              const h2 = p.querySelector(':scope > h2');
+              return h2 ? (h2.textContent || '').slice(0, 28) : null;
+            }""")
+            if not nested:
+                fails.append("[focus] could not find a nested panel to test (selector drift?)")
+            else:
+                page.evaluate("""() => {
+                  const p = document.querySelector('main.term-main .term-col > section.panel');
+                  const h2 = p.querySelector(':scope > h2');
+                  h2.dispatchEvent(new MouseEvent('dblclick', {bubbles: true}));
+                }""")
+                page.wait_for_timeout(700)
+                nst = page.evaluate("""() => {
+                  const foc = document.querySelector('.panel--focus');
+                  const all = [...document.querySelectorAll('main.term-main section.panel')];
+                  return {
+                    focVisible: !!foc && foc.offsetParent !== null,
+                    focH: foc ? Math.round(foc.getBoundingClientRect().height) : 0,
+                    nVisible: all.filter((p) => p.offsetParent !== null).length,
+                    vh: window.innerHeight,
+                  };
+                }""")
+                if not nst["focVisible"]:
+                    fails.append(f"[focus] NESTED panel ({nested!r}) vanished when focused — "
+                                 "its ancestor .term-col was hidden with the siblings")
+                elif nst["nVisible"] != 1:
+                    fails.append(f"[focus] nested focus left {nst['nVisible']} panels visible — expected 1")
+                elif nst["focH"] < 0.7 * nst["vh"]:
+                    fails.append(f"[focus] nested panel only {nst['focH']}px of {nst['vh']}px")
+                else:
+                    print(f"[focus] PASS nested panel ({nested!r}) maximizes to {nst['focH']}px "
+                          "— its ancestor column survives")
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(500)
+
+            # ── honesty: presentation only, no datum moved ──
+            counts_after = page.evaluate("() => __BTCQ_TERMINAL_DEBUG.counts()")
+            regressed = [k for k in counts_before
+                         if isinstance(counts_before.get(k), (int, float))
+                         and isinstance(counts_after.get(k), (int, float))
+                         and counts_after[k] < counts_before[k]]
+            if regressed:
+                fails.append(f"[focus] store counts went BACKWARD across focus (data lost): {regressed}")
+            else:
+                print(f"[focus] PASS presentation-only: {len(counts_before)} store counts never regressed "
+                      "(ingest continued while siblings were hidden)")
+
+            if cerr or perr:
+                fails.append(f"[focus] not clean: {len(cerr)} console + {len(perr)} page errors: {(cerr + perr)[:3]}")
+            else:
+                print("[focus] PASS clean: 0 console errors, 0 page errors")
+
+            full = os.path.join(args.out, "full-focus.png")
+            page.dblclick("section.area-fp > h2")
+            page.wait_for_timeout(600)
+            page.screenshot(path=full, full_page=True)
+            shots.append(full)
+            page.close()
+            browser.close()
+    finally:
+        server.shutdown()
+
+    print(f"\nscreenshots ({len(shots)}) in {args.out}")
+    if fails:
+        print("\n== focus/hierarchy FAILURES ==")
+        for x in fails:
+            print("  FAIL " + x)
+        return 1
+    print("\nOK — T-4 hierarchy + focus mode proven: tiers stamped from the registry, "
+          "dblclick maximizes, Esc restores, and no datum moved.")
+    return 0
+
+
 def run_census(sync_playwright, args) -> int:
     """T-4 layout census: page height, panel/empty counts, DOM text collisions."""
     server, port = start_server()
@@ -1036,6 +1219,19 @@ def main() -> int:
                          "fault on the header health chip; clean (?replay=1) proves it is silent "
                          "when healthy; cascade (?fault=ingest) freezes only the flush-derived "
                          "views (agg/dom stay live). A SEPARATE run — it drives injected faults.")
+    ap.add_argument("--focus", action="store_true",
+                    help="T-4 hierarchy + focus-mode proof: every panel carries a data-tier from "
+                         "the M3 registry, double-clicking a panel header maximizes it, Esc "
+                         "restores the grid, and no store count regresses across the toggle "
+                         "(presentation only). A SEPARATE run — it drives interaction.")
+    ap.add_argument("--census", action="store_true",
+                    help="T-4 layout census: print page scrollHeight, panel + empty-panel counts, "
+                         ".hint coverage, TradingView logo count, tape dust rows and DOM text "
+                         "collisions at 1680x1050. A REPORTING pass (asserts only horizontal "
+                         "overflow) so the visual targets are re-measurable instead of eyeballed.")
+    ap.add_argument("--census-max-height", type=int, default=0, metavar="PX",
+                    help="with --census, FAIL if the page is taller than PX (turns the "
+                         "page-height target into a gate once a budget is agreed).")
     args = ap.parse_args()
 
     sync_playwright = _require_playwright()
@@ -1058,6 +1254,15 @@ def main() -> int:
     # run must never see; run it separately, like --fault/--a11y.
     if args.n5:
         return run_n5(sync_playwright, args)
+
+    # T-4: the layout census is its own pass — it measures at the review's
+    # 1680x1050 viewport (the standard gate uses a tall 1400px one so every panel
+    # is laid out for element screenshots), so it must not share that run.
+    if args.focus:
+        return run_focus(sync_playwright, args)
+
+    if args.census:
+        return run_census(sync_playwright, args)
 
     server, port = start_server()
     url = f"http://127.0.0.1:{port}/dashboard/terminal.html?replay=1"
