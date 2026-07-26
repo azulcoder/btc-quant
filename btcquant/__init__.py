@@ -15,6 +15,8 @@ Package layout
 --------------
 - :mod:`btcquant.data`       — fetch + cache public market data (this module is keyless).
 - :mod:`btcquant.features`   — pure indicator / signal functions on pandas Series/DataFrame.
+- :mod:`btcquant.orderflow`  — event-time order-flow bars from the recorded tick store
+  (features only; opt-in duckdb dep, so it re-exports best-effort like the rest).
 - :mod:`btcquant.backtest`   — vectorized backtester (sizing, costs, slippage, walk-forward).
 - :mod:`btcquant.risk`       — performance & risk stats incl. deflated / probabilistic Sharpe.
 - :mod:`btcquant.strategies` — the strategy library; each cites its edge and caveats.
@@ -71,3 +73,9 @@ _reexport("backtest", ("run", "walk_forward"))
 _reexport("risk", ("summary", "sharpe", "deflated_sharpe_ratio",
                    "probabilistic_sharpe_ratio"))
 _reexport("report", ("tearsheet", "export_json"))
+# Order-flow bars need the opt-in tick-store deps; _reexport already degrades
+# silently when duckdb is absent, so `import btcquant` stays safe either way.
+# Only the bar builder is pulled up: `orderflow.volume_buckets` is a VPIN
+# diagnostic table with no OHLCV, and a name sitting beside `order_flow_bars` at
+# the top level would imply it shares the bar contract. It does not.
+_reexport("orderflow", ("order_flow_bars",))

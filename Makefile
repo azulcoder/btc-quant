@@ -15,10 +15,11 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare dsr-ab scan test fetch dash collector collector-api verify-browser verify-census verify-focus verify-wire check-ticks econ archive archive-dry archive-list hf-sync backfill-levels
+.PHONY: help install backtest compare dsr-ab scan test fetch dash collector collector-api verify-browser verify-census verify-focus verify-wire check-ticks orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
+	@echo "research: orderflow-smoke (M1 end-to-end: recorded ticks -> bars -> deflation harness; expect INSUFFICIENT HISTORY)"
 	@echo "verify:  verify-browser (L1 fixture-replay in headless Chromium) | verify-census (L1b layout census) | verify-focus (L1c hierarchy + focus mode) | verify-wire (L2 live invariants, ~45s) | check-ticks (L3 tick-store QA + MinBTL readiness meter)"
 	@echo "archive: archive-dry (export closed months to local parquet ONLY) | archive (export + upload to GitHub Releases + prune) | archive-list (what is offsite)"
 	@echo "hf:      hf-sync (closed day files -> HF dataset, verify on Hub, then delete local; ARGS=--dry-run to stage only, ARGS=--yes for cron)"
@@ -139,3 +140,11 @@ verify-focus:
 #     reported, never filled). Run while the collector is stopped, or on a copy.
 check-ticks:
 	python3 scripts/check_ticks.py --db data/ticks
+
+# M1 end-to-end smoke (STRATEGY.md M1): recorded ticks -> order-flow bars ->
+# features/walk_forward/DSR/PBO/MinBTL with ZERO harness change. The expected and
+# correct verdict is INSUFFICIENT HISTORY — the deflation stack refusing to score
+# a ~3-week archive is the machinery working. Reads the HF mirror by default, so
+# the first run costs a few minutes; the result is cached under data/orderflow/.
+orderflow-smoke:
+	python3 scripts/orderflow_smoke.py $(ARGS)

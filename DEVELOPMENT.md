@@ -110,7 +110,7 @@ in the docstring so a quant can audit.
 ## 4. Verification suite (run before every commit)
 
 ```bash
-python3 -m pytest -q                      # 207 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
+python3 -m pytest -q                      # 260 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
 node --check dashboard/app.js             # JS syntax (also quant.js, charts.js, livewire.js, terminal-*.js)
 node dashboard/app.js --check             # ppy guard: ppy()=365 (1d)/8760 (1h); no literal-365 at an annualization site
 python3 scripts/check_parity.py           # JS↔Python mirror parity (79 shared fields; the one rule)
@@ -120,12 +120,26 @@ make verify-census                        # L1b: layout census — page height, 
 make verify-focus                         # L1c: panel data-tier stamped from the M3 registry + focus/maximize (dblclick header, Esc)
 make verify-wire                          # L2: ~45s live-wire invariants through the PRODUCTION adapters (exit 2 = offline, not a bug)
 make check-ticks                          # L3: tick-store QA report card (gaps/dupes/cadence/coherence — reported, never filled)
+make orderflow-smoke                      # M1: recorded ticks -> order-flow bars -> features/walk_forward/DSR/PBO/MinBTL, zero harness change (expect INSUFFICIENT HISTORY; needs duckdb, see below)
 # CSS brace balance:
 awk '{o+=gsub(/{/,"{");c+=gsub(/}/,"}")}END{print (o==c)?"balanced":"UNBALANCED"}' dashboard/styles.css
 python3 scripts/compare.py                # public OOS leaderboard (defaults to --start 2018-01-01)
 python3 scripts/compare.py --research     # + pre-registered candidate verdicts
 make test        # convenience targets: also  make compare / backtest / scan / fetch / dash / collector / install
 ```
+
+**`make orderflow-smoke` is the one line above that is NOT free.** It needs the optional
+tick-store deps (`requirements-collector.txt` — `duckdb`), and on a cold cache it pulls the
+day partitions from the `hf://` mirror: measured **6 m 32 s** end-to-end with `--no-cache`
+versus **0.1 s** off the spec-hashed cache in `data/orderflow/` (git-ignored, derived, never a
+source of truth). Both runs printed **byte-identical output** apart from the build-time line,
+which is the check that the cache is a cache and not a stale artefact — re-run with
+`--no-cache` whenever you touch the bar builder. It is deliberately **not** a CI gate: it needs
+network and an optional dep, and its verdict is a property of how much history the collector
+has recorded, not of the diff under review. `ARGS=` passes through
+(`make orderflow-smoke ARGS="--source local --json"`). Exit 0 means the deflation stack
+**refused** (INSUFFICIENT HISTORY); a non-zero exit means the span claims to clear MinBTL(5)
+on this archive, which is a clock bug, not a discovery.
 
 **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the build gates on every push/PR:
 `pytest`, `node --check` ×N, **`node dashboard/app.js --check`** (the annualization guard — closes
@@ -436,6 +450,7 @@ was dividing the downside variance by the downside count instead of the full sam
 | [RESEARCH-tharp-runlog.md](RESEARCH-tharp-runlog.md) | Trading-books eval/risk layer: expectancy/R-multiple (vol-notional R) + SQN/PF/MAE, percent-risk sizing sweep, Tier-B candidate sweep (donchian/vwap-reversion/fixed-R — all KILL), live CVD + volume-profile notes |
 | [RESEARCH-ic-runlog.md](RESEARCH-ic-runlog.md) | Lead-time Information Coefficient: forward IC of OOS signals (rank, overlap-corrected) — board strategies show NO significant forward IC; their edge is trend/vol-capture, not bar-to-bar lead |
 | [RESEARCH-reversion-runlog.md](RESEARCH-reversion-runlog.md) | Regime-gated mean reversion (Hurst/VR/ADX gate + `mean_reversion`): pre-registered gated-vs-ungated A/B on 1d+1h — gate cuts drawdown but adds no OOS alpha; hypothesis FALSIFIED, board unchanged |
+| [RESEARCH-orderflow-runlog.md](RESEARCH-orderflow-runlog.md) | `btcquant/orderflow.py` (M1): grounding corrections that overrode the brief, the gap/coverage model and its independent per-second validation, per-feature citation + stated approximation, the independent numerical cross-check of every feature on real recorded data, and the end-to-end smoke whose correct verdict is INSUFFICIENT HISTORY |
 | [DESIGN-orderflow-terminal.md](DESIGN-orderflow-terminal.md) | Orderflow terminal + tick collector: CryExc-inspired feature map, honesty rails (live-descriptive only, labeled estimates, unsigned GEX), empirical data-source matrix (real captured frames), module contracts, phase plan O-0…O-5, research time-gating |
 | [AUDIT.md](AUDIT.md) / [AUDIT_LOG.md](AUDIT_LOG.md) | Repeatable code/stat audit spec + the change-log of verified fixes (H1 funding P&L fixed; remaining findings tracked) |
 | **DEVELOPMENT.md** (this) | Contributors — architecture, the parity rule, extend-recipes, verification, gotchas, roadmap |

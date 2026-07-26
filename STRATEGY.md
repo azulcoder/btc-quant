@@ -66,9 +66,11 @@ and not an execution engine.
    precision), PBO, hierarchical-Bayes Sharpe shrinkage — cited to Bailey-López de Prado,
    single-source-of-truth (`expected_max_sharpe_ratio` shared byte-identical by DSR and
    MinBTL). No incumbent charting terminal has anything equivalent.
-   Caveat (state the tense): today this validates OHLCV/options strategies, not
-   order-flow. It is a moat **in potential** for this product; the coupling is the
-   unbuilt shaft (Gap 1).
+   Caveat (state the tense, updated 2026-07-27): the shaft is now **built** — M1's
+   `btcquant/orderflow.py` feeds order-flow bars into this same engine with zero harness
+   change — but it has not yet *validated* an order-flow strategy and cannot, because the
+   archive is at **1.8 % of MinBTL(N=5)**. So: coupling done, verdict pending on data.
+   Still a moat **in potential**; the constraint moved from code to the clock (Gap 1, N4).
 5. **Collector → HF lifecycle, production-grade and honestly-gapped.** Event-time daily
    rotation + 5-min grace, immutable closed-day files, re-read + sha256-verify + confirm
    on the Hub before local delete, L3 QA that FAILS on duplicate `trade_id` and reports
@@ -80,13 +82,23 @@ feature list.
 
 ## 3. Honest gaps (ranked by impact on the stated goals)
 
-- **Gap 1 — [critical, vision] the flywheel does not close.** No research/backtest/feature
-  code reads the tick store. `btcquant/features.py` (36 funcs) and `strategies.py`
-  (18 funcs) are 100% OHLCV/options; `btcquant/orderflow.py` does not exist. Precise:
-  the live-descriptive *serving* path already reads ticks
-  (`scripts/backfill_levels.py`, `/v1/profile` via `collector.py:1958`), but the
-  research → deflation-harness path is missing. The collector accrues history that
-  nothing downstream turns into a validated signal.
+- **Gap 1 — [critical, vision] the flywheel does not close.**
+  ~~No research/backtest/feature code reads the tick store. `btcquant/features.py`
+  (36 funcs) and `strategies.py` (18 funcs) are 100% OHLCV/options;
+  `btcquant/orderflow.py` does not exist.~~ **Pipe closed 2026-07-26 (M1):**
+  `btcquant/orderflow.py` reads day files / `hf://` parquet and emits order-flow bars
+  that `features.atr`, `backtest.walk_forward`/`cpcv` and the DSR/PBO/MinBTL stack
+  consume unchanged; `make orderflow-smoke` runs it end to end.
+  **The gap is now DATA, not code, and it is worse than it looked:** on the 18-day
+  window where one instrument has both a trade and a book leg (bybit, 07-05..07-22),
+  **52.1 % of wall time is a feed hole** (224.93 h of 432) and only **27 of 432** 1h
+  bars are both fully covered and carry a non-gap-spanning return — 0.0031 years of
+  clean bars against a MinBTL(N=5) of 2.699 years. So the flywheel *turns*, but it has
+  almost nothing to turn on until **N4** (collector uptime) lands. Nothing downstream
+  may be scored, and the smoke enforces that by refusing.
+  (An earlier draft of this bullet said 51.8 % / 29 bars / 0.0033 yrs — those were
+  pre-fix figures from before the per-leg witness change and are `[SUPERSEDED]` by the
+  numbers above, which are what `make orderflow-smoke` prints today.)
 - **Gap 2 — [blocking deploy] paint loop has zero error isolation.** `frame()`
   (`terminal.js:3825-4099`) has no try/catch around its 32 `view.render()` calls, and
   `scheduleFrame()` is the last statement. One render throw (a NaN into a canvas path,
@@ -253,7 +265,7 @@ sequence to the calendar, not to enthusiasm.
 
 ### MID — close the flywheel + collapse the maintainability tax (1-3 months)
 
-- [ ] **M1. Build the keystone `btcquant/orderflow.py`.** Read day-file/HF parquet, emit
+- [x] **M1. Build the keystone `btcquant/orderflow.py`.** Read day-file/HF parquet, emit
       event-time order-flow bars in the SAME DataFrame contract `features.py` uses, so
       `backtest.walk_forward`/`cpcv`/`DSR`/`PBO` consume it with zero harness change.
       Features and their references (research-first, verify each numerically vs an
@@ -268,6 +280,73 @@ sequence to the calendar, not to enthusiasm.
       - Size-bucketed signed delta; liquidation intensity; depth-imbalance slope.
       *Accept:* bars materialize; a smoke experiment runs end-to-end through the existing
       deflation harness; each feature has a numeric cross-check test. Highest mid priority.
+      **Shipped 2026-07-26** (`btcquant/orderflow.py`, `tests/test_orderflow.py` 52 tests,
+      `scripts/orderflow_smoke.py` / `make orderflow-smoke`, `RESEARCH-orderflow-runlog.md`).
+      Zero harness change is *executed*, not argued: `features.atr` + `walk_forward`
+      (the `compare.py:533` idiom verbatim) **and** `cpcv` all run on real bars in the
+      smoke. `cpcv`'s signature is *not* identical to `walk_forward`'s (`n_blocks`/
+      `k_test`/`embargo_pct` vs `n_splits`/`min_train`) — only the leading
+      `(make_positions, prices)` contract is shared, which is the load-bearing part;
+      an earlier "inherits it (identical signature)" claim here was wrong and is
+      `[SUPERSEDED]` by an executed call. Every feature is cross-checked by an independent route on
+      the REAL archive — OFI vs a per-pair loop over 74,575 snapshots `|Δ|=5.68e-13`,
+      microprice vs a second algebraic form `|Δ|=0`, depth slope vs `np.linalg.lstsq`
+      `|Δ|=2.27e-13`, delta/size-buckets vs a naive loop over 268,922 prints
+      `|Δ|≤7e-09`, VPIN vs a pure-Python bucket-splitting loop `|Δ|=1.17e-12` with every
+      complete bucket holding `V` to `4.6e-11`, coverage vs an 86,400-slot per-second
+      occupancy array (exact). Three brief claims were **wrong and the data won**: the
+      book is not bybit-single-venue across the archive (07-24/25 are binancef-only),
+      a full day is 4–6.5 M trades not ~269 k, and `liquidations` has *two* honest-empty
+      representations (table-with-0-rows vs absent HF partition) that only agree once
+      zero-vs-unknown is decided by **leg liveness**, not row count. Also measured and
+      not smoothed: on the 18-day bybit smoke window **52.1 % of wall time is a feed
+      hole** (224.93 h of 432) and only **27 of 432** 1h bars are clean — 0.0031 yrs
+      against MinBTL(5) = 2.699 yrs; the binding constraint on M1's
+      usefulness is N4 (collector uptime), not the code. Smoke verdict, as designed:
+      **INSUFFICIENT HISTORY** (span 0.049 yrs = 1.8 % of MinBTL(N=5) = 2.699 yrs);
+      nothing is scored and nothing is shown.
+      **What the final-gate run actually returned** (`make orderflow-smoke`, 2026-07-27,
+      exit 0, bybit BTCUSDT 07-05..07-22, 1h, HF mirror, 18/18 days resolved, 0
+      unresolved, 0 skipped-locked): a **432 × 52** frame, 39 fully covered / 304
+      partial / 89 all-NaN bars, **224.93 h** of feed hole, 405 of 432 returns spanning
+      a gap, 12 clean segments; `features.atr(bars, 14)` last **289.2012** and
+      `features.realized_vol(r, 20, ppy)` last **0.2746**; four throwaway `cvd_slope`
+      candidates (3/6/12/24 h) through the verbatim `walk_forward` idiom returned OOS
+      SR **−8.79 / −3.07 / −10.31 / −8.50** on n = 286 with maxDD −1.74 / −1.00 / −2.38
+      / −1.93 % and OOS DSR ≤ **0.0005**; `cpcv(n_blocks=6, k_test=2)` returned **15
+      paths**, OOS SR p25 **−15.22** / p75 **−5.34** (min −23.56, max 4.13); best-of-N
+      DSR **0.1315**, PBO (CSCV, 8 blocks, 70 splits) **0.2857**; MinBTL(5/20/100) =
+      **2.699 / 3.152 / 3.640 yrs** against a 0.049-yr span → **1.8 / 1.6 / 1.4 %**
+      met. Re-run with `--no-cache` (6 m 32 s, rebuilt straight off the `hf://` mirror
+      instead of the 0.1 s spec-hashed cache) it printed **byte-identical output** apart
+      from the build-time line — so the cached path is a cache, not a stale artefact.
+      Read this as a *pipeline* receipt and nothing else. Three things are
+      deliberately not claimed: the negative Sharpes are **not** evidence of a short
+      edge (the candidate is `sign(ΔCVD)` with no hypothesis, run only to give the
+      harness a position series); the two DSR routes disagree (**0.0005** per candidate
+      vs **0.1315** best-of-N) because they are fed different trial sets — `walk_forward`
+      deflates over its 5 folds, the best-of-N call over the 4 lookbacks — and neither
+      is a score; and at 1.8 % of MinBTL **no** number in this paragraph may be read as
+      evidence about any strategy. The verdict is INSUFFICIENT HISTORY, which is the
+      **correct** outcome: the smoke exits non-zero if the span ever *clears* MinBTL(5)
+      on this archive, so a green run is the deflation stack refusing, not passing.
+      Nothing here is research-ready; `status != CLEARED` and nothing is displayed.
+      **Review pass, same day** — a full adversarial re-read found and fixed eight real
+      defects before any of this could be trusted: the trade family was witnessed by
+      `trades ∪ depth`, so a venue whose trade leg died under a live book scored
+      `coverage = 1.0` and wrote **fabricated zeros** into delta/volume/CVD (reproduced on
+      the archive: binancef 2026-07-25 has 0 trades and 74,575 depth rows) — witnesses are
+      now per leg; the VPIN volume clock and the OFI snapshot pairing were anchored to the
+      *request window* instead of the UTC day, so the same bar changed value inside a wider
+      range (measured 180/180 bars, max 8.7e-02 — now 0/180); `segment` only broke on a
+      wholly empty bar, so CVD accumulated through any hole shorter than one bar; a range
+      containing a not-yet-closed day was cached forever as an all-gap frame; the local and
+      `hf://` backends disagreed 0.0-vs-NaN on an honestly-empty liquidations day; two
+      symbols on one venue were silently pooled into one tape and one book; the OFI note
+      asserted a bias direction that is **false** (a price round-trip inside the sampling
+      interval *overstates* — counterexample in the docstring and pinned by a test); and
+      rail 6 claimed no look-ahead for the quality family, which is ex-post by construction
+      and now says so. Every fix carries an independent-recomputation test.
 - [ ] **M2. Promote the gate from prose to a machine-checkable registry.** Per-candidate
       artifact `{hypothesis_id, feature, N_trials, MinBTL_target, kill DSR/PBO thresholds,
       LockBox slice}`. A signal is `status=CLEARED` iff OOS `DSR>0.95` net-of-cost AND
@@ -363,8 +442,8 @@ sequence to the calendar, not to enthusiasm.
 
 ## 7. Sustainable process (standing gates)
 
-- **Verification harness L0-L3 as a non-negotiable CI gate.** L0 (208 pytest + parity to
-  machine-eps + the 77-group verbatim-assert gate over real wire frames), L1 (deterministic
+- **Verification harness L0-L3 as a non-negotiable CI gate.** L0 (260 pytest + parity to
+  machine-eps + the 83-group verbatim-assert gate over real wire frames), L1 (deterministic
   browser replay: REPLAY MODE + zero console error + non-blank canvas), L2 (live-wire
   invariants: book never crossed, mid coherent), L3 (tick-store gap census — report, never
   fill). Every new panel carries one group; accept the linear carrying cost as the price of

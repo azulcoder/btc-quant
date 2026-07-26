@@ -14,6 +14,9 @@ data/*.duckdb.wal
 # parquet exports + manifests bound for GitHub Releases, plus the prune/rebuild
 # side files. Large, regenerable, never committed.
 data/archive/
+# M1 order-flow bar cache (btcquant/orderflow.py) — derived, spec-hashed, and
+# re-buildable from the day files / HF mirror; never a source of truth.
+data/orderflow/
 data/*.duckdb.rebuild
 data/*.pre-archive.bak
 .DS_Store
