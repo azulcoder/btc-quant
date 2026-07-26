@@ -223,6 +223,51 @@ was dividing the downside variance by the downside count instead of the full sam
   book level of `"883.58"` is ~8.84 BTC. Forgetting the ×ctVal is a silent 100× bug — same trap
   family as `mark_iv` percent. (Terminal book feeds: Bybit `orderbook.200`, OKX `books`; the
   adapters scale at the wire, stores only ever see coin units.)
+- **A bit-exact float golden is not portable — state the tolerance (2026-07-26).** The M4
+  golden constants in `tests/test_core.py` were pinned with `==` and that claim was false:
+  these Sharpes reduce through numpy/pandas summation, whose ORDER depends on the SIMD/BLAS
+  build, not only on library versions. Measured, same code, three stacks — `oos` =
+  `-0.6577099382791564` (pandas 3.0.5/numpy 2.4.6 and 2.5.1) vs `-0.6577099382791571`
+  (pandas 2.3.3/numpy 1.26.4, which is requirements.txt's own MINIMUM). **No version pin
+  fixes it**; pinning only hides it on one machine. All four floats drift 2–4e-15 absolute
+  / 4–8e-15 relative, so they now assert `pytest.approx(..., rel=1e-12)` — ~1000× headroom
+  over the noise, and a real formula change moves a Sharpe by ~1e-3 (verified: a
+  `sqrt(364/365)` mis-annualization is still caught by 9 orders of magnitude). The
+  same-process `wf0 == wfz` / `cp0 == cpz` comparisons **stay exact** — those are the actual
+  M4 rail and they genuinely are bit-identical. This follows §5's standing rule ("state the
+  *real* tolerance; don't claim bit-for-bit"), it does not weaken it. **Why it mattered
+  beyond the test:** `pytest` is CI's FIRST step, so its exit 1 short-circuited
+  `node --check`, the annualization guard, `check_parity.py` and `check_terminal.cjs` — the
+  whole verbatim-assert gate had been inert on `main` since 2026-07-23 behind this one
+  float.
+- **CSS source ORDER is load-bearing in `terminal.css` — do not hoist a rule to dedupe it.**
+  Elements carry both classes (`class="tape-row tape-head"`), and the head class wins on
+  `font-size`/`padding` only by appearing AFTER the row class (equal specificity → source
+  order decides). A T-4 draft consolidated the seven identical column-header rules and moved
+  the shared block up next to `.panel-ctl`; four headers silently went 10px → 11px. Caught by
+  diffing **computed styles** in Chromium old-vs-new, not by eye. Consolidated blocks must
+  sit below the rules they override and above the `.panel--empty` block that must stay last.
+- **A venue's plain-text keepalive is a CONTROL FRAME, not a dropped frame — declare it.** OKX
+  prescribes a plain-text `ping` and answers `pong`, which `livewire.js`'s `JSON.parse` cannot read.
+  An adapter declares such frames via the optional **`isControlFrame(rawText)`**, consulted inside
+  the `JSON.parse` **catch** — never before the parse, because that would run a predicate on every
+  frame across 7 legs of 100 ms-batched book updates for no benefit. A declared frame marks liveness
+  and is never counted; a genuinely malformed frame still increments the drop counter; an adapter
+  with no predicate is byte-unaffected (the `app.js` path). Do NOT "fix" this by suppressing the
+  counter instead — the whole point is that malformed frames stay visible. Full post-mortem in
+  AUDIT_LOG.md (2026-07-26, T-4/R2): the pong was silently dropped BY DESIGN for months, and the
+  moment N5 gave that silent catch a counter, a healthy terminal started reporting
+  `degraded: N dropped` forever (~288 phantom drops/hour). **The general rail is DESIGN §0.9:
+  telemetry is silent when healthy — audit any new counter against every correct behaviour the code
+  it watches already tolerates.**
+- **Keepalive intervals need MARGIN, not the vendor's number.** Bybit v5 says "client ping ≲20 s";
+  both Bybit legs used exactly `20000` (which is also livewire's own untuned fallback default), and
+  a ping scheduled at the deadline is late whenever the single main thread is busy painting. They
+  are 15 s now, asserted in `check_terminal.cjs`. When a leg cycles, read the venue's own close code
+  — `livewire.js` folds `ev.code`/`ev.reason` into the `onStatus('reconnecting', …)` message rather
+  than discarding the CloseEvent, so the cause is evidence instead of inference. Measure with
+  `make verify-stability` (drives the PRODUCTION `makeSocket`); `make verify-wire` **cannot** see
+  stale transitions or drops — its socket loop is deliberately not livewire's.
 - **Bybit v5 `tickers` sends a snapshot then PARTIAL deltas** — delta frames omit unchanged fields
   (a delta with no `markPrice` does not mean mark went away). Merge against the last snapshot or
   funding/OI silently vanish. Same stream carries OI — there is no separate Bybit OI poll.

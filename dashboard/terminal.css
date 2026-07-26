@@ -436,18 +436,6 @@ main.term-main {
 
 /* Book-heatmap panel-header controls (venue select + velocity tint toggle) —
    they live in the h2 chrome, mono + small like the legends. */
-.heat-controls {
-  float: right;
-  display: inline-flex;
-  gap: var(--sp-2);
-  align-items: center;
-  font-family: var(--mono);
-  font-size: var(--fs-xs);
-  font-weight: 400;
-  color: var(--muted);
-  text-transform: none;
-  letter-spacing: 0;
-}
 .heat-controls select { min-width: 84px; padding: 1px 4px; font-size: var(--fs-xs); }
 .heat-controls input[type="checkbox"] { vertical-align: middle; margin: 0 0 0 3px; }
 .heat-controls button { font-size: var(--fs-xs); padding: 1px 6px; text-transform: none; letter-spacing: 0; }
@@ -457,12 +445,39 @@ main.term-main {
    columns cannot carry these in the h2 chrome the way a single-select panel
    can, so they get their own row that wraps instead of overflowing the column
    (horizontal-scroll defect fix). Mono/small like the legends. */
+/* ═══ T-4: ONE control-row definition ════════════════════════════════════════
+   Seven control rows repeated the same five declarations, so "make every control
+   row look the same" meant editing seven blocks and hoping. The shared contract
+   lives once now; only the deltas that are REAL stay per class.
+
+   Class NAMES are unchanged on purpose: .whale-controls / .agg-controls /
+   .hist-replay-controls are constructed in JS, so renaming them is a coordinated
+   HTML+JS+CSS edit with no visual payoff. The tax was in the declarations.
+   Verified computed-style-identical before/after in Chromium. ═══════════════ */
+.panel-ctl, .heat-controls, .whale-controls, .auction-controls,
+.agg-controls, .hist-replay-controls, .audio-ctl {
+  display: flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.panel-ctl, .whale-controls, .auction-controls, .agg-controls { flex-wrap: wrap; }
+/* Inline variants sit INSIDE another row (a panel <h2>, the tape settings line),
+   so they must not become block-level flex containers. Must FOLLOW the shared
+   `display: flex` — equal specificity, so source order decides. */
+.heat-controls, .audio-ctl { display: inline-flex; }
+
+/* Per-row deltas that are genuine, not accidental. */
 .panel-ctl {
-  display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: center;
-  padding: 3px 0 2px; margin-bottom: 2px;
-  font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted);
+  gap: 3px 8px; padding: 3px 0 2px; margin-bottom: 2px;
   border-bottom: 1px solid var(--border);
 }
+.heat-controls { float: right; gap: var(--sp-2); font-weight: 400; text-transform: none; letter-spacing: 0; }
+.whale-controls, .auction-controls { gap: var(--sp-2); padding-bottom: var(--sp-1); }
+.agg-controls { gap: 2px var(--sp-2); padding-bottom: var(--sp-1); }
+.hist-replay-controls { gap: var(--sp-2); padding-top: var(--sp-1); }
+.audio-ctl { gap: 5px; }
 .panel-ctl label { color: var(--muted); }
 .panel-ctl select { min-width: 78px; max-width: 128px; padding: 1px 4px; font-size: var(--fs-xs); }
 .panel-ctl input[type="checkbox"] { vertical-align: middle; margin: 0 0 0 2px; }
@@ -637,14 +652,6 @@ table.ladder tr.spread .sp-x { color: var(--muted); margin: 0 5px; }
    (inline-block strips the content's trailing space; the margin restores the
    original '▲ $…' gap without reintroducing a soft-wrap opportunity.) */
 .tape-row .px::before { display: inline-block; margin-right: 0.3em; }
-.tape-head {
-  color: var(--muted);
-  text-transform: uppercase;
-  font-size: var(--fs-2xs);
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 2px;
-  margin-bottom: 2px;
-}
 .tape-row .ts { color: var(--muted); }
 .tape-row .qty, .tape-row .ntl { text-align: right; }
 .tape-row .px { text-align: right; }
@@ -738,14 +745,6 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-2xs); color: var(
   padding: 1px 2px;
   align-items: baseline;
 }
-.liq-head {
-  color: var(--muted);
-  text-transform: uppercase;
-  font-size: var(--fs-2xs);
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 2px;
-  margin-bottom: 2px;
-}
 .liq-row .ts { color: var(--muted); }
 .liq-row .px, .liq-row .qty, .liq-row .ntl { text-align: right; }
 /* side = the LIQUIDATED position (§3): long liq = forced sell → --down;
@@ -785,14 +784,6 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-2xs); color: var(
   font-variant-numeric: tabular-nums slashed-zero;
   padding: 1px 2px;
   align-items: baseline;
-}
-.det-head {
-  color: var(--muted);
-  text-transform: uppercase;
-  font-size: var(--fs-2xs);
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 2px;
-  margin-bottom: 2px;
 }
 .det-row .ts { color: var(--muted); }
 .det-row .px, .det-row .qty, .det-row .life { text-align: right; }
@@ -837,7 +828,6 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-2xs); color: var(
    audio widgets are narrower than the default number width above. */
 .control-tiers .tier-inputs { display: inline-flex; gap: 3px; }
 .control-tiers .tier-inputs input[type="number"] { width: 74px; }
-.audio-ctl { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); }
 .audio-ctl input[type="range"] { width: 84px; }
 .audio-ctl input[type="checkbox"] { margin: 0; }
 
@@ -868,15 +858,6 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-2xs); color: var(
 }
 
 /* Bar-replay control row under the chart. */
-.hist-replay-controls {
-  display: flex;
-  gap: var(--sp-2);
-  align-items: center;
-  font-family: var(--mono);
-  font-size: var(--fs-xs);
-  color: var(--muted);
-  padding-top: var(--sp-1);
-}
 /* display:flex above beats the UA sheet's [hidden]{display:none} — restate it
    (same idiom as .chart-tip[hidden]/.overlay[hidden] in styles.css), else the
    replay-mode hide in terminal.js silently no-ops and inert controls render
@@ -957,15 +938,6 @@ table.farb-table tr.farb-spread td {
 
 /* Macro correlation block: label / value / window-or-n tag per row. */
 .macro-corr { font-family: var(--mono); font-size: var(--fs-xs); }
-.macro-corr-head {
-  color: var(--muted);
-  text-transform: uppercase;
-  font-size: var(--fs-2xs);
-  letter-spacing: 0.04em;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 2px;
-  margin-bottom: 2px;
-}
 .macro-corr-row {
   display: grid;
   grid-template-columns: minmax(110px, auto) 1fr 2fr;
@@ -1058,16 +1030,6 @@ table.farb-table tr.farb-spread td {
 .conf-label { color: var(--warn-fg); }   /* the §4d sentence — warn hue, always visible */
 
 /* Whale watch: controls row + ladder-density table + per-row remove. */
-.whale-controls {
-  display: flex;
-  gap: var(--sp-2);
-  align-items: center;
-  flex-wrap: wrap;
-  font-family: var(--mono);
-  font-size: var(--fs-xs);
-  color: var(--muted);
-  padding-bottom: var(--sp-1);
-}
 .whale-controls input[type="text"] { width: 200px; font-size: var(--fs-xs); padding: 1px 4px; font-family: var(--mono); }
 .whale-controls button { font-size: var(--fs-xs); padding: 1px 6px; }
 .whale-controls input[type="checkbox"] { vertical-align: middle; margin: 0 2px 0 0; }
@@ -1082,14 +1044,6 @@ table.farb-table tr.farb-spread td {
   font-variant-numeric: tabular-nums slashed-zero;
   padding: 1px 2px;
   align-items: baseline;
-}
-.whale-head {
-  color: var(--muted);
-  text-transform: uppercase;
-  font-size: var(--fs-2xs);
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 2px;
-  margin-bottom: 2px;
 }
 .whale-row .addr { color: var(--c4); }
 .whale-row .num { text-align: right; white-space: nowrap; }
@@ -1359,16 +1313,6 @@ table.farb-table tr.farb-spread td {
 
 /* Auction profile: control row (whale-controls idiom) + canvas mount with
    an 18px legend strip reserved at the bottom (agg-book idiom). */
-.auction-controls {
-  display: flex;
-  gap: var(--sp-2);
-  align-items: center;
-  flex-wrap: wrap;
-  font-family: var(--mono);
-  font-size: var(--fs-xs);
-  color: var(--muted);
-  padding-bottom: var(--sp-1);
-}
 .auction-controls select { font-size: var(--fs-xs); padding: 1px 4px; min-width: 90px; }
 .auction-controls select[multiple] { min-height: 44px; }
 .auction-controls input[type="checkbox"] { vertical-align: middle; margin: 0 2px 0 0; }
@@ -1394,14 +1338,6 @@ table.farb-table tr.farb-spread td {
   font-variant-numeric: tabular-nums slashed-zero;
   padding: 1px 2px;
   align-items: baseline;
-}
-.lvls-head {
-  color: var(--muted);
-  text-transform: uppercase;
-  font-size: var(--fs-2xs);
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 2px;
-  margin-bottom: 2px;
 }
 .lvls-row .ts { color: var(--muted); }
 .lvls-row .num { text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1531,14 +1467,6 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
   padding: 1px 2px;
   align-items: baseline;
 }
-.walls-head {
-  color: var(--muted);
-  text-transform: uppercase;
-  font-size: var(--fs-2xs);
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 2px;
-  margin-bottom: 2px;
-}
 .walls-row .ts { color: var(--muted); }
 .walls-row .px, .walls-row .qty { text-align: right; }
 .walls-row .side.bid { color: var(--up); }
@@ -1629,16 +1557,6 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 }
 
 /* Agg-book include checkboxes (display-side merge filter). */
-.agg-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px var(--sp-2);
-  align-items: center;
-  font-family: var(--mono);
-  font-size: var(--fs-xs);
-  color: var(--muted);
-  padding-bottom: var(--sp-1);
-}
 .agg-controls .agg-inc-label { color: var(--g-300); text-transform: uppercase; font-size: var(--fs-2xs); }
 .agg-controls label { cursor: pointer; white-space: nowrap; }
 .agg-controls input[type="checkbox"] { vertical-align: middle; margin: 0 2px 0 0; }
@@ -1696,6 +1614,32 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .tape-row .ex-bybit_spot { color: var(--c2); }
 .tape-row .ex-binance_spot { color: var(--c1); }
 .tape-row .ex-okx_spot { color: var(--c3); }
+
+
+/* ═══ T-4: ONE column-header definition ══════════════════════════════════════
+   Six of these were BYTE-IDENTICAL and the seventh differed by one declaration.
+   (.jour-head / .jour-errhead / .cal-bhead / .poly-evhead are deliberately NOT
+   here: a sticky table header, an error header, a sub-header and a space-between
+   flex row are different components — merging them would be a worse lie than the
+   duplication.)
+
+   POSITION IS LOAD-BEARING. These elements carry both classes, e.g.
+   class="tape-row tape-head", and .tape-row sets font-size/padding earlier in the
+   sheet. The header definition wins only by coming AFTER it — equal specificity,
+   so source order decides. An earlier draft hoisted this block up next to
+   .panel-ctl and silently regressed four headers from 10px to 11px; caught by
+   diffing computed styles in Chromium, not by eye. Keep this block below the row
+   rules, and above the .panel--empty block that must stay last. ═══════════════ */
+.tape-head, .liq-head, .det-head, .macro-corr-head,
+.whale-head, .lvls-head, .walls-head {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: var(--fs-2xs);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 2px;
+  margin-bottom: 2px;
+}
+.macro-corr-head { letter-spacing: 0.04em; }
 
 /* ═══ Empty-state collapse (presentation pass) ══════════════════════════════
    A panel whose body currently shows ONLY its honest disabled/awaiting note

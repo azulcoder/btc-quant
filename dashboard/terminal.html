@@ -124,7 +124,7 @@
           <label title="show per-bar Δmin/Δmax (intra-bar delta path extremes, 0-anchored) + Δ% (delta/totalVol) footer rows — finished-bar facts, descriptive"><input type="checkbox" id="set-fp-drows" checked /> Δ rows</label>
         </span>
       </h2>
-      <div class="panel-src" title="Bid×ask aggressor volume per price per bar, session-local. LIVE-DESCRIPTIVE ONLY (DESIGN §0.1): never a backtest input. Imbalance flags are computed on finished bars only.">live session · bid×ask aggressor volume per price per bar · never a backtest input (§0.1)</div>
+      <div class="panel-src">live session · bid×ask aggressor volume per price per bar · never a backtest input (§0.1)</div>
       <div id="view-footprint" class="fp-wrap"></div>
       <div class="hint"><span class="hint-lead">cells: <b>sell × buy</b> aggressor volume (<span class="js-base">BTC</span>) per $-grouped level <span class="hint-flag">· ◉ absorption flag = heuristic</span></span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> outlined half = diagonal imbalance (k=3, finished bars only). Right gutter: session volume profile with POC/VAH/VAL. Dashed column = the open (unfinished) bar. I-1 (§4f): • = per-bar POC; translucent bands = stacked-imbalance zones (≥3 grid-adjacent same-side imbalances, finished bars; a traded-through zone dims instead of vanishing); ◉ = absorption flag — <b>heuristic</b> (volume spike, no follow-through next bar: pattern-consistent-with, never proof); bottom strip = cumΔ (session-anchored running Σ of bar deltas — slope/divergence only, level is meaningless). T-1 (§4g): Δmm/Δ% footer rows (toggle) = intra-bar delta-path extremes + delta/totalVol; ⌜/⌟ at a finished bar's extreme = <b>unfinished auction</b> (the extreme level printed BOTH sides — classic orderflow marker by convention, Dalton-adjacent, not a signal); dashed horizontal lines = key levels (prior-day/registry + live IB, toggle in the key-levels panel).</span></details></div>
     </section>
@@ -135,7 +135,8 @@
         <h2>DOM ladder
           <span class="signal-tag st-desc" title="Full-local-book depth ladder around the spread (§4i): log-scaled depth bars read the maintained-FULL book (display windowed); rolling trade-imprint-at-price (buy/sell mini bars); WallsLedger markers; spread ticks+bps, mid, top-of-book + within-20-tick depth imbalance. Source-selectable across the matrix books OR the aggregated same-quote (USDT) merge (a DISPLAY approximation, loudly caveated). Imprint/walls ride the single-venue source that owns them (§0.7).">descriptive</span>
         </h2>
-        <div class="panel-src" title="Full-local-book depth ladder around the spread (§4i): log-scaled depth bars over the maintained-FULL book (display windowed); rolling trade-imprint-at-price; WallsLedger markers; spread/mid/imbalance readouts. Imprint = the source leg's own rolling flow; the walls ledger is bybit-grid (§4g), shown on the bybit·lin source only (§0.7).">full local book, log depth bars · display windowed (§4i) · sell/buy = rolling trade imprint · ‖ = WallsLedger level</div>
+        <div class="panel-src">full local book, log depth bars · display windowed (§4i) · sell/buy = rolling trade imprint · ‖ = WallsLedger level</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">Full-local-book depth ladder around the spread (§4i): log-scaled depth bars over the maintained-FULL book (display windowed); rolling trade-imprint-at-price; WallsLedger markers; spread/mid/imbalance readouts. Imprint = the source leg's own rolling flow; the walls ledger is bybit-grid (§4g), shown on the bybit·lin source only (§0.7).</span></details></div>
         <!-- T-3 (§4i): ladder source — bybit linear default; any synced venue
              book, OR the aggregated same-quote (USDT) merge (display-only,
              caveated). Plus the cumulative-depth toggle. Own row (narrow
@@ -162,7 +163,7 @@
         <h2>aggregated book — venue matrix
           <span class="signal-tag st-desc" title="Per-leg stacked depth at $-grouped levels + cumulative depth curve, across the 7-leg venue×market matrix (§4h). Sources: bybit WS books (snapshot+delta), engine-synced binance diff books (spot/futures continuity proven per event), seq-chained okx books, coinbase full l2 book. OKX swap sizes are ctVal-scaled to base units in the adapter. Legs are independent; a dead or disabled leg drops out (nothing interpolated). Include checkboxes are display-side only — books keep ingesting.">descriptive</span>
         </h2>
-        <div class="panel-src" title="Include checkboxes filter the DISPLAY merge only — every enabled leg's book keeps ingesting. The binance/coinbase engine books are maintained FULL locally (top-1000 diff-synced / ~44k-level l2); the display truncates to the visible price window. Per-leg sync quality (incl. honest resync counts) is the strip above the canvas.">per-leg stacked depth (§4h) · include toggles are display-only · binance/coinbase/okx books maintained full, display windowed · resync counts visible</div>
+        <div class="panel-src">per-leg stacked depth (§4h) · include toggles are display-only · binance/coinbase/okx books maintained full, display windowed · resync counts visible</div>
         <!-- T-2 (§4h): per-leg include checkboxes — display-side merge filter
              (default: all enabled legs). Wired in terminal.js. -->
         <div class="agg-controls" id="agg-controls">
@@ -189,7 +190,8 @@
         <h2>tape — aggregated
           <span class="signal-tag st-desc" title="Aggregated read-the-tape surface (§4i): same-venue/side/price runs merge into one ×N block (never across venues, §0.7); each block is size-TIERED by USD notional (sig/large/huge/whale — LABELED DISPLAY CONVENTIONS, not signals). Colour intensity + row weight + a log-notional bar scale with the tier. Big-print rail = the last N huge/whale blocks. Aggressor side normalized per venue (§0.6).">descriptive</span>
         </h2>
-        <div class="panel-src" title="Aggregated read-the-tape surface (§4i): same-venue/side/price runs merge into one ×N block (never across venues). Size tiers (sig/large/huge/whale) are labeled display conventions, not signals. Big-print rail pins the last N huge/whale blocks. Aggressor side normalized per venue (§0.6).">aggregated blocks (×N), size-tiered — <span class="src-flag">conventions, not signals</span> · per-block venue tag (§0.7) · aggressor normalized (§0.6)</div>
+        <div class="panel-src">aggregated blocks (×N), size-tiered — <span class="src-flag">conventions, not signals</span> · per-block venue tag (§0.7) · aggressor normalized (§0.6)</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">Aggregated read-the-tape surface (§4i): same-venue/side/price runs merge into one ×N block (never across venues). Size tiers (sig/large/huge/whale) are labeled display conventions, not signals. Big-print rail pins the last N huge/whale blocks. Aggressor side normalized per venue (§0.6).</span></details></div>
         <!-- T-3 (§4i): tape filters — market both/spot/perp, single-venue, and
              the metric-column toggle. Own row (the narrow right column can't
              hold them in the h2). Behaviour view-owned, persisted in
@@ -231,7 +233,8 @@
         <h2>liquidations — Bybit allLiquidation
           <span class="signal-tag st-desc" title="side = the LIQUIDATED position: a printed forced buy closed a short, a forced sell closed a long (§3 convention). Rolling sums over wall-clock windows.">descriptive</span>
         </h2>
-        <div class="panel-src" title="side = the LIQUIDATED position: a printed forced buy closed a short, a forced sell closed a long (§3 convention). Rolling sums over wall-clock windows.">side = the liquidated position (§3) · rolling sums over wall-clock windows</div>
+        <div class="panel-src">side = the liquidated position (§3) · rolling sums over wall-clock windows</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">side = the LIQUIDATED position: a printed forced buy closed a short, a forced sell closed a long (§3 convention). Rolling sums over wall-clock windows.</span></details></div>
         <div id="view-liq" class="liq-wrap"></div>
       </section>
 
@@ -254,7 +257,7 @@
             </select>
           </span>
         </h2>
-        <div class="panel-src" title="MODEL ESTIMATE (§0.4): entry prices proxied by session volume-at-price × EQUAL-weighted leverage tiers (5/10/25/50/100×, flat mmr 0.5%) — the true tier mix is unknowable keyless. Long-liq bands below mark, short-liq above. Observed liquidation prints render as separate dots in their own lane, never blended into the bands."><span class="src-flag">ESTIMATED (model, §0.4)</span> · VAP entry proxy × equal-weight leverage tiers 5–100× — true tier mix unknowable keyless</div>
+        <div class="panel-src"><span class="src-flag">ESTIMATED (model, §0.4)</span> · VAP entry proxy × equal-weight leverage tiers 5–100× — true tier mix unknowable keyless</div>
         <div id="view-liqheat" class="liqheat-wrap"></div>
         <div class="hint"><span class="hint-lead">bands = <b>model-estimated</b> liquidation clusters (α ∝ weight, normalized); dots in the left lane = liquidations that actually printed (§0.7 — kept visually separate).</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Re-estimated every 5s of event time. Default window = mark ± 6%; bands/prints beyond it are counted in edge markers, never silently dropped.</span></details></div>
       </section>
@@ -264,7 +267,8 @@
         <h2>detections — Bybit book
           <span class="signal-tag st-heur" title="HEURISTIC (§4b): flags book patterns CONSISTENT WITH spoofing (▽ large wall pulled fast, barely traded) or icebergs (◈ traded volume ≫ max displayed). Intent is unobservable from public L2 — these are patterns, not proof, and never feed a signal.">heuristic</span>
         </h2>
-        <div class="panel-src" title="HEURISTIC (§4b): flags book patterns CONSISTENT WITH spoofing (▽ large wall pulled fast, barely traded) or icebergs (◈ traded volume ≫ max displayed). Intent is unobservable from public L2 — these are patterns, not proof, and never feed a signal.">patterns consistent with spoofing ▽ / icebergs ◈ — never proof; intent unobservable from public L2</div>
+        <div class="panel-src">patterns consistent with spoofing ▽ / icebergs ◈ — never proof; intent unobservable from public L2</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">HEURISTIC (§4b): flags book patterns CONSISTENT WITH spoofing (▽ large wall pulled fast, barely traded) or icebergs (◈ traded volume ≫ max displayed). Intent is unobservable from public L2 — these are patterns, not proof, and never feed a signal.</span></details></div>
         <div id="view-detect" class="det-wrap"></div>
       </section>
 
@@ -277,7 +281,8 @@
         <h2>walls ledger — Bybit book
           <span class="signal-tag st-desc" title="Book-history bookkeeping, not intent (§4g): a level ≥ 4×p95 of the grouped ladder sustained ≥ 5 samples enters; 'pulled' = vanished while price was &gt;1 tick away (it cannot have traded); 'filled' = price traded through it; a vanish at ≤1 tick of mid is ambiguous and stays 'standing' until a print confirms. Cross-reference the detections panel — the ledger keeps EVERY wall's history, the detector flags a pattern.">descriptive</span>
         </h2>
-        <div class="panel-src" title="Book-history bookkeeping, not intent (§4g). Enter: qty ≥ 4×p95 of the current 40-level grouped bybit ladder sustained ≥ 5 consecutive 1/s samples (K/M conventions). Pulled: vanished &gt;1 tick from mid. Filled: a print crossed the level. Ring 50, newest first.">what big resting levels DID — entered / pulled / filled · K=4×p95, M=5 samples (conventions) · not intent — see detections ▽ for the pattern flags</div>
+        <div class="panel-src">what big resting levels DID — entered / pulled / filled · K=4×p95, M=5 samples (conventions) · not intent — see detections ▽ for the pattern flags</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">Book-history bookkeeping, not intent (§4g). Enter: qty ≥ 4×p95 of the current 40-level grouped bybit ladder sustained ≥ 5 consecutive 1/s samples (K/M conventions). Pulled: vanished &gt;1 tick from mid. Filled: a print crossed the level. Ring 50, newest first.</span></details></div>
         <div id="view-walls" class="walls-wrap"></div>
       </section>
     </div>
@@ -296,7 +301,7 @@
           <label for="set-heat-vel" title="Hue = sign of resting-qty change vs the previous column (build/drain) instead of bid/ask side; α still ∝ qty">velocity tint <input type="checkbox" id="set-heat-vel" /></label>
         </span>
       </h2>
-      <div class="panel-src" title="Session ring of real 1/s book samples (event-time gated): X = session time, Y = price, α ∝ resting qty (p95-normalized). White line = that venue's own last-price trail. ▽/◈ = heuristic detector marks (bybit only). Reconnect gaps stay blank — nothing is interpolated (§0.7).">per-venue — books never merged · real 1/s samples, event-time gated · gaps stay gaps (§0.7)</div>
+      <div class="panel-src">per-venue — books never merged · real 1/s samples, event-time gated · gaps stay gaps (§0.7)</div>
       <div id="view-bookheat" class="heat-wrap"></div>
       <div class="hint"><span class="hint-lead">one venue at a time, labeled — books are never merged here. T-2 (§4h): the heatmap + its grid-bound history stay <b>bybit-linear primary</b> — merging different venues/grids into one history would fabricate a book that stood nowhere.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> bid depth in green, ask depth in red (α ∝ resting size, p95-scaled so one whale wall can't wash out the ladder); ▽ = heuristic spoof-pull, ◈ = heuristic iceberg-refill (see detections panel). binancef shows no price line — its trades are topic-filtered on this network (§0.2), so there is honestly no per-venue print series to draw. I-1 (§4f): shaded columns = Asia (00–08) / London (07–16) / NY (12–21) session boxes, <b>UTC, classic FX-desk convention</b> — crypto never closes; overlaps are real and render darker; 21–24 UTC belongs to no session.</span></details></div>
     </section>
@@ -307,7 +312,8 @@
       <h2>CVD — per leg (bybit lin/spot · binance spot · okx swap/spot · coinbase) + by trade size (bybit), session-anchored
         <span class="signal-tag st-desc" title="Cumulative signed USD notional (aggressor buy − sell). One labeled line PER TRADE LEG (§4b/§4h — never an unlabeled blend; spot legs share the venue hue, dashed) plus an exact Σ, plus bybit-only trade-size buckets. binance·fut is absent — no futures trades flow on this network (§0.2), so no line is fabricated for it. Anchored at page open — CVD has no natural zero; read slope/divergence, never level. NOT a signal, NOT backtestable from here.">descriptive</span>
       </h2>
-      <div class="panel-src" title="Cumulative signed USD notional (aggressor buy − sell). One labeled line PER TRADE LEG (§4b/§4h — never an unlabeled blend; spot legs share the venue hue, dashed) plus an exact Σ, plus bybit-only trade-size buckets. binance·fut is absent — no futures trades flow on this network (§0.2). Anchored at page open — CVD has no natural zero; read slope/divergence, never level. NOT a signal, NOT backtestable from here.">per-leg labels + exact Σ (§4b/§4h) · spot legs dashed in the venue hue · binance·fut honestly absent (§0.2) · anchored at page open — slope/divergence only · NOT a signal</div>
+      <div class="panel-src">per-leg labels + exact Σ (§4b/§4h) · spot legs dashed in the venue hue · binance·fut honestly absent (§0.2) · anchored at page open — slope/divergence only · NOT a signal</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">Cumulative signed USD notional (aggressor buy − sell). One labeled line PER TRADE LEG (§4b/§4h — never an unlabeled blend; spot legs share the venue hue, dashed) plus an exact Σ, plus bybit-only trade-size buckets. binance·fut is absent — no futures trades flow on this network (§0.2). Anchored at page open — CVD has no natural zero; read slope/divergence, never level. NOT a signal, NOT backtestable from here.</span></details></div>
       <div id="view-cvd" class="term-cvd"></div>
     </section>
 
@@ -319,7 +325,8 @@
       <h2>spot vs perp CVD — session-anchored market split
         <span class="signal-tag st-desc" title="Two cumulative session lines: Σ signed USD flow of the enabled PERP legs vs the enabled SPOT legs (registry market split, §4h). A DESCRIPTIVE lead/lag read — which side of the market moved first this session — labeled, never a signal, nothing scores it. A leg disabled mid-session stops contributing but its past flow stays in the sum (the series is since-page-open; removing it would restate history, §0.7).">descriptive</span>
       </h2>
-      <div class="panel-src" title="Σ signed USD notional per market side (aggressor buy − sell), 10s buckets + live edge. Composition shown live below the pane. Descriptive lead/lag only — NOT a signal.">Σ perp legs vs Σ spot legs (§4h) · descriptive lead/lag read — NOT a signal · composition shown live</div>
+      <div class="panel-src">Σ perp legs vs Σ spot legs (§4h) · descriptive lead/lag read — NOT a signal · composition shown live</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">Σ signed USD notional per market side (aggressor buy − sell), 10s buckets + live edge. Composition shown live below the pane. Descriptive lead/lag only — NOT a signal.</span></details></div>
       <div id="view-spotperp" class="spcvd-wrap"></div>
     </section>
 
@@ -365,7 +372,7 @@
           <input type="datetime-local" id="set-vwap-ts" title="custom anchor (UTC) — used when anchor = custom" hidden />
         </span>
       </h2>
-      <div class="panel-src" title="Bybit v5 REST klines (linear perp), fetched newest-first and reversed to chronological (§4c gotcha). NO live-WS merging (§0.7): this panel is a pure REST snapshot, refreshed only on interval change — the live panels above carry the session.">bybit linear klines · REST · pure snapshot, no live-WS merge (§0.7)</div>
+      <div class="panel-src">bybit linear klines · REST · pure snapshot, no live-WS merge (§0.7)</div>
       <div id="view-hist" class="hist-wrap"></div>
       <div class="hist-replay-controls" id="hist-replay-controls">
         <button id="hist-play" type="button" title="Reveal bars in order from the start (or the scrub position)">▶ play</button>
@@ -392,7 +399,7 @@
           <select id="set-tpo-session"></select>
         </span>
       </h2>
-      <div class="panel-src" title="Classical TPO from 30m OHLC bars: each bar marks its full H–L range for its clock period — that IS the canonical Steidlmayer construction (touched/not-touched per period), nothing intra-bar is approximated. Sessions are UTC days.">kline-range TPO · 30m · bybit — canonical Steidlmayer construction · UTC-day sessions</div>
+      <div class="panel-src">kline-range TPO · 30m · bybit — canonical Steidlmayer construction · UTC-day sessions</div>
       <div id="view-tpo" class="tpo-wrap"></div>
       <div class="hint"><span class="hint-lead">letters A..v = 30m UTC periods (missing klines leave letter holes — gaps stay gaps).</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> <b>accent row = POC</b>, dashed = VAH/VAL (70% value area on TPO counts); <b>•</b> = interior single print; left bracket = initial balance (first 2 <i>observed</i> periods).</span></details></div>
     </section>
@@ -402,7 +409,7 @@
       <h2>composite volume profile
         <span class="signal-tag st-est" title="APPROXIMATION (§4c rail): OHLCV bars don’t say where volume printed inside the bar, so each bar’s volume is spread uniformly across its H–L ticks. Tick-accurate VP = the footprint gutter (live session) or the collector’s stored trades — never this panel.">estimated</span>
       </h2>
-      <div class="panel-src" title="APPROXIMATION (§4c rail): OHLCV bars don’t say where volume printed inside the bar, so each bar’s volume is spread uniformly across its H–L ticks. Tick-accurate VP = the footprint gutter (live session) or the collector’s stored trades — never this panel."><span class="src-flag">bar-range approximation (§4c)</span> — bar volume spread uniformly across its H–L ticks; tick-accurate VP = footprint gutter</div>
+      <div class="panel-src"><span class="src-flag">bar-range approximation (§4c)</span> — bar volume spread uniformly across its H–L ticks; tick-accurate VP = footprint gutter</div>
       <div id="view-klinevp" class="vp-wrap"></div>
       <div class="hint"><span class="hint-lead">built over the historical chart's current lookback + interval (follows its interval select).</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> ◆ HVN / ◇ LVN (local extrema with a prominence gate); dashed extensions = nodes away from the current price, untested until revisited.</span></details></div>
     </section>
@@ -411,7 +418,8 @@
       <h2>funding — cross-venue
         <span class="signal-tag st-desc" title="Per-row sources: bybit = live WS tickers; binancef = the existing REST poller (5s mark / 60s OI); okx = O-3 REST poll (60s, silent-null tolerated → '—'). Annualized = rate × 8760/intervalH — descriptive only, carry remains off-board (B3).">descriptive</span>
       </h2>
-      <div class="panel-src" title="Per-row sources: bybit = live WS tickers; binancef = the existing REST poller (5s mark / 60s OI); okx = O-3 REST poll (60s, silent-null tolerated → '—'). Annualized = rate × 8760/intervalH — descriptive only, carry remains off-board (B3).">bybit WS · binancef REST 5s/60s · okx REST 60s · annualized = rate × 8760/intervalH</div>
+      <div class="panel-src">bybit WS · binancef REST 5s/60s · okx REST 60s · annualized = rate × 8760/intervalH</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">Per-row sources: bybit = live WS tickers; binancef = the existing REST poller (5s mark / 60s OI); okx = O-3 REST poll (60s, silent-null tolerated → '—'). Annualized = rate × 8760/intervalH — descriptive only, carry remains off-board (B3).</span></details></div>
       <div id="view-farb" class="farb-wrap"></div>
     </section>
 
@@ -419,7 +427,8 @@
       <h2>macro — HIP-3 mids + proxies
         <span class="signal-tag st-est" title="Hyperliquid HIP-3 dex perps (km:/xyz: prefixed — the main-universe 'SPX' is the SPX6900 memecoin and is filtered out by construction, §4c) expose LIVE MIDS ONLY keyless: no history, so HIP-3 cells carry session-% and session-corr labeled with n. History legs (BTC/ETH/PAXG) use Bybit 1h klines. On-chain proxies track their index with error; no CME feeds.">estimated</span>
       </h2>
-      <div class="panel-src" title="Hyperliquid HIP-3 dex perps (km:/xyz: prefixed — the main-universe 'SPX' is the SPX6900 memecoin and is filtered out by construction, §4c) expose LIVE MIDS ONLY keyless: no history, so HIP-3 cells carry session-% and session-corr labeled with n. History legs (BTC/ETH/PAXG) use Bybit 1h klines. On-chain proxies track their index with error; no CME feeds."><span class="src-flag">on-chain proxies · no CME</span> — HIP-3 live mids only (session-% · corr labeled n) · history legs = bybit 1h klines</div>
+      <div class="panel-src"><span class="src-flag">on-chain proxies · no CME</span> — HIP-3 live mids only (session-% · corr labeled n) · history legs = bybit 1h klines</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">Hyperliquid HIP-3 dex perps (km:/xyz: prefixed — the main-universe 'SPX' is the SPX6900 memecoin and is filtered out by construction, §4c) expose LIVE MIDS ONLY keyless: no history, so HIP-3 cells carry session-% and session-corr labeled with n. History legs (BTC/ETH/PAXG) use Bybit 1h klines. On-chain proxies track their index with error; no CME feeds.</span></details></div>
       <div id="view-macro" class="macro-wrap"></div>
     </section>
 
@@ -431,7 +440,8 @@
       <h2>basis + funding — Bybit perp
         <span class="signal-tag st-desc" title="basis bp = (mark − index)/index · 1e4 and the funding rate, ring of the last ~1h of the EXISTING bybit tickers events (BasisSeries, §4g — no new feeds). Two panes, own scales. Descriptive; carry stays off-board (B3).">descriptive</span>
       </h2>
-      <div class="panel-src" title="basis bp = (mark − index)/index · 1e4 and the funding rate, ring of the last ~1h of the EXISTING bybit tickers events (BasisSeries, §4g — no new feeds). Funding absent on a partial delta stays absent (NaN skipped), never zero-coerced.">session ring of the existing ~1s mark events · two panes, own scales · absent funding stays absent (§0.7)</div>
+      <div class="panel-src">session ring of the existing ~1s mark events · two panes, own scales · absent funding stays absent (§0.7)</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">basis bp = (mark − index)/index · 1e4 and the funding rate, ring of the last ~1h of the EXISTING bybit tickers events (BasisSeries, §4g — no new feeds). Funding absent on a partial delta stays absent (NaN skipped), never zero-coerced.</span></details></div>
       <div id="view-basis" class="basis-wrap"></div>
     </section>
 
@@ -485,7 +495,8 @@
           <label title="draw the key levels as dashed horizontal markers on the footprint canvas (default on)"><input type="checkbox" id="set-klev-draw" checked /> draw on footprint</label>
         </span>
       </h2>
-      <div class="panel-src" title="Registry levels are recorded BTCUSDT days only (§4g honest note when another symbol is selected); weekly open = the Monday row's open (UTC week, convention); IB = first 2×30min UTC range of this session's own prints — unwitnessed opens stay honestly absent.">prior-day H/L/C · POC · VAH/VAL · naked POCs (age) · weekly open (Mon row, UTC) · live IB (first 2×30min UTC)</div>
+      <div class="panel-src">prior-day H/L/C · POC · VAH/VAL · naked POCs (age) · weekly open (Mon row, UTC) · live IB (first 2×30min UTC)</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">Registry levels are recorded BTCUSDT days only (§4g honest note when another symbol is selected); weekly open = the Monday row's open (UTC week, convention); IB = first 2×30min UTC range of this session's own prints — unwitnessed opens stay honestly absent.</span></details></div>
       <div id="view-keylevels" class="klev-wrap"></div>
     </section>
 
@@ -494,7 +505,7 @@
       <h2>auction profile — recorded ticks
         <span class="signal-tag st-desc" title="Tick-EXACT volume-at-price over the collector's recorded trades (bybit leg): today/local days via the BYOD API's /v1/profile (DuckDB aggregation, §4f), archived days read straight from the HF dataset in-browser (hyparquet, size-gated before download). POC/VAH/VAL use the ProfileStore-parity 70% expansion. Descriptive — recorded history, never a backtest input (§0.1).">descriptive</span>
       </h2>
-      <div class="panel-src" title="Tick-EXACT volume-at-price over the collector's recorded trades (bybit leg): today/local days via the BYOD API's /v1/profile (DuckDB aggregation, §4f), archived days read straight from the HF dataset in-browser (hyparquet, size-gated before download). POC/VAH/VAL use the ProfileStore-parity 70% expansion. Descriptive — recorded history, never a backtest input (§0.1).">tick-exact · local store / hf archive (size-gated) · recorded bybit trades — never a backtest input</div>
+      <div class="panel-src">tick-exact · local store / hf archive (size-gated) · recorded bybit trades — never a backtest input</div>
       <div class="auction-controls">
         <label for="set-auction-src">source</label>
         <select id="set-auction-src"><option value="today" selected>today (live BYOD)</option></select>
@@ -521,7 +532,7 @@
           <label title="overlay prior-day POC/VA + naked POCs on the historical chart and mark naked-POC rows on the DOM ladder"><input type="checkbox" id="set-levels-draw" /> draw on charts</label>
         </span>
       </h2>
-      <div class="panel-src" title="/v1/levels: one row per RECORDED UTC day (bybit leg) from data/ticks/levels.jsonl — O/H/L/C, POC, 70% value area, volume; 'naked' (POC never revisited by a LATER day's range) is DERIVED at serve time, never stored. Reference levels, not signals.">/v1/levels · serve-time naked · one row per recorded UTC day (bybit leg) — reference levels, not signals</div>
+      <div class="panel-src">/v1/levels · serve-time naked · one row per recorded UTC day (bybit leg) — reference levels, not signals</div>
       <div id="view-levels" class="lvls-wrap"></div>
       <div class="hint"><span class="hint-lead">recorded days only — a day the collector missed is an absent row, never an interpolated one (§0.7).</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> <b>draw on charts</b> puts prior-day POC/VA + naked POCs on the historical chart (dashed) and dots the DOM ladder rows at naked POCs.</span></details></div>
     </section>
@@ -532,7 +543,7 @@
       <h2>microstructure — bybit book
         <span class="signal-tag st-cite" title="OFI (Cont–Kukanov–Stoikov 2014) between successive ~1s top-5 book snapshots — the 1s snapshot approximation is stated (per-event OFI needs a full event feed); microprice (Stoikov 2018, first-order imbalance-weighted mid) minus mid. Both DESCRIPTIVE flow reads on the live bybit book — never signals. Each series gets its OWN pane and scale (§4f: never dual-axis).">cited</span>
       </h2>
-      <div class="panel-src" title="OFI (Cont–Kukanov–Stoikov 2014) between successive ~1s top-5 book snapshots — the 1s snapshot approximation is stated (per-event OFI needs a full event feed); microprice (Stoikov 2018, first-order imbalance-weighted mid) minus mid. Both DESCRIPTIVE flow reads on the live bybit book — never signals. Each series gets its OWN pane and scale (§4f: never dual-axis).">OFI · microprice — descriptive · Cont–Kukanov–Stoikov 2014 / Stoikov 2018 · 1s snapshot approximation stated</div>
+      <div class="panel-src">OFI · microprice — descriptive · Cont–Kukanov–Stoikov 2014 / Stoikov 2018 · 1s snapshot approximation stated</div>
       <div id="view-micro" class="micro-wrap"></div>
       <div class="hint"><span class="hint-lead">fed by the same event-ts-gated 1/s bybit book sampler as the depth history — a stalled feed stops producing samples (gaps stay gaps, §0.7).</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> OFI aggregates each second's book events into one e_t (stated approximation of the per-event definition); positive = net buy-side pressure. microprice − mid = how far the thin side pulls the estimator off the mid.</span></details></div>
     </section>
@@ -544,7 +555,7 @@
       <h2>VPIN — Bybit prints
         <span class="signal-tag st-cite" title="Easley, López de Prado &amp; O'Hara (2012), RFS 25(5): equal-volume buckets, per bucket |buyVol − sellVol|/V, VPIN = mean over the last 50. Classified with the REAL normalized aggressor flags (§0.6) — better-informed than the paper's BVC approximation. Toxicity interpretation CONTESTED (Andersen–Bondarenko 2014): series shown, no claim.">cited</span>
       </h2>
-      <div class="panel-src" title="V = session volume / 50, armed after the first 5 min of session flow and re-estimated hourly (setBucketVol, future buckets only — completed buckets keep the V they were measured at). Session-local; restarts with the symbol.">volume clock · V = session vol / 50 (armed at 5 min, re-estimated hourly — convention) · real aggressor flags</div>
+      <div class="panel-src">volume clock · V = session vol / 50 (armed at 5 min, re-estimated hourly — convention) · real aggressor flags</div>
       <div id="view-vpin" class="vpin-wrap"></div>
       <div class="hint"><span class="hint-lead">Easley, López de Prado &amp; O'Hara (2012) — computed from <b>real aggressor flags</b> (better-informed than the paper's BVC approximation).</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> The toxicity interpretation is <b>contested</b>: Andersen &amp; Bondarenko (2014) attribute VPIN's predictive content largely to trading intensity/volatility and dispute the flash-crash early-warning claim. The series is shown; no toxicity claim is made (§0.1 descriptive only).</span></details></div>
     </section>
@@ -572,7 +583,7 @@
           </select>
         </span>
       </h2>
-      <div class="panel-src" title="ONE 30s REST call carries all ~720 linear symbols (§4d). x = 24h %, y = last vs the 24h-VWAP PROXY (turnover24h/volume24h — response-derived, labeled, not a tick-accurate VWAP), r ∝ √turnover, color = funding sign (α ∝ |annualized|). A hot quadrant is a 24h fact, not a signal.">bybit linear · 24h VWAP = turnover/volume (response-derived proxy, not tick-accurate) · one 30s REST call</div>
+      <div class="panel-src">bybit linear · 24h VWAP = turnover/volume (response-derived proxy, not tick-accurate) · one 30s REST call</div>
       <div id="view-screener" class="scr-wrap"></div>
       <div class="hint"><span class="hint-lead">bubble = one perp symbol; quadrant cross at 0/0.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Rows without 24h volume have no VWAP and are <b>counted, not plotted</b> (a fabricated 0-deviation would lie). The current symbol wears the accent ring.</span></details></div>
     </section>
@@ -585,7 +596,7 @@
           <button id="rsi-refresh" type="button" title="re-fetch 1h klines for the current top-40 (also auto-refreshes every 5min)">refresh</button>
         </span>
       </h2>
-      <div class="panel-src" title="Last 1h RSI-14 (Wilder, quant.js rsi — indicator math is never reimplemented) per top-40 screener symbol; 40 kline fetches behind a 4-way politeness pool, refreshed on demand + every 5min. The strip renders partial state honestly as symbols land.">1h RSI-14 (Wilder, quant.js) · bybit klines · top-40 by turnover · partial state rendered honestly</div>
+      <div class="panel-src">1h RSI-14 (Wilder, quant.js) · bybit klines · top-40 by turnover · partial state rendered honestly</div>
       <div id="view-rsi" class="rsi-wrap"></div>
       <div class="hint"><span class="hint-lead">30/70 zones shaded; symbols at the extremes (&lt;25 or &gt;75) are named.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Vertical position is turnover <b>rank</b> (layout), not a data axis. An oscillator extreme is a description, not an entry.</span></details></div>
     </section>
@@ -599,7 +610,7 @@
           <select id="set-opt-expiry"></select>
         </span>
       </h2>
-      <div class="panel-src" title="§0.5 (non-negotiable): the dealer's side of each open contract is unknowable keyless, so gamma exposure stays UNSIGNED Σ|Γ|·OI — a concentration map, never a flip level or dealer-positioning claim. Chain: get_book_summary_by_currency (kind=option), 60s poll, CORS-open (§4d) — mark_iv only, greeks are client-side Black-76 (quant.js) on the mark surface."><span class="src-flag">unsigned Σ|Γ|·OI — dealer sign unknowable (§0.5)</span> · deribit mark-only chain · Black-76 greeks client-side</div>
+      <div class="panel-src"><span class="src-flag">unsigned Σ|Γ|·OI — dealer sign unknowable (§0.5)</span> · deribit mark-only chain · Black-76 greeks client-side</div>
       <div id="view-options" class="opts-wrap"></div>
       <div class="hint"><span class="hint-lead">smile + max pain read the <b>selected expiry</b>; term structure, heatmap, PCR and the GEX profile span every live expiry — <span class="hint-flag">never a forecast</span>.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Max pain / GEX are the same descriptive positioning reads as the analytics page — <b>never a forecast</b>.</span></details></div>
     </section>
@@ -608,7 +619,7 @@
       <h2>confluence — 9 mechanical reads
         <span class="signal-tag st-heur" title="The CryExc 'mechanical analysis' board, rebuilt with the §4d honesty rail: 9 descriptive category reads + a tally, evaluated every 5s of event time from the live stores. The IC run-log found ≈0 forward IC for board signals — the mandatory sentence below the tally says so on-page.">heuristic</span>
       </h2>
-      <div class="panel-src" title="The CryExc 'mechanical analysis' board, rebuilt with the §4d honesty rail: 9 descriptive category reads + a tally, evaluated every 5s of event time from the live stores. The IC run-log found ≈0 forward IC for board signals — the mandatory sentence below the tally says so on-page."><span class="src-flag">un-validated · NOT a signal</span> — 9 descriptive reads, IC run-log ≈ 0 forward IC · evaluated every 5s of event time</div>
+      <div class="panel-src"><span class="src-flag">un-validated · NOT a signal</span> — 9 descriptive reads, IC run-log ≈ 0 forward IC · evaluated every 5s of event time</div>
       <div id="view-conf" class="conf-wrap"></div>
       <div class="hint"><span class="hint-lead">a missing feed reads <b>n/a</b>, never 'neutral' — absence is not an opinion (§0.7).</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> REST-fed reads (TPO, SMA50) are n/a in replay.</span></details></div>
     </section>
@@ -618,7 +629,8 @@
       <h2>whale watch — Hyperliquid
         <span class="signal-tag st-desc" title="clearinghouseState is public on-chain state, queryable for any address — positions are FACTS, not signals (§4d). Watchlist persists locally (cap 25); each address polls every 60s, staggered. The leaderboard discover button is a one-shot ~33 MB opt-in download and says so before fetching.">descriptive</span>
       </h2>
-      <div class="panel-src" title="clearinghouseState is public on-chain state, queryable for any address — positions are FACTS, not signals (§4d). Watchlist persists locally (cap 25); each address polls every 60s, staggered. The leaderboard discover button is a one-shot ~33 MB opt-in download and says so before fetching.">public on-chain state (clearinghouseState) — facts, not signals · 60s staggered polls</div>
+      <div class="panel-src">public on-chain state (clearinghouseState) — facts, not signals · 60s staggered polls</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">clearinghouseState is public on-chain state, queryable for any address — positions are FACTS, not signals (§4d). Watchlist persists locally (cap 25); each address polls every 60s, staggered. The leaderboard discover button is a one-shot ~33 MB opt-in download and says so before fetching.</span></details></div>
       <div id="view-whale" class="whale-wrap"></div>
     </section>
 
@@ -626,7 +638,7 @@
       <h2>alerts
         <span class="signal-tag st-heur" title="AlertEngine (§4d): descriptive attention triggers over session facts — price cross, whale print, liq burst, funding flip, CVD divergence (heuristic), book imbalance, detector pass-through (heuristic), OI jump, basis. 60s per-rule cooldown, event-time driven. Un-validated: a trigger is a ping, never an entry.">heuristic</span>
       </h2>
-      <div class="panel-src" title="AlertEngine (§4d): descriptive attention triggers over session facts — price cross, whale print, liq burst, funding flip, CVD divergence (heuristic), book imbalance, detector pass-through (heuristic), OI jump, basis. 60s per-rule cooldown, event-time driven. Un-validated: a trigger is a ping, never an entry."><span class="src-flag">descriptive triggers — un-validated · not signals</span> · 60s per-rule cooldown, event-time</div>
+      <div class="panel-src"><span class="src-flag">descriptive triggers — un-validated · not signals</span> · 60s per-rule cooldown, event-time</div>
       <div id="view-alerts" class="alerts-wrap"></div>
       <div class="hint"><span class="hint-lead">thresholds are <b>visible inputs</b> (no defaults hidden in engine logic, §4d); a threshold-kind with an empty box cannot fire.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Browser notifications are opt-in and fire only while the tab is hidden — the in-page feed already covers the visible case.</span></details></div>
     </section>
@@ -650,7 +662,7 @@
       <h2>trade journal — your own trades
         <span class="signal-tag st-jour" title="§4e rail: a MANUAL log of the user's own trades (localStorage; CSV export/import for portability). R = pnl / your declared 1R; stats use the repo's Tharp conventions (quant.js expectancyReport / risk.py expectancy_report). Journaled ≠ backtested: n is tiny, entries are discretionary, and nothing here ever feeds the OOS harness.">journal</span>
       </h2>
-      <div class="panel-src" title="§4e rail: a MANUAL log of the user's own trades (localStorage; CSV export/import for portability). R = pnl / your declared 1R; stats use the repo's Tharp conventions (quant.js expectancyReport / risk.py expectancy_report). Journaled ≠ backtested: n is tiny, entries are discretionary, and nothing here ever feeds the OOS harness."><span class="src-flag">your logged trades — NOT a backtest</span> · manual log · localStorage · CSV export/import</div>
+      <div class="panel-src"><span class="src-flag">your logged trades — NOT a backtest</span> · manual log · localStorage · CSV export/import</div>
       <div id="view-journal" class="jour-wrap"></div>
       <div class="hint"><span class="hint-lead">the <b>log</b> button snapshots descriptive context (mark / funding / OI / CVD slope / confluence tally) onto the row — a record of conditions, never a judgment.</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> Import rejects bad rows <b>per line</b> (nothing silently coerced); rows with riskUsd ≤ 0 are kept but excluded from R stats, counted on-page.</span></details></div>
     </section>
@@ -659,7 +671,8 @@
       <h2>calendar returns
         <span class="signal-tag st-jour" title="§4e: journal-derived — daily/weekly/monthly/hour-of-day sums of YOUR logged R, bucketed by close time in UTC. Empty cells are days you didn't trade, not zeros.">journal</span>
       </h2>
-      <div class="panel-src" title="§4e: journal-derived — daily/weekly/monthly/hour-of-day sums of YOUR logged R, bucketed by close time in UTC. Empty cells are days you didn't trade, not zeros.">journal-derived · UTC close-time buckets — empty cells are days you didn't trade, not zeros</div>
+      <div class="panel-src">journal-derived · UTC close-time buckets — empty cells are days you didn't trade, not zeros</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">§4e: journal-derived — daily/weekly/monthly/hour-of-day sums of YOUR logged R, bucketed by close time in UTC. Empty cells are days you didn't trade, not zeros.</span></details></div>
       <div id="view-calendar" class="cal-wrap"></div>
     </section>
 
@@ -668,7 +681,8 @@
       <h2>prediction markets — Polymarket BTC
         <span class="signal-tag st-desc" title="§4e: /events?tag_slug=bitcoin (the one server-side filter that works — markets?search and markets?tag_slug ignore their filters, verified). outcomePrices arrive as STRINGS in a JSON-encoded array; yes% = Number(prices[0])×100. Crowd-implied probabilities — not a forecast endorsement.">descriptive</span>
       </h2>
-      <div class="panel-src" title="§4e: /events?tag_slug=bitcoin (the one server-side filter that works — markets?search and markets?tag_slug ignore their filters, verified). outcomePrices arrive as STRINGS in a JSON-encoded array; yes% = Number(prices[0])×100. Crowd-implied probabilities — not a forecast endorsement."><span class="src-flag">crowd-implied probabilities</span> — not a forecast endorsement · /events?tag_slug=bitcoin · 60s poll</div>
+      <div class="panel-src"><span class="src-flag">crowd-implied probabilities</span> — not a forecast endorsement · /events?tag_slug=bitcoin · 60s poll</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">§4e: /events?tag_slug=bitcoin (the one server-side filter that works — markets?search and markets?tag_slug ignore their filters, verified). outcomePrices arrive as STRINGS in a JSON-encoded array; yes% = Number(prices[0])×100. Crowd-implied probabilities — not a forecast endorsement.</span></details></div>
       <div id="view-polymarket" class="poly-wrap"></div>
     </section>
 
@@ -686,7 +700,8 @@
           </label>
         </span>
       </h2>
-      <div class="panel-src" title="§4e: REST poll of news.treeofalpha.com (CORS *), 30s. A context feed: headlines are descriptive context, never tradeable information. BTC-tagged items are emphasized using the feed's own symbol tags.">context feed · 30s poll — headlines are context, never tradeable information</div>
+      <div class="panel-src">context feed · 30s poll — headlines are context, never tradeable information</div>
+      <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">§4e: REST poll of news.treeofalpha.com (CORS *), 30s. A context feed: headlines are descriptive context, never tradeable information. BTC-tagged items are emphasized using the feed's own symbol tags.</span></details></div>
       <div id="view-news" class="news-wrap"></div>
     </section>
 
@@ -705,7 +720,8 @@
       <h2>econ calendar — ForexFactory mirror
         <span class="signal-tag st-desc" title="§4e empirical: the faireconomy econ JSON has NO CORS header — the browser cannot fetch it directly. scripts/fetch_econ.py (stdlib, `make econ`) writes dashboard/econ_calendar.json same-origin; this panel reads that local file and shows its fetch age. Scheduled events are context, not predictions.">descriptive</span>
       </h2>
-      <div class="panel-src" title="§4e empirical: the faireconomy econ JSON has NO CORS header — the browser cannot fetch it directly. scripts/fetch_econ.py (stdlib, `make econ`) writes dashboard/econ_calendar.json same-origin; this panel reads that local file and shows its fetch age. Scheduled events are context, not predictions.">fetched locally (no CORS) via make econ — scheduled events are context, not predictions</div>
+      <div class="panel-src">fetched locally (no CORS) via make econ — scheduled events are context, not predictions</div>
+        <div class="hint"><details class="hint-more"><summary>more…</summary><span class="hint-rest">§4e empirical: the faireconomy econ JSON has NO CORS header — the browser cannot fetch it directly. scripts/fetch_econ.py (stdlib, `make econ`) writes dashboard/econ_calendar.json same-origin; this panel reads that local file and shows its fetch age. Scheduled events are context, not predictions.</span></details></div>
       <div id="view-econ" class="econ-wrap"></div>
     </section>
 

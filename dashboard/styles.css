@@ -181,15 +181,42 @@ header.topbar {
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel-2);
 }
+/* Wordmark (T-4 refinement). A treatment already existed — mono 600 with the amber
+   dot — and it stays: mono is the right voice for an instrument, and the accent dot
+   is the one piece of brand colour on the page. What changed is the RELATIONSHIP
+   between the mark and its descriptor. They previously shared one letter-spacing
+   and sat in one undifferentiated line, so "btc·quant orderflow terminal" read as
+   four words of equal rank. Now the mark leads at full foreground strength with
+   tighter tracking, and the descriptor becomes a separate nameplate field —
+   hairline-divided, small, wide-tracked, muted. Restrained on purpose: a rule and a
+   tracking change, no second accent and no new colour (§4.5 "chrome does not carry
+   colour" — the amber dot and the price are the only exceptions). */
 header.topbar h1 {
   font-family: var(--mono);   /* the wordmark stays terminal-mono */
   font-size: var(--fs-lg);
   margin: 0;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;     /* tighter than the descriptor — the mark is one unit */
   font-weight: 600;
+  color: var(--fg);
+  display: inline-flex;
+  align-items: baseline;
+  white-space: nowrap;
+  /* NO flex `gap` here: the amber dot is its own <span>, so a gap would space
+     "btc · quant" apart and break the mark into three words. Only the descriptor
+     needs separation, and it takes its own margin below. */
 }
 header.topbar h1 .tick { color: var(--accent); }   /* amber brand dot */
-header.topbar .subtitle { color: var(--muted); font-size: var(--fs-sm); }
+header.topbar .subtitle {
+  color: var(--muted);
+  font-size: var(--fs-2xs);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;             /* wide tracking = a field label, not a title */
+  margin-left: var(--sp-3);
+  padding-left: var(--sp-3);
+  border-left: 1px solid var(--border);   /* the nameplate divider */
+  align-self: center;
+}
 header.topbar .price {
   margin-left: auto;
   font-size: var(--fs-xl);

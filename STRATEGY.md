@@ -117,7 +117,11 @@ feature list.
   missing.
 - **Gap 8 — [minor]** no orchestrator unit test (`terminal.js` glue is only covered
   e2e); silent catches with no telemetry (`livewire.js:76`); pure-util duplication
-  (`finiteOr/posOr/makeRing` byte-identical in two modules); ~~`--g-400 ~2.9:1` below WCAG
+  ~~(`finiteOr/posOr/makeRing` byte-identical in two modules)~~ *(pure-util duplication is
+  still open — M5)*; the control-row / column-header CSS duplication is **closed (T-4)**: 6
+  bespoke `*-controls` and 7 identical column-header rules now share two definitions,
+  verified computed-style-identical in Chromium (class names kept — three are built in JS);
+  ~~`--g-400 ~2.9:1` below WCAG
   AA used for readable text~~ **closed (T-4)**: readable labels/notes/values moved to
   `--g-300` (clears 4.5:1); `--g-400` is now reserved for borders, disabled controls and
   text whose dimness IS the message (an explicit N/A value/badge/tally, an
@@ -282,6 +286,12 @@ sequence to the calendar, not to enthusiasm.
       (fp's second render unit) stopped being spelled inline in two places. Check gate
       79→82 groups: registry↔DOM both directions, the load-bearing `header` exemption,
       and GOLDEN pins reproducing the pre-M3 literals exactly.
+      Caption discipline landed with it: `.hint` **18/35 → 34/35** (only the stats strip
+      lacks one, correctly — it has no methodology to caption), and all **33** hover-only
+      `.panel-src[title]` strings moved into the visible `more…` disclosure or dropped where
+      they duplicated the `signal-tag` tooltip verbatim (23 of 33 were byte-identical). A
+      tooltip is not reachable by keyboard or touch, so this is an a11y fix as much as a
+      de-duplication; costs +173px of collapsed disclosures.
       **Still open — the `render(ctx)` half:** the 34 `frame()` blocks stay
       block-per-panel. Each carries bespoke slice-building and sits nested inside
       section/availability gates, so flattening them into descriptor thunks changes
