@@ -117,8 +117,12 @@ feature list.
   missing.
 - **Gap 8 — [minor]** no orchestrator unit test (`terminal.js` glue is only covered
   e2e); silent catches with no telemetry (`livewire.js:76`); pure-util duplication
-  (`finiteOr/posOr/makeRing` byte-identical in two modules); `--g-400 ~2.9:1` below WCAG
-  AA used for readable text; deploy hygiene (`mlflow.db`, `mlruns/`, a 133 MB
+  (`finiteOr/posOr/makeRing` byte-identical in two modules); ~~`--g-400 ~2.9:1` below WCAG
+  AA used for readable text~~ **closed (T-4)**: readable labels/notes/values moved to
+  `--g-300` (clears 4.5:1); `--g-400` is now reserved for borders, disabled controls and
+  text whose dimness IS the message (an explicit N/A value/badge/tally, an
+  "alerts: nothing fired" empty state) — the five WCAG-exempt cases, listed in
+  `terminal.css`; deploy hygiene (`mlflow.db`, `mlruns/`, a 133 MB
   `.duckdb.wal.checkpoint` in the tree).
 
 ## 4. The execution boundary (HFT / MM reality)
@@ -318,8 +322,17 @@ sequence to the calendar, not to enthusiasm.
       away.
 - [ ] **L5. Dockable/resizable/pop-out workspace layer** (draggable header, resize handle,
       `window.open` + BroadcastChannel shared store, saved layouts; the current grid
-      becomes the "all" preset). Interim cheap step first: a focus/maximize mode
-      (double-click a panel → full viewport, esc to return).
+      becomes the "all" preset). ~~Interim cheap step first: a focus/maximize mode
+      (double-click a panel → full viewport, esc to return).~~ **Interim step done
+      (T-4, 2026-07-26):** double-click a panel header → full viewport, `Esc` returns.
+      Two classes only, so CSS owns it and no element MOVES in the DOM (relocating a
+      canvas forces a re-measure and can re-enter the documented `.fp-wrap` 620px →
+      ~3000px size feedback loop). Handles the 7 panels NESTED in a `.term-col` via
+      `:has()` — hiding every non-focused direct child of `<main>` would hide the
+      column holding a focused nested panel, i.e. the panel vanishes when you
+      maximize it. Proven by `make verify-focus`, which covers the nested case
+      explicitly and asserts no store count regresses across the toggle. The
+      docking/pop-out/saved-layout half is still open.
 - [ ] **L6. Pre-register the FIRST order-flow candidate** with a kill criterion; score it
       continuously as history accrues. Wire the gated terminal signal panel LAST — until
       `CLEARED` it shows a countdown, never a prediction.

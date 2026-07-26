@@ -3869,6 +3869,14 @@
   //           throttled (§4e.2). Tuned per panel cost, rationale inline below.
   //   section the collapse-gate section, or null to be EXEMPT from it.
   //   anchor  the DOM id the IntersectionObserver watches, or null for none.
+  //   tier    visual weight: 'primary' | 'secondary' | 'tertiary' (T-4). The
+  //           instrument vs the instrumentation. 35 panels carried IDENTICAL
+  //           visual weight, so nothing on the page signalled what matters —
+  //           the footprint and the tape read exactly like the econ calendar.
+  //           This is per-panel metadata, which is why it belongs on the
+  //           descriptor rather than in 35 hand-written CSS rules; terminal.js
+  //           stamps it as data-tier on each panel element and the sheet styles
+  //           it. Presentation ONLY — it changes no gate, budget or datum.
   //   extra   OPTIONAL extra DOM ids this key also paints, for a panel that owns
   //           more than one render unit (only 'fp', which paints the footprint
   //           canvas AND the CVD strip beneath it). Declared here so the
@@ -3884,45 +3892,45 @@
     // ORDERFLOW (§4b/§4g/§4h/§4i). fp repaints hundreds of cells; dom is a fixed
     // text-pool update; heat/liqmap update at ~1s/5s data cadence anyway, so
     // their budgets just cap bursts.
-    { key: 'header', minMs: 400, section: null, anchor: null },
-    { key: 'fp', minMs: 250, section: 'orderflow', anchor: 'view-footprint', extra: ['view-cvd'] },
-    { key: 'dom', minMs: 120, section: 'orderflow', anchor: 'view-dom' },
-    { key: 'tape', minMs: 180, section: 'orderflow', anchor: 'view-tape' },
-    { key: 'agg', minMs: 220, section: 'orderflow', anchor: 'view-aggbook' },
-    { key: 'liq', minMs: 300, section: 'orderflow', anchor: 'view-liq' },
-    { key: 'heat', minMs: 500, section: 'orderflow', anchor: 'view-bookheat' },
-    { key: 'liqmap', minMs: 600, section: 'orderflow', anchor: 'view-liqheat' },
-    { key: 'det', minMs: 250, section: 'orderflow', anchor: 'view-detect' },
+    { key: 'header', minMs: 400, section: null, anchor: null, tier: 'primary' },
+    { key: 'fp', minMs: 250, section: 'orderflow', anchor: 'view-footprint', extra: ['view-cvd'], tier: 'primary' },
+    { key: 'dom', minMs: 120, section: 'orderflow', anchor: 'view-dom', tier: 'primary' },
+    { key: 'tape', minMs: 180, section: 'orderflow', anchor: 'view-tape', tier: 'primary' },
+    { key: 'agg', minMs: 220, section: 'orderflow', anchor: 'view-aggbook', tier: 'primary' },
+    { key: 'liq', minMs: 300, section: 'orderflow', anchor: 'view-liq', tier: 'secondary' },
+    { key: 'heat', minMs: 500, section: 'orderflow', anchor: 'view-bookheat', tier: 'secondary' },
+    { key: 'liqmap', minMs: 600, section: 'orderflow', anchor: 'view-liqheat', tier: 'secondary' },
+    { key: 'det', minMs: 250, section: 'orderflow', anchor: 'view-detect', tier: 'secondary' },
     // T-1 (§4g): tapeint ticks with the tape burst (text strip + 120px spark —
     // cheap); walls at the 1/s sampler. T-2 (§4h): spcvd on the CVD setData budget.
-    { key: 'tapeint', minMs: 500, section: 'orderflow', anchor: 'view-tapeint' },
-    { key: 'walls', minMs: 1000, section: 'orderflow', anchor: 'view-walls' },
-    { key: 'spcvd', minMs: 600, section: 'orderflow', anchor: 'view-spotperp' },
+    { key: 'tapeint', minMs: 500, section: 'orderflow', anchor: 'view-tapeint', tier: 'secondary' },
+    { key: 'walls', minMs: 1000, section: 'orderflow', anchor: 'view-walls', tier: 'secondary' },
+    { key: 'spcvd', minMs: 600, section: 'orderflow', anchor: 'view-spotperp', tier: 'secondary' },
     // STRUCTURE (§4c): hist/tpo/vp repaint only on (re)fetch or control change;
     // farb ticks with its 1s countdown; macro moves at poll cadence (>=10s);
     // basis at the ~1s mark cadence (the view throttles setData further).
-    { key: 'hist', minMs: 500, section: 'structure', anchor: 'view-hist' },
-    { key: 'tpo', minMs: 800, section: 'structure', anchor: 'view-tpo' },
-    { key: 'vp', minMs: 800, section: 'structure', anchor: 'view-klinevp' },
-    { key: 'farb', minMs: 500, section: 'structure', anchor: 'view-farb' },
-    { key: 'macro', minMs: 800, section: 'structure', anchor: 'view-macro' },
-    { key: 'basis', minMs: 600, section: 'structure', anchor: 'view-basis' },
+    { key: 'hist', minMs: 500, section: 'structure', anchor: 'view-hist', tier: 'secondary' },
+    { key: 'tpo', minMs: 800, section: 'structure', anchor: 'view-tpo', tier: 'secondary' },
+    { key: 'vp', minMs: 800, section: 'structure', anchor: 'view-klinevp', tier: 'secondary' },
+    { key: 'farb', minMs: 500, section: 'structure', anchor: 'view-farb', tier: 'tertiary' },
+    { key: 'macro', minMs: 800, section: 'structure', anchor: 'view-macro', tier: 'tertiary' },
+    { key: 'basis', minMs: 600, section: 'structure', anchor: 'view-basis', tier: 'secondary' },
     // AUCTION (I-1 §4f): auct moves on fetch/60s refresh; lvls/klev at the 5min
     // poll; micro at the 1/s sampler; vpin per completed bucket.
-    { key: 'auct', minMs: 800, section: 'auction', anchor: 'view-auction' },
-    { key: 'lvls', minMs: 1000, section: 'auction', anchor: 'view-levels' },
-    { key: 'micro', minMs: 500, section: 'auction', anchor: 'view-micro' },
-    { key: 'klev', minMs: 1000, section: 'auction', anchor: 'view-keylevels' },
-    { key: 'vpin', minMs: 800, section: 'auction', anchor: 'view-vpin' },
+    { key: 'auct', minMs: 800, section: 'auction', anchor: 'view-auction', tier: 'secondary' },
+    { key: 'lvls', minMs: 1000, section: 'auction', anchor: 'view-levels', tier: 'tertiary' },
+    { key: 'micro', minMs: 500, section: 'auction', anchor: 'view-micro', tier: 'secondary' },
+    { key: 'klev', minMs: 1000, section: 'auction', anchor: 'view-keylevels', tier: 'secondary' },
+    { key: 'vpin', minMs: 800, section: 'auction', anchor: 'view-vpin', tier: 'secondary' },
     // INTELLIGENCE (O-4 §4d): scr/rsi/opts move at REST-poll cadence (30-60s),
     // so budgets just cap redraw bursts from hover-independent dirty flips;
     // conf/alerts tick with the 5s intel gate; whale at its 60s/address polls.
-    { key: 'scr', minMs: 800, section: 'intelligence', anchor: 'view-screener' },
-    { key: 'rsi', minMs: 500, section: 'intelligence', anchor: 'view-rsi' },
-    { key: 'opts', minMs: 1000, section: 'intelligence', anchor: 'view-options' },
-    { key: 'whale', minMs: 600, section: 'intelligence', anchor: 'view-whale' },
-    { key: 'alerts', minMs: 300, section: 'intelligence', anchor: 'view-alerts' },
-    { key: 'conf', minMs: 800, section: 'intelligence', anchor: 'view-conf' },
+    { key: 'scr', minMs: 800, section: 'intelligence', anchor: 'view-screener', tier: 'tertiary' },
+    { key: 'rsi', minMs: 500, section: 'intelligence', anchor: 'view-rsi', tier: 'tertiary' },
+    { key: 'opts', minMs: 1000, section: 'intelligence', anchor: 'view-options', tier: 'tertiary' },
+    { key: 'whale', minMs: 600, section: 'intelligence', anchor: 'view-whale', tier: 'tertiary' },
+    { key: 'alerts', minMs: 300, section: 'intelligence', anchor: 'view-alerts', tier: 'tertiary' },
+    { key: 'conf', minMs: 800, section: 'intelligence', anchor: 'view-conf', tier: 'tertiary' },
     // T-4 (§4j) the local-only strip. Exempt from BOTH gates, and unlike header
     // for a second, separate reason — recorded because it is easy to "tidy" away:
     // it spans TWO sections (auction + portfolio), so a single section gate would
@@ -3933,14 +3941,13 @@
     // writing DOM only when its fold state changes — so the API coming back
     // restores full panels without a reload. It owns two fold containers.
     { key: 'local', minMs: 1000, section: null, anchor: null,
-      extra: ['local-only-api', 'local-only-econ'] },
-    // PORTFOLIO (O-5 §4e): jour/cal move on user actions; poly/news/econ at
+      extra: ['local-only-api', 'local-only-econ'], tier: 'tertiary' },    // PORTFOLIO (O-5 §4e): jour/cal move on user actions; poly/news/econ at
     // their 30-60s poll cadence.
-    { key: 'jour', minMs: 400, section: 'portfolio', anchor: 'view-journal' },
-    { key: 'cal', minMs: 600, section: 'portfolio', anchor: 'view-calendar' },
-    { key: 'poly', minMs: 1000, section: 'portfolio', anchor: 'view-polymarket' },
-    { key: 'news', minMs: 800, section: 'portfolio', anchor: 'view-news' },
-    { key: 'econ', minMs: 1000, section: 'portfolio', anchor: 'view-econ' },
+    { key: 'jour', minMs: 400, section: 'portfolio', anchor: 'view-journal', tier: 'tertiary' },
+    { key: 'cal', minMs: 600, section: 'portfolio', anchor: 'view-calendar', tier: 'tertiary' },
+    { key: 'poly', minMs: 1000, section: 'portfolio', anchor: 'view-polymarket', tier: 'tertiary' },
+    { key: 'news', minMs: 800, section: 'portfolio', anchor: 'view-news', tier: 'tertiary' },
+    { key: 'econ', minMs: 1000, section: 'portfolio', anchor: 'view-econ', tier: 'tertiary' },
   ];
 
   /** The five per-panel lookups terminal.js's render loop needs, DERIVED from

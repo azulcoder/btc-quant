@@ -4050,6 +4050,38 @@ group('livewire onDropped silent-catch hook (N5)', () => {
   }
 });
 
+group('type scale enforced: no raw font-size px literals in terminal.css (T-4)', () => {
+  // The scale used to bottom out at --fs-xs (11px) while terminal.css carried 39
+  // raw literals below it — 24x 10px, 14x 9px, 1x 8px — so the dense chrome was
+  // sized by accident, panel by panel, with no shared step. The two steps the
+  // design actually needs are NAMED now (--fs-2xs tabular chrome, --fs-3xs
+  // micro-annotation), which makes this rule checkable instead of aspirational.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'terminal.css'), 'utf8');
+  const raw = [];
+  const re = /font-size:\s*([0-9.]+)px/g;
+  let m;
+  while ((m = re.exec(css)) !== null) {
+    const line = css.slice(0, m.index).split('\n').length;
+    raw.push('terminal.css:' + line + ' → ' + m[0]);
+  }
+  assert.deepStrictEqual(raw, [],
+    'every font-size in terminal.css must use a scale token (--fs-3xs…--fs-2xl), not a px literal');
+
+  // The tokens the sheet now depends on must EXIST in styles.css, or every one of
+  // those converted sites silently falls back to the inherited size.
+  const tokens = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'styles.css'), 'utf8');
+  for (const t of ['--fs-3xs', '--fs-2xs', '--fs-xs', '--fs-sm', '--fs-base', '--fs-lg', '--fs-xl']) {
+    assert.ok(new RegExp('\\' + t + ':\\s*[0-9]').test(tokens), t + ' is defined in styles.css');
+  }
+  // Every --fs-* token terminal.css REFERENCES must be one of those defined — a
+  // typo'd var() is invisible in a browser (it just inherits).
+  const referenced = new Set((css.match(/var\((--fs-[a-z0-9-]+)/g) || []).map((v) => v.slice(4)));
+  for (const t of referenced) {
+    assert.ok(new RegExp('\\' + t + ':\\s*[0-9]').test(tokens),
+      'terminal.css references ' + t + ' — it must be defined in styles.css');
+  }
+});
+
 group('PANEL_DEFS registry <-> DOM consistency + derived-table shape (M3)', () => {
   const DEFS = S.PANEL_DEFS;
   assert.ok(Array.isArray(DEFS) && DEFS.length >= 30, 'PANEL_DEFS is the registry array');

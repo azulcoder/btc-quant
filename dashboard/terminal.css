@@ -96,7 +96,7 @@
   border-radius: var(--radius);
   background: var(--warn-fg);
   color: var(--warn-bg);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 0.05em;
   white-space: nowrap;
   overflow: hidden;
@@ -176,7 +176,7 @@ header.topbar .subtitle { color: var(--muted); font-size: var(--fs-sm); font-wei
    FIRST in the line so the ellipsis can never swallow them. */
 .panel-src {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   line-height: 1.5;
   color: var(--muted);
   white-space: nowrap;
@@ -203,7 +203,7 @@ details.hint-more[open] { display: block; }
 details.hint-more > summary {
   list-style: none;
   cursor: pointer;
-  color: var(--g-400);
+  color: var(--g-300);
   /* The DOM text stays 'more…'; the ::after swap below renders 'less' while
      open without touching the text node. */
   font-size: 0;
@@ -325,11 +325,11 @@ main.term-main {
   gap: var(--sp-2);
   margin-top: var(--sp-3);             /* + the 8px grid gaps ≈ 28px between sections */
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   font-weight: 600;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: var(--g-400);
+  color: var(--g-300);
 }
 .sec-hdr::after { content: ''; flex: 1 1 auto; border-top: 1px solid var(--border); }
 
@@ -485,7 +485,7 @@ main.term-main {
   margin-right: 5px;
   vertical-align: middle;
 }
-.lg-note, .chips-note { color: var(--g-400); }
+.lg-note, .chips-note { color: var(--g-300); }
 
 /* ─── Header stats strip ─────────────────────────────────────────────────── */
 .term-chips { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; margin-bottom: var(--sp-2); }
@@ -524,10 +524,10 @@ main.term-main {
   top: 3px;
   left: var(--sp-2);
   font-family: var(--mono);
-  font-size: 8px;
+  font-size: var(--fs-3xs);
   font-weight: 600;
   letter-spacing: 0.14em;
-  color: var(--g-400);
+  color: var(--g-300);
   text-transform: uppercase;
   pointer-events: none;
 }
@@ -561,7 +561,7 @@ table.ladder th {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   padding: 1px var(--sp-2);
   border-bottom: 1px solid var(--border);
   text-align: right;
@@ -594,7 +594,7 @@ table.ladder tr.spread td {
 /* ─── T-3 (§4i): trade imprint + cum + wall marker + spread readouts ─────── */
 /* Imprint = rolling executed volume-at-price (sell left, buy right — position
    is the second cue next to the coloured mini bar background). */
-table.ladder td.imp { color: var(--muted); font-size: 10px; }
+table.ladder td.imp { color: var(--muted); font-size: var(--fs-2xs); }
 table.ladder td.imp-buy { text-align: left; }
 table.ladder td.cum { color: var(--muted); }
 /* WallsLedger marker (§4g cross-reference): a ‖ after the price on a wall
@@ -605,7 +605,7 @@ table.ladder tr.wall td.px::after {
   content: '‖'; color: var(--accent); font-weight: 700; margin-left: 4px;
 }
 /* Enriched spread row: mid marker + spread ticks/bps + TOB & N-tick imbalance. */
-table.ladder tr.spread td { font-size: 10px; }
+table.ladder tr.spread td { font-size: var(--fs-2xs); }
 table.ladder tr.spread .sp-mid { color: var(--fg); font-weight: 600; margin-right: 8px; }
 table.ladder tr.spread .sp-x { color: var(--muted); margin: 0 5px; }
 
@@ -640,7 +640,7 @@ table.ladder tr.spread .sp-x { color: var(--muted); margin: 0 5px; }
 .tape-head {
   color: var(--muted);
   text-transform: uppercase;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   border-bottom: 1px solid var(--border);
   padding-bottom: 2px;
   margin-bottom: 2px;
@@ -652,19 +652,20 @@ table.ladder tr.spread .sp-x { color: var(--muted); margin: 0 5px; }
    consistent with the agg-book stacking colors. */
 /* Venue = a coloured dot (EX_TOKEN hue, one venue = one colour across panels);
    the tag text stays muted so the dot carries the colour cue. */
-.tape-row .ex { font-size: 10px; color: var(--muted); display: inline-flex; align-items: center; gap: 3px; overflow: hidden; }
+.tape-row .ex { font-size: var(--fs-2xs); color: var(--muted); display: inline-flex; align-items: center; gap: 3px; overflow: hidden; }
 .tape-row .ex.spot { text-decoration: underline dotted; text-underline-offset: 2px; }  /* market = second cue */
 .ex-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; flex: none; }
 
 /* T-4 Wave 2: the relocated library attribution (see the terminal.html footer).
    The five on-canvas TradingView watermarks are off via layout.attributionLogo;
    the credit lives here once instead. Quiet and secondary to the terminal's own
-   footer prose — it is a credit, not content. */
-footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(--g-400); }
+   footer prose — but it is CONTENT (a licence credit), so it sits on --g-300 with
+   the other readable text, not on the disabled-chrome step. */
+footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-2xs); color: var(--g-300); }
 /* ─── T-3 (§4i): size-tiered tape blocks — colour intensity + weight is the
    redundant cue next to the log-notional bar (the ◆/◇ glyph is the third). ── */
 .tape-row .qty { position: relative; background-clip: padding-box; }
-.tape-row .qty .xn { color: var(--muted); font-size: 9px; margin-left: 3px; }
+.tape-row .qty .xn { color: var(--muted); font-size: var(--fs-3xs); margin-left: 3px; }
 .tape-row.tier-baseline { opacity: 0.6; }        /* dust — dim, still legible */
 .tape-row.tier-sig      { opacity: 0.85; }
 .tape-row.big           { font-weight: 700; }    /* huge / whale */
@@ -681,7 +682,7 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(-
   border-bottom: 1px solid var(--border);
   scrollbar-width: thin;
 }
-.bp-label { flex: none; color: var(--muted); text-transform: uppercase; font-size: 9px; letter-spacing: 0.05em; }
+.bp-label { flex: none; color: var(--muted); text-transform: uppercase; font-size: var(--fs-3xs); letter-spacing: 0.05em; }
 .bp-empty { color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs); }
 .bp-chip {
   flex: none; display: inline-flex; align-items: center; gap: 4px;
@@ -691,7 +692,7 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(-
 }
 .bp-chip b { font-weight: 700; }
 .bp-chip .bp-px { color: var(--muted); }
-.bp-chip .bp-age { color: var(--muted); font-size: 9px; }
+.bp-chip .bp-age { color: var(--muted); font-size: var(--fs-3xs); }
 .bp-chip.tier-whale { border-color: var(--accent); }
 
 /* T-4 (§4j) sub-floor caption: what the min-notional floor took OUT of view.
@@ -710,7 +711,7 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(-
 
 /* Honesty line: which legs feed the merged tape + that tiers are conventions. */
 .tape-hon {
-  color: var(--muted); font-family: var(--mono); font-size: 10px; line-height: 1.35;
+  color: var(--muted); font-family: var(--mono); font-size: var(--fs-2xs); line-height: 1.35;
   padding: 3px 2px 0; margin-top: 2px; border-top: 1px solid var(--border);
 }
 
@@ -740,7 +741,7 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(-
 .liq-head {
   color: var(--muted);
   text-transform: uppercase;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   border-bottom: 1px solid var(--border);
   padding-bottom: 2px;
   margin-bottom: 2px;
@@ -750,7 +751,7 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(-
 /* side = the LIQUIDATED position (§3): long liq = forced sell → --down;
    short liq = forced buy-back → --up. Text badge is the non-color cue. */
 .liq-badge {
-  font-size: 9px;
+  font-size: var(--fs-3xs);
   font-weight: 700;
   letter-spacing: 0.05em;
   padding: 0 4px;
@@ -788,7 +789,7 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(-
 .det-head {
   color: var(--muted);
   text-transform: uppercase;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   border-bottom: 1px solid var(--border);
   padding-bottom: 2px;
   margin-bottom: 2px;
@@ -803,7 +804,7 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(-
 /* Per-row 'heuristic' badge (§4b label rail) — warn palette, same visual
    language as the .signal-tag.research header tag. */
 .det-badge {
-  font-size: 9px;
+  font-size: var(--fs-3xs);
   font-weight: 700;
   letter-spacing: 0.05em;
   padding: 0 4px;
@@ -827,7 +828,7 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(-
   color: var(--muted);
   pointer-events: none;   /* never block the chart's own crosshair */
 }
-.cvd-anchor { color: var(--g-400); }
+.cvd-anchor { color: var(--g-300); }
 
 /* ─── Settings row ───────────────────────────────────────────────────────── */
 .area-set select { min-width: 90px; }
@@ -855,7 +856,7 @@ footer p.attrib { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(-
 /* Bar-replay flag in the panel header (§0: a rewound chart must never read
    as the live edge) — warn palette, same visual language as .signal-tag.research. */
 .hist-flag {
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   font-weight: 700;
   letter-spacing: 0.05em;
   padding: 1px 6px;
@@ -899,7 +900,7 @@ table.farb-table th {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   padding: 1px var(--sp-2);
   border-bottom: 1px solid var(--border);
   text-align: right;
@@ -911,7 +912,7 @@ table.farb-table td.ex { text-align: left; font-weight: 600; }
 table.farb-table td.ex-bybit { color: var(--c2); }
 table.farb-table td.ex-binancef { color: var(--c1); }
 table.farb-table td.ex-okx { color: var(--c3); }
-.farb-src { color: var(--g-400); font-weight: 400; font-size: 9px; }
+.farb-src { color: var(--g-300); font-weight: 400; font-size: var(--fs-3xs); }
 table.farb-table td.pos { color: var(--up); }
 table.farb-table td.neg { color: var(--down); }
 table.farb-table tr.farb-spread td {
@@ -951,7 +952,7 @@ table.farb-table tr.farb-spread td {
 .macro-cell .v { display: block; font-size: var(--fs-sm); font-weight: 600; white-space: nowrap; }
 .macro-cell .v.pos { color: var(--up); }
 .macro-cell .v.neg { color: var(--down); }
-.macro-src { color: var(--g-400); font-style: normal; font-size: 9px; text-transform: none; }
+.macro-src { color: var(--g-300); font-style: normal; font-size: var(--fs-3xs); text-transform: none; }
 .macro-scaled { color: var(--muted); font-weight: 400; font-size: var(--fs-xs); }
 
 /* Macro correlation block: label / value / window-or-n tag per row. */
@@ -959,7 +960,7 @@ table.farb-table tr.farb-spread td {
 .macro-corr-head {
   color: var(--muted);
   text-transform: uppercase;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 0.04em;
   border-bottom: 1px solid var(--border);
   padding-bottom: 2px;
@@ -1032,7 +1033,7 @@ table.farb-table tr.farb-spread td {
    its own DIMMER style — absence must not read as an opinion (§4d). Text is
    the non-color cue in all four. */
 .conf-badge {
-  font-size: 9px;
+  font-size: var(--fs-3xs);
   font-weight: 700;
   letter-spacing: 0.05em;
   padding: 0 4px;
@@ -1085,7 +1086,7 @@ table.farb-table tr.farb-spread td {
 .whale-head {
   color: var(--muted);
   text-transform: uppercase;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   border-bottom: 1px solid var(--border);
   padding-bottom: 2px;
   margin-bottom: 2px;
@@ -1096,7 +1097,7 @@ table.farb-table tr.farb-spread td {
 .whale-row .num.neg { color: var(--down); }
 .whale-row .whale-note-cell { grid-column: 2 / 8; color: var(--muted); }
 .whale-rm {
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   padding: 0 4px;
   line-height: 1.2;
   color: var(--muted);
@@ -1109,7 +1110,7 @@ table.farb-table tr.farb-spread td {
 /* Position-side badge (NOT the liq-badge pair — those are deliberately
    inverted because a long LIQUIDATION is a forced sell). */
 .side-badge {
-  font-size: 9px;
+  font-size: var(--fs-3xs);
   font-weight: 700;
   letter-spacing: 0.05em;
   padding: 0 4px;
@@ -1150,7 +1151,7 @@ table.farb-table tr.farb-spread td {
 }
 .alert-rule label { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .alert-rule input[type="number"] { width: 88px; font-size: var(--fs-xs); padding: 0 3px; font-family: var(--mono); }
-.alert-noth { color: var(--g-400); font-size: 9px; white-space: nowrap; }
+.alert-noth { color: var(--g-400); font-size: var(--fs-3xs); white-space: nowrap; }
 .alert-feed { max-height: 220px; overflow-y: auto; margin-top: var(--sp-1); }
 .alert-row {
   display: grid;
@@ -1165,7 +1166,7 @@ table.farb-table tr.farb-spread td {
 .alert-row .ts { color: var(--muted); }
 .alert-kind {
   color: var(--accent-2);          /* an alert is an ANNOTATION, never P&L green/red */
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1248,7 +1249,7 @@ table.farb-table tr.farb-spread td {
 .jour-row .num { text-align: right; white-space: nowrap; }
 .jour-row .num.pos { color: var(--up); }
 .jour-row .num.neg { color: var(--down); }
-.jour-head { color: var(--g-400); border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg-panel); }
+.jour-head { color: var(--g-300); border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg-panel); }
 .jour-tag { color: var(--accent-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jour-notecell { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jour-errs { font-family: var(--mono); font-size: var(--fs-xs); }
@@ -1264,8 +1265,8 @@ table.farb-table tr.farb-spread td {
   gap: 2px;
   align-items: center;
 }
-.cal-dowrow span { color: var(--g-400); text-align: center; }
-.cal-wlab { color: var(--muted); font-size: 9px; }
+.cal-dowrow span { color: var(--g-300); text-align: center; }
+.cal-wlab { color: var(--muted); font-size: var(--fs-3xs); }
 .cal-cell {
   width: 14px; height: 14px;
   border: 1px solid var(--border);
@@ -1274,7 +1275,7 @@ table.farb-table tr.farb-spread td {
 }
 .cal-future { opacity: 0.35; }
 .cal-bars { display: flex; flex-direction: column; gap: 1px; font-family: var(--mono); font-size: var(--fs-xs); }
-.cal-bhead { color: var(--g-400); padding-top: var(--sp-1); }
+.cal-bhead { color: var(--g-300); padding-top: var(--sp-1); }
 .cal-bar { display: grid; grid-template-columns: 64px 1fr 58px; gap: var(--sp-2); align-items: center; }
 .cal-blab { color: var(--muted); }
 .cal-btrack { height: 8px; background: var(--bg-panel-2); border-radius: 2px; overflow: hidden; }
@@ -1302,7 +1303,7 @@ table.farb-table tr.farb-spread td {
 .poly-track { height: 7px; background: var(--bg-panel-2); border-radius: 2px; overflow: hidden; }
 .poly-fill { display: block; height: 100%; }
 .poly-mkt .num { text-align: right; font-variant-numeric: tabular-nums; }
-.poly-vol { color: var(--g-400); text-align: right; }
+.poly-vol { color: var(--g-300); text-align: right; }
 
 /* ── News (§4e): ToA context feed ── */
 /* T-4 (§4j): the relevance caption — states how many rows are shown and how
@@ -1320,7 +1321,7 @@ table.farb-table tr.farb-spread td {
   align-items: baseline;
 }
 .news-row .ts { color: var(--muted); }
-.news-src { color: var(--g-400); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.news-src { color: var(--g-300); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .news-title { color: var(--fg); overflow-wrap: anywhere; }
 .news-title a { color: var(--fg); text-decoration: none; }
 .news-title a:hover { color: var(--accent); text-decoration: underline; }
@@ -1343,10 +1344,10 @@ table.farb-table tr.farb-spread td {
 }
 .econ-row .ts { color: var(--muted); }
 .econ-cty { color: var(--accent-2); }
-.econ-imp { font-size: 9px; text-align: center; border: 1px solid var(--border); border-radius: 2px; }
+.econ-imp { font-size: var(--fs-3xs); text-align: center; border: 1px solid var(--border); border-radius: 2px; }
 .econ-high { color: var(--warn-fg); border-color: var(--warn-fg); }
 .econ-med { color: var(--accent); border-color: var(--accent); }
-.econ-low { color: var(--g-400); }
+.econ-low { color: var(--g-300); }
 .econ-title { color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .econ-fp { color: var(--muted); text-align: right; white-space: nowrap; }
 .econ-cd { color: var(--muted); text-align: right; }
@@ -1397,7 +1398,7 @@ table.farb-table tr.farb-spread td {
 .lvls-head {
   color: var(--muted);
   text-transform: uppercase;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   border-bottom: 1px solid var(--border);
   padding-bottom: 2px;
   margin-bottom: 2px;
@@ -1407,7 +1408,7 @@ table.farb-table tr.farb-spread td {
 .lvls-row .num.poc { color: var(--accent); }   /* POC = the reference-marker token, panel-wide vocabulary */
 /* Naked badge: accent (an ANNOTATION about an untested level, not P&L). */
 .naked-badge {
-  font-size: 9px;
+  font-size: var(--fs-3xs);
   font-weight: 700;
   letter-spacing: 0.05em;
   padding: 0 4px;
@@ -1434,7 +1435,7 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
    LOOK disabled next to the live toolbar buttons. Needs the id selector: the
    #sym-btn color above outranks any .ux-btn:disabled rule, and the generic
    disabled rule is scoped to .term-main (the topbar sits outside it). */
-#sym-btn:disabled, #sym-btn:disabled:hover { color: var(--g-400); border-color: var(--border); cursor: default; }
+#sym-btn:disabled, #sym-btn:disabled:hover { color: var(--g-300); border-color: var(--border); cursor: default; }
 .sym-pop {
   position: absolute;
   top: calc(100% + 4px); left: 0;
@@ -1473,7 +1474,7 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .sym-list li .s-px, .sym-list li .s-to { color: var(--muted); text-align: right; }
 .sym-list li.cur .s-sym { color: var(--accent); }
 .sym-list .sym-note { color: var(--muted); cursor: default; grid-template-columns: 1fr; }
-.ws-label { color: var(--g-400); font-family: var(--mono); font-size: var(--fs-xs); }
+.ws-label { color: var(--g-300); font-family: var(--mono); font-size: var(--fs-xs); }
 .ws-sel { min-width: 118px; font-size: var(--fs-xs); padding: 2px 4px; }
 
 /* N3 (Gap 7): topbar a11y toggles — quiet mono chips matching .ws-label, the
@@ -1515,7 +1516,7 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .ti-z { padding: 0 5px; border-radius: 3px; border: 1px solid var(--g-400); color: var(--muted); }
 .ti-z.hot { border-color: var(--warn-fg); color: var(--warn-fg); }
 .ti-spark { flex: none; width: 120px; height: 16px; display: block; }
-.ti-note { color: var(--g-400); }
+.ti-note { color: var(--g-300); }
 
 /* ─── T-1 (§4g): walls ledger table (det-row family) ─────────────────────── */
 .walls-wrap { display: flex; flex-direction: column; }
@@ -1533,7 +1534,7 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .walls-head {
   color: var(--muted);
   text-transform: uppercase;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   border-bottom: 1px solid var(--border);
   padding-bottom: 2px;
   margin-bottom: 2px;
@@ -1546,7 +1547,7 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
    accent (the book withdrew it); filled = accent-2 (price took it). Text is
    the non-color cue. */
 .wall-badge {
-  font-size: 9px;
+  font-size: var(--fs-3xs);
   font-weight: 700;
   letter-spacing: 0.05em;
   padding: 0 4px;
@@ -1572,7 +1573,7 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
   border-radius: 3px;
   padding: 2px 7px;
 }
-.klev-chip .k { color: var(--g-400); text-transform: uppercase; font-size: 10px; }
+.klev-chip .k { color: var(--g-300); text-transform: uppercase; font-size: var(--fs-2xs); }
 .klev-chip .v { color: var(--fg); font-weight: 600; }
 .klev-chip.poc .k, .klev-chip.naked .k { color: var(--accent); }
 .klev-chip.ib .k { color: var(--accent-2); }
@@ -1619,9 +1620,9 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .leg-row.stale .leg-dot { background: var(--accent); }
 .leg-row.error .leg-dot { background: var(--down); }
 .legs-note {
-  color: var(--g-400);
+  color: var(--g-300);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   padding: var(--sp-1) 8px 2px;
   border-top: 1px solid var(--border);
   margin-top: var(--sp-1);
@@ -1638,7 +1639,7 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
   color: var(--muted);
   padding-bottom: var(--sp-1);
 }
-.agg-controls .agg-inc-label { color: var(--g-400); text-transform: uppercase; font-size: 10px; }
+.agg-controls .agg-inc-label { color: var(--g-300); text-transform: uppercase; font-size: var(--fs-2xs); }
 .agg-controls label { cursor: pointer; white-space: nowrap; }
 .agg-controls input[type="checkbox"] { vertical-align: middle; margin: 0 2px 0 0; }
 
@@ -1648,7 +1649,7 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
   flex-wrap: wrap;
   gap: 1px var(--sp-2);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--muted);
   padding-bottom: var(--sp-1);
   border-bottom: 1px solid var(--border);
@@ -1665,7 +1666,7 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .agg-quality .q-bad  .q-dot { background: var(--down); }
 .agg-quality .q-bad  b { color: var(--down); }
 .agg-quality .q-off  .q-dot { background: var(--g-400); }
-.agg-quality .q-off  b { color: var(--g-400); }
+.agg-quality .q-off  b { color: var(--g-300); }
 
 /* Spot vs perp CVD strip. */
 .spcvd-wrap { display: flex; flex-direction: column; }
@@ -1682,8 +1683,8 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
 .spcvd-read .neg { color: var(--down); }
 .spcvd-comp {
   font-family: var(--mono);
-  font-size: 10px;
-  color: var(--g-400);
+  font-size: var(--fs-2xs);
+  color: var(--g-300);
   padding-top: var(--sp-1);
 }
 
@@ -1791,3 +1792,88 @@ table.ladder tr.naked td.px { text-decoration: underline dotted var(--accent); t
   line-height: 1.5;
 }
 .panel--empty .det-list .chart-na { margin: auto 0; }
+
+/* T-4 contrast rule (closes STRATEGY Gap 8's WCAG item). --g-400 (#5a606e) is
+   self-documented in styles.css as "<4.5:1" yet was the colour of 29 pieces of
+   text in this sheet. The rule now: readable labels, notes and values use
+   --g-300 (its token comment: "clears 4.5:1"); --g-400 is reserved for BORDERS,
+   disabled controls, and text whose dimness IS the message — a disabled button,
+   an explicit N/A value/badge/tally, an "alerts: nothing fired" empty state.
+   Those five are the WCAG-exempt category; everything else was flipped. When
+   adding a muted style, ask which category it is instead of defaulting to g-400. */
+
+/* ═══ T-4: panel hierarchy + focus mode ══════════════════════════════════════
+   35 panels carried identical weight, so the page signalled nothing about what
+   matters: the footprint read exactly like the econ calendar. data-tier is
+   stamped from S.PANEL_DEFS (terminal.js applyPanelTiers) — per-panel metadata
+   belongs on the descriptor, not in 35 hand-written rules.
+
+   The vocabulary is deliberately RESTRAINED, per the "data carries the colour,
+   chrome does not" rail: tiers differ in border emphasis and header treatment,
+   never by tinting the panel or adding a second accent. A primary panel earns a
+   brighter left edge and a full-strength header; a tertiary panel recedes. No
+   tier changes any gate, budget, store or datum — presentation only. ═══════ */
+
+/* PRIMARY — the instrument you read tick by tick (footprint, ladder, tape,
+   agg book, stats strip). Brightest header, a marked left edge. */
+.panel[data-tier="primary"] {
+  border-color: var(--g-500);   /* one step lighter than --border (g-600) */
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
+.panel[data-tier="primary"] > h2 { color: var(--fg); font-weight: 600; }
+
+/* SECONDARY — the reads that inform sizing and fade-or-follow. Base treatment;
+   named explicitly so the middle tier is a choice, not an absence of one. */
+.panel[data-tier="secondary"] > h2 { color: var(--fg); }
+
+/* TERTIARY — reference, context and logs. Recedes: muted header, no edge mark.
+   It is still fully legible — receding is not hiding (§0.7). */
+.panel[data-tier="tertiary"] > h2 { color: var(--muted); font-weight: 400; }
+.panel[data-tier="tertiary"] { border-color: var(--border); }
+
+/* ── Focus / maximize (STRATEGY L5's named interim step) ──────────────────────
+   Double-click a panel header → full viewport; Esc returns. Implemented as two
+   classes so CSS owns it and NO element moves in the DOM: relocating a canvas
+   would force a re-measure and can re-enter the documented .fp-wrap size
+   feedback loop (620px → ~3000px). The siblings stay in the grid, merely
+   hidden, so their stores keep ingesting and their state is untouched. */
+/* NESTING MATTERS: 7 of the 35 panels are not grid children — they live inside
+   .term-col.area-mid / .area-right. Hiding every non-focused direct child would
+   hide the COLUMN containing a focused nested panel, and with it the panel
+   itself. So a direct child survives if it IS the focused panel or CONTAINS it,
+   and inside a surviving column the other panels are hidden one level down. */
+main.term-main--focused > *:not(.panel--focus):not(:has(.panel--focus)) { display: none; }
+main.term-main--focused .term-col > .panel:not(.panel--focus) { display: none; }
+main.term-main--focused .term-col:has(.panel--focus) { height: 100%; }
+main.term-main--focused {
+  display: block;
+  height: calc(100vh - 2 * var(--sp-3));
+}
+.panel--focus {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+/* Canvas wraps inside a focused panel take the space the panel gained, instead
+   of keeping the fixed heights tuned for the grid. */
+.panel--focus > .fp-wrap,
+.panel--focus > .agg-wrap,
+.panel--focus > .heat-wrap,
+.panel--focus > .hist-wrap,
+.panel--focus > .tpo-wrap,
+.panel--focus > .vp-wrap,
+.panel--focus > .auction-wrap,
+.panel--focus > .liqheat-wrap,
+.panel--focus > .scr-wrap,
+.panel--focus > .rsi-wrap { flex: 1 1 auto; height: auto; min-height: 0; }
+/* Affordance: a header that can be focused says so on hover. */
+.panel > h2 { cursor: default; }
+.panel > h2:hover { text-decoration: underline dotted var(--g-400); text-underline-offset: 3px; }
+.panel--focus > h2::after {
+  content: ' · esc to exit';
+  color: var(--g-300);
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}

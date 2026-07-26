@@ -81,6 +81,16 @@
   --sp-5: 24px; --sp-6: 32px; --sp-8: 48px;
 
   /* §4.6 separate ~1.25 modular type scale (NOT forced onto the 8pt grid). */
+  /* The two dense-chrome steps BELOW the prose scale (T-4). The scale used to
+     bottom out at 11px while terminal.css hard-coded 24 `font-size: 10px` and 16
+     `font-size: 9px`/`8px` literals anyway — ladder imprint, tape venue tags and
+     ×N counts, axis labels, age chips, micro eyebrows. A dense order-flow
+     terminal genuinely needs them; naming them is more honest than 40 literals
+     escaping the scale, and it makes "no raw font-size px in terminal.css" a
+     checkable rule (check_terminal enforces it).
+       --fs-2xs  tabular chrome: venue tags, imprint, level labels
+       --fs-3xs  micro-annotation: ×N counts, age chips, source eyebrows */
+  --fs-2xs: 10px; --fs-3xs: 9px;
   --fs-xs: 11px; --fs-sm: 12px; --fs-base: 13px;
   --fs-lg: 16px; --fs-xl: 20px; --fs-2xl: 28px;
 

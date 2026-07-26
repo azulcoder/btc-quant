@@ -1047,6 +1047,79 @@
     }
   }
 
+  // ─── T-4: panel hierarchy + focus mode, both driven by the M3 registry ────
+  //
+  // 35 panels carried IDENTICAL visual weight, so the page signalled nothing
+  // about what matters — the footprint read exactly like the econ calendar. The
+  // tier is per-panel metadata, so it lives on the descriptor (S.PANEL_DEFS) and
+  // is stamped here as data-tier; terminal.css does the rest. Presentation only:
+  // no gate, budget, store or datum is touched.
+  //
+  // Focus/maximize is STRATEGY L5's named interim step ("double-click a panel →
+  // full viewport, esc to return") before a real dockable workspace. It is cheap
+  // precisely because the registry already knows every panel's identity and its
+  // render units — this adds a class and a key handler, not a layout engine.
+  function applyPanelTiers() {
+    for (const d of S.PANEL_DEFS) {
+      for (const id of S.panelUnits(d.key)) {
+        const el = $(id);
+        const panel = el && el.closest ? el.closest('.panel') : null;
+        // First writer wins: fp's two units share one .panel, and a panel that
+        // hosts several keys (tape + tapeint) must not flip-flop tiers.
+        if (panel && !panel.getAttribute('data-tier')) panel.setAttribute('data-tier', d.tier);
+      }
+    }
+    // The stats strip is its own panel and has no gated render unit, so it is
+    // stamped directly from its descriptor rather than via panelUnits().
+    const hdr = $('view-header');
+    const hdrTier = (S.PANEL_DEFS.find((d) => d.key === 'header') || {}).tier;
+    if (hdr && hdrTier && !hdr.getAttribute('data-tier')) hdr.setAttribute('data-tier', hdrTier);
+    // Panels with no descriptor at all are pure chrome — today that is the
+    // settings panel, which hosts controls and renders no data. Chrome recedes,
+    // so the fallback is 'tertiary' rather than leaving it unstamped (an
+    // unstamped panel would silently inherit the base weight and read as
+    // secondary, i.e. more important than the reference panels).
+    for (const panel of document.querySelectorAll('main.term-main section.panel')) {
+      if (!panel.getAttribute('data-tier')) panel.setAttribute('data-tier', 'tertiary');
+    }
+  }
+
+  // Focus mode: one class on <main> + one on the chosen panel, so CSS owns the
+  // presentation and no element is moved in the DOM (moving a canvas would force
+  // a re-measure and re-enter the documented fp-wrap size feedback loop).
+  let focusedPanel = null;
+  function setFocus(panel) {
+    const main = document.querySelector('main.term-main');
+    if (!main) return;
+    if (focusedPanel) focusedPanel.classList.remove('panel--focus');
+    focusedPanel = panel || null;
+    if (focusedPanel) {
+      focusedPanel.classList.add('panel--focus');
+      main.classList.add('term-main--focused');
+    } else {
+      main.classList.remove('term-main--focused');
+    }
+    // The focused panel's box changed, so every canvas in it must re-measure:
+    // canvases size from their wrap on the next draw, which needs a dirty flag.
+    dirtyAll();
+  }
+  function initFocusMode() {
+    const main = document.querySelector('main.term-main');
+    if (!main) return;
+    // Double-click a panel HEADER (not the body — dblclick inside a canvas is a
+    // legitimate interaction on the footprint/ladder and must not hijack it).
+    main.addEventListener('dblclick', (e) => {
+      const h2 = e.target && e.target.closest ? e.target.closest('.panel > h2') : null;
+      if (!h2) return;
+      const panel = h2.parentElement;
+      e.preventDefault();
+      setFocus(panel === focusedPanel ? null : panel);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && focusedPanel) { e.preventDefault(); setFocus(null); }
+    });
+  }
+
   // ─── Views (terminal-views.js §4) — mount into terminal.html anchors ─────
   const headerView = V.HeaderStatsView();
   headerView.mount($('view-header'));
@@ -4776,6 +4849,10 @@
     if (document.hidden) setTimeout(frame, 500);
     else requestAnimationFrame(frame);
   }
+  // T-4: stamp the registry's tiers and arm focus mode BEFORE the first paint, so
+  // the page never renders a frame at the wrong visual weight.
+  applyPanelTiers();
+  initFocusMode();
   scheduleFrame();
   document.addEventListener('visibilitychange', () => {
     // Eyes back on the page: repaint everything that moved while hidden.
