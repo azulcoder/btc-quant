@@ -455,3 +455,20 @@ was dividing the downside variance by the downside count instead of the full sam
 | [AUDIT.md](AUDIT.md) / [AUDIT_LOG.md](AUDIT_LOG.md) | Repeatable code/stat audit spec + the change-log of verified fixes (H1 funding P&L fixed; remaining findings tracked) |
 | **DEVELOPMENT.md** (this) | Contributors — architecture, the parity rule, extend-recipes, verification, gotchas, roadmap |
 | [DISCLAIMER.md](DISCLAIMER.md) | Research-only / not financial advice |
+
+### Collector health — reading `/health` honestly
+
+`/health` always returns 200; **the body carries the verdict**, and `ok` is computed from
+recorded observations rather than hard-coded (it used to be a constant, which is how a
+40-hour outage read as healthy — AUDIT_LOG 2026-08-01).
+
+    curl -s 127.0.0.1:8788/health | python3 -m json.tool
+
+Read `ok` first, then `unhealthy` (leg names), then per-leg `state`:
+`running` / `starting` / `restarting` / `stale` / `dead` / `given-up`. `given-up` means the
+restart cap was hit — the leg stays loudly broken instead of going quiet. `writer.state`
+and `disk_free_bytes` are there because a failing writer or a full disk is what kills legs
+in the first place. `gap_events_total` counts the honest holes a restart left behind; they
+are never backfilled.
+
+`/health/ready` is the separate readiness probe (for a systemd/GCP health check).

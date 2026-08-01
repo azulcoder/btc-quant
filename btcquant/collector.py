@@ -17,7 +17,21 @@ Honesty rails (DESIGN §0, binding)
   DEVELOPMENT.md §6 greenlight. Until then this file buys *optionality*, not signals.
 * **Gaps stay gaps** (§3 resilience). A reconnect, a stalled stream, or a downed
   process leaves a hole in ``ts_ms`` — we never interpolate, backfill from a second
-  source into the same series, or otherwise fabricate rows (§0.7).
+  source into the same series, or otherwise fabricate rows (§0.7). A watchdog
+  restart is one of those holes: it is logged, counted in ``/health`` and appended
+  to ``data/ticks/gaps.jsonl``, which EXPLAINS the hole and never fills it.
+* **Per-leg watchdog** (§3 resilience). Process-level supervision is not enough:
+  on 2026-07-24/25 this daemon stayed alive, answered ``/health`` with
+  ``{"ok": true}`` and kept the day file's mtime moving while six of its ~16 legs
+  had been dead for 40 hours (an ENOSPC made ``print()`` itself raise inside every
+  leg's ``except`` block; the exceptions were parked in un-awaited Tasks and
+  evaporated). Two rails now: a log sink that cannot kill a leg (:func:`_safe_log`,
+  plus guarded flush/prune loops), and :class:`LegSupervisor`, which judges every
+  leg BY SYMPTOM — task ended, or no ROWS for longer than that leg type tolerates
+  (:data:`LEG_BUDGET_S`, per-leg-type and grounded in measured cadence so a
+  legitimately sparse stream can never cry wolf) — then restarts it on a bounded
+  ladder AND reports it. ``/health`` reports what it observes; ``/health/ready``
+  is the 200/503 probe surface.
 * **Aggressor/side conventions are per-exchange and normalized explicitly** (§0.6):
   Bybit ``publicTrade.S`` is already the *taker* side (used as-is); Bybit
   ``allLiquidation.S == "Buy"`` means a **short** position was liquidated (the
@@ -82,13 +96,16 @@ by ``scripts/backfill_levels.py`` for days already archived to HF — with the
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import math
 import random
 import re
+import shutil
 import signal
 import threading
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -116,7 +133,9 @@ _INSTALL_HINT = "pip install -r requirements-collector.txt"
 
 __all__ = [
     "DEFAULT_DB",
+    "GAPS_FILENAME",
     "GRACE_WINDOW_MS",
+    "LEG_BUDGET_S",
     "LEVELS_TICK",
     "OKX_CTVAL",
     "BatchWriter",
@@ -124,8 +143,11 @@ __all__ = [
     "CoinbaseTape",
     "DayFileManager",
     "Downsampler",
+    "LegState",
+    "LegSupervisor",
     "OkxBook",
     "RotatingWriter",
+    "append_gap_row",
     "append_levels_row",
     "compute_day_levels",
     "derive_naked",
@@ -150,6 +172,7 @@ __all__ = [
     "normalize_okx_trade",
     "open_db",
     "parse_deribit_option_name",
+    "read_gap_ledger",
     "read_levels_registry",
     "run",
     "utc_day",
@@ -216,6 +239,146 @@ OKX_CTVAL = 0.01
 
 # Exchange codes accepted by run() — short codes per DESIGN §3/§3c schema note.
 _ACCEPTED_EXCHANGES = ("binancef", "bybit", "okx", "coinbase", "deribit")
+
+
+# --------------------------------------------------------------------------- #
+# PER-LEG WATCHDOG (DESIGN §3 resilience) — the 2026-07-24/25 outage rail.     #
+#                                                                             #
+# Measured incident (not hypothetical): the daemon ran 7 d 14 h and recorded   #
+# ZERO trades for the last 40 h while every signal said healthy — process      #
+# alive, /health {"ok":true}, day-file mtime advancing, 8.1 GiB free. Six legs #
+# (bybit-ws, okx-ws, binancef-aggTrades, binancef-premiumIndex, okx-oi,        #
+# deribit-dvol) had died inside a live process during the 07-23 ENOSPC window; #
+# the surviving REST pollers kept touching the day file and masked it. Nothing #
+# supervised the ~16 tasks: a task that raises parks its exception in the Task #
+# object, nobody awaits it, the failure evaporates.                            #
+#                                                                             #
+# Two rails, both required:                                                    #
+#   * root cause — a log sink that raises (print() on a full disk) must never  #
+#     kill a leg; see _safe_log and the flush guards below;                    #
+#   * symptom detection — a leg is unhealthy if its task ended OR it produced  #
+#     no ROWS for longer than that leg type tolerates. Symptom, never cause:   #
+#     disk failures, venue changes, silent stalls and reconnect-storm livelock #
+#     (socket churns, task alive, zero data) all land in the same net.         #
+# --------------------------------------------------------------------------- #
+SUPERVISOR_TICK_S = 10.0
+# Restart ladder, indexed by how many CONSECUTIVE restarts this leg has had.
+# A dead leg comes back fast (5 s); a leg that keeps dying is slowed down so a
+# permanently-broken venue cannot spin the process.
+LEG_RESTART_BACKOFF_S = (5.0, 15.0, 60.0, 300.0)
+# After this many consecutive restarts the watchdog STOPS restarting and stays
+# LOUD forever (/health not-ok, a rate-limited log line). Auto-heal that hides a
+# systemic problem is how 40 h of silence happened; give-up is deliberate.
+LEG_RESTART_CAP = 6
+# A leg healthy for this long resets its ladder (a venue outage last week must
+# not make this week's first hiccup a "6th consecutive" restart).
+LEG_RESTART_DECAY_S = 3600.0
+LEG_GIVEUP_LOG_S = 300.0  # rate-limit the give-up line: loud, not spam
+# The periodic-flush task does not produce rows of its own, so it is judged on
+# "did a flush cycle complete recently" — 120x the 500 ms flush interval.
+WRITER_FLUSH_BUDGET_S = 60.0
+# Watchdog restarts are recorded here, beside levels.jsonl. A restart is a REAL
+# hole in the tape (§0.7): the ledger EXPLAINS the hole, it never fills it.
+GAPS_FILENAME = "gaps.jsonl"
+
+# Every WS leg carries its OWN reconnect rail: a silent-socket watchdog at
+# WATCHDOG_S (60 s) plus capped backoff at _BACKOFF_CAP_S (30 s). The supervisor
+# must always be the SECOND responder, so the stream budget sits strictly above
+# 60 + 30 = 90 s. 120 s = that floor + 30 s margin, and it is ~40x the worst
+# inter-row gap actually measured on a healthy day (bybit p99 0.74 s / max 2.44 s,
+# okx 0.57/1.73, coinbase 0.83/3.82, binancef depth 1.28 s at its 1/s downsample).
+_STREAM_BUDGET_S = 120.0
+
+# Per-leg staleness budgets, in seconds, keyed by the leg name used in
+# _run_async. None == "task-state only": a budget would CRY WOLF on this leg, so
+# it is supervised for liveness (task ended -> restart) and nothing else.
+#
+# NEVER CRY WOLF (the N5 lesson). The budget attaches to the LEG (one task), not
+# to a TABLE — a sparse stream cannot witness its own liveness. Liquidations are
+# the proof: bybit prints 3-2000/day and 2026-07-25 had ZERO all day, honestly.
+# `liquidations` therefore has no budget of its own; it rides bybit-ws, whose
+# publicTrade flow is the witness. Same for bybit funding_mark/open_interest
+# (sub-topics of bybit-ws) and okx books (sub-topic of okx-ws).
+LEG_BUDGET_S: dict[str, Optional[float]] = {
+    # --- continuous WS streams: see _STREAM_BUDGET_S above ---
+    "bybit-ws": _STREAM_BUDGET_S,
+    "okx-ws": _STREAM_BUDGET_S,
+    "coinbase-ws": _STREAM_BUDGET_S,  # heartbeats keep the SOCKET alive -> only
+    #   rows may vouch for this leg, never frames (that is why the verdict reads
+    #   last_data_ms and the heartbeat frames stamp last_alive_ms only).
+    "binancef-ws": _STREAM_BUDGET_S,  # depth20@100ms stored at 1/s
+    # --- 5 s REST polls: 24 consecutive failed polls before we act; anything
+    #     shorter is ordinary network flap, which the leg already logs. ---
+    "binancef-premiumIndex": 120.0,
+    "binancef-aggTrades": 120.0,
+    # --- 60 s REST polls: 5 missed samples. Grounded on the live measurement,
+    #     not on the nominal cadence — okx-funding's worst observed inter-row gap
+    #     is 125.6 s (rate-limited endpoint), binancef-openInterest 66.1 s. 300 s
+    #     clears the worst measured sample by >2x. ---
+    "binancef-openInterest": 300.0,
+    "okx-funding": 300.0,
+    "okx-oi": 300.0,
+    "deribit-dvol": 300.0,
+    # --- 5 m crowding buckets: the poll re-serves the open bucket until it
+    #     closes and the Downsampler dedupes it, so ROWS arrive once per bucket
+    #     (measured p50 = p95 = p99 = 300.0 s exactly). 1500 s = 5 buckets. ---
+    "binancef-takerlongshortRatio": 1500.0,
+    "binancef-topLongShortPositionRatio": 1500.0,
+    "binancef-globalLongShortAccountRatio": 1500.0,
+    "binancef-openInterestHist": 1500.0,
+    # --- hourly option-chain snapshot: measured p50 3602 s, and 8931 s on a
+    #     degraded day. 21600 s = 6 snapshots, 2.4x that degraded worst case.
+    #     Generous on purpose: an outright DEAD task is caught at the next 10 s
+    #     tick whatever the budget says, so the budget only governs the
+    #     alive-but-silent case — where being late costs little and a false
+    #     alarm costs a real hole (a restart IS a gap). On a slow leg, be later
+    #     and be right. ---
+    "deribit-chain": 21600.0,
+    # --- internal tasks: no rows of their own -> task-state only. The flush task
+    #     gets its own freshness check (WRITER_FLUSH_BUDGET_S) in the writer
+    #     block of /health; retention fires once a DAY, so any staleness budget
+    #     would be a false alarm 99.99 % of the time. ---
+    "writer-flush": None,
+    "retention": None,
+}
+
+# The leg whose task is currently running. Set INSIDE the task body, so it is
+# task-local by construction (asyncio.create_task copies the context at creation;
+# a set() inside the coroutine writes to that task's own copy). This is the one
+# implicit mechanism in the watchdog, chosen deliberately: the explicit
+# alternative (a per-leg writer proxy) would have to be threaded through every
+# frame-handler closure, and touching six handlers to add liveness plumbing is a
+# far bigger blast radius than one contextvar read inside writer.add.
+_CURRENT_LEG: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "btcq_leg", default=None
+)
+
+# Log-sink failures are SWALLOWED (a leg must not die because print() failed on a
+# full disk) but never silent: they are counted and surfaced in /health. What is
+# swallowed must be counted.
+_LOG_DROPS = 0
+
+
+def _safe_log(log, msg: str) -> None:
+    """``log(msg)`` that cannot kill its caller — the 2026-07-23 root cause.
+
+    On a full disk ``print()`` raises ``OSError(28)``. Every leg loop called
+    ``log()`` from INSIDE its own ``except`` block with no handler above it, so
+    the raise escaped the ``while``, the coroutine finished, and the exception
+    was parked in an un-awaited Task — six legs died exactly this way while the
+    process stayed alive. Reproduced against this file for _ws_stream (both the
+    frame-handler and the transport path), _rest_poll and _aggtrades_loop.
+    """
+    global _LOG_DROPS
+    try:
+        log(msg)
+    except Exception:  # noqa: BLE001 — a broken sink must never kill a leg
+        _LOG_DROPS += 1
+
+
+def log_drop_count() -> int:
+    """How many log lines this process failed to emit (surfaced in /health)."""
+    return _LOG_DROPS
 
 
 # --------------------------------------------------------------------------- #
@@ -966,14 +1129,25 @@ class BatchWriter:
         con: "duckdb.DuckDBPyConnection",
         lock: threading.Lock,
         max_rows: int = FLUSH_MAX_ROWS,
+        log=print,
     ) -> None:
         self._con = con
         self._lock = lock
         self._max_rows = max_rows
+        self._log = log
         self._buffers: dict[str, list[tuple]] = {t: [] for t in _INSERT_SQL}
         self._pending = 0
         # Honest ops counter (surfaces in logs; the DB itself is the source of truth).
         self.rows_written: dict[str, int] = {t: 0 for t in _INSERT_SQL}
+        # Watchdog seams (see LEG_BUDGET_S). ``leg_sink`` is called with the row
+        # count whenever rows are ACCEPTED — the one choke point where a leg's
+        # data becomes real. ``last_flush_ok_ms`` / ``flush_failures`` let
+        # /health tell the truth about the periodic-flush task itself.
+        self.leg_sink = None
+        self.last_flush_ok_ms = 0
+        self.flush_failures = 0
+        self.rows_dropped_error = 0
+        self.last_error_drop_ms = 0
 
     def add(self, table: str, rows: list[tuple]) -> None:
         """Buffer rows for ``table``; auto-flush once >= max_rows are pending."""
@@ -981,12 +1155,20 @@ class BatchWriter:
             return
         self._buffers[table].extend(rows)
         self._pending += len(rows)
+        # Stamp liveness for the leg whose task is running RIGHT NOW, at the
+        # moment the rows are handed over (mirrors the aggTrades "mark BEFORE
+        # add" rail: buffered rows ARE handed over). An EMPTY batch never
+        # stamps — that is deliberate, and it is exactly what stops a Coinbase
+        # heartbeat frame or a deduped crowding bucket from faking liveness.
+        if self.leg_sink is not None:
+            self.leg_sink(len(rows))
         if self._pending >= self._max_rows:
             self.flush()
 
     def flush(self) -> int:
         """Write every buffered row; return how many were written."""
         if self._pending == 0:
+            self.last_flush_ok_ms = int(time.time() * 1000)
             return 0
         written = 0
         with self._lock:
@@ -998,16 +1180,30 @@ class BatchWriter:
                 written += len(buf)
                 buf.clear()
         self._pending = 0
+        self.last_flush_ok_ms = int(time.time() * 1000)
         return written
 
     async def run(self, stop_event: asyncio.Event, interval_s: float = FLUSH_INTERVAL_S) -> None:
-        """Periodic-flush task (the 500 ms half of the flush contract)."""
+        """Periodic-flush task (the 500 ms half of the flush contract).
+
+        The flush is guarded: a raising flush (ENOSPC, an invalidated DuckDB
+        handle) must not end this task. A dead flush task means every leg keeps
+        buffering into RAM while the store silently stops growing — counted in
+        ``flush_failures`` and surfaced in /health instead.
+        """
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
             except asyncio.TimeoutError:
                 pass
-            self.flush()
+            try:
+                self.flush()
+            except Exception as exc:  # noqa: BLE001 — the flush task must survive
+                self.flush_failures += 1
+                _safe_log(
+                    self._log,
+                    f"[collector] writer flush FAILED: {exc!r} (retrying next tick)",
+                )
 
 
 class Downsampler:
@@ -1197,6 +1393,46 @@ def append_levels_row(path: Any, row: dict) -> bool:
     return True
 
 
+def read_gap_ledger(path: Any) -> list[dict]:
+    """Parse ``gaps.jsonl`` -> watchdog gap events, in recorded (append) order.
+
+    A missing file is an EMPTY ledger — honest: no watchdog restart has been
+    recorded yet, which is the healthy case. Mirrors :func:`read_levels_registry`
+    except for the ordering: a gap ledger is an EVENT LOG, so recorded order is
+    the meaningful order and it is never re-sorted.
+    """
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in p.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def append_gap_row(path: Any, row: dict) -> bool:
+    """Append one watchdog gap event. Append-ONLY, never deduped or rewritten.
+
+    Deliberately NOT idempotent (unlike :func:`append_levels_row`): two restarts
+    of the same leg are two distinct holes in the tape and must both be on the
+    record. Existing lines are never touched — the ledger is an audit trail, and
+    a rewritten audit trail is worthless. Returns True iff a line was written;
+    a failure to write is reported to the caller rather than raised, because a
+    ledger problem must never stop a recovery (the DATA is the source of truth
+    for where the holes are — ``orderflow._holes_from_ts`` derives coverage/gap
+    spans straight from recorded ts_ms; this ledger only EXPLAINS them).
+    """
+    p = Path(path)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+        return True
+    except Exception:  # noqa: BLE001 — recovery outranks bookkeeping
+        return False
+
+
 def derive_naked(rows: list[dict]) -> list[dict]:
     """Add the serve-time ``naked`` flag (§4f: DERIVED at serve time, NEVER
     stored): a day's POC is naked iff NO LATER recorded day's [l, h] range
@@ -1270,10 +1506,36 @@ class DayFileManager:
         self._cons[day] = con
         return con
 
+    def evict(self, day: str) -> bool:
+        """Drop a POISONED connection so the next write reopens the day file.
+
+        DuckDB invalidates a connection when a transaction fails hard (the
+        07-23 ENOSPC produced 1 492 commit failures). ``con_for`` hands back a
+        cached handle without re-validating it, so one poisoned handle would
+        keep failing forever. Evicting turns a permanent poison into a retry
+        that can heal itself. The day is NOT marked closed — it is still a legal
+        write target; only the handle was bad. Returns True iff a handle was
+        dropped.
+        """
+        con = self._cons.pop(day, None)
+        if con is None:
+            return False
+        try:
+            con.close()
+        except Exception:  # noqa: BLE001 — an already-broken handle may refuse to close
+            pass
+        return True
+
     def levels_path(self) -> Path:
         """``<root>/levels.jsonl`` — the §4f day-levels registry, kept beside
         the day files it summarizes (one store, one registry)."""
         return self.root / LEVELS_FILENAME
+
+    def gaps_path(self) -> Path:
+        """``<root>/gaps.jsonl`` — the watchdog gap ledger, kept beside the day
+        files whose holes it explains (§0.7: gaps stay gaps; the ledger records
+        WHY a hole exists, it never fills one)."""
+        return self.root / GAPS_FILENAME
 
     def close_expired(self, now_ms: int, log=print) -> list[str]:
         """Close every open day whose write window has lapsed; return them."""
@@ -1291,19 +1553,28 @@ class DayFileManager:
                 try:
                     row = compute_day_levels(con, day)
                     if row is not None and append_levels_row(self.levels_path(), row):
-                        log(
+                        _safe_log(
+                            log,
                             f"[collector] levels registry += {day} (poc {row['poc']}, "
-                            f"va [{row['val']}, {row['vah']}], vol {row['vol']}) — §4f"
+                            f"va [{row['val']}, {row['vah']}], vol {row['vol']}) — §4f",
                         )
                 except Exception as exc:  # noqa: BLE001 — registry is best-effort
-                    log(
+                    _safe_log(
+                        log,
                         f"[collector] levels registry: {day} summary FAILED: "
-                        f"{exc!r} — the day still closes (§3c immutability first)"
+                        f"{exc!r} — the day still closes (§3c immutability first)",
                     )
-                con.close()
+                try:
+                    con.close()
+                except Exception as exc:  # noqa: BLE001 — a poisoned handle may refuse
+                    _safe_log(
+                        log,
+                        f"[collector] day file {day}: close FAILED: {exc!r} — "
+                        "the day is sealed anyway (§3c immutability first)",
+                    )
                 self._closed.add(day)
                 closed.append(day)
-                log(f"[collector] day file {day} closed — immutable from here (§3c)")
+                _safe_log(log, f"[collector] day file {day} closed — immutable from here (§3c)")
         return closed
 
     def open_days(self) -> list[str]:
@@ -1352,6 +1623,16 @@ class RotatingWriter:
         self._pending = 0
         self.rows_written: dict[str, int] = {t: 0 for t in _INSERT_SQL}
         self.rows_dropped_closed = 0
+        # Watchdog seams — see BatchWriter for the contract.
+        self.leg_sink = None
+        self.last_flush_ok_ms = 0
+        self.flush_failures = 0
+        # Rows lost to a WRITE ERROR (as opposed to the expected, honest
+        # closed-day drop). Non-zero means the store is refusing rows RIGHT NOW
+        # — that is the signal that was missing on 07-23, when 1 492 commit
+        # failures never reached any health surface.
+        self.rows_dropped_error = 0
+        self.last_error_drop_ms = 0
 
     def add(self, table: str, rows: list[tuple]) -> None:
         """Buffer rows routed by EVENT day; auto-flush once >= max_rows pending."""
@@ -1361,44 +1642,83 @@ class RotatingWriter:
         for row in rows:
             self._buffers.setdefault((utc_day(row[ts_i]), table), []).append(row)
         self._pending += len(rows)
+        if self.leg_sink is not None:  # per-leg liveness stamp — see BatchWriter.add
+            self.leg_sink(len(rows))
         if self._pending >= self._max_rows:
             self.flush()
 
     def flush(self) -> int:
-        """Write every buffered row into its day file; then close lapsed days."""
+        """Write every buffered row into its day file; then close lapsed days.
+
+        Every (day, table) entry is isolated: one poisoned day file must not
+        strand the whole buffer. On a write error the entry is dropped and
+        COUNTED (``rows_dropped_error``, same honesty precedent as
+        ``rows_dropped_closed``) and the day's connection is EVICTED so the next
+        flush reopens it — DuckDB invalidates a handle after a failed commit, so
+        without the evict a single ENOSPC would poison the day forever. Buffer
+        reset and ``close_expired`` sit in ``finally``: whatever happens above,
+        this writer cannot wedge with an ever-growing buffer that never rotates.
+        """
         now = self._now_ms()
         written = 0
-        with self._lock:
-            for (day, table) in sorted(self._buffers):
-                buf = self._buffers[(day, table)]
-                if not buf:
-                    continue
-                con = self._manager.con_for(day, now)
-                if con is None:  # day already closed — immutable (§3c)
-                    self.rows_dropped_closed += len(buf)
-                    self._log(
-                        f"[collector] DROPPED {len(buf)} {table} row(s) for closed day "
-                        f"{day} — arrived after the grace window; the gap stays a gap"
-                    )
-                else:
-                    con.executemany(_INSERT_SQL[table], buf)
+        try:
+            with self._lock:
+                for (day, table) in sorted(self._buffers):
+                    buf = self._buffers[(day, table)]
+                    if not buf:
+                        continue
+                    con = self._manager.con_for(day, now)
+                    if con is None:  # day already closed — immutable (§3c)
+                        self.rows_dropped_closed += len(buf)
+                        _safe_log(
+                            self._log,
+                            f"[collector] DROPPED {len(buf)} {table} row(s) for closed day "
+                            f"{day} — arrived after the grace window; the gap stays a gap",
+                        )
+                        continue
+                    try:
+                        con.executemany(_INSERT_SQL[table], buf)
+                    except Exception as exc:  # noqa: BLE001 — one bad day, not the batch
+                        self.rows_dropped_error += len(buf)
+                        self.last_error_drop_ms = now
+                        self._manager.evict(day)  # poisoned handle -> reopen next flush
+                        _safe_log(
+                            self._log,
+                            f"[collector] DROPPED {len(buf)} {table} row(s) for {day}: "
+                            f"{exc!r} — connection evicted; the gap stays a gap",
+                        )
+                        continue
                     self.rows_written[table] += len(buf)
                     written += len(buf)
+        finally:
             self._buffers.clear()
             self._pending = 0
             # Even an idle flush tick must seal lapsed days (a quiet overnight
             # stream would otherwise hold yesterday open past the grace window).
-            self._manager.close_expired(now, log=self._log)
+            with self._lock:
+                self._manager.close_expired(now, log=self._log)
+            self.last_flush_ok_ms = int(time.time() * 1000)
         return written
 
     async def run(self, stop_event: asyncio.Event, interval_s: float = FLUSH_INTERVAL_S) -> None:
-        """Periodic-flush task (the 500 ms half of the flush contract)."""
+        """Periodic-flush task (the 500 ms half of the flush contract).
+
+        Guarded exactly like :meth:`BatchWriter.run`: this task dying silently
+        would stop the store growing while every leg kept buffering into RAM.
+        """
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
             except asyncio.TimeoutError:
                 pass
-            self.flush()
+            try:
+                self.flush()
+            except Exception as exc:  # noqa: BLE001 — the flush task must survive
+                self.flush_failures += 1
+                _safe_log(
+                    self._log,
+                    f"[collector] writer flush FAILED: {exc!r} (retrying next tick)",
+                )
 
 
 def migrate_legacy(src: Any, dest_root: Any, log=print) -> dict[str, dict[str, int]]:
@@ -1498,6 +1818,501 @@ def migrate_legacy(src: Any, dest_root: Any, log=print) -> dict[str, dict[str, i
 
 
 # --------------------------------------------------------------------------- #
+# PER-LEG WATCHDOG — LegState (the honest record) + LegSupervisor (the rail).  #
+# See the LEG_BUDGET_S block for the incident and the design constraints.      #
+# --------------------------------------------------------------------------- #
+@dataclass
+class LegState:
+    """One supervised leg's honest record. Every field is observed, none derived.
+
+    Two clocks, kept apart on purpose:
+
+    * ``last_alive_ms`` — a frame was parsed / a poll returned. DIAGNOSTIC ONLY.
+      It NEVER decides health. A socket that is open and chatty while producing
+      nothing is precisely the failure mode that looked healthy for 40 hours.
+    * ``last_data_ms`` — ROWS reached the writer. This is the only basis for a
+      staleness verdict.
+    """
+
+    name: str
+    kind: str  # 'stream' | 'poll' | 'internal'
+    budget_s: Optional[float] = None  # None == task-state only (would cry wolf)
+    tables: tuple[str, ...] = ()  # which series this leg feeds (for the ledger)
+    task: Optional[Any] = None  # asyncio.Task once spawned
+    started_ms: int = 0  # spawn OR last restart — start-grace anchor
+    last_alive_ms: int = 0
+    last_data_ms: int = 0
+    rows: int = 0
+    restarts: int = 0
+    restarts_consecutive: int = 0
+    last_restart_ms: int = 0
+    last_error: Optional[str] = None
+    gap_events: int = 0
+    gap_ms_total: int = 0
+    give_up_since_ms: Optional[int] = None
+    # When the supervisor first SAW this leg unhealthy. Exists so the loud line
+    # is printed once per incident, not once per 10 s tick — an alarm that spams
+    # is an alarm that gets ignored, and the ladder can hold a leg for 300 s.
+    alarm_since_ms: Optional[int] = None
+
+    # -- verdict ------------------------------------------------------------ #
+    def verdict(self, now_ms: int) -> str:
+        """PURE state from the recorded facts. No I/O, no wall clock.
+
+        ``running``   producing inside its budget (or unbudgeted and alive)
+        ``starting``  spawned, inside one budget of start-grace, nothing yet
+        ``restarting``restarted and has NOT produced since — known-broken, not
+                      yet known-fixed. Deliberately NOT ok: "we kicked it" is
+                      not "it works".
+        ``stale``     alive but silent past its budget (catches reconnect-storm
+                      livelock, which task-state alone cannot see)
+        ``dead``      the task ended (raised, returned, or was cancelled)
+        ``given-up``  restart cap reached — loud forever, operator required
+        """
+        if self.give_up_since_ms is not None:
+            return "given-up"
+        if self.task is None:
+            return "starting"
+        if self.task.done():
+            return "dead"
+        if self.budget_s is None:
+            return "running"  # task-state only: a budget here would cry wolf
+        budget_ms = self.budget_s * 1000.0
+        produced_since_start = self.last_data_ms >= self.started_ms and self.last_data_ms > 0
+        if not produced_since_start:
+            # Nothing yet since spawn/restart: one full budget of grace, so a
+            # freshly restarted task is never judged before it can act.
+            if now_ms - self.started_ms <= budget_ms:
+                return "restarting" if self.restarts else "starting"
+            return "stale"
+        return "stale" if now_ms - self.last_data_ms > budget_ms else "running"
+
+    def data_age_ms(self, now_ms: int) -> int:
+        """Time since rows last reached the writer; since spawn if never any."""
+        ref = self.last_data_ms if self.last_data_ms else self.started_ms
+        return max(0, int(now_ms) - int(ref))
+
+    def to_json(self, now_ms: int) -> dict:
+        task = self.task
+        if task is None:
+            task_state = "unspawned"
+        elif not task.done():
+            task_state = "running"
+        elif getattr(task, "cancelled", lambda: False)():
+            task_state = "cancelled"
+        else:
+            task_state = "finished"
+        return {
+            "kind": self.kind,
+            "state": self.verdict(now_ms),
+            "task": task_state,
+            "budget_s": self.budget_s,
+            "last_data_age_s": round(self.data_age_ms(now_ms) / 1000.0, 1),
+            "last_alive_age_s": (
+                round((now_ms - self.last_alive_ms) / 1000.0, 1) if self.last_alive_ms else None
+            ),
+            "rows": self.rows,
+            "restarts": self.restarts,
+            "restarts_consecutive": self.restarts_consecutive,
+            "last_error": self.last_error,
+            "gap_events": self.gap_events,
+            "gap_ms_total": self.gap_ms_total,
+            "tables": list(self.tables),
+        }
+
+
+class LegSupervisor:
+    """Watches every collector leg by SYMPTOM and restarts what it can.
+
+    Detection is deliberately symptom-based, never cause-based (constraint #1):
+    a leg is unhealthy when its task ENDED or when it produced NO ROWS for
+    longer than that leg type tolerates. Enumerating failure modes is how you
+    miss the next one — the 07-23 killer was ``print()`` raising ``OSError(28)``,
+    which no failure-mode list would have contained.
+
+    It never fights the existing rails. A WS leg owns its own silent-socket
+    watchdog (60 s) and capped backoff (30 s); every stream budget sits above
+    60 + 30 = 90 s, so the leg always gets first refusal. ``stop_event`` is the
+    first check in every loop, so the supervisor never races cancellation during
+    a clean shutdown.
+
+    Recovery is paired with reporting, never silent (constraint #3): a restart
+    is logged LOUD, counted in /health, and written to ``gaps.jsonl``. The hole
+    it leaves is a REAL hole and stays one (§0.7) — nothing here backfills.
+    """
+
+    def __init__(
+        self,
+        *,
+        stop_event: asyncio.Event,
+        log=print,
+        gaps_path: Any = None,
+        writer: Any = None,
+        disk_path: Any = None,
+        now_ms=None,
+        tick_s: float = SUPERVISOR_TICK_S,
+    ) -> None:
+        self._stop = stop_event
+        self._log = log
+        self._gaps_path = Path(gaps_path) if gaps_path is not None else None
+        self._writer = writer
+        self._disk_path = Path(disk_path) if disk_path is not None else None
+        self._now = now_ms or (lambda: int(time.time() * 1000))
+        self._tick_s = tick_s
+        self.legs: dict[str, LegState] = {}
+        self._factories: dict[str, Any] = {}
+        self.started_ms = self._now()
+        self._giveup_logged_ms: dict[str, int] = {}
+        self.restarts_total = 0
+        self.ledger_failures = 0
+
+    # -- registration ------------------------------------------------------- #
+    def spawn(self, name: str, kind: str, factory, budget_s=None, tables=()) -> LegState:
+        """Create the leg's task and register it. ``factory`` is a zero-arg
+        callable returning a FRESH coroutine — that is the whole reason the
+        watchdog can restart a leg at all, and the only structural change the
+        rail imposes on ``_run_async``."""
+        now = self._now()
+        leg = LegState(
+            name=name,
+            kind=kind,
+            budget_s=budget_s,
+            tables=tuple(tables),
+            started_ms=now,
+            last_alive_ms=now,
+        )
+        self.legs[name] = leg
+        self._factories[name] = factory
+        leg.task = self._create_task(name, factory)
+        return leg
+
+    def _create_task(self, name: str, factory):
+        async def _run_leg():
+            # Task-local by construction: create_task copies the context, this
+            # set() writes into that copy. Nested sync callbacks (frame
+            # handlers -> writer.add) see it; the parent never does.
+            _CURRENT_LEG.set(name)
+            await factory()
+
+        return asyncio.create_task(_run_leg(), name=name)
+
+    # -- heartbeats --------------------------------------------------------- #
+    def mark_alive(self, name: str) -> None:
+        leg = self.legs.get(name)
+        if leg is not None:
+            leg.last_alive_ms = self._now()
+
+    def mark_data(self, name: str, n_rows: int) -> None:
+        """Rows reached the writer for ``name`` — the ONLY liveness that counts."""
+        if n_rows <= 0:
+            return  # an empty batch is not evidence of anything
+        leg = self.legs.get(name)
+        if leg is None:
+            return
+        now = self._now()
+        leg.last_data_ms = now
+        leg.last_alive_ms = now
+        leg.rows += int(n_rows)
+
+    def mark_alive_current(self) -> None:
+        name = _CURRENT_LEG.get()
+        if name is not None:
+            self.mark_alive(name)
+
+    def mark_rows_current(self, n_rows: int) -> None:
+        """Writer seam: attribute rows to the leg whose task is running now."""
+        name = _CURRENT_LEG.get()
+        if name is not None:
+            self.mark_data(name, n_rows)
+
+    # -- inspection --------------------------------------------------------- #
+    def tasks(self) -> list:
+        """The CURRENT task objects (a restart replaces them) — the shutdown
+        rail cancels exactly what is running now."""
+        return [leg.task for leg in self.legs.values() if leg.task is not None]
+
+    def unhealthy(self, now_ms: Optional[int] = None) -> list[str]:
+        now = self._now() if now_ms is None else now_ms
+        return sorted(
+            name
+            for name, leg in self.legs.items()
+            if leg.verdict(now) not in ("running", "starting")
+        )
+
+    def ok(self) -> bool:
+        return bool(self.snapshot()["ok"])
+
+    def _writer_json(self, now_ms: int) -> Optional[dict]:
+        w = self._writer
+        if w is None:
+            return None
+        last_ok = int(getattr(w, "last_flush_ok_ms", 0) or 0)
+        age_s = round((now_ms - last_ok) / 1000.0, 1) if last_ok else None
+        drop_ms = int(getattr(w, "last_error_drop_ms", 0) or 0)
+        dropping_now = bool(drop_ms) and (now_ms - drop_ms) <= WRITER_FLUSH_BUDGET_S * 1000
+        if dropping_now:
+            # Rows are being LOST right now (this is what 1 492 ENOSPC commit
+            # failures looked like from the inside). Legs still stamp liveness —
+            # they handed their rows over honestly — so without this check the
+            # whole daemon would report ok while writing nothing.
+            state = "dropping"
+        elif age_s is None or age_s > WRITER_FLUSH_BUDGET_S:
+            state = "stale"
+        else:
+            state = "running"
+        return {
+            "state": state,
+            "last_flush_ok_age_s": age_s,
+            "flush_failures": int(getattr(w, "flush_failures", 0) or 0),
+            "rows_written": dict(getattr(w, "rows_written", {}) or {}),
+            "rows_dropped_closed": int(getattr(w, "rows_dropped_closed", 0) or 0),
+            "rows_dropped_error": int(getattr(w, "rows_dropped_error", 0) or 0),
+        }
+
+    def _disk_free_bytes(self) -> Optional[int]:
+        """Free bytes on the store's volume — the signal that would have warned
+        BEFORE the 07-23 ENOSPC instead of 40 hours after it."""
+        if self._disk_path is None:
+            return None
+        try:
+            return int(shutil.disk_usage(str(self._disk_path)).free)
+        except Exception:  # noqa: BLE001 — a missing path must not break /health
+            return None
+
+    def snapshot(self) -> dict:
+        """The /health body. Truthful by construction: every claim here is a
+        recorded observation, and ``ok`` is a function of them, not a constant."""
+        now = self._now()
+        legs: dict[str, dict] = {}
+        counts = {"running": 0, "starting": 0, "restarting": 0, "stale": 0,
+                  "dead": 0, "given-up": 0}
+        unhealthy: list[str] = []
+        for name in sorted(self.legs):
+            leg = self.legs[name]
+            payload = leg.to_json(now)
+            legs[name] = payload
+            counts[payload["state"]] = counts.get(payload["state"], 0) + 1
+            if payload["state"] not in ("running", "starting"):
+                unhealthy.append(name)
+        writer = self._writer_json(now)
+        ok = not unhealthy and (writer is None or writer["state"] == "running")
+        if ok:
+            status = "ok"
+        elif counts["given-up"]:
+            status = "given-up"
+        else:
+            status = "degraded"
+        return {
+            "ok": ok,
+            "ts_ms": now,
+            "status": status,
+            "uptime_s": round((now - self.started_ms) / 1000.0, 1),
+            "legs_total": len(self.legs),
+            "legs_ok": counts["running"] + counts["starting"],
+            "legs_stale": counts["stale"],
+            "legs_restarting": counts["restarting"],
+            "legs_dead": counts["dead"],
+            "legs_given_up": counts["given-up"],
+            "unhealthy": unhealthy,
+            "restarts_total": self.restarts_total,
+            "gap_events_total": sum(leg.gap_events for leg in self.legs.values()),
+            "log_drops": log_drop_count(),
+            "ledger_failures": self.ledger_failures,
+            "disk_free_bytes": self._disk_free_bytes(),
+            "writer": writer,
+            "legs": legs,
+        }
+
+    # -- the loop ----------------------------------------------------------- #
+    async def run(self) -> None:
+        """Watchdog loop. Returns on ``stop_event`` — shutdown owns the tasks."""
+        while not self._stop.is_set():
+            await _sleep_or_stop(self._stop, self._tick_s)
+            if self._stop.is_set():
+                return
+            try:
+                await self.check()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — the watchdog outlives its own bugs
+                _safe_log(self._log, f"[collector] WATCHDOG tick FAILED: {exc!r}")
+
+    async def check(self) -> None:
+        """One supervision pass. Safe to call directly (tests drive it)."""
+        if self._stop.is_set():
+            return  # shutdown owns the tasks now — never fight cancellation
+        now = self._now()
+        for name in list(self.legs):
+            if self._stop.is_set():
+                return
+            leg = self.legs[name]
+            if leg.give_up_since_ms is not None:
+                self._check_given_up(leg, now)
+                continue
+            self._decay(leg, now)
+            task = leg.task
+            if task is None:
+                continue
+            if task.done():
+                # RETRIEVE the exception (constraint #6) — an un-awaited Task
+                # parks it and the failure evaporates. Never again.
+                leg.last_error = self._epitaph(task)
+                reason = "task-died"
+                detail = f"task ENDED ({leg.last_error}) after {leg.rows} row(s)"
+            elif leg.verdict(now) == "stale":
+                reason = "stalled"
+                detail = (
+                    f"STALLED — no rows for {leg.data_age_ms(now) / 1000.0:.0f}s "
+                    f"(budget {leg.budget_s:.0f}s) while the task is still alive"
+                )
+            else:
+                if leg.alarm_since_ms is not None:  # healed on its own rail
+                    leg.alarm_since_ms = None
+                    _safe_log(
+                        self._log,
+                        f"[collector] WATCHDOG {leg.name}: producing again — "
+                        "recovered on its own reconnect rail, no restart needed",
+                    )
+                continue
+            if leg.alarm_since_ms is None:  # one loud line per incident, not per tick
+                leg.alarm_since_ms = now
+                _safe_log(
+                    self._log,
+                    f"[collector] WATCHDOG {leg.name}: {detail} — the gap stays a gap",
+                )
+            await self._restart(leg, reason, now)
+
+    def _check_given_up(self, leg: LegState, now_ms: int) -> None:
+        """A given-up leg is left alone but never goes quiet. Its own reconnect
+        rail may still recover it — if rows appear again we resume supervision
+        rather than pretend the leg is beyond help."""
+        alive = leg.task is not None and not leg.task.done()
+        if alive and leg.last_data_ms > leg.give_up_since_ms:
+            leg.give_up_since_ms = None
+            leg.restarts_consecutive = 0
+            self._giveup_logged_ms.pop(leg.name, None)
+            _safe_log(
+                self._log,
+                f"[collector] WATCHDOG {leg.name}: producing again after give-up "
+                "— supervision resumed",
+            )
+            return
+        last = self._giveup_logged_ms.get(leg.name, 0)
+        if now_ms - last >= LEG_GIVEUP_LOG_S * 1000:
+            self._giveup_logged_ms[leg.name] = now_ms
+            _safe_log(
+                self._log,
+                f"[collector] WATCHDOG {leg.name}: GIVEN UP after "
+                f"{leg.restarts_consecutive} consecutive restarts (last error: "
+                f"{leg.last_error}) — NOT restarting again; /health stays not-ok "
+                "until a human looks. Every second here is a hole in the tape.",
+            )
+
+    def _decay(self, leg: LegState, now_ms: int) -> None:
+        """A leg healthy for LEG_RESTART_DECAY_S earns a clean ladder — last
+        week's venue outage must not count toward this week's cap."""
+        if not leg.restarts_consecutive or not leg.last_restart_ms:
+            return
+        if (
+            now_ms - leg.last_restart_ms > LEG_RESTART_DECAY_S * 1000
+            and leg.last_data_ms > leg.last_restart_ms
+        ):
+            leg.restarts_consecutive = 0
+
+    @staticmethod
+    def _epitaph(task) -> str:
+        """Retrieve the task's outcome so it can NEVER be swallowed again.
+
+        An un-awaited Task parks its exception and the failure evaporates —
+        that is the structural root cause of a dead leg inside a live process.
+        Calling ``.exception()`` consumes it; we keep the repr on the record.
+        """
+        try:
+            if task.cancelled():
+                return "cancelled"
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return "cancelled"
+        except Exception as exc:  # noqa: BLE001 — never let bookkeeping raise
+            return f"exception-unavailable: {exc!r}"
+        return repr(exc) if exc is not None else "returned (loop exited without error)"
+
+    async def _restart(self, leg: LegState, reason: str, now_ms: int) -> None:
+        if self._stop.is_set():
+            return
+        if leg.restarts_consecutive >= LEG_RESTART_CAP:
+            leg.give_up_since_ms = now_ms
+            self._giveup_logged_ms[leg.name] = now_ms
+            _safe_log(
+                self._log,
+                f"[collector] WATCHDOG {leg.name}: restart cap ({LEG_RESTART_CAP}) "
+                f"reached — GIVING UP. Reason: {reason}; last error: {leg.last_error}. "
+                "The leg is NOT restarted again and /health reports not-ok until a "
+                "human intervenes (a silent auto-heal would hide the real problem).",
+            )
+            return
+        if leg.last_restart_ms:
+            idx = min(max(leg.restarts_consecutive - 1, 0), len(LEG_RESTART_BACKOFF_S) - 1)
+            wait_ms = LEG_RESTART_BACKOFF_S[idx] * 1000
+            if now_ms - leg.last_restart_ms < wait_ms:
+                return  # ladder holds: a broken leg must not spin the process
+
+        old = leg.task
+        if old is not None and not old.done():
+            old.cancel()
+            await asyncio.gather(old, return_exceptions=True)
+
+        # The hole is REAL and is recorded before anything is restarted (§0.7).
+        from_ms = leg.last_data_ms if leg.last_data_ms else leg.started_ms
+        gap_ms = max(0, now_ms - from_ms)
+        leg.gap_events += 1
+        leg.gap_ms_total += gap_ms
+        self._record_gap(leg, reason, from_ms, now_ms, gap_ms)
+
+        leg.restarts += 1
+        leg.restarts_consecutive += 1
+        leg.last_restart_ms = now_ms
+        leg.started_ms = now_ms  # start-grace restarts with the task
+        leg.alarm_since_ms = None  # this incident is answered; the next is new
+        self.restarts_total += 1
+        leg.task = self._create_task(leg.name, self._factories[leg.name])
+        _safe_log(
+            self._log,
+            f"[collector] WATCHDOG {leg.name}: restarted (#{leg.restarts}, "
+            f"{leg.restarts_consecutive} consecutive, reason {reason}) — "
+            f"{gap_ms / 1000.0:.1f}s of {'/'.join(leg.tables) or 'data'} is MISSING "
+            "and stays missing (no backfill, no interpolation)",
+        )
+
+    def _record_gap(
+        self, leg: LegState, reason: str, from_ms: int, to_ms: int, gap_ms: int
+    ) -> None:
+        if self._gaps_path is None:
+            return
+        row = {
+            "ts_ms": to_ms,
+            "leg": leg.name,
+            "kind": leg.kind,
+            "reason": reason,
+            "from_ms": from_ms,
+            "to_ms": to_ms,
+            "gap_ms": gap_ms,
+            "restart_n": leg.restarts + 1,
+            "error": leg.last_error,
+            "exchange": leg.name.split("-", 1)[0] if "-" in leg.name else None,
+            "tables": list(leg.tables),
+            "rows_before": leg.rows,
+        }
+        if not append_gap_row(self._gaps_path, row):
+            self.ledger_failures += 1
+            _safe_log(
+                self._log,
+                f"[collector] WATCHDOG {leg.name}: gap ledger write FAILED — the "
+                "restart proceeds; the hole is still in the recorded ts_ms",
+            )
+
+
+# --------------------------------------------------------------------------- #
 # Resilient stream plumbing: reconnect w/ capped exp backoff + jitter, and a   #
 # stalled-stream watchdog (no frame > 60 s -> force reconnect). Mirror of the  #
 # dashboard makeSocket semantics (DESIGN §3).                                  #
@@ -1519,6 +2334,7 @@ async def _ws_stream(
     subscribe: Any = None,
     app_ping: Any = None,
     log=print,
+    on_alive=None,
 ) -> None:
     """One resilient WS leg: connect, subscribe, pump frames into ``on_frame``.
 
@@ -1530,6 +2346,11 @@ async def _ws_stream(
 
     Honesty rail (DESIGN §3): every disconnect/backoff window is a HOLE in the
     recorded series. We log it and move on — no interpolation, no replay-fill.
+
+    ``on_alive`` (watchdog seam) is called once per PARSED frame. It stamps
+    ``last_alive_ms`` — a DIAGNOSTIC only. It never decides health: a Coinbase
+    heartbeat frame or a Bybit pong would otherwise make a leg that produces no
+    rows look alive, which is exactly the illusion this rail exists to break.
     """
     attempt = 0
     while not stop_event.is_set():
@@ -1562,10 +2383,15 @@ async def _ws_stream(
                         frame = json.loads(raw)
                     except (TypeError, ValueError):
                         continue  # non-JSON frame: skip, never guess at contents
+                    if on_alive is not None:
+                        on_alive()
                     try:
                         on_frame(frame)
                     except Exception as exc:  # noqa: BLE001 — one bad frame must not kill the leg
-                        log(f"[collector] {name}: frame handler error: {exc!r}")
+                        # _safe_log, not log: on 2026-07-23 print() itself raised
+                        # OSError(28) here, escaped to the outer handler and
+                        # killed the leg inside a live process.
+                        _safe_log(log, f"[collector] {name}: frame handler error: {exc!r}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — reconnect on ANY transport failure
@@ -1576,9 +2402,10 @@ async def _ws_stream(
             # streams doesn't thundering-herd the endpoint after an outage.
             delay = min(_BACKOFF_CAP_S, _BACKOFF_BASE_S * (2 ** min(attempt, 8)))
             delay *= 0.5 + random.random()
-            log(
+            _safe_log(
+                log,
                 f"[collector] {name}: {exc!r} — reconnecting in {delay:.1f}s "
-                f"(attempt {attempt}; the gap stays a gap)"
+                f"(attempt {attempt}; the gap stays a gap)",
             )
             await _sleep_or_stop(stop_event, delay)
 
@@ -1590,19 +2417,27 @@ async def _rest_poll(
     interval_s: float,
     stop_event: asyncio.Event,
     log=print,
+    on_alive=None,
 ) -> None:
     """One resilient REST poll leg. ``fetch`` is a blocking callable (requests)
     run via ``asyncio.to_thread`` so the event loop never blocks on HTTP.
     A failed poll is logged and skipped — the missing sample stays missing.
+
+    ``on_alive`` (watchdog seam) fires after a SUCCESSFUL fetch — diagnostic
+    only; the leg's health verdict is decided by rows reaching the writer.
     """
     while not stop_event.is_set():
         try:
             payload = await asyncio.to_thread(fetch)
+            if on_alive is not None:
+                on_alive()
             on_payload(payload)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — a failed poll must not kill the leg
-            log(f"[collector] {name}: poll failed: {exc!r} (the gap stays a gap)")
+            # _safe_log: a raising sink here killed binancef-premiumIndex,
+            # okx-oi and deribit-dvol on 2026-07-23 (root cause, reproduced).
+            _safe_log(log, f"[collector] {name}: poll failed: {exc!r} (the gap stays a gap)")
         await _sleep_or_stop(stop_event, interval_s)
 
 
@@ -1690,7 +2525,9 @@ def _fetch_deribit_chain(currency: str) -> dict:
     )
 
 
-async def _aggtrades_loop(symbol: str, writer, stop_event: asyncio.Event, log=print) -> None:
+async def _aggtrades_loop(
+    symbol: str, writer, stop_event: asyncio.Event, log=print, on_alive=None
+) -> None:
     """Binance ``aggTrades`` REST poll (5 s) with a gapless ``fromId`` cursor (§3c).
 
     The cursor advances to ``last a + 1`` ONLY after a successful poll+normalize;
@@ -1714,21 +2551,25 @@ async def _aggtrades_loop(symbol: str, writer, stop_event: asyncio.Event, log=pr
     while not stop_event.is_set():
         try:
             payload = await asyncio.to_thread(_fetch_binance_aggtrades, symbol, cursor)
+            if on_alive is not None:
+                on_alive()
             rows, next_from_id = normalize_binance_aggtrades(payload, symbol)
             if rows:
                 first_id = min(int(r[2]) for r in rows)
                 if cursor is not None and first_id > cursor:
-                    log(
+                    _safe_log(
+                        log,
                         f"[collector] binancef-aggTrades: id GAP — expected {cursor}, "
                         f"wire resumed at {first_id} ({first_id - cursor} aggTrade "
-                        "id(s) missing; the gap stays a gap)"
+                        "id(s) missing; the gap stays a gap)",
                     )
                 if last_id is not None:
                     fresh = [r for r in rows if int(r[2]) > last_id]
                     if len(fresh) != len(rows):
-                        log(
+                        _safe_log(
+                            log,
                             f"[collector] binancef-aggTrades: deduped "
-                            f"{len(rows) - len(fresh)} re-served row(s) <= id {last_id}"
+                            f"{len(rows) - len(fresh)} re-served row(s) <= id {last_id}",
                         )
                     rows = fresh
             if rows:
@@ -1739,7 +2580,9 @@ async def _aggtrades_loop(symbol: str, writer, stop_event: asyncio.Event, log=pr
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — a failed poll must not kill the leg
-            log(f"[collector] binancef-aggTrades: poll failed: {exc!r} (cursor kept)")
+            # _safe_log: the raising sink here is what killed binancef-aggTrades
+            # on 2026-07-23 — 07-25 recorded ZERO binancef trades because of it.
+            _safe_log(log, f"[collector] binancef-aggTrades: poll failed: {exc!r} (cursor kept)")
         await _sleep_or_stop(stop_event, _AGGTRADES_POLL_S)
 
 
@@ -1758,10 +2601,13 @@ async def _retention_loop(
     """
     while not stop_event.is_set():
         cutoff = int(time.time() * 1000) - int(retention_days) * 86_400_000
-        with lock:
-            for table in _TABLE_COLUMNS:
-                con.execute(f"DELETE FROM {table} WHERE ts_ms < ?", [cutoff])
-        log(f"[collector] retention: pruned rows older than {retention_days}d")
+        try:
+            with lock:
+                for table in _TABLE_COLUMNS:
+                    con.execute(f"DELETE FROM {table} WHERE ts_ms < ?", [cutoff])
+            _safe_log(log, f"[collector] retention: pruned rows older than {retention_days}d")
+        except Exception as exc:  # noqa: BLE001 — a failed prune must not kill the leg
+            _safe_log(log, f"[collector] retention: prune FAILED: {exc!r} (retrying tomorrow)")
         await _sleep_or_stop(stop_event, 86_400.0)
 
 
@@ -2195,6 +3041,7 @@ def make_api_server(
     info: dict,
     port: int,
     host: str = "127.0.0.1",
+    supervisor: Optional["LegSupervisor"] = None,
 ) -> ThreadingHTTPServer:
     """Build (not start) the BYOD ThreadingHTTPServer. ``port=0`` -> ephemeral
     (tests read the bound port off ``server.server_address``). Caller runs
@@ -2208,6 +3055,22 @@ def make_api_server(
     local day, and /v1/info aggregates row_counts across the local day files.
     §4f adds /v1/profile and /v1/vwap (both modes, live-local reads) and
     /v1/levels (rotation only — the registry lives beside the day files).
+
+    ``supervisor`` (a :class:`LegSupervisor`) makes ``/health`` TELL THE TRUTH:
+    per-leg last-data age, task state, restart counts, writer freshness and free
+    disk, with ``ok`` computed from those observations instead of hard-coded.
+    Without one — the legacy/test path — ``/health`` keeps its old shape and
+    says ``status: "no-supervisor"``, which is the honest statement of "nothing
+    is being watched here".
+
+    **``/health`` always answers HTTP 200; the verdict lives in the body.** That
+    is decided from the two measured consumers, not from preference:
+    ``dashboard/terminal.js`` treats a non-2xx as "collector API offline" and
+    would hide panels that are still perfectly answerable, while
+    ``scripts/archive_ticks.py`` already reads ANY answer as "collector alive".
+    The new ``/health/ready`` route is the probe surface that DOES switch status
+    code (200 ok / 503 not ok) — it has no existing consumer, so it cannot
+    regress one.
     /v1/info also advertises ``symbol_aliases`` — the canonical -> venue-native
     expansion every symbol filter applies (:func:`_expand_symbol`) — so a
     replay client can see exactly which stored ids a canonical query widens to.
@@ -2240,7 +3103,40 @@ def make_api_server(
             qs = {k: v[-1] for k, v in parse_qs(parts.query).items()}
             try:
                 if path == "/health":
-                    self._send_json({"ok": True, "ts_ms": int(time.time() * 1000)})
+                    # Always 200 — see the docstring. The BODY carries the verdict.
+                    if supervisor is None:
+                        self._send_json(
+                            {
+                                "ok": True,
+                                "ts_ms": int(time.time() * 1000),
+                                "status": "no-supervisor",
+                            }
+                        )
+                    else:
+                        self._send_json(supervisor.snapshot())
+                elif path == "/health/ready":
+                    # Probe surface (systemd/k8s/launchd style): the STATUS CODE
+                    # carries the verdict. New route, no existing consumer.
+                    if supervisor is None:
+                        self._send_json(
+                            {
+                                "ok": True,
+                                "ts_ms": int(time.time() * 1000),
+                                "status": "no-supervisor",
+                                "unhealthy": [],
+                            }
+                        )
+                    else:
+                        snap = supervisor.snapshot()
+                        self._send_json(
+                            {
+                                "ok": snap["ok"],
+                                "ts_ms": snap["ts_ms"],
+                                "status": snap["status"],
+                                "unhealthy": snap["unhealthy"],
+                            },
+                            status=200 if snap["ok"] else 503,
+                        )
                 elif path == "/v1/info":
                     if rotation:
                         counts = _rotation_row_counts(store, lock)
@@ -2284,7 +3180,7 @@ def make_api_server(
                         {
                             "error": "not found",
                             "routes": [
-                                "/health", "/v1/info", *_API_ROUTES,
+                                "/health", "/health/ready", "/v1/info", *_API_ROUTES,
                                 "/v1/profile", "/v1/vwap", "/v1/levels",  # §4f
                             ],
                         },
@@ -2436,10 +3332,30 @@ async def _run_async(
             # option summary, or shapes we could not parse.
             log(f"[collector] deribit-chain: {len(rows)} rows, {skipped} unparseable skipped")
 
-    # --- tasks ---
-    tasks: list[asyncio.Task] = [
-        asyncio.create_task(writer.run(stop_event), name="writer-flush"),
-    ]
+    # --- supervised legs (per-leg watchdog; see LEG_BUDGET_S) ---------------- #
+    # Every leg is spawned through the supervisor, which needs a FACTORY (a
+    # zero-arg callable returning a fresh coroutine) instead of a coroutine: a
+    # coroutine can only be awaited once, so a restartable leg must be
+    # re-creatable. That is the only structural change this rail imposes here —
+    # the leg set, its order and its arguments are unchanged.
+    sup = LegSupervisor(
+        stop_event=stop_event,
+        log=log,
+        gaps_path=(manager.gaps_path() if rotation else None),
+        writer=writer,
+        disk_path=(Path(db) if rotation else Path(db).parent),
+        tick_s=SUPERVISOR_TICK_S,
+    )
+    # The writer stamps per-leg liveness at the ONE choke point where a leg's
+    # data becomes real: rows accepted by the writer. Empty batches never stamp.
+    writer.leg_sink = sup.mark_rows_current
+    alive = sup.mark_alive_current  # diagnostic heartbeat, never a health verdict
+
+    sup.spawn(
+        "writer-flush", "internal",
+        lambda: writer.run(stop_event),
+        budget_s=LEG_BUDGET_S["writer-flush"],
+    )
     if "bybit" in exchanges:
         subscribe = {
             "op": "subscribe",
@@ -2450,78 +3366,89 @@ async def _run_async(
                 f"allLiquidation.{symbol}",
             ],
         }
-        tasks.append(
-            asyncio.create_task(
-                _ws_stream(
-                    "bybit-ws",
-                    _BYBIT_WS,
-                    on_bybit,
-                    stop_event=stop_event,
-                    subscribe=subscribe,
-                    app_ping={"op": "ping"},
-                    log=log,
-                ),
-                name="bybit-ws",
-            )
+        sup.spawn(
+            "bybit-ws", "stream",
+            lambda: _ws_stream(
+                "bybit-ws",
+                _BYBIT_WS,
+                on_bybit,
+                stop_event=stop_event,
+                subscribe=subscribe,
+                app_ping={"op": "ping"},
+                log=log,
+                on_alive=alive,
+            ),
+            budget_s=LEG_BUDGET_S["bybit-ws"],
+            # publicTrade is the witness for this whole socket; liquidations ride
+            # the same leg precisely BECAUSE they are sparse (0 all day on
+            # 2026-07-25, honestly) and cannot witness their own liveness.
+            tables=("trades", "liquidations", "depth_snapshots", "funding_mark",
+                    "open_interest"),
         )
     if "binancef" in exchanges:
         # depth20@100ms is the ONLY Binance futures WS topic that flows on this
         # network (§0.2) — trades/mark are topic-filtered, hence the REST polls.
         url = _BINANCEF_WS.format(streams=f"{symbol.lower()}@depth20@100ms")
-        tasks.append(
-            asyncio.create_task(
-                _ws_stream("binancef-ws", url, on_binance_depth, stop_event=stop_event, log=log),
-                name="binancef-ws",
-            )
+        sup.spawn(
+            "binancef-ws", "stream",
+            lambda: _ws_stream(
+                "binancef-ws", url, on_binance_depth, stop_event=stop_event, log=log,
+                on_alive=alive,
+            ),
+            budget_s=LEG_BUDGET_S["binancef-ws"],
+            tables=("depth_snapshots",),
         )
-        tasks.append(
-            asyncio.create_task(
-                _rest_poll(
-                    "binancef-premiumIndex",
-                    lambda: _fetch_binance_premium_index(symbol),
-                    lambda p: writer.add("funding_mark", normalize_binance_premium_index(p)),
-                    _PREMIUM_POLL_S,
-                    stop_event,
-                    log=log,
-                ),
-                name="binancef-premiumIndex",
-            )
+        sup.spawn(
+            "binancef-premiumIndex", "poll",
+            lambda: _rest_poll(
+                "binancef-premiumIndex",
+                lambda: _fetch_binance_premium_index(symbol),
+                lambda p: writer.add("funding_mark", normalize_binance_premium_index(p)),
+                _PREMIUM_POLL_S,
+                stop_event,
+                log=log,
+                on_alive=alive,
+            ),
+            budget_s=LEG_BUDGET_S["binancef-premiumIndex"],
+            tables=("funding_mark",),
         )
-        tasks.append(
-            asyncio.create_task(
-                _rest_poll(
-                    "binancef-openInterest",
-                    lambda: _fetch_binance_open_interest(symbol),
-                    lambda p: writer.add("open_interest", normalize_binance_open_interest(p)),
-                    _OI_POLL_S,
-                    stop_event,
-                    log=log,
-                ),
-                name="binancef-openInterest",
-            )
+        sup.spawn(
+            "binancef-openInterest", "poll",
+            lambda: _rest_poll(
+                "binancef-openInterest",
+                lambda: _fetch_binance_open_interest(symbol),
+                lambda p: writer.add("open_interest", normalize_binance_open_interest(p)),
+                _OI_POLL_S,
+                stop_event,
+                log=log,
+                on_alive=alive,
+            ),
+            budget_s=LEG_BUDGET_S["binancef-openInterest"],
+            tables=("open_interest",),
         )
         # §3c: futures trades via REST aggTrades (the WS topic-filter does not
         # apply to REST) — dedicated loop because it carries the fromId cursor.
-        tasks.append(
-            asyncio.create_task(
-                _aggtrades_loop(symbol, writer, stop_event, log=log),
-                name="binancef-aggTrades",
-            )
+        sup.spawn(
+            "binancef-aggTrades", "poll",
+            lambda: _aggtrades_loop(symbol, writer, stop_event, log=log, on_alive=alive),
+            budget_s=LEG_BUDGET_S["binancef-aggTrades"],
+            tables=("trades",),
         )
         # §3c crowding endpoints @ 5 m -> long-format crowding table.
         for endpoint, normalize in _CROWDING_ENDPOINTS:
-            tasks.append(
-                asyncio.create_task(
-                    _rest_poll(
-                        f"binancef-{endpoint}",
-                        lambda ep=endpoint: _fetch_binance_crowding(ep, symbol),
-                        lambda p, nz=normalize: on_crowding_payload(nz, p),
-                        _CROWDING_POLL_S,
-                        stop_event,
-                        log=log,
-                    ),
-                    name=f"binancef-{endpoint}",
-                )
+            sup.spawn(
+                f"binancef-{endpoint}", "poll",
+                lambda ep=endpoint, nz=normalize: _rest_poll(
+                    f"binancef-{ep}",
+                    lambda: _fetch_binance_crowding(ep, symbol),
+                    lambda p: on_crowding_payload(nz, p),
+                    _CROWDING_POLL_S,
+                    stop_event,
+                    log=log,
+                    on_alive=alive,
+                ),
+                budget_s=LEG_BUDGET_S[f"binancef-{endpoint}"],
+                tables=("crowding",),
             )
     if "okx" in exchanges:
         # §3c OKX leg: WS trades (ctVal-scaled) + books top-50; funding/OI via
@@ -2535,45 +3462,48 @@ async def _run_async(
                 ],
             }
         ]
-        tasks.append(
-            asyncio.create_task(
-                _ws_stream(
-                    "okx-ws",
-                    _OKX_WS,
-                    on_okx,
-                    stop_event=stop_event,
-                    subscribe=subscribe,
-                    app_ping="ping",  # OKX prescribes the PLAIN-TEXT ping (§4b)
-                    log=log,
-                ),
-                name="okx-ws",
-            )
+        sup.spawn(
+            "okx-ws", "stream",
+            lambda: _ws_stream(
+                "okx-ws",
+                _OKX_WS,
+                on_okx,
+                stop_event=stop_event,
+                subscribe=subscribe,
+                app_ping="ping",  # OKX prescribes the PLAIN-TEXT ping (§4b)
+                log=log,
+                on_alive=alive,
+            ),
+            budget_s=LEG_BUDGET_S["okx-ws"],
+            tables=("trades", "depth_snapshots"),
         )
-        tasks.append(
-            asyncio.create_task(
-                _rest_poll(
-                    "okx-funding",
-                    lambda: _fetch_okx_funding(legs["okx"]),
-                    lambda p: writer.add("funding_mark", normalize_okx_funding(p)),
-                    _OKX_REST_POLL_S,
-                    stop_event,
-                    log=log,
-                ),
-                name="okx-funding",
-            )
+        sup.spawn(
+            "okx-funding", "poll",
+            lambda: _rest_poll(
+                "okx-funding",
+                lambda: _fetch_okx_funding(legs["okx"]),
+                lambda p: writer.add("funding_mark", normalize_okx_funding(p)),
+                _OKX_REST_POLL_S,
+                stop_event,
+                log=log,
+                on_alive=alive,
+            ),
+            budget_s=LEG_BUDGET_S["okx-funding"],
+            tables=("funding_mark",),
         )
-        tasks.append(
-            asyncio.create_task(
-                _rest_poll(
-                    "okx-oi",
-                    lambda: _fetch_okx_oi(legs["okx"]),
-                    lambda p: writer.add("open_interest", normalize_okx_oi(p)),
-                    _OKX_REST_POLL_S,
-                    stop_event,
-                    log=log,
-                ),
-                name="okx-oi",
-            )
+        sup.spawn(
+            "okx-oi", "poll",
+            lambda: _rest_poll(
+                "okx-oi",
+                lambda: _fetch_okx_oi(legs["okx"]),
+                lambda p: writer.add("open_interest", normalize_okx_oi(p)),
+                _OKX_REST_POLL_S,
+                stop_event,
+                log=log,
+                on_alive=alive,
+            ),
+            budget_s=LEG_BUDGET_S["okx-oi"],
+            tables=("open_interest",),
         )
     if "coinbase" in exchanges:
         # §3c Coinbase spot tape leg — market_trades + heartbeats (the liveness
@@ -2583,57 +3513,59 @@ async def _run_async(
             {"type": "subscribe", "product_ids": [legs["coinbase"]], "channel": "market_trades"},
             {"type": "subscribe", "product_ids": [legs["coinbase"]], "channel": "heartbeats"},
         ]
-        tasks.append(
-            asyncio.create_task(
-                _ws_stream(
-                    "coinbase-ws",
-                    _COINBASE_WS,
-                    on_coinbase,
-                    stop_event=stop_event,
-                    subscribe=subscribe,
-                    log=log,
-                ),
-                name="coinbase-ws",
-            )
+        sup.spawn(
+            "coinbase-ws", "stream",
+            lambda: _ws_stream(
+                "coinbase-ws",
+                _COINBASE_WS,
+                on_coinbase,
+                stop_event=stop_event,
+                subscribe=subscribe,
+                log=log,
+                on_alive=alive,
+            ),
+            budget_s=LEG_BUDGET_S["coinbase-ws"],
+            tables=("trades",),
         )
     if "deribit" in exchanges:
         # §3c Deribit legs: DVOL @ 60 s; option chain snapshot HOURLY (this is
         # what starts the VRP/skew research clock — time-gated, not validated).
-        tasks.append(
-            asyncio.create_task(
-                _rest_poll(
-                    "deribit-dvol",
-                    _fetch_deribit_dvol,
-                    lambda p: writer.add("dvol", normalize_deribit_dvol(p)),
-                    _DVOL_POLL_S,
-                    stop_event,
-                    log=log,
-                ),
-                name="deribit-dvol",
-            )
+        sup.spawn(
+            "deribit-dvol", "poll",
+            lambda: _rest_poll(
+                "deribit-dvol",
+                _fetch_deribit_dvol,
+                lambda p: writer.add("dvol", normalize_deribit_dvol(p)),
+                _DVOL_POLL_S,
+                stop_event,
+                log=log,
+                on_alive=alive,
+            ),
+            budget_s=LEG_BUDGET_S["deribit-dvol"],
+            tables=("dvol",),
         )
-        tasks.append(
-            asyncio.create_task(
-                _rest_poll(
-                    "deribit-chain",
-                    lambda: _fetch_deribit_chain(legs["deribit"]),
-                    on_chain_payload,
-                    _CHAIN_POLL_S,
-                    stop_event,
-                    log=log,
-                ),
-                name="deribit-chain",
-            )
+        sup.spawn(
+            "deribit-chain", "poll",
+            lambda: _rest_poll(
+                "deribit-chain",
+                lambda: _fetch_deribit_chain(legs["deribit"]),
+                on_chain_payload,
+                _CHAIN_POLL_S,
+                stop_event,
+                log=log,
+                on_alive=alive,
+            ),
+            budget_s=LEG_BUDGET_S["deribit-chain"],
+            tables=("options_chain",),
         )
     if retention_days is not None and not rotation:
         # Legacy mode only — run() refuses the combination with rotation (§3c:
         # pruning closed days is the HF lifecycle's job, verify-then-delete);
         # the `not rotation` guard keeps a direct _run_async caller honest too.
-        tasks.append(
-            asyncio.create_task(
-                _retention_loop(con, lock, retention_days, stop_event, log=log),
-                name="retention",
-            )
+        sup.spawn(
+            "retention", "internal",
+            lambda: _retention_loop(con, lock, retention_days, stop_event, log=log),
+            budget_s=LEG_BUDGET_S["retention"],
         )
 
     server: Optional[ThreadingHTTPServer] = None
@@ -2645,7 +3577,7 @@ async def _run_async(
             "started_ms": int(time.time() * 1000),
             "retention_days": retention_days,  # None == keep-all (the default)
         }
-        server = make_api_server(store, lock, info, port=api_port)
+        server = make_api_server(store, lock, info, port=api_port, supervisor=sup)
         threading.Thread(target=server.serve_forever, name="byod-api", daemon=True).start()
         log(f"[collector] BYOD API on http://127.0.0.1:{server.server_address[1]}")
 
@@ -2657,11 +3589,23 @@ async def _run_async(
         f"Ctrl-C flushes and exits cleanly)"
         + (f" [venue ids: {leg_note}]" if leg_note else "")
     )
+    log(
+        f"[collector] per-leg watchdog: {len(sup.legs)} legs supervised, tick "
+        f"{SUPERVISOR_TICK_S:.0f}s"
+        + (f", gap ledger -> {manager.gaps_path()}" if rotation else "")
+    )
 
+    sup_task = asyncio.create_task(sup.run(), name="watchdog")
     await stop_event.wait()
 
     # --- graceful shutdown: stop legs, FINAL FLUSH, close (SIGINT rail, §3) ---
+    # UNCHANGED contract: SIGTERM still means cancel everything, then flush.
+    # The watchdog is cancelled FIRST and returns on stop_event anyway (it checks
+    # it before every action), so it can never restart a leg we just cancelled.
+    # sup.tasks() is read HERE, after the run, so a leg that was restarted mid-
+    # session is cancelled by its CURRENT task object, not a stale one.
     log("[collector] shutdown requested — final flush")
+    tasks: list[asyncio.Task] = [sup_task, *sup.tasks()]
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
@@ -2677,10 +3621,27 @@ async def _run_async(
     # Closed-day drops are logged per event during the run; the session total is
     # restated here so a long run's honest losses are visible at a glance (§3c).
     dropped = getattr(writer, "rows_dropped_closed", 0)
+    err_dropped = getattr(writer, "rows_dropped_error", 0)
     log(
         f"[collector] closed. rows this session: {writer.rows_written}"
         + (f"; rows DROPPED for closed days: {dropped}" if dropped else "")
+        + (f"; rows DROPPED on write errors: {err_dropped}" if err_dropped else "")
     )
+    # Watchdog restatement: every restart left a REAL hole. Stating the totals at
+    # shutdown is the same honesty rail as the closed-day drop line above — and
+    # the per-event detail is on disk in gaps.jsonl (rotation mode).
+    restarts = sup.restarts_total
+    gap_events = sum(leg.gap_events for leg in sup.legs.values())
+    gap_ms = sum(leg.gap_ms_total for leg in sup.legs.values())
+    given_up = sorted(n for n, leg in sup.legs.items() if leg.give_up_since_ms is not None)
+    if restarts or given_up or log_drop_count():
+        log(
+            f"[collector] watchdog: {restarts} leg restart(s), {gap_events} recorded "
+            f"gap event(s) totalling {gap_ms / 1000.0:.1f}s of MISSING data "
+            "(never backfilled)"
+            + (f"; GAVE UP on: {', '.join(given_up)}" if given_up else "")
+            + (f"; log lines dropped: {log_drop_count()}" if log_drop_count() else "")
+        )
 
 
 def run(

@@ -712,3 +712,50 @@ check a control frame clears it" while the code asserted only that a pong on a H
 is silent — deleting the liveness stamp outright still passed. It now drives livewire's real
 watchdog on a stubbed clock and asserts the full contract; all three regressions above were
 mutation-tested against it and each one fails the group.
+
+## 2026-08-01 — The collector recorded nothing for 40 hours and every health signal said fine
+
+**What happened.** A running collector logged zero trades for ~40 hours while the process
+was alive (uptime 7d14h), `/health` returned `{"ok": true}`, the day file's mtime kept
+advancing, and the disk had 8.1 GiB free. Only the REST pollers (options_chain,
+funding_mark, open_interest) were still alive; they are what kept touching the file and
+made the failure look like health.
+
+**Cost, measured.** 2026-07-24 and 07-25 are close to useless for research: 07-25 holds
+ONLY coinbase trades and ONLY binancef depth, where a healthy day is four venues and
+4-6.5M trades. `btcquant/orderflow.py` put a number on it — of 432 hourly bars in the
+recorded window, **27 have full coverage**.
+
+**Trigger chain.** The 2026-07-23 disk-full incident produced 1,492 DuckDB commit
+failures (`No space left on device`). Those surfaced as `bybit-ws: frame handler error:
+TransactionException(...)`.
+
+**Root cause — structural, not incidental.** `_run_async` created ~15 tasks with
+`asyncio.create_task` and then simply `await stop_event.wait()`. Nothing supervised them.
+A task that raises stores its exception in the Task object; with nobody awaiting it, the
+failure is swallowed and the process keeps waiting on an event that will not come. And
+`/health` returned a hard-coded `{"ok": True}` — it checked nothing, so it could not have
+reported the outage even in principle. A dead unit inside a live process, exactly the
+class of defect N5 fixed on the terminal side.
+
+**Recovery.** SIGTERM (clean exit in 8s, file consistent) → launchd `KeepAlive` restarted
+the process → all four venues resumed (bybit 241, binancef 104, okx 79, coinbase 76 in a
+three-minute window). Process-level supervision worked; leg-level supervision did not
+exist.
+
+**Fix.** `LegSupervisor` in `btcquant/collector.py`: per-leg heartbeats stamped where data
+is actually accepted, symptom-based detection (task done/raised, or no data beyond that
+leg's own budget), bounded restart with a `given-up` terminal state that stays loud rather
+than going quiet, retrieved task exceptions logged with the leg name, and watchdog
+restarts recorded as honest gaps rather than papered over. `/health` now returns a
+computed verdict — `ok` is a function of recorded observations, never a constant — with
+per-leg state, writer state, restart and gap counts, and free disk. `/health/ready` is a
+separate readiness probe.
+
+**Rails this touched.** Gaps stay gaps (§0.7): a watchdog restart is a real hole and is
+recorded, never backfilled. Never cry wolf: staleness budgets are per leg type, because a
+liquidation stream can be legitimately silent for hours (07-25 had none all day, honestly).
+
+**Standing consequence.** `Restart=always` in the GCP unit would NOT have caught this —
+the process never died. Leg-level supervision is therefore a prerequisite of N4, not a
+companion to it.

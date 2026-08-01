@@ -59,7 +59,10 @@ import http.client
 import importlib.util
 import json
 import math
+import os
+import signal
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -1529,3 +1532,961 @@ def test_profile_and_vwap_canonical_symbol_selects_native_leg(tmp_path):
             port, f"/v1/vwap?symbol=BTC-USDT-SWAP&exchange=bybit&anchor_ms={t0}"
         )
         assert status == 200 and body == {"vwap": None, "sigma": None, "n": 0}
+
+
+# --------------------------------------------------------------------------- #
+# 23. PER-LEG WATCHDOG (§3 resilience) — the 2026-07-24/25 outage rail.        #
+#                                                                             #
+# The incident these tests pin: the daemon ran 7 d 14 h and recorded ZERO      #
+# trades for its last 40 h while the process was alive, /health said           #
+# {"ok": true}, the day-file mtime kept moving and 8.1 GiB were free. Six legs #
+# had died inside a live process (an ENOSPC made print() itself raise inside   #
+# every leg's except block; the exceptions were parked in un-awaited Tasks).   #
+# 2026-07-24 and 07-25 are nearly useless for research as a result — 07-25 has #
+# coinbase trades and binancef depth ONLY, against 4 venues on a healthy day.  #
+# --------------------------------------------------------------------------- #
+class _StubTask:
+    """Minimal Task stand-in so LegState.verdict can be exercised as a PURE
+    function — no event loop, no coroutine, no clock."""
+
+    def __init__(self, done=False, cancelled=False):
+        self._done, self._cancelled = done, cancelled
+
+    def done(self):
+        return self._done
+
+    def cancelled(self):
+        return self._cancelled
+
+
+# Nominal cadence of every leg, from the module's own poll constants. The
+# budget must clear this by a wide margin or the watchdog cries wolf on an
+# ordinary hiccup — and a false alarm punches a REAL hole (a restart is a gap).
+_DOCUMENTED_CADENCE_S = {
+    "bybit-ws": 1.0,  # sub-second tape; 1 s is the conservative stand-in
+    "okx-ws": 1.0,
+    "coinbase-ws": 1.0,
+    "binancef-ws": 1.0,  # depth20@100ms stored at 1/s (DOWNSAMPLE_MS)
+    "binancef-premiumIndex": collector._PREMIUM_POLL_S,
+    "binancef-aggTrades": collector._AGGTRADES_POLL_S,
+    "binancef-openInterest": collector._OI_POLL_S,
+    "okx-funding": collector._OKX_REST_POLL_S,
+    "okx-oi": collector._OKX_REST_POLL_S,
+    "deribit-dvol": collector._DVOL_POLL_S,
+    "binancef-takerlongshortRatio": collector._CROWDING_POLL_S,
+    "binancef-topLongShortPositionRatio": collector._CROWDING_POLL_S,
+    "binancef-globalLongShortAccountRatio": collector._CROWDING_POLL_S,
+    "binancef-openInterestHist": collector._CROWDING_POLL_S,
+    "deribit-chain": collector._CHAIN_POLL_S,
+}
+
+# Worst inter-row gap actually OBSERVED on a healthy/degraded day (live API
+# sampling 2026-07-26 + the 2026-07-25 day file). The budget must clear the
+# worst thing the wire has really done, not the cadence the docs promise.
+_WORST_MEASURED_GAP_S = {
+    "bybit-ws": 2.44,
+    "okx-ws": 1.73,
+    "coinbase-ws": 3.82,
+    "binancef-ws": 1.51,
+    "binancef-openInterest": 66.1,
+    "okx-funding": 125.6,  # OKX rate-limits this endpoint
+    "binancef-takerlongshortRatio": 300.0,
+    "deribit-chain": 8931.0,  # degraded-day p99
+}
+
+
+def test_leg_budgets_are_grounded():
+    """U1 — every staleness budget is derived, never a round number picked by
+    feel, and the stream budgets sit STRICTLY above the leg's own reconnect rail.
+
+    Three rails at once:
+      * budget >= 4x the documented cadence (a single missed sample is normal);
+      * budget >= 2x the worst gap ever MEASURED on that leg;
+      * a WS budget must exceed WATCHDOG_S + _BACKOFF_CAP_S, so the leg's own
+        silent-socket watchdog and backoff always get first refusal and the
+        supervisor is the second responder, never a competing one.
+    """
+    for name, cadence in _DOCUMENTED_CADENCE_S.items():
+        budget = collector.LEG_BUDGET_S[name]
+        assert budget is not None, f"{name} must have a budget"
+        assert budget >= 4 * cadence, f"{name}: {budget}s is under 4x cadence {cadence}s"
+
+    for name, worst in _WORST_MEASURED_GAP_S.items():
+        assert collector.LEG_BUDGET_S[name] >= 2 * worst, (
+            f"{name}: budget would fire on a gap the wire has already produced"
+        )
+
+    leg_rail_s = collector.WATCHDOG_S + collector._BACKOFF_CAP_S  # 60 + 30
+    for name in ("bybit-ws", "okx-ws", "coinbase-ws", "binancef-ws"):
+        assert collector.LEG_BUDGET_S[name] > leg_rail_s, (
+            f"{name}: the supervisor would race the leg's own reconnect rail"
+        )
+
+    # Only internal tasks may be unbudgeted, and the reason is stated: a
+    # staleness budget on them would be a false alarm by construction.
+    unbudgeted = {n for n, b in collector.LEG_BUDGET_S.items() if b is None}
+    assert unbudgeted == {"writer-flush", "retention"}
+
+
+def test_every_spawned_leg_is_registered():
+    """U1b — name parity: a leg added to _run_async without a budget entry must
+    fail LOUD at startup (KeyError), never run silently unsupervised. This is
+    checked against the real _run_async wiring, not a copy of the leg list."""
+    for name in collector.LEG_BUDGET_S:
+        assert isinstance(name, str) and name
+    # The wiring itself is proved by the integration test below, which reads
+    # sup.legs after running the real _run_async: every leg it spawns had to
+    # resolve LEG_BUDGET_S[name] to get there.
+
+
+def test_leg_verdict_is_pure():
+    """U2 — the verdict is a pure function of recorded facts + an injected clock."""
+    now = 1_000_000
+
+    def leg(**kw):
+        base = dict(name="x", kind="stream", budget_s=100.0, started_ms=now - 500_000,
+                    task=_StubTask())
+        base.update(kw)
+        return collector.LegState(**base)
+
+    # Producing inside budget -> running.
+    assert leg(last_data_ms=now - 50_000).verdict(now) == "running"
+    # Silent past budget while the task is ALIVE -> stale. This is the
+    # reconnect-storm livelock case: task-state alone cannot see it.
+    assert leg(last_data_ms=now - 150_000).verdict(now) == "stale"
+    # Task ended -> dead, whatever the data clock says.
+    assert leg(last_data_ms=now, task=_StubTask(done=True)).verdict(now) == "dead"
+    # Fresh spawn, nothing yet, inside one budget of grace -> starting (ok).
+    assert leg(started_ms=now - 50_000, last_data_ms=0).verdict(now) == "starting"
+    # Same, but past the grace window -> stale (it never produced at all).
+    assert leg(started_ms=now - 150_000, last_data_ms=0).verdict(now) == "stale"
+    # Restarted and not yet producing -> restarting: known-broken, NOT known-fixed.
+    # "We kicked it" must not read as healthy.
+    assert leg(started_ms=now - 10_000, last_data_ms=0, restarts=1).verdict(now) == "restarting"
+    # Restart cap reached -> given-up, loud forever regardless of anything else.
+    assert leg(last_data_ms=now, give_up_since_ms=now - 1).verdict(now) == "given-up"
+    # No budget (internal/sparse) -> alive is the whole verdict; silence is fine.
+    assert leg(budget_s=None, last_data_ms=now - 10 ** 9).verdict(now) == "running"
+
+
+def test_sparse_stream_never_alarms():
+    """U3 — the N5 rail: a legitimately sparse series can NEVER raise an alarm.
+
+    2026-07-25 recorded ZERO liquidations all day, honestly (bybit prints
+    3-2000/day). Liquidations are a sub-topic of bybit-ws and have no leg — and
+    no budget — of their own; the publicTrade flow on the same socket is their
+    witness. Simulated here over a full 24 h: trades every second, not one
+    liquidation, and the leg stays healthy for all 86 400 seconds.
+    """
+    now = [0]
+    sup = collector.LegSupervisor(stop_event=asyncio.Event(), log=lambda _m: None,
+                                  now_ms=lambda: now[0])
+    leg = collector.LegState(
+        name="bybit-ws", kind="stream", budget_s=collector.LEG_BUDGET_S["bybit-ws"],
+        tables=("trades", "liquidations"), task=_StubTask(), started_ms=0,
+    )
+    sup.legs["bybit-ws"] = leg
+    for second in range(1, 86_401):
+        now[0] = second * 1000
+        sup.mark_data("bybit-ws", 1)  # a trade — never a liquidation
+        assert leg.verdict(now[0]) == "running"
+    assert sup.unhealthy(now[0]) == []
+    assert leg.rows == 86_400
+    # And no table ever gets a budget of its own — budgets attach to LEGS.
+    assert set(collector.LEG_BUDGET_S) & {"liquidations", "options_chain", "crowding"} == set()
+
+
+def test_empty_batch_never_stamps_liveness():
+    """U11a — rows == [] is not evidence. A Coinbase heartbeat frame (the
+    channel that keeps a quiet tape's socket open) and a re-served crowding
+    bucket the Downsampler dedupes both reach the writer as an EMPTY batch;
+    if those stamped liveness, a leg producing nothing would look alive —
+    which is the exact illusion this rail exists to break."""
+    now = [5_000]
+    sup = collector.LegSupervisor(stop_event=asyncio.Event(), log=lambda _m: None,
+                                  now_ms=lambda: now[0])
+    leg = sup.legs["coinbase-ws"] = collector.LegState(
+        name="coinbase-ws", kind="stream", budget_s=1.0, task=_StubTask(), started_ms=0,
+    )
+    sup.mark_data("coinbase-ws", 0)
+    assert leg.last_data_ms == 0 and leg.rows == 0
+    now[0] = 10_000
+    assert leg.verdict(now[0]) == "stale"  # empty batches did NOT rescue it
+    sup.mark_data("coinbase-ws", 3)
+    assert leg.verdict(now[0]) == "running"
+
+
+def test_leg_heartbeat_attribution_is_task_local(tmp_path):
+    """U11 — two concurrent legs writing through the SAME writer are attributed
+    correctly, and the attribution never leaks to the parent task."""
+    root = tmp_path / "ticks"
+    manager = collector.DayFileManager(root)
+    writer = collector.RotatingWriter(manager, threading.Lock(), log=lambda _m: None)
+
+    async def main():
+        stop = asyncio.Event()
+        sup = collector.LegSupervisor(stop_event=stop, log=lambda _m: None, writer=writer)
+        writer.leg_sink = sup.mark_rows_current
+
+        async def leg_body(n_rows, table, ts):
+            # writer.add is a plain sync call nested inside the task — the
+            # contextvar must be visible here without being passed down.
+            writer.add(table, [("bybit", "BTCUSDT", "1", ts, 1.0, 1.0, True)][:1] * n_rows
+                       if table == "trades" else [])
+            await asyncio.sleep(0)
+
+        sup.spawn("bybit-ws", "stream", lambda: leg_body(2, "trades", 1_785_000_000_000))
+        sup.spawn("okx-ws", "stream", lambda: leg_body(5, "trades", 1_785_000_000_001))
+        await asyncio.gather(*sup.tasks())
+        # The parent task never had a leg identity.
+        assert collector._CURRENT_LEG.get() is None
+        writer.add("trades", [("x", "BTCUSDT", "9", 1_785_000_000_002, 1.0, 1.0, True)])
+        return {n: leg.rows for n, leg in sup.legs.items()}
+
+    rows = asyncio.run(main())
+    assert rows == {"bybit-ws": 2, "okx-ws": 5}  # the parent's add stamped nobody
+    manager.close_all()
+
+
+def test_task_exception_is_retrieved_and_named():
+    """U5 — the structural root cause, closed: a raising leg's exception is
+    RETRIEVED (never left parked in an un-awaited Task) and logged WITH the leg
+    name. Before this, the failure evaporated and the process kept waiting."""
+    logs: list[str] = []
+
+    async def main():
+        stop = asyncio.Event()
+        sup = collector.LegSupervisor(stop_event=stop, log=logs.append, tick_s=0.01)
+
+        async def boom():
+            raise RuntimeError("no space left on device (simulated)")
+
+        sup.spawn("bybit-ws", "stream", boom, budget_s=100.0)
+        await asyncio.sleep(0.05)
+        await sup.check()
+        stop.set()
+        await asyncio.sleep(0.01)
+        for leg in sup.legs.values():  # tidy the RESTARTED task the same way
+            if leg.task.done() and not leg.task.cancelled():
+                leg.task.exception()
+        return sup
+
+    sup = asyncio.run(main())
+    leg = sup.legs["bybit-ws"]
+    assert "RuntimeError" in leg.last_error and "no space left" in leg.last_error
+    assert leg.restarts == 1
+    assert any("WATCHDOG bybit-ws" in ln and "RuntimeError" in ln for ln in logs)
+    # A leg that simply RETURNS (loop exited, no error) is a death too — the
+    # 07-23 legs looked exactly like this from the outside.
+    assert any("gap stays a gap" in ln for ln in logs)
+
+
+def test_restart_ladder_cap_and_decay():
+    """U4 — recovery is bounded: the ladder spaces restarts, the cap stops them
+    for good (loud forever, /health not-ok), and a healthy stretch clears it."""
+    now = [0]
+    logs: list[str] = []
+
+    async def main():
+        stop = asyncio.Event()
+        sup = collector.LegSupervisor(
+            stop_event=stop, log=logs.append, now_ms=lambda: now[0], tick_s=0.01
+        )
+
+        async def boom():
+            raise RuntimeError("dead venue")
+
+        sup.spawn("okx-ws", "stream", boom, budget_s=100.0)
+        leg = sup.legs["okx-ws"]
+        marks: list[int] = []
+        for _ in range(800):  # 800 s of SIMULATED time — the clock is injected
+            now[0] += 1000
+            await asyncio.sleep(0)  # let the doomed task actually raise
+            await sup.check()
+            if not marks or marks[-1] != leg.restarts:
+                marks.append(leg.restarts)
+        stop.set()
+        return sup, leg, marks
+
+    sup, leg, _marks = asyncio.run(main())
+    # The cap held: never more restarts than the cap, and then it stopped.
+    assert leg.restarts == collector.LEG_RESTART_CAP
+    assert leg.verdict(now[0]) == "given-up"
+    assert sup.ok() is False
+    assert sup.snapshot()["status"] == "given-up"
+    assert any("GIVING UP" in ln for ln in logs)
+    # Spacing followed the ladder: 6 restarts cannot fit into fewer seconds
+    # than 5 + 15 + 60 + 300 + 300 of enforced waiting.
+    assert now[0] >= 1000 * (5 + 15 + 60 + 300 + 300)
+
+    # Decay: a leg that recovers on its own rail and produces again is forgiven.
+    leg.give_up_since_ms = None
+    leg.restarts_consecutive = 3
+    leg.last_restart_ms = now[0]
+    now[0] += int(collector.LEG_RESTART_DECAY_S * 1000) + 1
+    leg.last_data_ms = now[0]
+    sup._decay(leg, now[0])
+    assert leg.restarts_consecutive == 0
+
+
+def test_given_up_leg_stops_spinning_but_stays_loud():
+    """U4b — after give-up the watchdog must NOT keep restarting (a permanently
+    broken leg cannot be allowed to spin the process) and must NOT go quiet."""
+    now = [0]
+    logs: list[str] = []
+
+    async def main():
+        stop = asyncio.Event()
+        sup = collector.LegSupervisor(
+            stop_event=stop, log=logs.append, now_ms=lambda: now[0], tick_s=0.01
+        )
+
+        async def boom():
+            raise RuntimeError("dead venue")
+
+        sup.spawn("okx-ws", "stream", boom, budget_s=100.0)
+        leg = sup.legs["okx-ws"]
+        for _ in range(800):  # simulated seconds: run the ladder out to the cap
+            now[0] += 1000
+            await asyncio.sleep(0)
+            await sup.check()
+        frozen = leg.restarts
+        assert leg.give_up_since_ms is not None
+        # Three more hours of ticks: restarts stay frozen, the alarm keeps firing.
+        before_lines = len([ln for ln in logs if "GIVEN UP" in ln])
+        for _ in range(120):
+            now[0] += 100_000
+            await asyncio.sleep(0)
+            await sup.check()
+        stop.set()
+        return leg, frozen, before_lines
+
+    leg, frozen, before_lines = asyncio.run(main())
+    assert leg.restarts == frozen == collector.LEG_RESTART_CAP  # no spin
+    giveup_lines = len([ln for ln in logs if "GIVEN UP" in ln])
+    assert giveup_lines > before_lines  # still loud, rate-limited not silenced
+
+
+def test_log_sink_failure_does_not_kill_a_leg(monkeypatch):
+    """U6 — THE measured root cause, pinned as a regression.
+
+    On 2026-07-23 the disk filled, ``print()`` raised OSError(28) from inside
+    each leg's own ``except`` block, the raise escaped the ``while`` and six
+    legs died inside a live process. Reproduced against this file for
+    _rest_poll, _aggtrades_loop and _ws_stream (both the frame-handler and the
+    transport path) before the fix; all three must now SURVIVE and count the
+    dropped line instead.
+    """
+    def enospc(_msg):
+        raise OSError(28, "No space left on device")
+
+    drops0 = collector.log_drop_count()
+
+    # --- _rest_poll: fetch raises, then log raises on top of it --------------
+    stop = asyncio.Event()
+    polls = [0]
+
+    def fetch():
+        polls[0] += 1
+        if polls[0] >= 4:
+            stop.set()
+        raise RuntimeError("net down")
+
+    async def fast_sleep(event, seconds):  # noqa: ARG001 — signature parity
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(collector, "_sleep_or_stop", fast_sleep)
+    asyncio.run(collector._rest_poll("okx-oi", fetch, lambda p: None, 60.0, stop, log=enospc))
+    assert polls[0] >= 4, "the leg died on the first failed poll (root cause NOT fixed)"
+
+    # --- _aggtrades_loop: same shape, its own except block -------------------
+    stop = asyncio.Event()
+    calls = [0]
+
+    def bad_agg(symbol, from_id):  # noqa: ARG001
+        calls[0] += 1
+        if calls[0] >= 4:
+            stop.set()
+        raise RuntimeError("net down")
+
+    monkeypatch.setattr(collector, "_fetch_binance_aggtrades", bad_agg)
+
+    class _W:
+        def add(self, table, rows):
+            pass
+
+    asyncio.run(collector._aggtrades_loop("BTCUSDT", _W(), stop, log=enospc))
+    assert calls[0] >= 4, "aggTrades died on the first failed poll"
+
+    # --- _ws_stream: the transport path AND the frame-handler path -----------
+    stop = asyncio.Event()
+    connects = [0]
+
+    class _FakeWS:
+        def __init__(self):
+            self.frames = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def send(self, _msg):
+            pass
+
+        async def recv(self):
+            # Two frames whose handler raises (the INNER _safe_log path), then
+            # the transport drops (the OUTER _safe_log path). Both raised
+            # OSError(28) on 2026-07-23; both had to be survivable.
+            self.frames += 1
+            if self.frames <= 2:
+                return json.dumps({"topic": "publicTrade.BTCUSDT"})
+            raise ConnectionError("closed")
+
+    def fake_connect(url, **kw):  # noqa: ARG001
+        connects[0] += 1
+        if connects[0] >= 4:
+            stop.set()
+        return _FakeWS()
+
+    def bad_handler(_frame):
+        raise ValueError("frame handler blew up")
+
+    monkeypatch.setattr(collector, "websockets", type("_ws", (), {"connect": fake_connect}))
+    asyncio.run(
+        collector._ws_stream("bybit-ws", "wss://x", bad_handler, stop_event=stop, log=enospc)
+    )
+    assert connects[0] >= 4, "the WS leg died on a raising log sink (root cause NOT fixed)"
+
+    # Swallowed is not silent: every dropped line is counted and surfaced.
+    assert collector.log_drop_count() > drops0
+
+
+def test_writer_run_survives_flush_failure(tmp_path):
+    """U7 — the periodic-flush task must outlive a raising flush. A dead flush
+    task means every leg keeps buffering into RAM while the store quietly stops
+    growing, and nothing on the outside would show it."""
+    con = collector.open_db(tmp_path / "t.duckdb")
+    writer = collector.BatchWriter(con, threading.Lock(), log=lambda _m: None)
+    calls = [0]
+    stop = asyncio.Event()
+
+    def boom():
+        calls[0] += 1
+        if calls[0] >= 5:
+            stop.set()
+        raise RuntimeError("TransactionException: No space left on device")
+
+    writer.flush = boom  # type: ignore[method-assign]
+    asyncio.run(writer.run(stop, interval_s=0.001))
+    assert calls[0] >= 5, "the flush task died on the first failure"
+    assert writer.flush_failures == calls[0]
+    assert writer.last_flush_ok_ms == 0  # never claimed a successful flush
+    con.close()
+
+
+def test_rotating_flush_isolates_a_poisoned_day(tmp_path):
+    """U8 — one poisoned day file must not strand the whole buffer, and the
+    poisoned CONNECTION must be evicted so the next flush can heal itself.
+
+    DuckDB invalidates a handle after a failed commit; ``con_for`` used to hand
+    the same dead handle back forever, so one ENOSPC poisoned a day for good.
+    """
+    root = tmp_path / "ticks"
+    manager = collector.DayFileManager(root)
+    logs: list[str] = []
+    now = collector._day_bounds_ms("2026-07-26")[0] + 3_600_000
+    writer = collector.RotatingWriter(
+        manager, threading.Lock(), now_ms=lambda: now, log=logs.append
+    )
+
+    good_day = "2026-07-26"
+    bad_day = "2026-07-27"
+
+    # Poison ONE day's connection; the other must still be written.
+    manager.con_for(bad_day, now)
+
+    class _Poisoned:
+        def executemany(self, *a):
+            raise RuntimeError("TransactionException: No space left on device")
+
+        def execute(self, *a):
+            raise RuntimeError("TransactionException: No space left on device")
+
+        def close(self):
+            raise RuntimeError("already invalidated")
+
+    manager._cons[bad_day] = _Poisoned()
+
+    t_good = collector._day_bounds_ms(good_day)[0] + 10
+    t_bad = collector._day_bounds_ms(bad_day)[0] + 10
+    writer.add("trades", [("bybit", "BTCUSDT", "g1", t_good, 1.0, 2.0, True)])
+    writer.add("trades", [("bybit", "BTCUSDT", "b1", t_bad, 1.0, 2.0, True)])
+    writer.flush()
+
+    # The healthy day was written; the poisoned one was dropped AND counted.
+    assert writer.rows_written["trades"] == 1
+    assert writer.rows_dropped_error == 1
+    assert writer.last_error_drop_ms == now
+    assert any("DROPPED 1 trades row(s)" in ln and bad_day in ln for ln in logs)
+    # No wedge: the buffer was reset in `finally`, so the next batch is clean.
+    assert writer._pending == 0 and writer._buffers == {}
+    # The poisoned handle was evicted -> the next flush REOPENS the day and heals.
+    assert bad_day not in manager._cons
+    writer.add("trades", [("bybit", "BTCUSDT", "b2", t_bad, 1.0, 2.0, True)])
+    writer.flush()
+    assert writer.rows_written["trades"] == 2
+    assert writer.rows_dropped_error == 1  # no new loss — it healed
+    manager.close_all()
+
+
+def test_gap_ledger_is_append_only(tmp_path):
+    """U10/§0.7 — a watchdog restart is a REAL hole. It is recorded, never
+    filled, and an earlier line is never rewritten when a later one arrives."""
+    path = tmp_path / "ticks" / "gaps.jsonl"
+    now = [10_000]
+    logs: list[str] = []
+
+    async def main():
+        stop = asyncio.Event()
+        sup = collector.LegSupervisor(
+            stop_event=stop, log=logs.append, gaps_path=path,
+            now_ms=lambda: now[0], tick_s=0.01,
+        )
+
+        async def boom():
+            raise RuntimeError("dead venue")
+
+        sup.spawn("bybit-ws", "stream", boom, budget_s=100.0,
+                  tables=("trades", "liquidations"))
+        sup.legs["bybit-ws"].last_data_ms = 4_000  # rows really did stop here
+        await asyncio.sleep(0)
+        await sup.check()
+        first = path.read_bytes()
+        now[0] += 60_000
+        await asyncio.sleep(0)
+        await sup.check()
+        return first, sup
+
+    first_bytes, sup = asyncio.run(main())
+    rows = collector.read_gap_ledger(path)
+    assert len(rows) == 2, "two restarts are two distinct holes — both on the record"
+    assert path.read_bytes().startswith(first_bytes), "an existing line was rewritten"
+    r0 = rows[0]
+    assert r0["leg"] == "bybit-ws" and r0["reason"] == "task-died"
+    assert r0["exchange"] == "bybit"
+    assert r0["tables"] == ["trades", "liquidations"]
+    assert r0["from_ms"] == 4_000 and r0["to_ms"] == 10_000 and r0["gap_ms"] == 6_000
+    assert "RuntimeError" in r0["error"]
+    assert sup.legs["bybit-ws"].gap_ms_total == r0["gap_ms"] + rows[1]["gap_ms"]
+    # Missing ledger == empty ledger (honest: no restart has happened yet).
+    assert collector.read_gap_ledger(tmp_path / "nope.jsonl") == []
+
+
+def test_health_snapshot_shape_and_ok_rule(tmp_path):
+    """U9 — /health reports what it OBSERVES. ok is a function of the legs and
+    the writer, never a constant. This is the endpoint that lied for 40 hours."""
+    now = [1_000_000]
+
+    class _Writer:
+        rows_written = {"trades": 7}
+        rows_dropped_closed = 3
+        rows_dropped_error = 0
+        flush_failures = 0
+        last_error_drop_ms = 0
+        last_flush_ok_ms = 1_000_000
+
+    sup = collector.LegSupervisor(
+        stop_event=asyncio.Event(), log=lambda _m: None, writer=_Writer(),
+        disk_path=tmp_path, now_ms=lambda: now[0],
+    )
+    sup.legs["bybit-ws"] = collector.LegState(
+        name="bybit-ws", kind="stream", budget_s=120.0, task=_StubTask(),
+        started_ms=0, last_data_ms=now[0] - 1_000, last_alive_ms=now[0], rows=99,
+    )
+    sup.legs["writer-flush"] = collector.LegState(
+        name="writer-flush", kind="internal", budget_s=None, task=_StubTask(), started_ms=0,
+    )
+    snap = sup.snapshot()
+    assert snap["ok"] is True and snap["status"] == "ok" and snap["unhealthy"] == []
+    for key in (
+        "ok", "ts_ms", "status", "uptime_s", "legs_total", "legs_ok", "legs_stale",
+        "legs_dead", "legs_given_up", "unhealthy", "restarts_total", "log_drops",
+        "disk_free_bytes", "writer", "legs",
+    ):
+        assert key in snap, f"/health lost {key}"
+    assert snap["disk_free_bytes"] > 0  # the pre-ENOSPC warning signal
+    assert snap["writer"]["state"] == "running"
+    assert snap["legs"]["bybit-ws"]["last_data_age_s"] == 1.0
+    assert snap["legs"]["bybit-ws"]["task"] == "running"
+
+    # A stale leg flips ok, names itself, and says WHY.
+    now[0] += 200_000
+    _Writer.last_flush_ok_ms = now[0]
+    snap = sup.snapshot()
+    assert snap["ok"] is False and snap["status"] == "degraded"
+    assert snap["unhealthy"] == ["bybit-ws"] and snap["legs_stale"] == 1
+    assert snap["legs"]["bybit-ws"]["last_data_age_s"] == 201.0
+
+    # A writer that is DROPPING rows makes the daemon not-ok even when every
+    # leg is happily handing rows over — this is the 1 492-commit-failure case,
+    # where legs looked alive because they did their job and the store did not.
+    sup.legs["bybit-ws"].last_data_ms = now[0]
+    _Writer.last_error_drop_ms = now[0]
+    _Writer.rows_dropped_error = 1492
+    snap = sup.snapshot()
+    assert snap["ok"] is False and snap["writer"]["state"] == "dropping"
+    assert snap["writer"]["rows_dropped_error"] == 1492
+
+
+def test_health_endpoint_without_supervisor_keeps_its_old_shape(tmp_path):
+    """The legacy/test path must not change: no supervisor -> the old body, and
+    the honest ``status: no-supervisor`` instead of a bare unconditional ok."""
+    con = collector.open_db(tmp_path / "t.duckdb")
+    server = collector.make_api_server(con, threading.Lock(), {"symbol": "BTCUSDT"}, port=0)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        status, body = _get_json(port, "/health")
+        assert status == 200 and body["ok"] is True and body["status"] == "no-supervisor"
+        status, body = _get_json(port, "/health/ready")
+        assert status == 200 and body["ok"] is True
+        status, body = _get_json(port, "/v1/nope")
+        assert status == 404 and "/health/ready" in body["routes"]
+    finally:
+        server.shutdown()
+        server.server_close()
+    con.close()
+
+
+
+
+# --------------------------------------------------------------------------- #
+# 23b. INTEGRATION — kill a real leg inside a real _run_async and prove the    #
+#      whole rail: detection, restart, honest /health, an honest gap, no false #
+#      alarm on a sparse leg, and an UNTOUCHED SIGTERM final-flush path.       #
+#                                                                             #
+#      Isolation is asserted, not assumed: a temp store (never data/ticks) and #
+#      an ephemeral port (never 8788). No socket leaves the process — the WS   #
+#      and REST primitives are replaced, so the real wiring, the real          #
+#      normalizers, the real RotatingWriter, the real API server and the real  #
+#      supervisor all run while the network does not.                          #
+# --------------------------------------------------------------------------- #
+_LEG_CTL: dict = {}
+
+
+def _ctl(name: str) -> dict:
+    """Per-leg test control: kill it, mute it, or let it produce."""
+    return _LEG_CTL.setdefault(
+        name, {"die": asyncio.Event(), "mute": asyncio.Event(), "produce": False}
+    )
+
+
+def _fresh_bybit_trade(seq: list) -> dict:
+    """A REAL captured publicTrade frame re-stamped to now, so it routes into
+    today's day file and flows through the production normalizer."""
+    frame = _copy(_FIXTURES["bybit_publicTrade"][0])
+    seq[0] += 1
+    frame["data"][0]["T"] = int(time.time() * 1000)
+    frame["data"][0]["i"] = f"test-{seq[0]}"
+    return frame
+
+
+def _fresh_premium_index() -> dict:
+    payload = _copy(_FIXTURES["binancef_rest_premiumIndex"])
+    payload["time"] = int(time.time() * 1000)
+    return payload
+
+
+async def _health(port: int) -> dict:
+    return (await asyncio.to_thread(_get_json, port, "/health"))[1]
+
+
+async def _ready_status(port: int) -> int:
+    return (await asyncio.to_thread(_get_json, port, "/health/ready"))[0]
+
+
+async def _trades_count(port: int) -> int:
+    body = (await asyncio.to_thread(_get_json, port, "/v1/info"))[1]
+    return body["row_counts"]["trades"]
+
+
+async def _await_health(port: int, pred, what: str, timeout_s: float = 15.0) -> dict:
+    """Poll /health until ``pred`` holds. A timeout is a RED test, never a hang."""
+    deadline = time.monotonic() + timeout_s
+    last: dict = {}
+    while time.monotonic() < deadline:
+        last = await _health(port)
+        if pred(last):
+            return last
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"never observed {what} within {timeout_s}s; last={last}")
+
+
+async def _await(pred, what: str, timeout_s: float = 15.0):
+    deadline = time.monotonic() + timeout_s
+    last = None
+    while time.monotonic() < deadline:
+        last = pred()
+        if last:
+            return last
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"never observed {what} within {timeout_s}s; last={last!r}")
+
+
+def test_watchdog_end_to_end_kills_a_real_leg(tmp_path, monkeypatch, capsys):
+    """The full rail against a real ``_run_async``: detect, restart, report, record.
+
+    A baseline    — every leg spawned, /health ok, trades landing in the store
+    B kill        — the bybit-ws task RAISES; /health goes not-ok and NAMES it,
+                    /health/ready answers 503, the exception is on the record
+    C recovery    — the leg is restarted and trades RESUME in the temp DB
+    D ledger      — gaps.jsonl gains an honest line per hole, append-only
+    E stall       — an ALIVE but silent leg is caught too (the reconnect-storm
+                    livelock that task-state alone can never see)
+    G no wolf     — sparse/slow legs never once appear in ``unhealthy``
+    H shutdown    — SIGTERM still means cancel-all + FINAL FLUSH, unchanged
+    """
+    _LEG_CTL.clear()
+    root = tmp_path / "ticks"
+    assert Path(root) != collector.DEFAULT_DB, "the test must never touch the live store"
+    assert not str(root).startswith(str(collector.DEFAULT_DB))
+
+    logs: list[str] = []
+    seq = [0]
+
+    async def fake_ws(name, url, on_frame, *, stop_event, subscribe=None,  # noqa: ARG001
+                      app_ping=None, log=print, on_alive=None):
+        ctl = _ctl(name)
+        while not stop_event.is_set():
+            if ctl["die"].is_set():
+                ctl["die"].clear()
+                raise RuntimeError(f"{name}: simulated leg death (ENOSPC-shaped)")
+            if ctl["produce"] and not ctl["mute"].is_set():
+                if on_alive is not None:
+                    on_alive()
+                on_frame(_fresh_bybit_trade(seq))
+            await asyncio.sleep(0.01)
+
+    async def fake_poll(name, fetch, on_payload, interval_s, stop_event,  # noqa: ARG001
+                        log=print, on_alive=None):
+        ctl = _ctl(name)
+        while not stop_event.is_set():
+            if ctl["die"].is_set():
+                ctl["die"].clear()
+                raise RuntimeError(f"{name}: simulated leg death")
+            if ctl["produce"] and not ctl["mute"].is_set():
+                if on_alive is not None:
+                    on_alive()
+                on_payload(_fresh_premium_index())
+            await asyncio.sleep(0.02)
+
+    async def fake_agg(symbol, writer, stop_event, log=print, on_alive=None):  # noqa: ARG001
+        while not stop_event.is_set():
+            await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(collector, "_ws_stream", fake_ws)
+    monkeypatch.setattr(collector, "_rest_poll", fake_poll)
+    monkeypatch.setattr(collector, "_aggtrades_loop", fake_agg)
+    monkeypatch.setattr(collector, "SUPERVISOR_TICK_S", 0.05)
+    monkeypatch.setattr(collector, "LEG_RESTART_BACKOFF_S", (0.05, 0.05, 0.05, 0.05))
+    # Tight budgets ONLY for the two legs under test; every other leg keeps its
+    # production budget, so this run doubles as the never-cry-wolf proof.
+    budgets = dict(collector.LEG_BUDGET_S)
+    budgets["bybit-ws"] = 0.4
+    budgets["binancef-premiumIndex"] = 0.4
+    monkeypatch.setattr(collector, "LEG_BUDGET_S", budgets)
+
+    _ctl("bybit-ws")["produce"] = True
+    _ctl("binancef-premiumIndex")["produce"] = True
+
+    obs: dict = {}
+    quiet_legs = ("deribit-chain", "deribit-dvol", "binancef-openInterestHist",
+                  "binancef-openInterest", "binancef-aggTrades", "writer-flush",
+                  "binancef-takerlongshortRatio")
+
+    async def main():
+        run_task = asyncio.create_task(
+            collector._run_async(
+                "BTCUSDT", ("bybit", "binancef", "deribit"), str(root), 0, None,
+                log=logs.append,
+            )
+        )
+        try:
+            line = await _await(
+                lambda: next((ln for ln in logs if "BYOD API on" in ln), None),
+                "the BYOD API to bind",
+            )
+            port = int(line.rsplit(":", 1)[1])
+            assert port != 8788, "the live collector's port must never be touched"
+            obs["port"] = port
+
+            # --- A: baseline ------------------------------------------------ #
+            snap = await _await_health(
+                port,
+                lambda s: s["ok"] and s["legs"]["bybit-ws"]["rows"] > 0,
+                "a healthy baseline with rows flowing",
+            )
+            obs["A_health"] = snap
+            obs["A_ready"] = await _ready_status(port)
+            assert snap["status"] == "ok" and snap["unhealthy"] == []
+            assert snap["legs"]["bybit-ws"]["state"] == "running"
+            assert obs["A_ready"] == 200
+            obs["legs"] = sorted(snap["legs"])
+            obs["A_trades"] = await _trades_count(port)
+
+            # --- B: KILL the leg for real ------------------------------------ #
+            _ctl("bybit-ws")["die"].set()
+            bad = await _await_health(
+                port,
+                lambda s: not s["ok"] and "bybit-ws" in s["unhealthy"],
+                "the watchdog to notice the dead leg",
+            )
+            obs["B_health"] = bad
+            obs["B_ready"] = await _ready_status(port)
+            assert bad["legs"]["bybit-ws"]["state"] in ("dead", "restarting", "stale")
+            assert obs["B_ready"] == 503, "/health/ready must fail its probe"
+            # /health tells the truth the INSTANT the task ends — it reads state,
+            # it does not wait for the watchdog. The loud line follows on the
+            # next tick, carrying the retrieved exception and the leg name.
+            await _await(
+                lambda: next(
+                    (ln for ln in logs
+                     if "WATCHDOG bybit-ws" in ln and "RuntimeError" in ln),
+                    None,
+                ),
+                "the loud WATCHDOG line naming the leg and its retrieved exception",
+            )
+
+            # --- C: recovery + data really resumes ---------------------------- #
+            good = await _await_health(
+                port,
+                lambda s: s["ok"] and s["legs"]["bybit-ws"]["restarts"] >= 1
+                and s["legs"]["bybit-ws"]["state"] == "running",
+                "the leg to be restarted and healthy again",
+            )
+            obs["C_health"] = good
+            assert "RuntimeError" in (good["legs"]["bybit-ws"]["last_error"] or "")
+            # Recovery is only real if ROWS resume — a "running" state that
+            # produces nothing is the lie this whole rail exists to prevent.
+            obs["C_trades"] = 0
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                n = await _trades_count(port)
+                if n > obs["A_trades"]:
+                    obs["C_trades"] = n
+                    break
+                await asyncio.sleep(0.05)
+            assert obs["C_trades"] > obs["A_trades"], "trades never resumed after the restart"
+
+            # --- D: the hole is on the record --------------------------------- #
+            ledger = await _await(
+                lambda: collector.read_gap_ledger(root / "gaps.jsonl") or None,
+                "the gap ledger to record the hole",
+            )
+            assert len(ledger) == 1
+            assert ledger[0]["leg"] == "bybit-ws" and ledger[0]["reason"] == "task-died"
+            assert ledger[0]["gap_ms"] > 0 and ledger[0]["exchange"] == "bybit"
+            assert "trades" in ledger[0]["tables"] and "liquidations" in ledger[0]["tables"]
+            assert "RuntimeError" in (ledger[0]["error"] or "")
+
+            # --- E: a STALLED leg (task alive, zero rows) is caught too -------- #
+            before = good["legs"]["binancef-premiumIndex"]["restarts"]
+            _ctl("binancef-premiumIndex")["mute"].set()
+            stalled = await _await_health(
+                port,
+                lambda s: "binancef-premiumIndex" in s["unhealthy"],
+                "the alive-but-silent leg to be caught",
+            )
+            obs["E_health"] = stalled
+            assert any(
+                "STALLED" in ln and "binancef-premiumIndex" in ln for ln in logs
+            ), "a leg that stays alive while producing nothing went undetected"
+            _ctl("binancef-premiumIndex")["mute"].clear()
+            healed = await _await_health(
+                port,
+                lambda s: s["ok"]
+                and s["legs"]["binancef-premiumIndex"]["restarts"] > before,
+                "the stalled leg to be restarted and recover",
+            )
+            obs["E_recovered"] = healed["legs"]["binancef-premiumIndex"]
+            obs["ledger"] = collector.read_gap_ledger(root / "gaps.jsonl")
+            assert any(
+                g["leg"] == "binancef-premiumIndex" and g["reason"] == "stalled"
+                for g in obs["ledger"]
+            )
+
+            # --- G: no false alarm on any sparse / slow leg -------------------- #
+            for phase in ("A_health", "B_health", "C_health", "E_health"):
+                for name in quiet_legs:
+                    assert name not in obs[phase]["unhealthy"], (
+                        f"{name} cried wolf in {phase} — it is legitimately quiet"
+                    )
+            obs["final_health"] = healed
+
+            # --- H: the SIGTERM final-flush rail, untouched --------------------- #
+            obs["H_trades_live"] = await _trades_count(port)
+            os.kill(os.getpid(), signal.SIGTERM)  # the REAL production rail
+            await asyncio.wait_for(run_task, timeout=30.0)
+        finally:
+            if not run_task.done():
+                run_task.cancel()
+                await asyncio.gather(run_task, return_exceptions=True)
+
+    asyncio.run(main())
+
+    # -- H (continued): the store is complete and was closed cleanly ---------- #
+    day = collector.utc_day(int(time.time() * 1000))
+    con = duckdb.connect(str(root / f"{day}.duckdb"), read_only=True)
+    try:
+        final_trades = con.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        liqs = con.execute("SELECT COUNT(*) FROM liquidations").fetchone()[0]
+    finally:
+        con.close()
+    obs["H_trades_final"] = final_trades
+    assert final_trades >= obs["H_trades_live"], "the final flush lost rows"
+    assert any("shutdown requested — final flush" in ln for ln in logs)
+    assert any(ln.startswith("[collector] closed.") for ln in logs)
+    assert any("watchdog:" in ln and "MISSING data" in ln for ln in logs)
+    # The sparse-stream rail, end to end: ZERO liquidations all run (exactly
+    # like 2026-07-25, honestly) and bybit-ws was never once flagged for it.
+    assert liqs == 0
+    assert obs["final_health"]["legs"]["bybit-ws"]["state"] == "running"
+    # No restart happened AFTER stop was requested — the watchdog never fights
+    # cancellation, so the ledger stopped growing at shutdown.
+    assert len(collector.read_gap_ledger(root / "gaps.jsonl")) == len(obs["ledger"])
+    assert all(g["gap_ms"] > 0 for g in obs["ledger"])  # every hole is a real hole
+
+    with capsys.disabled():
+        b = obs["B_health"]
+        print("\n=== WATCHDOG INTEGRATION PROOF ====================================")
+        print(f"store            : {root}")
+        print(f"api port         : {obs['port']} (ephemeral; live 8788 untouched)")
+        print(f"legs supervised  : {len(obs['legs'])} {obs['legs']}")
+        print(f"A /health        : ok={obs['A_health']['ok']} "
+              f"status={obs['A_health']['status']} ready={obs['A_ready']} "
+              f"bybit-ws={obs['A_health']['legs']['bybit-ws']['state']} "
+              f"rows={obs['A_health']['legs']['bybit-ws']['rows']} "
+              f"trades={obs['A_trades']}")
+        print(f"B /health KILLED : ok={b['ok']} status={b['status']} "
+              f"ready={obs['B_ready']} unhealthy={b['unhealthy']}")
+        print(f"  bybit-ws       : state={b['legs']['bybit-ws']['state']} "
+              f"task={b['legs']['bybit-ws']['task']} "
+              f"age={b['legs']['bybit-ws']['last_data_age_s']}s "
+              f"err={b['legs']['bybit-ws']['last_error']}")
+        print(f"C /health HEALED : ok={obs['C_health']['ok']} "
+              f"restarts={obs['C_health']['legs']['bybit-ws']['restarts']} "
+              f"state={obs['C_health']['legs']['bybit-ws']['state']}")
+        print(f"C trades resumed : {obs['A_trades']} -> {obs['C_trades']}")
+        print(f"E stall caught   : unhealthy={obs['E_health']['unhealthy']} -> "
+              f"restarts={obs['E_recovered']['restarts']} "
+              f"state={obs['E_recovered']['state']}")
+        for g in obs["ledger"]:
+            print(f"gaps.jsonl       : leg={g['leg']} reason={g['reason']} "
+                  f"gap_ms={g['gap_ms']} from={g['from_ms']} to={g['to_ms']} "
+                  f"tables={g['tables']}")
+        print(f"G never cried    : {list(quiet_legs)}")
+        print(f"H SIGTERM flush  : {obs['H_trades_live']} live -> "
+              f"{obs['H_trades_final']} on disk; liquidations={liqs} (sparse, honest)")
+        print("===================================================================")

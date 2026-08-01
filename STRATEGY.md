@@ -206,6 +206,14 @@ sequence to the calendar, not to enthusiasm.
       `applyDensity` from `app.js`, read `btcq-cvd`/`btcq-density` at boot, expose in the
       settings row + Cmd-K + shortcuts. *Accept:* colour-blind mode visibly changes
       footprint/heatmap on the terminal and persists; browser-harness screenshot verifies.
+- [x] **N4a. Per-leg watchdog in the collector** (done 2026-08-01 — `LegSupervisor`:
+      symptom-based detection, per-leg-type staleness budgets that cannot cry wolf on a
+      legitimately sparse stream, bounded restart with a loud `given-up` terminal state,
+      task exceptions retrieved and logged, watchdog restarts recorded as honest gaps, and
+      a `/health` whose `ok` is computed from observations instead of hard-coded. Motivated
+      by a real 40-hour silent outage — see AUDIT_LOG 2026-08-01.) **This is a prerequisite
+      of N4, not a companion:** the process never died, so `Restart=always` alone would have
+      moved the same blindness to a machine that is harder to watch.
 - [ ] **N4. Collector always-on, supervised.** launchd/systemd agent + prevent AC sleep,
       or the GCP VM (kit already in `deploy/gcp/`), with `check_ticks` as a standing weekly
       gate. Justified on feature-integrity + data-irreplaceability. *Accept:* one week of
