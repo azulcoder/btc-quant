@@ -15,12 +15,13 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare dsr-ab scan test fetch dash collector collector-api verify-browser verify-census verify-focus verify-wire check-ticks orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels
+.PHONY: help install backtest compare dsr-ab scan test fetch dash collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
 	@echo "research: orderflow-smoke (M1 end-to-end: recorded ticks -> bars -> deflation harness; expect INSUFFICIENT HISTORY)"
 	@echo "verify:  verify-browser (L1 fixture-replay in headless Chromium) | verify-census (L1b layout census) | verify-focus (L1c hierarchy + focus mode) | verify-wire (L2 live invariants, ~45s) | check-ticks (L3 tick-store QA + MinBTL readiness meter)"
+	@echo "bench:   bench-render (where the frame budget actually goes: store cost, Worker-boundary cost, Canvas2D churn vs raster — STRATEGY §ARCHITECTURE)"
 	@echo "archive: archive-dry (export closed months to local parquet ONLY) | archive (export + upload to GitHub Releases + prune) | archive-list (what is offsite)"
 	@echo "hf:      hf-sync (closed day files -> HF dataset, verify on Hub, then delete local; ARGS=--dry-run to stage only, ARGS=--yes for cron)"
 	@echo "levels:  backfill-levels (archived HF days -> data/ticks/levels.jsonl registry; idempotent, never touches day files)"
@@ -135,6 +136,19 @@ verify-census:
 verify-focus:
 	python3 scripts/verify_terminal_browser.py --focus
 
+
+# Render-budget bench (STRATEGY.md §ARCHITECTURE). Answers where the terminal's frame
+# time actually goes BEFORE any render-layer work is sequenced off a guess: the Node half
+# measures the ingest+store cost (the ceiling on what a Worker can free) and the cost of a
+# structured-clone thread boundary; the browser half measures Canvas2D state churn vs
+# rasterization, LOD vs naive zoom, a WebGL2 equivalent, and what a Worker/OffscreenCanvas
+# path would have to replace. Numbers are machine-specific — record the machine with them.
+bench-render:
+	node scripts/bench_render.cjs
+	@echo ""
+	@echo "browser half (needs a real GPU, so not headless-by-default):"
+	@echo "  python3 -m http.server 8799 && open http://127.0.0.1:8799/scripts/bench_render.html"
+	@echo "  results also land in window.__BENCH__"
 
 # L3: tick-store QA report card over data/ticks.duckdb (gaps/dupes/cadence/coherence —
 #     reported, never filled). Run while the collector is stopped, or on a copy.

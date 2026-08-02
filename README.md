@@ -6,6 +6,12 @@ your laptop, plus a dependency-free web dashboard for live charts and signals fr
 > **Research & backtesting only. Not financial advice. Places no orders, holds no API keys.**
 > Read [DISCLAIMER.md](DISCLAIMER.md) — a backtest is not a forecast, and edges decay.
 
+**License — [BSL 1.1](LICENSE):** the source is public, and you may read it, run it, modify it,
+and use it for your own research, study, teaching, or trading with your own capital. Selling it,
+or building a commercial product, service, or client-money trading operation on it, needs a
+license from me. On **2030-08-02** it converts to Apache-2.0 and those limits fall away — see
+[License](#license) below, and [THIRD-PARTY.md](THIRD-PARTY.md) for what other people wrote.
+
 The whole point is to see *through* flattering backtests. Every result is net of transaction
 costs, ranked **out-of-sample (walk-forward)**, and reported as a **deflated Sharpe ratio** — then
 guarded by three selection-overfit diagnostics (**PBO**, **MinBTL**, **CPCV**), with buy-and-hold
@@ -225,10 +231,53 @@ across both engines (per-period SR, `bias=False` non-excess kurtosis; N = 1 is l
 
 See [DESIGN.md](DESIGN.md) for module contracts and [RESEARCH.md](RESEARCH.md) for the cited rationale.
 
+## License
+
+btc-quant is licensed under the **Business Source License 1.1** ([LICENSE](LICENSE)).
+
+- **Licensed Work:** btc-quant 0.1.0 and later versions shipped with that file.
+- **Change Date:** 2030-08-02 · **Change License:** Apache-2.0.
+- **What you may do today:** everything the BSL grants by default — copy, modify, create
+  derivative works, redistribute, and use non-production — plus the Additional Use Grant in
+  the LICENSE, which explicitly covers personal use (including trading *your own* capital on
+  what the terminal shows you), academic and educational use, non-profit research, and
+  internal evaluation.
+- **What needs a commercial license:** offering btc-quant or a derivative to third parties as
+  a product, a hosted service, or part of a paid support/consulting/data/signal offering; using
+  it to trade, allocate, or advise on capital that is not your own; redistributing it for a fee.
+- **On the Change Date** every one of those restrictions ends and the covered versions are
+  available under Apache-2.0 — an irrevocable promise made in the license text itself, not a
+  policy that can be walked back.
+
+**Why BSL and not MIT/Apache today.** The intent is to sell this eventually, and the build-out
+is not finished. Licensing is a one-way door: a future version can always be released under
+*more* permissive terms, but a grant already made on published source can never be revoked —
+anyone who took a copy under it keeps it forever. Publishing permissively now, to relicense
+later, is therefore the one mistake that cannot be undone. BSL keeps the source readable,
+runnable, forkable and auditable — which is the point of a project whose whole claim is that
+you can check its numbers — while reserving the commercial rights until the Change Date, when
+it converts on its own without anyone having to be asked.
+
+**Not an open-source license.** BSL 1.1 does not meet the OSI definition, and the license text
+says so in its own Notice. Calling it "source-available" is the accurate description.
+
 ## Third-party attribution
 
+Full inventory, with hashes, verification method and license obligations:
+[THIRD-PARTY.md](THIRD-PARTY.md). Verbatim license texts: [`LICENSES/`](LICENSES/). In short:
+
 - Charts: [TradingView Lightweight Charts™](https://www.tradingview.com/lightweight-charts/) v4.2.0,
-  Apache-2.0 (vendored, `dashboard/vendor/lightweight-charts.js`). The on-canvas watermark is
-  disabled via `layout.attributionLogo` so five stacked marks stop competing with the data; the
-  attribution is carried here and in the terminal page footer instead — relocated, not removed.
+  Apache-2.0 (vendored, `dashboard/vendor/lightweight-charts.js`, verified byte-identical to the
+  upstream build). The on-canvas watermark is disabled via `layout.attributionLogo` so five
+  stacked marks stop competing with the data; the attribution is carried here and in the terminal
+  page footer instead — relocated, not removed.
+- Archived-day parquet in the browser: [hyparquet](https://github.com/hyparam/hyparquet) 1.26.2 and
+  [fzstd](https://github.com/101arrowz/fzstd) 0.1.1, both MIT, re-bundled into
+  `dashboard/vendor/hyparquet.js` (the file's own header records the build exactly).
 - Fonts: IBM Plex Mono (OFL-1.1) and Inter (OFL-1.1), vendored under `dashboard/vendor/fonts/`.
+- The `index.html` dashboard also embeds TradingView's Advanced Chart widget from TradingView's
+  own host, under TradingView's widget terms — its "Track all markets on TradingView" link is
+  mandatory and must stay.
+
+Nothing vendored here is copyleft, so nothing conflicts with the BSL — checked component by
+component in THIRD-PARTY.md §6.

@@ -119,7 +119,10 @@ feature list.
 - **Gap 5 — [UX category gap] no dockable/resizable/pop-out workspace.** Fixed CSS grid,
   single-scroll ~4982 px. Bookmap/Sierra/Exocharts are workspace applications (drag,
   resize, multi-monitor, pop-out). This is the "monitoring page vs workspace
-  application" difference.
+  application" difference. Measured sub-gap, and the more binding half: **zero viewport** —
+  no `wheel` handler in any of the eight `terminal*.js` modules and a fixed 120-bar
+  footprint ring (`terminal-state.js:295`), so no hand-drawn canvas zooms or pans at all
+  (L5a).
 - **Gap 6 — [efficiency, in our control]** `setData` full-rebuild + single-thread
   ceiling (see §1).
 - **Gap 7 — [a11y regression, cheap, pre-deploy]** the CVD-safe (Okabe-Ito) and density
@@ -240,6 +243,32 @@ sequence to the calendar, not to enthusiasm.
       them, not only the header; (b) a non-latching (alternating throw/success) render
       fault never trips the consecutive breaker and today emits no telemetry — surface it
       via this counter so a recurring intermittent fault is visible, not silent.
+- [x] **N6. LICENSE + third-party attribution.** (done 2026-08-02 — BSL 1.1 at `LICENSE`
+      with the parameter block filled: Licensor `azul`, Licensed Work btc-quant 0.1.0 and
+      later versions shipped with that file, **Change Date 2030-08-02**, **Change License
+      Apache-2.0**, and an Additional Use Grant that explicitly permits personal use —
+      including trading *your own* capital on what the terminal shows you — plus academic,
+      non-profit-research and internal-evaluation use, drawing the commercial line exactly
+      at other people's capital. Until this landed the repo carried **no licence file at
+      all** (`license: null`): all rights reserved in law, ambiguous to every reader.)
+      **Why BSL and not MIT/Apache today, in one sentence:** licensing is a one-way door —
+      a future version can always be released under *more* permissive terms, but a grant
+      already made on published source can never be revoked, so publishing permissively
+      while the build-out is unfinished and the intent is eventually to sell is the one
+      mistake that cannot be undone; BSL keeps the source readable, runnable, forkable and
+      auditable (the whole point of a project whose claim is that you can check its
+      numbers) while reserving the commercial rights until it converts on its own.
+      Verified rather than assumed: the Change Date sits exactly on the License's own
+      built-in four-year backstop, so a longer date would not have held; Apache-2.0
+      qualifies as a Change License under Covenant 1 ("compatible with GPL Version 2.0 **or
+      a later version**" — FSF lists Apache-2.0 as GPLv3-compatible), with CockroachDB as
+      live precedent; the vendored chart bundle is byte-identical to the published npm
+      artefact, so Apache-2.0 §4(b) does not apply at all. Inventory, hashes and the
+      conflict check are in `THIRD-PARTY.md`; verbatim texts in `LICENSES/`. **One honest
+      open item, naming only:** the IBM Plex Mono woff2 files are a latin subset (229 chars
+      / 280 glyphs) and OFL-FAQ 2.6 says subsetting is modification, which "would not
+      normally allow the use of RFNs" — IBM reserves the name "Plex". No conflict with BSL;
+      three exits listed in `THIRD-PARTY.md` §2. Inter is unaffected (no RFN clause).
 
 - [x] **T-4 Wave 1 "Truth"** (done 2026-07-26 — five items, all measured before they were
       built; see DESIGN §4j + AUDIT_LOG). (1) **The health chip lied** — N5 (`afe817f`)
@@ -397,6 +426,51 @@ sequence to the calendar, not to enthusiasm.
 - [ ] **M6. Materialize a versioned feature store** (DVC stage → parquet order-flow bars)
       so the harness reads bars, not raw ticks; avoid a monthly re-scan per experiment;
       every figure reproducible.
+- [ ] **M7. Binance Vision historical trade ingest — the single item that actually moves
+      Gap 1.** `data.binance.vision` publishes daily `aggTrades` archives under a **public
+      Binance URL scheme**; it is Binance's own distribution of Binance's own data, free for
+      anyone, and needs **zero third-party code** to use (§6 states what stays clean-room).
+      **Why the dedup is exact rather than heuristic.** The collector already ingests the
+      same stream from the same venue: `binancef-aggTrades` via REST `/fapi/v1/aggTrades`
+      with a gapless `fromId` cursor, normalized into
+      `trades(exchange,symbol,trade_id,ts_ms,price,qty,aggressor_buy)` with `trade_id=str(a)`
+      and `aggressor_buy = not m` (`collector.py:702`). Archive rows and recorded rows
+      therefore live in the **same aggTradeId space**, so overlap resolves by exact key match
+      on `(exchange,symbol,trade_id)` and missing history is found by **ID continuity**, not
+      by a timestamp guess. That identity is the only reason this is admissible under DESIGN
+      §0.7 ("no fabricated history") at all — it is not "another source", it is the same
+      source arriving by a slower road.
+      **The honest limit, stated before a line of code exists: `aggTrades` is TRADES ONLY,
+      so Gap 1 does not close — it SPLITS.** Trade-derived families (CVD, footprint, delta,
+      size buckets, and VPIN, whose volume clock needs only trades) can reach years of
+      history. Book-derived families (OFI, microprice, walls, depth-imbalance slope) stay
+      pinned at **1.8 % of MinBTL(5)** and can only be bought with collector uptime (N4).
+      After M7, every claim must say which side of that line it stands on; a bar frame that
+      mixes both families is only as long as its shortest family.
+      **Guard-rails that keep this from becoming the mixed-history backfill §6 refuses:**
+      (a) a **separate tree path** `data/vision/`, never written into `data/ticks/` and never
+      unioned into an `hf://` recorded partition; (b) a **source allowlist** in
+      `orderflow.py` — `_open_source(source=…)` already switches `local`/`hf`/`auto`, so
+      `vision` becomes a fourth value that **`auto` does not include**: recorded-only stays
+      the default and reaching for the archive is always explicit in the call; (c)
+      `check_ticks.sec_readiness` keeps counting **recorded days only**, so archive rows can
+      never inflate the MinBTL readout that gates every downstream verdict; (d) L3 QA runs
+      over the vision partition too — same duplicate-`trade_id` FAIL, same report-never-fill
+      gap census, no exemption for being an archive.
+      **Step zero, before any code:** `HEAD` one archive URL to confirm the file exists and
+      that the column layout matches what the normalizer expects (aggTradeId, price, qty,
+      firstId, lastId, transact time, isBuyerMaker — whether a header row is present has
+      differed by year), and check whether `futures/um/daily/` also publishes `bookTicker`,
+      `bookDepth`, `liquidationSnapshot` and `metrics`. If it does, three of those map onto
+      tables the repo already has (`depth_snapshots`, `liquidations`, `funding_mark` /
+      `open_interest`) and the trade-vs-book split above narrows — but design nothing around
+      them until a request actually returns 200.
+      *Accept:* one archive day lands under `data/vision/`; its overlap with a recorded day
+      dedups to **zero** duplicate `(exchange,symbol,trade_id)` rows; `orderflow.py` builds
+      bars with `source="vision"` while `auto` still returns recorded-only bars byte-identical
+      to today; `sec_readiness` output is unchanged by the new rows; and `provenance_table`
+      names the archive per column, so no reader can mistake an archive-fed CVD for a
+      recorded one.
 
 ### LONG — decompose, offload, expand, and place the execution interface (6-12 months)
 
@@ -417,6 +491,37 @@ sequence to the calendar, not to enthusiasm.
       **long-history heatmap backed by the recorded book store** — the one heatmap axis we
       can win, because we own recorded book history that Bookmap (paid data) cannot give
       away.
+- [ ] **L5a. Viewport — zoom / pan / ruler on the order-flow canvases.** Deliberately
+      placed **before** the docking half of L5. Measured, not assumed: **zero `wheel`
+      handlers across all eight `dashboard/terminal*.js` modules** (grep, 0 hits) and the
+      footprint keeps a fixed **120-bar ring** (`terminal-state.js:295`), so there is not
+      merely weak zoom — there is none, and no pan either. What you see is the last 120 bars
+      at one scale. `HistChartView` zooms only because lightweight-charts brings it for
+      free; every hand-drawn canvas (footprint, both heatmaps, DOM ladder, profiles) has
+      nothing. Peer terminals put panning/zoom/ruler on *every* chart, so this is a category
+      gap, not a polish item.
+      **Why ahead of docking:** docking/pop-out is the more expensive build and the less-used
+      one. Zoom is reached for in every session; a saved multi-monitor layout occasionally.
+      Shape: pointer-drag pan and `wheel` zoom on the time axis with a modifier for the price
+      axis, a ruler/measure drag reading Δprice / Δtime / Σvolume inside the selection, and
+      **one shared viewport object** threaded through the seam every canvas already uses
+      (`fitCanvas`, `terminal-views.js:218`, 16 call sites) so it is written once rather than
+      sixteen times. The real work is on the store side: the 120-bar ring must become a
+      **windowed store** able to serve a range wider than the live window, with lazy backfill
+      when the viewport is dragged past the loaded edge.
+      **That windowed store is the prerequisite M7 then fills.** A viewport with no history
+      pans over emptiness; history with no viewport is unreachable from the UI. L5a builds
+      the window, M7 gives it something to scroll into — in that order.
+      Related and cheaper, worth folding in while the store is open: `BARS = [60000, 300000]`
+      (`terminal.js:69`) — 1m and 5m only, both on the time clock, even though
+      `VpinStore` (`terminal-state.js:2870`) already runs a volume clock in the same
+      terminal. Tick-basis and sub-second bars are a store-level addition, not a renderer
+      one.
+      *Accept:* wheel-zoom and drag-pan on footprint and both heatmaps; a ruler read-out;
+      the viewport surviving a symbol switch; a keyboard equivalent for every gesture (N3's
+      a11y line is not walked back for a pointer feature); and a browser-harness group
+      asserting store counts are byte-identical across a zoom/pan cycle — a viewport is
+      presentation, and it must not move one recorded number.
 - [ ] **L5. Dockable/resizable/pop-out workspace layer** (draggable header, resize handle,
       `window.open` + BroadcastChannel shared store, saved layouts; the current grid
       becomes the "all" preset). ~~Interim cheap step first: a focus/maximize mode
@@ -434,6 +539,179 @@ sequence to the calendar, not to enthusiasm.
       continuously as history accrues. Wire the gated terminal signal panel LAST — until
       `CLEARED` it shows a countdown, never a prediction.
 
+### ARCHITECTURE — the render layer (decision 2026-08-02)
+
+**Decision: a WebGPU render layer with a WebGL2 fallback, plus Worker offload. NOT a
+rewrite** to Rust/WASM or C++/ImGui. Written down because this is exactly the decision that
+evaporates into "we should just rewrite it in X" every few months unless the reasoning is on
+paper. Occasioned by an audit of flowsurface (a GPL-3.0 Rust terminal, 57,958 lines across
+three crates) run side by side with this one.
+
+Grounding, from reading the two reference terminals rather than their pitch:
+
+- **Neither one runs "everything on the GPU."** flowsurface uses `iced` for its UI and drops
+  to raw `wgpu` for exactly **one** surface — the heatmap — through an ImDrawList-style
+  callback. cryexc (C++/ImGui) states the same discipline out loud: immediate mode for draw
+  calls, cached and dirty-flagged for data prep. GPU where it pays, ordinary widgets
+  everywhere else. We already run the second half of that pattern (per-view dirty flags +
+  `IntersectionObserver` paint gating that never gates ingest, §1).
+- **This repo is already shaped for the offload, by an earlier correct decision.** The
+  stores are DOM-free and clock-free — every one of the 11 `Date.now()` occurrences in
+  `terminal-state.js` is a *comment asserting its own absence*, because replay determinism
+  demanded event time as the only clock. That makes them Worker-ready as a side effect.
+  Views are pure `{mount, render(slice)}` factories and every hand-drawn canvas takes its
+  context from one helper (`fitCanvas`, `terminal-views.js:218`), so a view can change
+  renderer without a store ever knowing.
+- **A rewrite would spend the moat to buy something reachable without spending it.** Moving
+  to Rust/WASM or C++/ImGui discards 276 pytest tests, the verbatim-assert build gate, the
+  honesty rails that are mechanical rather than cosmetic (§2), and the Python↔JS parity
+  harness. That combination *is* the differentiator, and none of it ports for free. ImGui
+  additionally renders the entire UI into one canvas with no ARIA, which destroys the
+  accessibility work just shipped in N3 and cannot be added back afterwards.
+
+**The honest claim about what this wins.** flowsurface genuinely beats us today on four
+things, and pretending otherwise would be the kind of self-flattery this file exists to
+prevent: a `wgpu` ring-buffer heatmap (Rg32Uint 8192×2048 texture, per-dirty-column upload,
+screen→world→bucket mapping done in a fragment shader), full viewport interaction on every
+chart with viewport-driven lazy backfill, tick-basis and sub-second timeframes (100 ms–1 s,
+tick counts 10–10,000), and historical tick-accurate footprint for any past date. It also
+carries **zero unit tests, zero `cfg(test)`, a fmt+clippy-only CI, and no
+sequence-continuity validation on its OKX/Bybit depth legs** (`prevSeqId`: 0 hits, while its
+Binance/MEXC legs do get proper sync state machines) — the precise rail we treat as
+non-negotiable (§2.2), plus no alerts, TPO, VPIN/microprice/OFI, liquidations, funding or
+cross-venue aggregation. So the winnable position is **correctness PLUS competitive
+rendering**, never rendering alone. Rendering is the part we are behind on and it is
+buyable; correctness is the part that is expensive to retrofit, and we already hold it.
+
+**What flowsurface is for here:** a side-by-side comparison tool and an idea source. Run it,
+measure against it, learn what it does well. It is never a code source — see §6.
+
+**Measured 2026-08-02 — the sequencing below was rewritten by the numbers.** The original
+A2/A3 ordering rested on an explicitly-labelled hypothesis ("most of the frame budget goes
+to data prep rather than rasterization"). It was then measured, via `scripts/bench_render.cjs`
+(Node, against the real stores) and `scripts/bench_render.html` (browser; numbers below are
+an Apple M4 / Chromium 145 / ANGLE-Metal, and are machine-specific by nature). Three results
+changed the plan:
+
+1. **The movable half is already free.** Ingest + normalize + every store, at a *burst* rate
+   of 2000 trades/s + 100 depth deltas/s, costs **0.58 ms per wall second — 0.058 % of one
+   core**. That is the ceiling on what a Worker can free from the main thread; you cannot
+   offload work that does not exist.
+2. **The Worker boundary costs 30–100× more than it saves, in the "post slices back" shape.**
+   `structuredClone` of the heatmap slice (3600 samples × 80 levels = 288k `Map` entries) is
+   **17.3 ms**; the plain-array form is **33.1 ms** plus **4.6 ms** to build; the footprint
+   slice is **6.0 ms**. The stores hand views live references *precisely because* copying
+   them is prohibitive (`DepthHistoryStore.samples()`, terminal-state.js:661) — a thread
+   boundary forces exactly the copy the design refuses. Only a packed `Float64Array`
+   transfer (1.3 ms build, 4.45 MiB, zero-copy) is viable, and `SharedArrayBuffer` is not
+   available at all: it needs COOP/COEP, which GitHub Pages cannot send and
+   `python3 -m http.server` does not (`crossOriginIsolated: false`, measured both threads).
+3. **The heatmap is not raster-bound. It is CSS-colour-string bound.** One full 733×80-cell
+   repaint as shipped: **19.2 ms**. Identical pixels with a 64-step alpha ramp built once
+   instead of an `rgba()` string per cell: **9.0 ms**. Same ramp, bucketed so `fillStyle` is
+   assigned 64 times per frame instead of 58,640: **2.87 ms — an 85 % cut with no new
+   technology.** The WebGL2 instanced equivalent, pipeline-synced, is **4.7 ms** — *not
+   faster than the optimised 2D path at this scale*. (Stated against the bench's own
+   pessimism: it re-uploads the whole instance buffer and hard-syncs with `readPixels`
+   every iteration, where a real implementation would upload only dirty columns and never
+   sync. The honest claim is therefore "same order", not "2D wins" — which is still the
+   opposite of what the sequencing assumed.) The `p95` full sort the view redoes every
+   redraw is 1.34 ms and quickselect makes it 0.25 ms.
+
+The zoom case does eventually favour the GPU, but far less than assumed, and only against a
+*naive* 2D draw: a 2000-bar footprint costs 74.9 ms drawn one rect per bar and **11.1 ms**
+LOD-decimated to ≥1 px columns; at 10,000 bars it is 330.8 ms naive versus **10.1 ms** LOD —
+i.e. LOD makes 2D O(pixels), flat in bar count. WebGL2 at 800k instances is 7.3 ms. So the
+honest gap at post-L5a scale is ~1.4×, not the order of magnitude the plan implied — and the
+heatmap **already ships that LOD** (`stride` decimation, terminal-views.js:1880). The
+footprint does not yet; giving it the same decimation is the fix, in 2D.
+
+`[SUPERSEDED]` — "Sequenced before any GPU work on purpose: the working hypothesis is that
+most of the frame budget goes to data prep rather than rasterization." Measured: it is
+neither. It is Canvas2D *state churn* — 58,640 CSS colour-string parses per heatmap repaint —
+which a Worker does not touch and a GPU port fixes only incidentally. Kept here rather than
+deleted; the hypothesis was correctly labelled and the measurement is what a label is for.
+
+Sequencing (revised). These items *use* the existing L1/M4 entries rather than duplicating them:
+
+- [ ] **A0. Instrument before optimising.** There is no `performance.mark`/`measure` anywhere
+      in `dashboard/` (grep, 0 hits), so no claim about the frame budget is currently
+      falsifiable *on the live page* — the benches above are synthetic replicas of the draw
+      loops, not the page itself. Record per-key render ms in `frame()` beside the existing
+      `due()`/`MIN_MS` gate (the M3 registry already owns the key table), keep a p50/p95 ring
+      per key, and surface it on the N5 health chip. *Accept:* `__BTCQ_TERMINAL_DEBUG` exposes
+      per-panel p50/p95 render ms; one browser-harness group asserts the counters exist and
+      that reading them moves zero store counts. **A0 is the gate on A1–A4** — without it,
+      "it got faster" is an opinion.
+- [ ] **A1. The 2D wins first — they are larger than the port.** Cached alpha ramp + bucketed
+      `fillStyle` on `BookHeatmapView` (19.2 → 2.87 ms measured), quickselect for the p95
+      (1.34 → 0.25 ms), and LOD decimation on the footprint so a zoomed window stays
+      O(pixels). No new technology, no new render path, no harness change, and it must be done
+      *before* any GPU comparison or the comparison is dishonest — an optimised GPU path
+      versus an unoptimised 2D path measures the optimisation, not the API.
+      **Kill criterion for the whole render-layer programme:** if A0 shows live p95 render
+      already under ~8 ms per panel after A1, A3/A4 are premature and get shelved with the
+      number written down.
+- [ ] **A2. M4 (`setData` → `series.update()`).** Cheapest remaining win, no new technology,
+      and it targets the ~5 lightweight-charts panels (`FootprintView`, `HistChartView`,
+      `MicrostructureView`, `BasisView`, `SpotPerpCvdView`) that cannot move to a Worker at
+      all. Note that `FootprintView` is a hybrid — hand-drawn canvas *plus* an lw-charts CVD
+      subchart — so the flagship panel straddles any Worker boundary by construction.
+- [ ] **A3. L1 (Worker), scoped honestly, and only in the OffscreenCanvas shape.** The
+      "stores in a Worker, slices posted back" shape is measured net-negative (item 2 above)
+      and is refused. The only shape that pays is: ingest + stores + *drawing* all in the
+      Worker, so nothing crosses per frame. That is real, but it is not wiring — measured
+      coupling that must be replaced first, none of which exists off the main thread
+      (probed inside a live Worker: `document`, `getComputedStyle`, `devicePixelRatio`,
+      `getBoundingClientRect` all `undefined`):
+      `pal()`/`cssVar()` (42 call sites, reads `--up`/`--down` off `documentElement` at draw
+      time — this is the N3 CVD-safe toggle's only path to a canvas) must become a palette
+      snapshot pushed on theme/a11y change; `fitCanvas()` (17 call sites) must take size and
+      DPR pushed from a `ResizeObserver` + a DPR `matchMedia` listener; `setPanelEmpty()`
+      (37 call sites) writes a class on `.panel` *from inside a draw branch* and returns
+      whether it changed so the canvas re-measures — a synchronous draw↔layout feedback loop
+      that becomes a frame-late async round-trip across a thread, in the same machinery that
+      already documented a `.fp-wrap` 620 px → ~3000 px size runaway. And `safePanel()`'s
+      isolation unit is deliberately *slice-build + render together* (terminal.js:652) — a
+      throw inside a Worker draw does not propagate to the breaker, so N1 quarantine and the
+      N5 non-latching counter need an async fault channel plus a liveness timeout, and the
+      `?fault=`/`?flap=` proofs need Worker-side equivalents.
+      *Scope, measured:* 7,562 of 18,174 terminal JS lines are DOM-free and could move
+      (`terminal-state` 4099, `terminal-adapters` 907, `terminal-hist` 893, `terminal-replay`
+      641, `terminal-books` 521, `terminal-hfdata` 259, `livewire` 242). Of the 34 views,
+      **7 are pure canvas** (`BookHeatmapView`, `LiqHeatmapView`, `KlineVpView`,
+      `ScreenerView`, `RsiHeatmapView`, `TapeIntensityView`, `VpinView` — 1,044 lines, 19 %
+      of view code); 5 are lightweight-charts; 18 are DOM/`innerHTML`; 5 are canvas+DOM
+      hybrids that would have to be split. Say that out loud in the accept criteria rather
+      than calling it "partial by construction".
+- [ ] **A4. GPU render layer behind a capability probe, heatmap first — WebGL2 as the
+      target, WebGPU only if it earns it.** One renderer interface at the `fitCanvas` seam.
+      WebGL2 first, not as a "fallback": it is ~98 % available, it is one shader language,
+      `readPixels` is synchronous (the L1 gate can still judge the pixels), and the whole
+      technique flowsurface wins with — a ring texture with per-dirty-column upload and a
+      screen→world→bucket fragment shader — is expressible in GLES 3.0 (`RG32UI` is core).
+      Nothing in that design needs a compute pipeline, storage textures or timestamp
+      queries, which are the things WebGPU actually adds. WebGPU is ~82–85 % globally in
+      2026 (Safari 26+, Firefox 147 on Windows/ARM-macOS only, Linux and Android still
+      landing) — real, but a second GPU path means two shader languages and two binding
+      models for one panel, on top of a 2D floor that can never be retired.
+      **The 2D floor can never be retired** because the L1 gate reads canvases with
+      `getContext('2d')` + `getImageData`, and a canvas is single-context-type for life:
+      measured, `getContext('2d')` returns `null` after either `webgl2` or `webgpu`, so
+      `verify_terminal_browser.py` hard-fails ("no 2d context" → `nonBgPct: None` → fail),
+      taking the N3 CVD-safe pixel assertion with it. GPU readback means either
+      `preserveDrawingBuffer: true` (a production cost paid for a test) or a test-only
+      render mode (the gate then judges pixels the user never sees — a quiet weakening of
+      the moat). Budget that harness work as part of A4, not as an afterthought.
+      **A4 only becomes urgent after L5a, and less than assumed** — see the LOD numbers
+      above. *Accept:* A0 counters before/after on the same replay fixture; the optimised
+      2D path (post-A1) as the baseline, never the shipped one; the 2D floor still passing
+      every L1 browser group; pixel differences that move zero store counts; and the N3
+      a11y palette assertion still executing against whatever context ships. If WebGL2 is
+      within ~2× of optimised 2D on our panels, we keep 2D and say so. If WebGPU does not
+      measurably beat WebGL2, we ship WebGL2 and say so — the decision is the architecture,
+      not the API.
+
 ## 6. What to refuse (this is the product, not a limitation)
 
 - Refuse native execution / order entry / L3 emulation in `terminal*.js`. Wrong substrate
@@ -447,6 +725,26 @@ sequence to the calendar, not to enthusiasm.
 - Refuse fighting Bookmap/Sierra head-to-head as "the most advanced order-flow terminal."
   The winnable category claim is "the most honest, research-validated crypto order-flow
   workbench."
+- **Refuse any code out of flowsurface's `src/` or `data/` crates.** They are
+  GPL-3.0-or-later (78 % of its 57,958 lines), so copying from them would forcibly
+  relicense this repo away from the BSL decision in N6. That covers the **four `.wgsl`
+  shaders** especially — the heatmap pipeline is the tempting part and is exactly the GPL
+  part — and equally covers verbatim type layouts and comments, which are copying with
+  extra steps. Reading it, running it side by side and learning from what it does is
+  fine; we write our own. Its `exchange/` crate is MIT (22 %, 12,865 lines) and could
+  legally be ported, but 12,865 lines of Rust is not the binding constraint on anything we
+  want — treat it as reference material for the later L4 venue work, not a shortcut.
+- **Refuse committing anything to the fork, and refuse relicensing this repo to GPL** to
+  make a copy legal after the fact. N6 was a one-way door taken deliberately; GPL is a
+  different one-way door, and "we needed the shader" is not a reason to walk through it.
+- **Refuse porting flowsurface's OKX/Bybit depth handling.** It has no sequence-continuity
+  validation on those two venues (`prevSeqId`: 0 hits) while ours clears the book and counts
+  the resync to the UI (§2.2). Adopting it would be a downgrade wearing the costume of an
+  upgrade.
+- **Refuse unioning `data/vision/` archive rows into a recorded partition, and refuse
+  letting them count toward `sec_readiness`** (M7). The archive is a real gain for the
+  trade-derived families and a fabrication the moment it is allowed to imply book history
+  that was never recorded.
 
 ## 7. Sustainable process (standing gates)
 

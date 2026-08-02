@@ -1,0 +1,237 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>bench_render — rasterization vs data prep</title>
+<!--
+  bench_render.html — the browser half of scripts/bench_render.cjs.
+
+  Question it answers: is the terminal's canvas cost RASTERIZATION (which a GPU
+  render layer fixes) or CPU-side data prep and Canvas2D state churn (which it
+  does not)? STRATEGY §ARCHITECTURE assumed an answer; this measures one.
+
+  It replicates BookHeatmapView's inner loop shape exactly — 733 columns
+  (plotW/1.5 decimation) x 80 levels = 58,640 cells, one `ctx.fillStyle =
+  rgba(...)` string plus one fillRect per cell — and then three variants that
+  change ONLY how the fill colour is supplied. It also runs the post-L5a zoom
+  case (2,000 and 10,000 bars) naive vs LOD-decimated, a WebGL2 instanced
+  equivalent, and a capability probe of the things a Worker/OffscreenCanvas
+  path would need.
+
+  Run:  python3 -m http.server 8787 --directory .   (repo root)
+        open http://127.0.0.1:8787/scripts/bench_render.html
+  Results land in window.__BENCH__ and in the <pre> below.
+  Numbers are machine-specific — record the machine with them.
+-->
+<body style="margin:0;background:#0a0b0d;color:#e4e8ee;font:13px ui-monospace,monospace">
+<canvas id="cv" width="2200" height="1240" style="width:1100px;height:620px"></canvas>
+<canvas id="gl" width="2200" height="1240" style="display:none"></canvas>
+<pre id="out" style="padding:12px;white-space:pre-wrap">running…</pre>
+<script>
+'use strict';
+const OUT = {};
+const now = () => performance.now();
+function timed(label, fn, iters) {
+  fn(); fn();
+  const t0 = now();
+  for (let i = 0; i < iters; i++) fn();
+  OUT[label] = +((now() - t0) / iters).toFixed(3);
+  return OUT[label];
+}
+
+// The palette helper as shipped (terminal-views.js rgba()).
+function rgba(hex, a) {
+  const h = String(hex).replace('#', '');
+  if (h.length !== 6) return 'rgba(154,163,178,' + a + ')';
+  const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+}
+const UP = '#26A69A', DN = '#EF5350';
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+ctx.setTransform(2, 0, 0, 2, 0, 0);                 // DPR 2, like fitCanvas()
+const W = 1100, H = 620, COLS = 733, LEVELS = 80;   // BookHeatmapView at 1100 css px
+const cellH = H / LEVELS, wCol = W / COLS;
+
+const cols = [];
+for (let c = 0; c < COLS; c++) {
+  const m = new Map();
+  for (let l = 0; l < LEVELS; l++) m.set(61000 - 40 + l, 1 + ((c * 7 + l * 13) % 90));
+  cols.push(m);
+}
+const alphaOf = (q) => 0.05 + 0.72 * Math.min(1, q / 85);
+
+// ── A. heatmap: same pixels, three ways of supplying the fill colour ────────
+timed('A1_heat_as_shipped_ms', () => {
+  ctx.clearRect(0, 0, W, H);
+  for (let c = 0; c < COLS; c++) {
+    const x0 = c * wCol; let l = 0;
+    for (const q of cols[c].values()) { ctx.fillStyle = rgba(UP, alphaOf(q)); ctx.fillRect(x0, l++ * cellH, wCol, cellH); }
+  }
+}, 20);
+
+// 64-step ramp built ONCE. Same pixels to the eye; no per-cell string.
+const RAMP = [];
+for (let i = 0; i < 64; i++) RAMP.push(rgba(UP, +(0.05 + i / 63 * 0.72).toFixed(3)));
+const rampIdx = (q) => Math.min(63, ((alphaOf(q) - 0.05) / 0.72 * 63) | 0);
+timed('A2_heat_cached_ramp_ms', () => {
+  ctx.clearRect(0, 0, W, H);
+  for (let c = 0; c < COLS; c++) {
+    const x0 = c * wCol; let l = 0;
+    for (const q of cols[c].values()) { ctx.fillStyle = RAMP[rampIdx(q)]; ctx.fillRect(x0, l++ * cellH, wCol, cellH); }
+  }
+}, 20);
+
+// Cached ramp + bucketed: fillStyle assigned 64 times per frame, not 58,640.
+const buckets = []; for (let i = 0; i < 64; i++) buckets.push([]);
+for (let c = 0; c < COLS; c++) { let l = 0; for (const q of cols[c].values()) buckets[rampIdx(q)].push(c * wCol, l++ * cellH); }
+timed('A3_heat_cached_ramp_bucketed_ms', () => {
+  ctx.clearRect(0, 0, W, H);
+  for (let i = 0; i < 64; i++) {
+    const arr = buckets[i]; if (!arr.length) continue;
+    ctx.fillStyle = RAMP[i];
+    for (let k = 0; k < arr.length; k += 2) ctx.fillRect(arr[k], arr[k + 1], wCol, cellH);
+  }
+}, 20);
+
+// ── B. the p95 the view recomputes every redraw over 58,640 quantities ─────
+const qs = []; for (const m of cols) for (const q of m.values()) qs.push(q);
+timed('B1_p95_full_sort_ms', () => { const a = Float64Array.from(qs); a.sort(); return a[(0.95 * (a.length - 1)) | 0]; }, 20);
+function qselect(src, k) {
+  const a = Float64Array.from(src); let lo = 0, hi = a.length - 1;
+  while (lo < hi) {
+    const p = a[(lo + hi) >> 1]; let i = lo, j = hi;
+    while (i <= j) { while (a[i] < p) i++; while (a[j] > p) j--; if (i <= j) { const t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; } }
+    if (k <= j) hi = j; else if (k >= i) lo = i; else break;
+  }
+  return a[k];
+}
+timed('B2_p95_quickselect_ms', () => qselect(qs, (0.95 * (qs.length - 1)) | 0), 20);
+
+// ── C. post-L5a zoom: naive (one rect per bar) vs LOD (one rect per pixel) ──
+const FR = 62;
+function zoomNaive(NB) {
+  ctx.clearRect(0, 0, W, H);
+  const barW = W / NB, rowH = H / FR;
+  for (let b = 0; b < NB; b++) {
+    const x0 = b * barW, half = barW / 2;
+    for (let r = 0; r < FR; r++) {
+      const y = r * rowH;
+      ctx.fillStyle = rgba(DN, 0.3); ctx.fillRect(x0, y, half, rowH);
+      ctx.fillStyle = rgba(UP, 0.4); ctx.fillRect(x0 + half, y, half, rowH);
+    }
+  }
+}
+function zoomLOD(NB) {
+  ctx.clearRect(0, 0, W, H);
+  const stride = Math.max(1, Math.ceil(NB / W));         // >= 1 css px per column
+  const nCols = Math.ceil(NB / stride);
+  const barW = Math.max(1, Math.floor(W / nCols)), rowH = H / FR;
+  ctx.fillStyle = rgba(DN, 0.3);
+  for (let c = 0; c < nCols; c++) for (let r = 0; r < FR; r++) ctx.fillRect(c * barW, Math.floor(r * rowH), Math.ceil(barW / 2), Math.ceil(rowH));
+  ctx.fillStyle = rgba(UP, 0.4);
+  for (let c = 0; c < nCols; c++) for (let r = 0; r < FR; r++) ctx.fillRect(c * barW + barW / 2, Math.floor(r * rowH), Math.ceil(barW / 2), Math.ceil(rowH));
+}
+timed('C1_zoom2000_naive_ms', () => zoomNaive(2000), 5);
+timed('C2_zoom2000_LOD_ms', () => zoomLOD(2000), 20);
+timed('C3_zoom10000_naive_ms', () => zoomNaive(10000), 3);
+timed('C4_zoom10000_LOD_ms', () => zoomLOD(10000), 20);
+
+// ── D. WebGL2 instanced equivalent, with a hard pipeline sync ──────────────
+(function () {
+  const gl = document.getElementById('gl').getContext('webgl2');
+  if (!gl) { OUT.D_webgl2 = false; return; }
+  OUT.D_webgl2 = true;
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  OUT.D_gl_renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+  const NI = COLS * LEVELS;
+  const vsrc = `#version 300 es
+    layout(location=0) in vec2 pos; layout(location=1) in vec3 inst;
+    out float vA; uniform vec2 uRes;
+    void main(){ float w=uRes.x/${COLS}.0, h=uRes.y/${LEVELS}.0;
+      vec2 p=vec2(inst.x*w+pos.x*w, inst.y*h+pos.y*h);
+      gl_Position=vec4(p/uRes*2.0-1.0,0,1); vA=inst.z; }`;
+  const fsrc = `#version 300 es
+    precision highp float; in float vA; out vec4 o;
+    void main(){ o=vec4(0.149,0.651,0.604,vA); }`;
+  const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) OUT.D_gl_err = gl.getShaderInfoLog(o); return o; };
+  const pr = gl.createProgram();
+  gl.attachShader(pr, sh(gl.VERTEX_SHADER, vsrc)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fsrc)); gl.linkProgram(pr);
+  if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) OUT.D_gl_link_err = gl.getProgramInfoLog(pr);
+  gl.useProgram(pr);
+  const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  const inst = new Float32Array(NI * 3);
+  { let o = 0; for (let c = 0; c < COLS; c++) for (let l = 0; l < LEVELS; l++) { inst[o++] = c; inst[o++] = l; inst[o++] = alphaOf(1 + ((c * 7 + l * 13) % 90)); } }
+  const ib = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, ib); gl.bufferData(gl.ARRAY_BUFFER, inst, gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 0, 0); gl.vertexAttribDivisor(1, 1);
+  gl.uniform2f(gl.getUniformLocation(pr, 'uRes'), 2200, 1240);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.viewport(0, 0, 2200, 1240);
+  const one = new Uint8Array(4);
+  // readPixels drains the pipeline — without it the "draw" time is a lie.
+  timed('D1_heat_webgl2_instanced_ms', () => {
+    gl.bindBuffer(gl.ARRAY_BUFFER, ib); gl.bufferSubData(gl.ARRAY_BUFFER, 0, inst);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, NI);
+    gl.readPixels(1100, 620, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, one);
+  }, 30);
+  OUT.D1_drew_pixels = one[3] > 0;
+  const NI2 = 10000 * 80, inst2 = new Float32Array(NI2 * 3);
+  for (let i = 0, o = 0; i < NI2; i++) { inst2[o++] = i % 10000; inst2[o++] = (i / 10000) | 0; inst2[o++] = 0.4; }
+  gl.bufferData(gl.ARRAY_BUFFER, inst2, gl.DYNAMIC_DRAW);
+  timed('D2_zoom800k_instances_webgl2_ms', () => {
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, NI2);
+    gl.readPixels(1100, 620, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, one);
+  }, 20);
+})();
+
+// ── E. capability probe: what a GPU / Worker path would have to replace ────
+(async () => {
+  // The L1 browser gate reads canvases with getContext('2d') + getImageData.
+  // A canvas is single-context-type for life: once it is webgl2/webgpu, the
+  // 2d probe returns null and verify_terminal_browser.py hard-fails
+  // ("no 2d context" -> nonBgPct None -> fail), including the N3 CVD-safe
+  // pixel assertion. Measured, not assumed:
+  const c1 = document.createElement('canvas'); c1.width = c1.height = 64; c1.getContext('webgl2');
+  OUT.E_getContext2d_after_webgl2 = String(c1.getContext('2d'));
+  const c2 = document.createElement('canvas'); c2.width = c2.height = 64;
+  try { c2.getContext('webgpu'); OUT.E_getContext2d_after_webgpu = String(c2.getContext('2d')); }
+  catch (e) { OUT.E_getContext2d_after_webgpu = 'ctx-err: ' + e; }
+
+  OUT.E_webgpu_api_present = typeof navigator.gpu !== 'undefined';
+  if (OUT.E_webgpu_api_present) {
+    try {
+      const a = await navigator.gpu.requestAdapter();
+      OUT.E_webgpu_adapter = !!a;
+      if (a && a.info) OUT.E_webgpu_info = { vendor: a.info.vendor, architecture: a.info.architecture };
+    } catch (e) { OUT.E_webgpu_err = String(e); }
+  }
+
+  // What EXISTS inside a dedicated Worker. fitCanvas() needs
+  // getBoundingClientRect + devicePixelRatio; pal() needs getComputedStyle;
+  // setPanelEmpty() needs document. SharedArrayBuffer needs COOP/COEP, which
+  // GitHub Pages cannot send and `python3 -m http.server` does not send.
+  const src = `self.onmessage = () => {
+    const oc = new OffscreenCanvas(64, 64);
+    self.postMessage({
+      offscreen_2d: !!oc.getContext('2d'),
+      document: typeof document,
+      getComputedStyle: typeof getComputedStyle,
+      devicePixelRatio: typeof devicePixelRatio,
+      getBoundingClientRect: typeof OffscreenCanvas.prototype.getBoundingClientRect,
+      SharedArrayBuffer: typeof SharedArrayBuffer,
+      crossOriginIsolated: self.crossOriginIsolated
+    });
+  };`;
+  const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+  OUT.E_worker_env = await new Promise((res) => { w.onmessage = (e) => res(e.data); w.postMessage(1); });
+  OUT.E_main_crossOriginIsolated = self.crossOriginIsolated;
+
+  window.__BENCH__ = OUT;
+  window.__BENCH_DONE__ = true;
+  document.getElementById('out').textContent =
+    'machine: ' + navigator.userAgent + '\n\n' + JSON.stringify(OUT, null, 2);
+})();
+</script>
