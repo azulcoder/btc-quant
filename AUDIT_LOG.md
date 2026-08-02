@@ -4,6 +4,53 @@ Each entry: finding id, what changed, before/after, and the test that proves it.
 findings report (no Critical; 1 High; ~8 Medium; ~12 Low; 4 Info) was produced read-only
 before any edit, per the spec.
 
+## 2026-08-02 — app heartbeat starved on a busy socket; give-up left wedged tasks running
+
+**Findings fixed:** the application-level WS heartbeat was sent only from the recv-timeout
+branch, so it fired only when a socket had been idle for `_APP_PING_S`; the library's RFC 6455
+keepalive was left on for the two legs that run their own heartbeat; a GIVEN-UP leg was never
+touched again; and the launchd log was block-buffered, so the watchdog's loud lines only
+reached disk when the process died.
+
+**Before:** `bybit-ws` carries ~48 depth frames/s (measured: 1,197 frames in 25 s), so the
+recv-timeout branch never ran and the heartbeat Bybit v5 documents as required was NEVER sent
+on a subscribed leg. Meanwhile `websockets>=14` ran its own keepalive at the default 20 s and
+Bybit did not answer it, closing healthy sockets with
+`Close(1011, 'keepalive ping timeout')` — 27 such closures in one log window, each starting a
+reconnect storm that then failed the opening handshake until the leg hit `LEG_RESTART_CAP`.
+Only the two `app_ping` legs (bybit, okx) were ever affected; `binancef-ws` and `coinbase-ws`,
+which rely on the library keepalive, stayed up throughout. Once given up, the leg was left
+running and never re-probed: on this date both legs held wedged-but-ESTABLISHED sockets
+(verified with `lsof` FD 7/10, `Recv-Q=0`, `Send-Q=0`) for 2.5 h while an independent probe of
+the same endpoints, with the same subscribe payload, returned 1,197 and 339 frames in 25 s.
+
+**After:** `_app_ping_loop` sends the heartbeat on its own clock regardless of inbound
+traffic, bounded by `_WS_SEND_TIMEOUT_S`; a leg carrying `app_ping` passes
+`ping_interval=None` while legs without one keep the library keepalive pinned; every `ws.send`
+is bounded; and a given-up leg is re-probed every `LEG_GIVEUP_REPROBE_S` (15 min). The
+re-probe deliberately does NOT clear `give_up_since_ms`: the leg keeps reporting `given-up`,
+`/health` keeps reporting not-ok and the loud line keeps printing until real ROWS arrive. The
+2026-07-23 lesson stands — staying loud and staying broken are separable, and only the first
+was ever the design intent. `-u` was added to the launchd ProgramArguments.
+
+**Tests:** `test_app_ping_fires_on_a_BUSY_socket` (verified failing at HEAD with `assert []` —
+zero heartbeats on a saturated socket), `test_app_ping_legs_disable_the_library_keepalive`
+(asserts the split in both directions), `test_given_up_leg_is_reprobed_without_ever_claiming_health`,
+`test_reprobe_yields_to_real_rows_and_resumes_supervision`. 350 pass.
+
+**NOT fixed, and open.** After these changes the reconnect storm is gone, but `bybit-ws` and
+`okx-ws` still record zero rows inside the collector process while an isolated probe using the
+identical URL, subscribe payload, keepalive configuration and `user_agent_header` returns
+2,461 and 1,125 data frames in 55 s from the same machine. `/health` separates the two
+failures: bybit shows `last_alive_age_s=4.8` against `last_data_age_s=126.5` (frames arrive,
+no rows — the subscribe is not being honoured), while okx shows both at ~125 s (total
+silence). Both venues recorded normally on 2026-08-01 (18,178 and 17,404 trades), so this
+began today. Also observed and unexplained: the ISP resolver (AS17451 Biznet, Jakarta)
+returned `202.169.44.80` for all four exchange hostnames at one point, and `8.8.8.8` was
+unreachable, though `getaddrinfo` later returned genuine CloudFront/Cloudflare addresses and
+the collector is verifiably connected to real venue IPs. Root cause NOT established; the
+re-probe rail above bounds the damage to 15 minutes instead of forever.
+
 ## 2026-06-16 — H1/M3/M1-carry: perp carry P&L was spot returns, not funding accrual
 
 **Findings fixed:** H1 (High, verified) carry P&L computed from spot price returns instead

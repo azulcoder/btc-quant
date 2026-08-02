@@ -1867,6 +1867,113 @@ def test_given_up_leg_stops_spinning_but_stays_loud():
     assert giveup_lines > before_lines  # still loud, rate-limited not silenced
 
 
+def test_given_up_leg_is_reprobed_without_ever_claiming_health():
+    """U4c — the 2026-08-02 finding: give-up left a WEDGED task (socket
+    ESTABLISHED, zero rows, no exception) running untouched, so a transient wedge
+    became a 2.5 h hole while the venue was verifiably healthy.
+
+    The leg must now be re-probed on the slow cadence, and — this is the part that
+    matters — the re-probe must NOT make it look ok. `given-up`, `/health` not-ok
+    and the loud line all survive a re-probe; only real ROWS clear them.
+    """
+    now = [0]
+    logs: list[str] = []
+
+    async def main():
+        stop = asyncio.Event()
+        sup = collector.LegSupervisor(
+            stop_event=stop, log=logs.append, now_ms=lambda: now[0], tick_s=0.01
+        )
+        spawned = [0]
+
+        async def wedged():
+            """Alive, silent, never raises — exactly the measured failure."""
+            spawned[0] += 1
+            await stop.wait()
+
+        sup.spawn("bybit-ws", "stream", wedged, budget_s=100.0)
+        leg = sup.legs["bybit-ws"]
+        # A wedged leg is slower to the cap than a raising one: each restart
+        # costs a full budget of start-grace on top of the backoff ladder.
+        for _ in range(2400):
+            now[0] += 1000
+            await asyncio.sleep(0)
+            await sup.check()
+            if leg.give_up_since_ms is not None:
+                break
+        assert leg.give_up_since_ms is not None, "precondition: leg gave up"
+        at_giveup = spawned[0]
+        frozen_restarts = leg.restarts
+
+        # Three hours of ticks past give-up.
+        for _ in range(36):
+            now[0] += 300_000
+            await asyncio.sleep(0)
+            await sup.check()
+        state = leg.to_json(now[0])
+        stop.set()
+        await asyncio.sleep(0)
+        return leg, spawned[0], at_giveup, frozen_restarts, state
+
+    leg, spawned, at_giveup, frozen_restarts, state = asyncio.run(main())
+
+    # It was re-probed: the wedged task really was replaced, more than once.
+    assert leg.reprobes >= 2, f"expected re-probes, got {leg.reprobes}"
+    assert spawned > at_giveup, "the wedged task was never actually re-spawned"
+    # A re-probe is NOT a restart: the ladder that produced the give-up is frozen.
+    assert leg.restarts == frozen_restarts == collector.LEG_RESTART_CAP
+    # And above all it is NOT a claim of health.
+    assert leg.give_up_since_ms is not None
+    assert leg.verdict(0) == "given-up" or state["state"] == "given-up"
+    assert state["reprobes"] == leg.reprobes
+    # Every attempt is in the ledger as a real hole, never a backfill.
+    assert leg.gap_events >= leg.reprobes
+    assert any("re-probe" in ln for ln in logs)
+
+
+def test_reprobe_yields_to_real_rows_and_resumes_supervision():
+    """U4d — the ONLY thing that clears give-up is data. A leg that produces rows
+    after a re-probe returns to normal supervision; nothing else does that."""
+    now = [0]
+    logs: list[str] = []
+
+    async def main():
+        stop = asyncio.Event()
+        sup = collector.LegSupervisor(
+            stop_event=stop, log=logs.append, now_ms=lambda: now[0], tick_s=0.01
+        )
+
+        async def wedged():
+            await stop.wait()
+
+        sup.spawn("okx-ws", "stream", wedged, budget_s=100.0)
+        leg = sup.legs["okx-ws"]
+        for _ in range(2400):
+            now[0] += 1000
+            await asyncio.sleep(0)
+            await sup.check()
+            if leg.give_up_since_ms is not None:
+                break
+        assert leg.give_up_since_ms is not None
+        # A re-probe lands and the venue answers: rows reach the writer.
+        now[0] += int(collector.LEG_GIVEUP_REPROBE_S * 1000) + 1000
+        await sup.check()
+        assert leg.give_up_since_ms is not None, "a re-probe alone must not clear it"
+        leg.last_data_ms = now[0]
+        leg.rows += 1
+        now[0] += 1000
+        await sup.check()
+        stop.set()
+        await asyncio.sleep(0)
+        return leg
+
+    leg = asyncio.run(main())
+    assert leg.give_up_since_ms is None, "real rows must clear give-up"
+    assert leg.restarts_consecutive == 0, "the ladder resets on genuine recovery"
+    assert leg.verdict(0) != "given-up"
+    assert any("supervision resumed" in ln for ln in logs)
+
+
 def test_log_sink_failure_does_not_kill_a_leg(monkeypatch):
     """U6 — THE measured root cause, pinned as a regression.
 
@@ -1961,6 +2068,126 @@ def test_log_sink_failure_does_not_kill_a_leg(monkeypatch):
 
     # Swallowed is not silent: every dropped line is counted and surfaced.
     assert collector.log_drop_count() > drops0
+
+
+def test_app_ping_fires_on_a_BUSY_socket(monkeypatch):
+    """U8 — the 2026-08-02 root cause, pinned.
+
+    The app heartbeat used to be sent only from the recv-timeout branch, so it
+    fired only when the socket had been IDLE for _APP_PING_S. bybit-ws carries
+    ~48 depth frames/s (measured: 1,197 frames in 25 s), so that branch never
+    ran and the heartbeat its venue requires was NEVER sent. Bybit then closed
+    the session (`Close(1011, 'keepalive ping timeout')` in the collector log),
+    which started the reconnect storm that ran the leg to the restart cap.
+
+    A busy socket must still be pinged on its own clock.
+    """
+    monkeypatch.setattr(collector, "_APP_PING_S", 0.01)
+    stop = asyncio.Event()
+    sent: list = []
+
+    class _BusyWS:
+        """Never idle: recv() always has a frame ready, immediately."""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def send(self, msg):
+            sent.append(msg)
+
+        async def recv(self):
+            await asyncio.sleep(0)  # yield, but never block: the socket is BUSY
+            return json.dumps({"topic": "orderbook.50.BTCUSDT"})
+
+    monkeypatch.setattr(
+        collector, "websockets", type("_ws", (), {"connect": lambda url, **kw: _BusyWS()})
+    )
+
+    async def main():
+        task = asyncio.create_task(
+            collector._ws_stream(
+                "bybit-ws",
+                "wss://x",
+                lambda _f: None,
+                stop_event=stop,
+                app_ping={"op": "ping"},
+                log=lambda _m: None,
+            )
+        )
+        await asyncio.sleep(0.25)  # ~25 heartbeat intervals of a saturated socket
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(main())
+    pings = [m for m in sent if "ping" in m]
+    assert pings, "no app heartbeat was sent on a busy socket — the venue will close it"
+    assert len(pings) >= 3, f"heartbeat is not on its own clock (only {len(pings)})"
+
+
+def test_app_ping_legs_disable_the_library_keepalive(monkeypatch):
+    """U8b — a leg with its own heartbeat must pass ping_interval=None.
+
+    Bybit v5 does not reliably answer RFC 6455 ping frames, so leaving the
+    library keepalive on closed healthy sockets every ~40 s. Legs WITHOUT an app
+    heartbeat (binancef, coinbase) must keep it — it is their only half-open
+    detector. This asserts the split, in both directions.
+    """
+    seen: list[dict] = []
+    stop = asyncio.Event()
+
+    class _WS:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def send(self, _m):
+            pass
+
+        async def recv(self):
+            stop.set()
+            raise ConnectionError("done")
+
+    def fake_connect(url, **kw):  # noqa: ARG001
+        seen.append(kw)
+        return _WS()
+
+    monkeypatch.setattr(collector, "websockets", type("_ws", (), {"connect": fake_connect}))
+
+    asyncio.run(
+        collector._ws_stream(
+            "bybit-ws", "wss://x", lambda _f: None,
+            stop_event=stop, app_ping={"op": "ping"}, log=lambda _m: None,
+        )
+    )
+    assert seen[0]["ping_interval"] is None, "app_ping leg must disable library keepalive"
+    assert seen[0]["ping_timeout"] is None
+
+    seen.clear()
+    stop2 = asyncio.Event()
+
+    class _WS2(_WS):
+        async def recv(self):
+            stop2.set()
+            raise ConnectionError("done")
+
+    monkeypatch.setattr(
+        collector,
+        "websockets",
+        type("_ws", (), {"connect": lambda url, **kw: (seen.append(kw), _WS2())[1]}),
+    )
+    asyncio.run(
+        collector._ws_stream(
+            "binancef-ws", "wss://x", lambda _f: None, stop_event=stop2, log=lambda _m: None
+        )
+    )
+    assert seen[0]["ping_interval"] == collector._WS_PING_INTERVAL_S, (
+        "a leg with NO app heartbeat must keep the library keepalive"
+    )
 
 
 def test_writer_run_survives_flush_failure(tmp_path):

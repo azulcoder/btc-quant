@@ -49,3 +49,7 @@ data/hf-stage/
 # GCP collector deploy (deploy/gcp/): the real env file carries the HF write token.
 # Only env.example is committed. Never the filled-in env.
 deploy/gcp/env
+
+# Collector stdout (make collector-api > data/collector.log). Machine-local
+# operational log: the WATCHDOG lines that a terminal-only run throws away.
+data/*.log

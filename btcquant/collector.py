@@ -212,6 +212,24 @@ _BACKOFF_CAP_S = 30.0
 # Bybit v5 public WS expects an application-level {"op":"ping"} heartbeat ~every 20 s
 # (protocol-level pings are not enough to keep the v5 session alive).
 _APP_PING_S = 20.0
+# Every await inside a leg must be BOUNDED. On 2026-08-02 bybit-ws and okx-ws each
+# sat ESTABLISHED (verified: lsof FD 7/10, Recv-Q=0, Send-Q=0) for 2.5 h producing
+# zero rows, while an independent probe of the same endpoints with the same
+# subscribe payload returned 1,197 and 339 frames in 25 s. The venues were fine;
+# the leg was wedged. `ws.send()` was the only unbounded await on the path, and it
+# is reached ONLY by the legs carrying app_ping -- exactly the two that hung.
+# Whether or not the send was the wedge, an unbounded await on the data lifeline
+# is a defect: a send that cannot complete in 10 s means the socket is gone, and
+# raising here hands the leg to the reconnect rail that already exists below.
+_WS_SEND_TIMEOUT_S = 10.0
+# Library-level RFC 6455 keepalive, applied ONLY to legs with no app_ping of
+# their own (binancef, coinbase -- both healthy on it for days). These ARE the
+# websockets>=14 defaults today; pinned because for those legs it is the one
+# mechanism that detects a half-open peer, and it does not get to change under us
+# on a library bump. Legs that DO carry app_ping pass ping_interval=None: see the
+# connect() call for the measurement that forced that split.
+_WS_PING_INTERVAL_S = 20.0
+_WS_PING_TIMEOUT_S = 20.0
 
 # REST poll cadence (DESIGN §3 + §3c): premiumIndex 5 s, openInterest 60 s,
 # aggTrades 5 s, OKX funding/OI 60 s, crowding 5 m, DVOL 60 s, chain hourly.
@@ -274,6 +292,15 @@ LEG_RESTART_CAP = 6
 # not make this week's first hiccup a "6th consecutive" restart).
 LEG_RESTART_DECAY_S = 3600.0
 LEG_GIVEUP_LOG_S = 300.0  # rate-limit the give-up line: loud, not spam
+# A given-up leg is re-probed on this slow cadence. This is NOT auto-heal and it
+# does not soften the 2026-07-23 lesson: /health stays not-ok, the loud line keeps
+# printing, and the leg REMAINS `given-up` until real rows arrive -- a re-probe is
+# an attempt, never a claim of health. What it removes is the other failure mode,
+# measured on 2026-08-02: both bybit-ws and okx-ws held wedged-but-ESTABLISHED
+# sockets for 2.5 h while their venues were verifiably healthy, because give-up
+# left the broken task running and never touched it again. Staying loud and
+# staying broken are separable; only the first one is the design intent.
+LEG_GIVEUP_REPROBE_S = 900.0
 # The periodic-flush task does not produce rows of its own, so it is judged on
 # "did a flush cycle complete recently" — 120x the 500 ms flush interval.
 WRITER_FLUSH_BUDGET_S = 60.0
@@ -1850,6 +1877,11 @@ class LegState:
     gap_events: int = 0
     gap_ms_total: int = 0
     give_up_since_ms: Optional[int] = None
+    # Last time a GIVEN-UP leg's wedged task was cancelled and re-spawned. Kept
+    # separate from last_restart_ms so the re-probe cadence can never be confused
+    # with -- or reset -- the restart ladder that produced the give-up.
+    last_reprobe_ms: int = 0
+    reprobes: int = 0
     # When the supervisor first SAW this leg unhealthy. Exists so the loud line
     # is printed once per incident, not once per 10 s tick — an alarm that spams
     # is an alarm that gets ignored, and the ladder can hold a leg for 300 s.
@@ -1914,6 +1946,11 @@ class LegState:
             "rows": self.rows,
             "restarts": self.restarts,
             "restarts_consecutive": self.restarts_consecutive,
+            # Attempts made while GIVEN UP. Reported separately from `restarts`
+            # because a re-probe is not a restart: it does not advance the ladder
+            # and it does not make the leg ok. A rising count with `state` still
+            # `given-up` is the signal that something needs a human.
+            "reprobes": self.reprobes,
             "last_error": self.last_error,
             "gap_events": self.gap_events,
             "gap_ms_total": self.gap_ms_total,
@@ -2147,7 +2184,7 @@ class LegSupervisor:
                 return
             leg = self.legs[name]
             if leg.give_up_since_ms is not None:
-                self._check_given_up(leg, now)
+                await self._check_given_up(leg, now)
                 continue
             self._decay(leg, now)
             task = leg.task
@@ -2182,11 +2219,29 @@ class LegSupervisor:
                 )
             await self._restart(leg, reason, now)
 
-    def _check_given_up(self, leg: LegState, now_ms: int) -> None:
-        """A given-up leg is left alone but never goes quiet. Its own reconnect
-        rail may still recover it — if rows appear again we resume supervision
-        rather than pretend the leg is beyond help."""
-        alive = leg.task is not None and not leg.task.done()
+    async def _check_given_up(self, leg: LegState, now_ms: int) -> None:
+        """A given-up leg never goes quiet, and is never abandoned.
+
+        Two ways back, and NEITHER of them lies about health:
+
+        1. Its own reconnect rail produced rows again — supervision resumes.
+        2. Nothing has arrived for LEG_GIVEUP_REPROBE_S, so the task is presumed
+           WEDGED (alive, socket open, zero rows — the state measured on both
+           bybit-ws and okx-ws on 2026-08-02) and is cancelled and re-spawned.
+
+        Path 2 does not clear ``give_up_since_ms``. The leg keeps reporting
+        ``given-up``, ``/health`` keeps reporting not-ok, and the loud line keeps
+        printing until ROWS arrive and path 1 fires. That distinction is the whole
+        point: the operator still has to look, but the tape stops bleeding while
+        they get there.
+        """
+        task = leg.task
+        if task is not None and task.done():
+            # Constraint #6 applies inside give-up too, and on EVERY tick, not
+            # only at re-probe time: an un-awaited Task parks its exception and
+            # the failure evaporates. Consuming it here bounds that to one tick.
+            leg.last_error = self._epitaph(task)
+        alive = task is not None and not task.done()
         if alive and leg.last_data_ms > leg.give_up_since_ms:
             leg.give_up_since_ms = None
             leg.restarts_consecutive = 0
@@ -2204,9 +2259,40 @@ class LegSupervisor:
                 self._log,
                 f"[collector] WATCHDOG {leg.name}: GIVEN UP after "
                 f"{leg.restarts_consecutive} consecutive restarts (last error: "
-                f"{leg.last_error}) — NOT restarting again; /health stays not-ok "
-                "until a human looks. Every second here is a hole in the tape.",
+                f"{leg.last_error}) — still not-ok and still needs a human; "
+                f"re-probing every {LEG_GIVEUP_REPROBE_S / 60.0:.0f} min so the "
+                "hole stops growing. Every second here is a hole in the tape.",
             )
+        # -- path 2: the slow re-probe ---------------------------------------- #
+        if self._stop.is_set():
+            return
+        since = leg.last_reprobe_ms or leg.give_up_since_ms
+        if now_ms - since < LEG_GIVEUP_REPROBE_S * 1000:
+            return
+        old = leg.task
+        if old is not None and not old.done():
+            old.cancel()
+            await asyncio.gather(old, return_exceptions=True)
+        # (a task that was already done had its exception consumed above)
+        # The hole was real for the whole give-up window and is recorded as such
+        # BEFORE anything is re-spawned (§0.7) — a re-probe never backfills.
+        from_ms = leg.last_data_ms if leg.last_data_ms else leg.started_ms
+        gap_ms = max(0, now_ms - from_ms)
+        leg.gap_events += 1
+        leg.gap_ms_total += gap_ms
+        self._record_gap(leg, "giveup-reprobe", from_ms, now_ms, gap_ms)
+        leg.reprobes += 1
+        leg.last_reprobe_ms = now_ms
+        leg.started_ms = now_ms  # start-grace travels with the new task
+        leg.task = self._create_task(leg.name, self._factories[leg.name])
+        _safe_log(
+            self._log,
+            f"[collector] WATCHDOG {leg.name}: GIVEN-UP re-probe #{leg.reprobes} — "
+            f"wedged task cancelled and re-spawned after "
+            f"{gap_ms / 1000.0:.0f}s with no rows. The leg stays GIVEN UP and "
+            "/health stays not-ok until rows actually arrive; this is an attempt, "
+            "not a recovery, and the missing data stays missing.",
+        )
 
     def _decay(self, leg: LegState, now_ms: int) -> None:
         """A leg healthy for LEG_RESTART_DECAY_S earns a clean ladder — last
@@ -2325,6 +2411,29 @@ async def _sleep_or_stop(stop_event: asyncio.Event, seconds: float) -> None:
         pass
 
 
+async def _app_ping_loop(ws, app_ping, stop_event: asyncio.Event) -> None:
+    """Send the venue's application-level heartbeat on a real SCHEDULE.
+
+    It used to be sent only from the recv-timeout branch, which meant it fired
+    only when the socket had been IDLE for _APP_PING_S. On a busy socket that
+    branch never runs: bybit-ws carries ~48 orderbook frames per second (measured
+    1,197 frames in 25 s), so a leg subscribed to a depth channel would go its
+    entire life without ever sending the heartbeat its venue documents as
+    required. Bybit v5 and OKX both specify a client ping on a clock, not a
+    clock-since-last-inbound-frame -- the busier the leg, the more certainly the
+    old code starved it.
+
+    Raising here is deliberate: the caller watches this task and reconnects. A
+    heartbeat that cannot be sent is a socket that is already gone.
+    """
+    while not stop_event.is_set():
+        await _sleep_or_stop(stop_event, _APP_PING_S)
+        if stop_event.is_set():
+            return
+        payload = app_ping if isinstance(app_ping, str) else json.dumps(app_ping)
+        await asyncio.wait_for(ws.send(payload), timeout=_WS_SEND_TIMEOUT_S)
+
+
 async def _ws_stream(
     name: str,
     url: str,
@@ -2356,42 +2465,80 @@ async def _ws_stream(
     while not stop_event.is_set():
         try:
             async with websockets.connect(
-                url, open_timeout=15, close_timeout=5, user_agent_header=_USER_AGENT
+                url,
+                open_timeout=15,
+                close_timeout=5,
+                # A leg that runs its OWN application heartbeat must not also run
+                # the library's RFC 6455 keepalive. Measured 2026-08-02 in
+                # /tmp/btcquant-collector.log: bybit-ws died over and over with
+                # `Close(code=1011, reason='keepalive ping timeout')`, and each
+                # death started a reconnect storm that then failed the opening
+                # handshake until the leg hit the cap. Only the two app_ping legs
+                # (bybit, okx) were ever affected; binancef-ws and coinbase-ws,
+                # which rely on the library keepalive, stayed up throughout.
+                # For these venues liveness is guarded by the app ping below plus
+                # the WATCHDOG_S silent-socket rail — belt and braces, not a third
+                # mechanism that closes healthy sockets.
+                ping_interval=None if app_ping is not None else _WS_PING_INTERVAL_S,
+                ping_timeout=None if app_ping is not None else _WS_PING_TIMEOUT_S,
+                user_agent_header=_USER_AGENT,
             ) as ws:
                 for sub in subscribe if isinstance(subscribe, list) else [subscribe]:
                     if sub is not None:
-                        await ws.send(json.dumps(sub))
+                        await asyncio.wait_for(
+                            ws.send(json.dumps(sub)), timeout=_WS_SEND_TIMEOUT_S
+                        )
                 attempt = 0  # a successful connect resets the backoff ladder
                 last_frame = time.monotonic()
-                while not stop_event.is_set():
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=_APP_PING_S)
-                    except asyncio.TimeoutError:
-                        # Watchdog: a socket that is "open" but silent for 60 s is
-                        # treated as dead — force the reconnect path (§3).
-                        if time.monotonic() - last_frame > WATCHDOG_S:
-                            raise TimeoutError(
-                                f"no frame in {WATCHDOG_S:.0f}s — watchdog reconnect"
+                pinger = None
+                if app_ping is not None:
+                    pinger = asyncio.create_task(
+                        _app_ping_loop(ws, app_ping, stop_event),
+                        name=f"{name}-appping",
+                    )
+                try:
+                    while not stop_event.is_set():
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=_APP_PING_S)
+                        except asyncio.TimeoutError:
+                            # Watchdog: a socket that is "open" but silent for 60 s
+                            # is treated as dead — force the reconnect path (§3).
+                            # The app heartbeat is NOT sent from here any more: it
+                            # is on its own clock, see _app_ping_loop.
+                            if time.monotonic() - last_frame > WATCHDOG_S:
+                                raise TimeoutError(
+                                    f"no frame in {WATCHDOG_S:.0f}s — watchdog reconnect"
+                                )
+                            continue
+                        last_frame = time.monotonic()
+                        try:
+                            frame = json.loads(raw)
+                        except (TypeError, ValueError):
+                            continue  # non-JSON frame: skip, never guess at contents
+                        if on_alive is not None:
+                            on_alive()
+                        try:
+                            on_frame(frame)
+                        except Exception as exc:  # noqa: BLE001 — one bad frame must not kill the leg
+                            # _safe_log, not log: on 2026-07-23 print() itself raised
+                            # OSError(28) here, escaped to the outer handler and
+                            # killed the leg inside a live process.
+                            _safe_log(
+                                log, f"[collector] {name}: frame handler error: {exc!r}"
                             )
-                        if app_ping is not None:  # app-level heartbeat (Bybit/OKX)
-                            await ws.send(
-                                app_ping if isinstance(app_ping, str) else json.dumps(app_ping)
+                        if pinger is not None and pinger.done():
+                            # The heartbeat died (send timed out, socket gone). Its
+                            # exception is retrieved and re-raised HERE so the leg
+                            # reconnects instead of drifting on toward the venue's
+                            # own idle-disconnect with no heartbeat at all.
+                            exc = pinger.exception()
+                            raise exc if exc is not None else TimeoutError(
+                                "app heartbeat loop exited — reconnect"
                             )
-                        continue
-                    last_frame = time.monotonic()
-                    try:
-                        frame = json.loads(raw)
-                    except (TypeError, ValueError):
-                        continue  # non-JSON frame: skip, never guess at contents
-                    if on_alive is not None:
-                        on_alive()
-                    try:
-                        on_frame(frame)
-                    except Exception as exc:  # noqa: BLE001 — one bad frame must not kill the leg
-                        # _safe_log, not log: on 2026-07-23 print() itself raised
-                        # OSError(28) here, escaped to the outer handler and
-                        # killed the leg inside a live process.
-                        _safe_log(log, f"[collector] {name}: frame handler error: {exc!r}")
+                finally:
+                    if pinger is not None and not pinger.done():
+                        pinger.cancel()
+                        await asyncio.gather(pinger, return_exceptions=True)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — reconnect on ANY transport failure
