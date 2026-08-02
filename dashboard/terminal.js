@@ -2050,6 +2050,19 @@
       });
     }
     refreshTpo();
+    // The TPO panel used to be fetched ONCE per page load. sessions[0] IS the
+    // running UTC day, so its letters, POC, VAH/VAL, single prints and initial
+    // balance froze at the moment the tab opened and never moved again — while
+    // the caption kept calling the construction canonical and the confluence
+    // board kept reading live price against that frozen value area (§4c
+    // TPO-position row). The one panel carrying the word "canonical" was the one
+    // showing the stalest numbers, and nothing on screen said so.
+    //
+    // 5 minutes, not 60s: a TPO row is a 30-MINUTE bracket, so a finer cadence
+    // buys no new letters and only costs REST calls. The no-live-merge rail
+    // (see above) forbids splicing WS trades into a REST kline series — it has
+    // never forbidden refetching the kline series itself, which is all this does.
+    setInterval(refreshTpo, 300000);
 
     // T-1 (§4g): a symbol switch re-fetches every SYM-parameterized REST
     // panel; caches are dropped FIRST so the old symbol's bars never render
@@ -2629,7 +2642,15 @@
   let auctionComposite = { on: false, days: [] };
   let auctionState = { profile: null, delta: null, label: '', note: 'probing collector API…', status: '' };
   let auctionGen = 0;           // load generation — a newer source pick abandons stale completions
-  const profCache = new Map();  // 'YYYY-MM-DD' → per-day profile (local fetch or hf aggregation)
+  // Keyed 'YYYY-MM-DD|venue|tick', NOT by date alone. A date-only key is a
+  // venue blend with a CONFIDENT WRONG LABEL: switching venue rewrites the
+  // .js-auction-venue chrome, then the loader hits the cache and re-shows the
+  // previous venue's levels under the new venue's name. That is worse than a
+  // blank panel — the per-source rail (§0.7) exists to stop exactly this, and a
+  // cache underneath it silently defeated it. Tick is in the key too because the
+  // levels ARE a function of the bucket grid.
+  const profCache = new Map();
+  const profKey = (date) => date + '|' + settings.auctionVenue + '|' + settings.tick;
   let levelsDrawOn = settings.levelsDraw;
   let vwapOn = settings.vwapOn;
 
@@ -2690,9 +2711,20 @@
     const acc = new Map();
     let W = 0, mean = 0, Sw = 0, totalVol = 0;
     for (const r of rows) {
-      if (!r || r.exchange !== 'bybit' || r.symbol !== SYM) continue;   // one leg, like the endpoint
+      // ONE leg, like the endpoint — and the SELECTED one, so an archived day
+      // and a local day answer for the same venue. A literal here would have
+      // made the archived path silently bybit-only under whatever venue name the
+      // chrome was showing.
+      if (!r || r.exchange !== settings.auctionVenue || r.symbol !== SYM) continue;
       const price = r.price, qty = r.qty;
       if (!Number.isFinite(price) || !(qty > 0)) continue;
+      // NOTE (2026-08-03 audit): the server buckets with round(price/tick)*tick
+      // (collector.py:1375, :3036) while this floors, so the same label names a
+      // half-bucket-shifted interval on each side. Left as-is HERE deliberately —
+      // changing one side alone would make local and archived days disagree
+      // instead of agreeing wrongly. Tracked as a single cross-language snap-rule
+      // decision; until then a composite that mixes a local and an archived day
+      // sums two different price intervals under one key.
       const lvl = Math.floor(price / tick) * tick;
       let e = acc.get(lvl);
       if (!e) { e = { buy: 0, sell: 0, prints: 0, bk: new Array(bucketsUsd.length + 1).fill(0) }; acc.set(lvl, e); }
@@ -2913,20 +2945,22 @@
    *  are NEVER auto-downloaded here — the size gate must be a user click
    *  (loadArchivedDay), so composite merges only what is already consented. */
   function ensureDayProfile(date) {
-    if (profCache.has(date)) return Promise.resolve(profCache.get(date));
+    const ck = profKey(date);
+    if (profCache.has(ck)) return Promise.resolve(profCache.get(ck));
     if (!isLocalDate(date)) {
       return Promise.reject(new Error(date + ' is archived — load it once via the source select (size-gated) first'));
     }
     const d0 = Date.parse(date + 'T00:00:00Z');
     return fetchJson(profileUrl(d0, d0 + DAY_MS), 20000).then((p) => {
-      profCache.set(date, p);
+      profCache.set(ck, p);
       return p;
     });
   }
 
   function loadArchivedDay(date, gen) {
-    if (profCache.has(date)) {
-      setAuctionProfile(profCache.get(date), date + ' · archived day · hf dataset', '');
+    const ck = profKey(date);
+    if (profCache.has(ck)) {
+      setAuctionProfile(profCache.get(ck), date + ' · archived day · hf dataset', '');
       return;
     }
     if (!HFD) {
@@ -2961,7 +2995,7 @@
       }).then((rows) => {
         if (gen !== auctionGen) return;
         const prof = aggregateTradeRows(rows, LEVELS_TICK, AUCTION_BUCKETS);
-        profCache.set(date, prof);
+        profCache.set(ck, prof);
         setAuctionProfile(prof, date + ' · archived day · hf dataset', '');
       });
     }).catch((e) => {

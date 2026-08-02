@@ -3003,7 +3003,16 @@
 
       // Caption: session date + construction statement (per-source label).
       font(9, true); ctx.fillStyle = p.muted; ctx.textAlign = 'left';
-      ctx.fillText(s.date + ' UTC · 30m letters · $' + tick + ' rows · • = single print', 4, 8);
+      // A DEVELOPING session says so, with the count. Its POC and value area are
+      // provisional by construction — value is a statement about a distribution
+      // that has had time to develop (Dalton ch.4), and a partial day rendered
+      // identically to a settled one invites it to be read as settled.
+      const devTag = s.developing
+        ? ' · DEVELOPING ' + s.periodsObserved + '/' + s.periodsFull
+          + ' periods — POC/VA provisional'
+        : '';
+      ctx.fillText(s.date + ' UTC · 30m letters · $' + tick + ' rows · • = single print'
+        + devTag, 4, 8);
     }
 
     /** slice = { sessions (buildTpo output, NEWEST-FIRST), tickSize } */

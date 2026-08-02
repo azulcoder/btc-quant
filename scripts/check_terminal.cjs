@@ -4760,6 +4760,37 @@ group('layout: one element per grid area, strips place themselves, anchors survi
 });
 
 
+group('buildTpo marks a DEVELOPING session and counts what it observed', () => {
+  // The 2026-08-03 AMT audit finding: the running UTC day rendered identically
+  // to a settled one, so a provisional POC/value area read as final. Dalton's
+  // point is that value is a statement about a distribution that has HAD TIME to
+  // develop; a 4-of-48-period profile is not that, and must say so.
+  const DAY = 86400000, HALF = 1800000;
+  const day0 = Math.floor(Date.UTC(2026, 7, 2) / DAY) * DAY;
+  const bar = (i, l, h) => ({ ts: day0 + i * HALF, o: l, h, l, c: h, v: 1 });
+
+  // Four half-hour brackets = a developing day.
+  const partial = S.buildTpo([bar(0, 100, 101), bar(1, 100, 102), bar(2, 101, 103), bar(3, 101, 102)],
+                             { tickSize: 1 });
+  assert.strictEqual(partial.length, 1);
+  assert.strictEqual(partial[0].periodsObserved, 4, 'counts DISTINCT observed brackets');
+  assert.strictEqual(partial[0].periodsFull, 48, '48 x 30m brackets in a UTC day');
+  assert.strictEqual(partial[0].developing, true);
+
+  // A full 48-bracket day is settled and must NOT carry the marker.
+  const full = [];
+  for (let i = 0; i < 48; i++) full.push(bar(i, 100 + (i % 3), 102 + (i % 3)));
+  const settled = S.buildTpo(full, { tickSize: 1 });
+  assert.strictEqual(settled[0].periodsObserved, 48);
+  assert.strictEqual(settled[0].developing, false, 'a complete day is not developing');
+
+  // The count is of OBSERVED brackets, not of bars: a gap in the kline series
+  // must leave a hole, never renumber the letters into a false full day.
+  const holed = S.buildTpo([bar(0, 100, 101), bar(9, 100, 101), bar(20, 100, 101)], { tickSize: 1 });
+  assert.strictEqual(holed[0].periodsObserved, 3, 'holes stay holes; 3 bars is 3 brackets');
+  assert.strictEqual(holed[0].developing, true);
+});
+
 group('hmsMs: millisecond event time, and the second-cache cannot skew it', () => {
   // Fixed instant, chosen so every field is unambiguous.
   const t = Date.UTC(2026, 7, 2, 15, 59, 50) + 358;

@@ -1180,6 +1180,18 @@
         if (m.l < ibLo) ibLo = m.l;
       }
 
+      // How much of the UTC day this session has actually SEEN. A day with
+      // fewer than its full 48 half-hour brackets is a DEVELOPING profile, and
+      // its POC / value area / single prints are provisional by construction:
+      // Dalton's whole point is that value is a statement about a distribution
+      // that has had time to develop. Counting distinct observed periods rather
+      // than reading a clock keeps buildTpo pure and keeps the count honest when
+      // klines are missing (the period index is clock-derived, so a hole stays a
+      // hole instead of renumbering the letters).
+      const observed = new Set();
+      for (const r of rows) for (const q of r.periods) observed.add(q);
+      const PERIODS_PER_UTC_DAY = 48;   // 30-minute brackets, Steidlmayer's unit
+
       sessions.push({
         // Pure function of the bar ts — a date LABEL, not a wall-clock read.
         date: new Date(dayIdx * DAY_MS).toISOString().slice(0, 10),
@@ -1189,6 +1201,9 @@
         val: rows[va.loIdx].price,
         singles,
         ib: { hi: ibHi, lo: ibLo },
+        periodsObserved: observed.size,
+        periodsFull: PERIODS_PER_UTC_DAY,
+        developing: observed.size < PERIODS_PER_UTC_DAY,
       });
     }
     // Newest-first (ISO dates sort lexicographically = chronologically).
