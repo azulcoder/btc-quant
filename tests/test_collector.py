@@ -1291,6 +1291,83 @@ def test_compute_day_levels_none_without_bybit_trades(tmp_path):
         con.close()
 
 
+def test_duplicate_trade_ids_are_deduped_by_volume_readers(tmp_path):
+    """U10 — a reconnect replaying its recent tape writes the SAME trade twice.
+
+    Measured 2026-08-03 on the 2026-08-01 day file: 971 binancef trade_ids and
+    68 coinbase trade_ids each appear twice, and in EVERY case the two rows carry
+    a byte-identical (ts_ms, price, qty, aggressor_buy). So they are one trade
+    recorded twice, never two trades that collided on an id. Undeduped, SUM(qty)
+    counted both and inflated reported volume by 0.198 % / 0.098 %.
+
+    Both volume readers must dedupe on trade_id: /v1/profile (display) and
+    compute_day_levels (the PRIOR-DAY reference that value migration and the
+    `vs prior-day value` confluence row are built on).
+
+    Hand-computed: three distinct trades of 1.0, 2.0, 3.0 = 6.0 BTC. One of them
+    is written a second time. A deduping reader says 6.0; a naive one says 8.0.
+    """
+    con = collector.open_db(tmp_path / "d.duckdb")
+    try:
+        dup = _mk_trade(_MIDNIGHT + 2_000, 61500.0, 2.0, True)
+        rows = [
+            _mk_trade(_MIDNIGHT + 1_000, 61500.0, 1.0, True),
+            dup,
+            _mk_trade(_MIDNIGHT + 3_000, 61510.0, 3.0, False),
+            dup,                       # the replayed duplicate — identical tuple
+        ]
+        con.executemany(collector._INSERT_SQL["trades"], rows)
+        assert con.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 4
+        assert con.execute("SELECT COUNT(DISTINCT trade_id) FROM trades").fetchone()[0] == 3
+
+        lv = collector.compute_day_levels(con, _D_TODAY)
+        assert lv is not None
+        assert abs(lv["vol"] - 6.0) < 1e-9, (
+            f"registry volume must count each trade ONCE, got {lv['vol']} (naive sum is 8.0)"
+        )
+        # And the deduplication must not disturb the OHLC, which is an arg_min /
+        # arg_max over event time and never a sum.
+        assert abs(lv["o"] - 61500.0) < 1e-9
+        assert abs(lv["c"] - 61510.0) < 1e-9
+        assert abs(lv["h"] - 61510.0) < 1e-9
+        assert abs(lv["l"] - 61500.0) < 1e-9
+    finally:
+        con.close()
+
+
+def test_profile_endpoint_dedupes_and_keeps_buy_sell_split(tmp_path):
+    """U10b — the /v1/profile side of the same defect, through the real endpoint.
+
+    Also pins what dedup must NOT break: the buy/sell split, the print COUNT and
+    the level grid all have to stay consistent with the deduped set, not with a
+    half-deduped mixture.
+    """
+    root = tmp_path / "ticks"
+    root.mkdir()
+    dup = _mk_trade(_MIDNIGHT + 2_000, 61500.0, 2.0, True)
+    _seed_day(root, _D_TODAY, [
+        _mk_trade(_MIDNIGHT + 1_000, 61500.0, 1.0, True),
+        dup,
+        _mk_trade(_MIDNIGHT + 3_000, 61500.0, 3.0, False),
+        dup,                       # replayed
+    ])
+    with _rotation_server(root) as port:
+        status, body = _get_json(
+            port,
+            f"/v1/profile?symbol=BTCUSDT&exchange=bybit&tick=10"
+            f"&start_ms={_MIDNIGHT}&end_ms={_MIDNIGHT + 86_400_000}",
+        )
+    assert status == 200, body
+    levels = body["levels"]
+    assert len(levels) == 1, f"one $10 level at 61500, got {levels}"
+    lvl = levels[0]
+    # 1.0 + 2.0 buy (the duplicate counted ONCE) and 3.0 sell.
+    assert abs(lvl["buy_vol"] - 3.0) < 1e-9, f"buy volume deduped: {lvl}"
+    assert abs(lvl["sell_vol"] - 3.0) < 1e-9, f"sell volume untouched: {lvl}"
+    assert lvl["prints"] == 3, f"print COUNT is of distinct trades, got {lvl['prints']}"
+    assert abs(body["total_vol"] - 6.0) < 1e-9, "naive sum would be 8.0"
+
+
 def test_levels_endpoint_derives_naked_both_ways(tmp_path):
     """/v1/levels: naked iff NO LATER recorded day's [l, h] contains the POC —
     a revisited POC un-nakes (day1), an untouched one stays naked (day2), the

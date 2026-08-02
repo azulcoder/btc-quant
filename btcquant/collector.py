@@ -1365,14 +1365,30 @@ def compute_day_levels(
         return None
     symbol = sym_row[0]
     where = "WHERE exchange = ? AND symbol = ? AND ts_ms >= ? AND ts_ms < ?"
+    # Deduped on trade_id for exactly the reason /v1/profile is (see
+    # _profile_sql): a reconnect can replay its recent tape, and those rows are
+    # byte-identical duplicates of trades already stored. Undeduped they inflated
+    # `vol` — and this row is not display-only, it is the PRIOR-DAY reference the
+    # value-migration read and the `vs prior-day value` confluence row are built
+    # on, so it has to be at least as exact as the display path.
+    #
+    # POC/VAH/VAL barely move (they are about the relative shape), but `vol` is
+    # reported as a number and was 0.2 % high on the busiest leg. Rows already in
+    # levels.jsonl keep their old values until `make backfill-levels` recomputes
+    # them; that is deliberate — silently rewriting recorded history would be the
+    # opposite of the audit trail this file exists to keep.
+    dedup = (
+        "(SELECT trade_id, ANY_VALUE(ts_ms) AS ts_ms, ANY_VALUE(price) AS price, "
+        f"ANY_VALUE(qty) AS qty FROM trades {where} GROUP BY trade_id)"
+    )
     o, h, low, c, vol = con.execute(
         # arg_min/arg_max by ts_ms = first/last print of the day (event time).
         f"SELECT arg_min(price, ts_ms), max(price), min(price), "
-        f"arg_max(price, ts_ms), SUM(qty) FROM trades {where}",  # noqa: S608 — fixed cols
+        f"arg_max(price, ts_ms), SUM(qty) FROM {dedup}",  # noqa: S608 — fixed cols
         [exchange, symbol, lo, hi],
     ).fetchone()
     lvl_rows = con.execute(
-        f"SELECT round(price / ?) * ? AS lvl, SUM(qty) FROM trades {where} "  # noqa: S608
+        f"SELECT round(price / ?) * ? AS lvl, SUM(qty) FROM {dedup} "  # noqa: S608
         "GROUP BY 1 ORDER BY 1",
         [tick, tick, exchange, symbol, lo, hi],
     ).fetchall()
@@ -3047,11 +3063,32 @@ def _profile_sql(n_buckets: int, n_symbols: int) -> str:
                 f"THEN qty ELSE 0 END) AS b{i}"
             )
         cols.append(f"SUM(CASE WHEN price * qty > ? THEN qty ELSE 0 END) AS b{n_buckets}")
-    return (
-        "SELECT " + ", ".join(cols) + " FROM trades "
+    # DEDUPED on trade_id before aggregation. Measured 2026-08-03 on the
+    # 2026-08-01 day file: 971 binancef trade_ids and 68 coinbase trade_ids each
+    # appear TWICE, and in every single case the two rows carry a byte-identical
+    # (ts_ms, price, qty, aggressor_buy) — so they are the same trade written
+    # twice (a reconnect replaying its recent tape), never two trades that
+    # collided on an id. Left raw, SUM(qty) counted each of them, inflating the
+    # displayed profile volume by 0.198 % (binancef) and 0.098 % (coinbase).
+    #
+    # Verified precondition: zero NULL and zero empty trade_id across all four
+    # venues in the store. That matters — a NULL id would collapse every
+    # unidentified trade into ONE row and silently delete data, which is the
+    # opposite of the intent.
+    #
+    # ANY_VALUE, not DISTINCT ON: the payload is identical by construction (and
+    # asserted by test), so the choice cannot change a number, and ANY_VALUE
+    # needs no ORDER BY to be well-defined. The research path (orderflow.py)
+    # already dedupes on (exchange, symbol, trade_id); this brings the display
+    # path to the same standard rather than inventing a second one.
+    inner = (
+        "SELECT trade_id, ANY_VALUE(ts_ms) AS ts_ms, ANY_VALUE(price) AS price, "
+        "ANY_VALUE(qty) AS qty, ANY_VALUE(aggressor_buy) AS aggressor_buy "
+        "FROM trades "
         "WHERE exchange = ? AND symbol IN (" + ", ".join("?" * n_symbols) + ") "
-        "AND ts_ms >= ? AND ts_ms <= ? GROUP BY 1"
+        "AND ts_ms >= ? AND ts_ms <= ? GROUP BY trade_id"
     )
+    return "SELECT " + ", ".join(cols) + " FROM (" + inner + ") GROUP BY 1"
 
 
 def _bucket_params(buckets: list[float]) -> list[float]:

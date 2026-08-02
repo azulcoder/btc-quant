@@ -4,6 +4,68 @@ Each entry: finding id, what changed, before/after, and the test that proves it.
 findings report (no Critical; 1 High; ~8 Medium; ~12 Low; 4 Info) was produced read-only
 before any edit, per the spec.
 
+## 2026-08-03 (3) — RETRACTION: the "dark panels" were my harness, and a real dedupe
+
+**RETRACTED.** The entry above reported that the four collector-API panels never populate
+in a live browser, "characterised precisely, root cause NOT established". That finding was
+wrong, and both halves of the evidence behind it were artefacts of the test harness rather
+than of the product.
+
+*First artefact — the console pipe.* The claim "neither `.then()` nor `.catch()` fires"
+rested on `console.log` messages not arriving at a Playwright listener. Re-instrumented to
+push into a `window` array and read back via `evaluate`, the truth is the opposite:
+
+    151ms  A: about to call fetchJson /health
+    200ms  B: THEN entered, status=ok        <- resolves in 49 ms
+    6151ms T: setTimeout 6s fired            <- timers were never starved
+    170ms  pollLevels SYM=BTCUSDT
+    176ms  levels OK n=26                    <- levelsDays IS populated
+
+*Second artefact — no scroll.* With the data confirmed present, the remaining question was
+why `levelsView.render()` was never reached. It is the `IntersectionObserver` off-screen
+paint gate — which this repo's own design lists as a strength, and which the AMT audit
+praised. The panel sits at `top: 4042px` on a 1050px viewport; a headless run that never
+scrolls never brings it into view, so it is never painted. Scrolling it into view:
+
+    before scroll: inView=false  rows=1   "awaiting /v1/levels…"
+    after  scroll: inView=true   rows=26  "2026-08-01  $62,858 …"
+
+Nothing was broken. Recorded as a retraction rather than deleted, because the failure mode
+worth remembering is mine: two consecutive sessions in which a negative claim about the
+product rested on a weak observation of my own tooling. The rule this yields — a negative
+finding needs a POSITIVE control before it is written down — is the actual lesson.
+
+**Fixed for real: duplicate trades were double-counted by both volume readers.**
+`_profile_sql` (`/v1/profile`, display) and `compute_day_levels` (the levels registry) both
+ran `SUM(qty)` over raw rows. Measured on the 2026-08-01 day file: 971 binancef and 68
+coinbase trade_ids appear twice, and in EVERY case the two rows carry a byte-identical
+`(ts_ms, price, qty, aggressor_buy)` — one trade written twice by a reconnect replaying its
+recent tape, never two trades colliding on an id. Verified precondition: zero NULL and zero
+empty `trade_id` across all four venues, which is what makes a `GROUP BY trade_id` safe
+rather than destructive.
+
+Both now dedupe with `ANY_VALUE` per `trade_id`. Measured effect over a live 24 h window:
+
+| venue | before | after | delta | POC |
+|---|---|---|---|---|
+| binancef | 77,092.999 | 76,534.056 | −558.94 (−0.725 %) | 63,460 → unchanged |
+| coinbase | 3,147.937 | 3,141.790 | −6.15 (−0.195 %) | 63,060 → unchanged |
+
+The POC does not move — the level SHAPE was never affected, only the volume numbers
+printed beside it. Note the 24 h inflation (0.725 %) is well above the 0.198 % measured on
+a settled day: the duplicate rate scales with reconnect frequency, so the fix is worth more
+on a bad day than a good one. Rows already written to `levels.jsonl` keep their old values
+until `make backfill-levels` recomputes them — silently rewriting recorded history would
+defeat the point of an audit trail.
+
+The research path (`orderflow.py`) already deduped on `(exchange, symbol, trade_id)` and is
+unchanged; this brings the display path to the same standard instead of inventing a second.
+
+**Tests:** `test_duplicate_trade_ids_are_deduped_by_volume_readers` and
+`test_profile_endpoint_dedupes_and_keeps_buy_sell_split` — both verified failing at the
+undeduped revision (`got 8.0 (naive sum is 8.0)`), and both pin what dedup must NOT break:
+OHLC (an arg_min/arg_max, never a sum), the buy/sell split, and the print count. 354 pass.
+
 ## 2026-08-03 (2) — the auction surface reads the auction, and one panel is dark
 
 **Built (AMT audit items 1-4).** `buildTpo` now derives **range extension** beyond the
@@ -29,7 +91,9 @@ check_terminal is what forced the decision into the open. Dalton's canonical acc
 reference is the prior day; today's value area is partly circular, since price sits near
 its own developing POC by construction.
 
-**Found and NOT fixed — the four collector-API panels do not populate in a live browser.**
+**[RETRACTED 2026-08-03 — see the entry below. This finding was an artefact of my
+own test harness, twice over. The panels populate correctly.]** ~~Found and NOT fixed —
+the four collector-API panels do not populate in a live browser.~~
 Correcting an earlier claim in this log's 2026-08-03 session notes: those panels were
 reported "LIVE" on the weak test of "the text does not contain 'collector API offline'".
 The daily-levels panel in fact shows its INITIAL note, `awaiting /v1/levels (collector API
