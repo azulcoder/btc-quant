@@ -2411,6 +2411,38 @@ async def _sleep_or_stop(stop_event: asyncio.Event, seconds: float) -> None:
         pass
 
 
+def bybit_subscribe(symbol: str) -> dict:
+    """Bybit v5 public/linear subscribe frame. Args are TOPIC STRINGS."""
+    return {
+        "op": "subscribe",
+        "args": [
+            f"publicTrade.{symbol}",
+            f"orderbook.50.{symbol}",
+            f"tickers.{symbol}",
+            f"allLiquidation.{symbol}",
+        ],
+    }
+
+
+def okx_subscribe(inst_id: str) -> list:
+    """OKX v5 public subscribe frame. Args are OBJECTS, not strings (§4b)."""
+    return [{
+        "op": "subscribe",
+        "args": [
+            {"channel": "trades", "instId": inst_id},
+            {"channel": "books", "instId": inst_id},
+        ],
+    }]
+
+
+def coinbase_subscribe(product_id: str) -> list:
+    """Coinbase Advanced Trade: one frame PER channel, and `type`, not `op`."""
+    return [
+        {"type": "subscribe", "product_ids": [product_id], "channel": "market_trades"},
+        {"type": "subscribe", "product_ids": [product_id], "channel": "heartbeats"},
+    ]
+
+
 async def _app_ping_loop(ws, app_ping, stop_event: asyncio.Event) -> None:
     """Send the venue's application-level heartbeat on a real SCHEDULE.
 
@@ -3504,23 +3536,22 @@ async def _run_async(
         budget_s=LEG_BUDGET_S["writer-flush"],
     )
     if "bybit" in exchanges:
-        subscribe = {
-            "op": "subscribe",
-            "args": [
-                f"publicTrade.{symbol}",
-                f"orderbook.50.{symbol}",
-                f"tickers.{symbol}",
-                f"allLiquidation.{symbol}",
-            ],
-        }
+        # Built by a pure function, and passed by DEFAULT ARGUMENT below. Both
+        # halves matter. On 2026-08-02 all three venue blocks assigned one shared
+        # local named `subscribe`; sup.spawn only CREATES the task, so by the time
+        # any lambda body ran the name held the LAST assignment, and bybit-ws and
+        # okx-ws each sent Coinbase's market_trades payload to a venue that has
+        # never heard of it. They were silently never subscribed and recorded ZERO
+        # rows for hours with the socket open and answering pings.
+        bybit_sub = bybit_subscribe(symbol)
         sup.spawn(
             "bybit-ws", "stream",
-            lambda: _ws_stream(
+            lambda sub=bybit_sub: _ws_stream(
                 "bybit-ws",
                 _BYBIT_WS,
                 on_bybit,
                 stop_event=stop_event,
-                subscribe=subscribe,
+                subscribe=sub,
                 app_ping={"op": "ping"},
                 log=log,
                 on_alive=alive,
@@ -3600,23 +3631,15 @@ async def _run_async(
     if "okx" in exchanges:
         # §3c OKX leg: WS trades (ctVal-scaled) + books top-50; funding/OI via
         # REST 60 s (the WS tickers channel is not needed for these two rows).
-        subscribe = [
-            {
-                "op": "subscribe",
-                "args": [
-                    {"channel": "trades", "instId": legs["okx"]},
-                    {"channel": "books", "instId": legs["okx"]},
-                ],
-            }
-        ]
+        okx_sub = okx_subscribe(legs["okx"])
         sup.spawn(
             "okx-ws", "stream",
-            lambda: _ws_stream(
+            lambda sub=okx_sub: _ws_stream(
                 "okx-ws",
                 _OKX_WS,
                 on_okx,
                 stop_event=stop_event,
-                subscribe=subscribe,
+                subscribe=sub,
                 app_ping="ping",  # OKX prescribes the PLAIN-TEXT ping (§4b)
                 log=log,
                 on_alive=alive,
@@ -3656,18 +3679,15 @@ async def _run_async(
         # §3c Coinbase spot tape leg — market_trades + heartbeats (the liveness
         # channel; ANY frame feeds the _ws_stream watchdog, so heartbeats keep a
         # quiet tape from tripping a false reconnect).
-        subscribe = [
-            {"type": "subscribe", "product_ids": [legs["coinbase"]], "channel": "market_trades"},
-            {"type": "subscribe", "product_ids": [legs["coinbase"]], "channel": "heartbeats"},
-        ]
+        coinbase_sub = coinbase_subscribe(legs["coinbase"])
         sup.spawn(
             "coinbase-ws", "stream",
-            lambda: _ws_stream(
+            lambda sub=coinbase_sub: _ws_stream(
                 "coinbase-ws",
                 _COINBASE_WS,
                 on_coinbase,
                 stop_event=stop_event,
-                subscribe=subscribe,
+                subscribe=sub,
                 log=log,
                 on_alive=alive,
             ),

@@ -4,6 +4,46 @@ Each entry: finding id, what changed, before/after, and the test that proves it.
 findings report (no Critical; 1 High; ~8 Medium; ~12 Low; 4 Info) was produced read-only
 before any edit, per the spec.
 
+## 2026-08-03 — RESOLVED: one shared local silently unsubscribed two venues
+
+**Finding fixed:** `_run_async` assigned three venue subscribe payloads to the SAME local
+name, `subscribe`. `sup.spawn` only CREATES the task — the lambda body runs later, when the
+loop first schedules it — so by then the name held the LAST assignment. bybit-ws and okx-ws
+each sent Coinbase's `{"type": "subscribe", "product_ids": ["BTC-USD"], "channel":
+"market_trades"}` to a venue that has never heard of it.
+
+**Before:** the two legs connected, completed the handshake, answered pings, and were never
+subscribed to anything. They recorded ZERO rows while their sockets stayed open and healthy.
+`/health` reported the symptom exactly and could not report the cause: `bybit-ws
+last_alive_age_s=4.8` against `last_data_age_s=126.5` — frames arriving (the pongs), no rows.
+The watchdog then restarted them every 120 s until the cap, and give-up made it permanent.
+This is the same outage recorded in the entry above; the diagnosis there was incomplete.
+
+**Why it survived review.** Each venue block reads correctly in isolation, and the three
+protocols are mutually unintelligible, so the swap failed SILENTLY instead of erroring. It is
+also a race: if the loop happens to run a leg body before the next block rebinds the name, that
+leg captures the right payload — which is why bybit recorded 18,178 trades on 2026-08-01 and
+zero on 2026-08-02 with no code change in between.
+
+**Bisected, not guessed.** bybit alone -> 343 rows/90 s. bybit+binancef -> healthy (binancef
+passes no `subscribe` at all). bybit+okx -> bybit dead, okx alive. All five -> bybit AND okx
+dead, coinbase alive. Every case is this bug and nothing else. Two hypotheses were refuted
+along the way with measurement rather than argument: the venues and the network were verified
+healthy (an isolated probe returned 2,461 and 1,125 data frames in 55 s), and event-loop lag
+under the full leg set was measured at p99 = 1.4 ms, max 594 ms — the loop was never blocked.
+
+**After:** each payload is a pure module-level builder (`bybit_subscribe`, `okx_subscribe`,
+`coinbase_subscribe`), so there is no shared local left to rebind, and each factory binds its
+payload by DEFAULT ARGUMENT — value captured at spawn, not at call. Verified live: all 16 legs
+healthy, `unhealthy=[]`, bybit 1,168 rows and okx 609 rows in the first 150 s, and the
+recorded-store profile answers for bybit again.
+
+**Tests:** `test_leg_subscribe_payloads_are_not_shared` asserts each builder emits its own
+venue's dialect (Bybit topic STRINGS, OKX arg OBJECTS, Coinbase `type` and one frame per
+channel). `test_no_late_binding_closure_in_run` is the class guard: a structural AST assertion
+that no local `_run_async` assigns more than once is read inside a lambda — verified failing at
+the buggy revision. 71 collector tests pass.
+
 ## 2026-08-02 — app heartbeat starved on a busy socket; give-up left wedged tasks running
 
 **Findings fixed:** the application-level WS heartbeat was sent only from the recv-timeout
@@ -38,7 +78,8 @@ zero heartbeats on a saturated socket), `test_app_ping_legs_disable_the_library_
 (asserts the split in both directions), `test_given_up_leg_is_reprobed_without_ever_claiming_health`,
 `test_reprobe_yields_to_real_rows_and_resumes_supervision`. 350 pass.
 
-**NOT fixed, and open.** After these changes the reconnect storm is gone, but `bybit-ws` and
+**NOT fixed by that commit, and RESOLVED the next day — see the 2026-08-03 entry
+below.** After these changes the reconnect storm is gone, but `bybit-ws` and
 `okx-ws` still record zero rows inside the collector process while an isolated probe using the
 identical URL, subscribe payload, keepalive configuration and `user_agent_header` returns
 2,461 and 1,125 data frames in 55 s from the same machine. `/health` separates the two

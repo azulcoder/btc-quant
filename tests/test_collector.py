@@ -2190,6 +2190,95 @@ def test_app_ping_legs_disable_the_library_keepalive(monkeypatch):
     )
 
 
+def test_leg_subscribe_payloads_are_not_shared():
+    """U9 — THE 2026-08-02 root cause, pinned.
+
+    `sup.spawn` only CREATES the task; the lambda body runs later, when the loop
+    first schedules it. All three venue blocks assigned the SAME local name for
+    their subscribe payload, so by then the name held the LAST assignment —
+    Coinbase's. bybit-ws and okx-ws each sent
+    `{"type": "subscribe", "product_ids": ["BTC-USD"], "channel": "market_trades"}`
+    to a venue that has never heard of it, were silently never subscribed, and
+    recorded ZERO rows for hours while their sockets stayed open and answered
+    pings. /health could only report the symptom: alive, but no data.
+
+    Bisected in isolation: bybit alone -> 343 rows/90 s; bybit+binancef -> fine
+    (binancef passes no subscribe at all); bybit+okx -> bybit dead; all five ->
+    bybit AND okx dead, coinbase alive. Every case is this bug and nothing else.
+
+    Each payload is now a pure function, so there is no shared local left to
+    rebind, and each is asserted to be in its OWN venue's dialect — the three
+    protocols are mutually unintelligible, which is exactly why the swap was
+    silent rather than loud.
+    """
+    by = collector.bybit_subscribe("BTCUSDT")
+    assert by["op"] == "subscribe"
+    assert all(isinstance(a, str) for a in by["args"]), "Bybit args are TOPIC STRINGS"
+    assert "publicTrade.BTCUSDT" in by["args"]
+    assert "orderbook.50.BTCUSDT" in by["args"]
+
+    ok = collector.okx_subscribe("BTC-USDT-SWAP")
+    assert isinstance(ok, list) and ok[0]["op"] == "subscribe"
+    assert all(isinstance(a, dict) for a in ok[0]["args"]), "OKX args are OBJECTS, not strings"
+    assert {a["channel"] for a in ok[0]["args"]} == {"trades", "books"}
+    assert all(a["instId"] == "BTC-USDT-SWAP" for a in ok[0]["args"])
+
+    cb = collector.coinbase_subscribe("BTC-USD")
+    assert isinstance(cb, list) and len(cb) == 2, "Coinbase takes ONE frame per channel"
+    assert all(f["type"] == "subscribe" for f in cb), "Coinbase says `type`, not `op`"
+    assert {f["channel"] for f in cb} == {"market_trades", "heartbeats"}
+
+    # The three dialects really are mutually unintelligible: no venue's payload
+    # could be mistaken for another's by the receiving end, which is why the
+    # swapped legs failed silently instead of erroring.
+    assert "op" not in cb[0] and "type" not in by
+    assert isinstance(by, dict) and isinstance(ok, list) and isinstance(cb, list)
+
+    # Fresh objects per call — never one shared structure a caller could mutate.
+    assert collector.bybit_subscribe("BTCUSDT") is not by
+    assert collector.okx_subscribe("BTC-USDT-SWAP") is not ok
+
+
+def test_no_late_binding_closure_in_run():
+    """U9b — the CLASS, not just the instance.
+
+    Any local that `_run_async` assigns more than once and a lambda then reads is
+    a late-binding hazard: the lambda captures the VARIABLE, and a leg factory
+    that runs after the loop yields sees whatever was assigned last. This is a
+    structural assertion over the AST so the next venue block cannot reintroduce
+    it — the bug was invisible in review precisely because each block read fine
+    on its own.
+    """
+    import ast
+    import collections
+    import inspect
+
+    src = inspect.getsource(collector)
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_run_async")
+
+    assigned = collections.Counter()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    assigned[t.id] += 1
+    read_in_lambda = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Lambda):
+            for m in ast.walk(n):
+                if isinstance(m, ast.Name) and isinstance(m.ctx, ast.Load):
+                    read_in_lambda.add(m.id)
+
+    hazards = sorted(name for name in read_in_lambda if assigned[name] > 1)
+    assert not hazards, (
+        "late-binding closure hazard in _run_async: "
+        + ", ".join(f"{h} (assigned {assigned[h]}x, read inside a lambda)" for h in hazards)
+        + " — give each leg its OWN name; a lambda captures the variable, not the value"
+    )
+
+
 def test_writer_run_survives_flush_failure(tmp_path):
     """U7 — the periodic-flush task must outlive a raising flush. A dead flush
     task means every leg keeps buffering into RAM while the store quietly stops
