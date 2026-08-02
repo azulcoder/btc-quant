@@ -2108,7 +2108,15 @@
       }
       // Corner tag: venue + scale statement (per-source label, §0.7).
       font(9, true); ctx.textAlign = 'left'; ctx.fillStyle = p.muted;
-      ctx.fillText((slice.ex || '') + ' · α ∝ resting qty (p95-scaled)' + (velOn ? ' · velocity tint ON' : '')
+      // Grid, band and history length are STATED. A finer grid buys resolution
+      // with history (the ring holds a fixed entry budget), and a window that
+      // silently shortened would read as a data gap rather than a setting.
+      const bandTxt = Number.isFinite(range.min) && Number.isFinite(range.max)
+        ? ' · grid $' + tick + ' · band $' + Math.round(range.max - range.min)
+          + ' over ' + nRows + ' rows'
+        : '';
+      ctx.fillText((slice.ex || '') + bandTxt
+        + ' · α ∝ resting qty (p95-scaled)' + (velOn ? ' · velocity tint ON' : '')
         + tradeNote
         + (slice.sessions && slice.sessions.length ? ' · shaded: Asia/London/NY sessions (UTC, FX-desk convention — §4f)' : ''), 6, 8);
 

@@ -140,11 +140,59 @@
   // setting would silently never persist and nothing would say why.
   const AUCTION_VENUES = ['bybit', 'binancef', 'okx', 'coinbase'];
 
+  // The book heatmap's OWN price grid, deliberately separate from settings.tick.
+  //
+  // They are the same knob today and that is the single biggest reason the
+  // heatmap reads shallow. Measured on the live wire 2026-08-03, rows actually
+  // drawn after grouping (cap 40/side):
+  //
+  //             wire levels      $10 tick     $1 tick    $0.5 tick
+  //   bybit         400            7 rows     57 rows     80 rows
+  //   binancef       40            3 rows      7 rows     12 rows
+  //   okx           800           12 rows     80 rows     80 rows
+  //
+  // $10 is RIGHT for the footprint — a bid x ask cell has to be legible — and
+  // catastrophic for a DOM heatmap, which wants the finest grid the book can
+  // actually resolve. Two panels, opposite requirements, one knob.
+  //
+  // Safe by construction: BookStore.grouped(tick, n) is PURE (terminal-state.js
+  // :173) — tick is an argument, not state — so two stores can hold two grids
+  // at once. The grid-bound rail forbids RE-BUCKETING recorded history onto a
+  // new grid, which is why changing this still rebuilds the ring rather than
+  // reinterpreting it.
+  //
+  // Grid and depth are ONE decision, not two. Raising the tick resolution
+  // without raising nLevels only moves the truncation from the price axis to
+  // the depth axis — sharp at the touch, blind beyond it. And the ring's cost
+  // is maxSamples x nLevels x 2 sides of Map entries per venue, so buying a
+  // finer grid at a fixed history length silently multiplies memory.
+  //
+  // So the budget is held CONSTANT at what ships today (3600 x 40 x 2 = 288k
+  // entries per venue) and each grid spends it differently. A finer grid buys
+  // resolution with HISTORY, and the panel says so out loud rather than letting
+  // the window quietly shrink.
+  const HEAT_ENTRY_BUDGET = 3600 * 40 * 2;
+  const HEAT_GRID = [
+    // tick, levels/side  -> band = tick x levels; samples = budget / (2 x levels)
+    { tick: 0.5, levels: 160 },   // +/- $80   ·  900 samples = 15 min
+    { tick: 1, levels: 120 },     // +/- $120  · 1200 samples = 20 min
+    { tick: 2.5, levels: 100 },   // +/- $250  · 1440 samples = 24 min
+    { tick: 5, levels: 60 },      // +/- $300  · 2400 samples = 40 min
+    { tick: 10, levels: 40 },     // +/- $400  · 3600 samples = 60 min  (today)
+    { tick: 25, levels: 40 },     // +/- $1000 · 3600 samples = 60 min
+  ];
+  const HEAT_TICKS = HEAT_GRID.map((g) => g.tick);
+  const heatGridFor = (tick) => HEAT_GRID.find((g) => g.tick === tick) || HEAT_GRID[4];
+  const heatSamplesFor = (levels) =>
+    Math.max(300, Math.floor(HEAT_ENTRY_BUDGET / (2 * levels)));
+
   const DEFAULTS = {
     // Which RECORDED leg the auction profile is built from. bybit by default
     // (deepest book, and the leg the levels registry is keyed on), but the store
     // holds one profile per venue and they are never merged (§0.7).
     auctionVenue: 'bybit',
+    // $1, not the footprint's $10 — see HEAT_TICKS for the measurement.
+    heatTick: 1,
     // T-4 (§4j) tapeMin 0 → 10000: the floor was OFF, and `DEFAULTS.tapeMin: 0`
     // + TIER_ALPHA.baseline meant the 60-row DOM budget was spent on seconds of
     // sub-$100 dust with ZERO rows above the 'sig' tier. $10,000 is not a new
@@ -318,6 +366,7 @@
       if (DOM_SOURCES.indexOf(j.domSource) >= 0) s.domSource = j.domSource;
       if (typeof j.domCum === 'boolean') s.domCum = j.domCum;
       if (AUCTION_VENUES.indexOf(j.auctionVenue) >= 0) s.auctionVenue = j.auctionVenue;
+      if (HEAT_TICKS.indexOf(j.heatTick) >= 0) s.heatTick = j.heatTick;
     } catch (_) { /* corrupt storage → defaults */ }
     return s;
   }
@@ -342,6 +391,7 @@
         // T-3 (§4i): tape tiers/audio/filters + ladder source.
         tapeTiers: settings.tapeTiers, tapeAudio: settings.tapeAudio,
         auctionVenue: settings.auctionVenue,
+        heatTick: settings.heatTick,
         tapeMarket: settings.tapeMarket, tapeVenue: settings.tapeVenue, tapeMetric: settings.tapeMetric,
         domSource: settings.domSource, domCum: settings.domCum,
       }));
@@ -569,7 +619,10 @@
     imprints = {};
     for (const ex of CVD_LEG_EXS) imprints[ex] = S.TradeImprint({ windowMs: 60000 });   // §4i rolling window
     for (const ex of HIST_EXS) {
-      depthHist[ex] = S.DepthHistoryStore({ tickSize: settings.tick, maxSamples: 3600, nLevels: 40 });
+      const hg = heatGridFor(settings.heatTick);
+      depthHist[ex] = S.DepthHistoryStore({
+        tickSize: hg.tick, maxSamples: heatSamplesFor(hg.levels), nLevels: hg.levels,
+      });
       priceTrail[ex] = [];
       lastSampleTs[ex] = -Infinity;
     }
@@ -1483,6 +1536,23 @@
   heatVenueSel.addEventListener('change', () => {
     if (HIST_EXS.indexOf(heatVenueSel.value) < 0) return;
     heatVenue = heatVenueSel.value;
+    dirty.heat = true;
+  });
+
+  // Heatmap price grid. REBUILDS the ring rather than regrouping it: the stored
+  // samples are already bucketed, and re-bucketing a coarse ladder onto a finer
+  // grid cannot recover the levels the coarse pass merged — it would have to
+  // invent them, which is exactly the fabrication §0.7 forbids. So the history
+  // restarts and says so by simply being short, the same discipline the
+  // footprint tick already follows.
+  const heatTickSel = $('set-heat-tick');
+  heatTickSel.value = String(settings.heatTick);
+  heatTickSel.addEventListener('change', () => {
+    const v = Number(heatTickSel.value);
+    if (HEAT_TICKS.indexOf(v) < 0) return;
+    settings.heatTick = v;
+    saveSettings();
+    rebuildHeatmapStores();
     dirty.heat = true;
   });
 
@@ -4808,12 +4878,12 @@
           bookHeatView.render({
             samples: dhSamples,
             range: dhRange,
+            tickSize: settings.heatTick,
             circles: circ.circles,
             // Present iff this venue produced ANY prints — the view uses it to
             // tell "no aggression in view" apart from "no tape for this venue",
             // which are different facts and must not read the same.
             circlesCover: heatTrades.length ? circ : null,
-            tickSize: settings.tick,
             trail: priceTrail[heatVenue],   // empty for binancef (no trades leg, §0.2) — honestly absent
             // Detector markers belong to the venue they were computed on: shown
             // on the BYBIT heatmap only (drawing bybit flags over another

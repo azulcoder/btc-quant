@@ -298,6 +298,20 @@
             <option value="binancef">binancef</option>
             <option value="okx">okx</option>
           </select>
+          <!-- The heatmap's OWN price grid, separate from the footprint tick.
+               A footprint wants a coarse tick so its bid x ask cells stay
+               legible; a DOM heatmap wants the finest grid the book can
+               resolve. Sharing one knob is what made this panel read shallow:
+               at $10 a bybit book draws 7 rows, at $1 it draws 57. -->
+          <label for="set-heat-tick" title="Price grid for THIS panel only — the footprint keeps its own. Finer = more rows of real book structure; too fine for the venue's own resolution just draws empty rows. Changing it REBUILDS the ring: re-bucketing recorded ladders onto a new grid would fabricate depth that never rested there (§0.7).">grid $</label>
+          <select id="set-heat-tick">
+            <option value="0.5">0.5</option>
+            <option value="1" selected>1</option>
+            <option value="2.5">2.5</option>
+            <option value="5">5</option>
+            <option value="10">10</option>
+            <option value="25">25</option>
+          </select>
           <label for="set-heat-vel" title="Hue = sign of resting-qty change vs the previous column (build/drain) instead of bid/ask side; α still ∝ qty">velocity tint <input type="checkbox" id="set-heat-vel" /></label>
         </span>
       </h2>
