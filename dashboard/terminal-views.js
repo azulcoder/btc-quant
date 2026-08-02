@@ -3013,6 +3013,37 @@
         : '';
       ctx.fillText(s.date + ' UTC · 30m letters · $' + tick + ' rows · • = single print'
         + devTag, 4, 8);
+
+      // Second caption line: what the IB bracket and the extremes actually SAY.
+      // Both were computed and discarded before — the panel drew the bracket and
+      // never once interpreted it. Descriptive statistics about a UTC window,
+      // deliberately NOT a day-type label: the literature's cutoffs are
+      // calibrated to a ~13-period RTH session and this is a 48-period day.
+      const parts = [];
+      const e = s.ext;
+      if (e && Number.isFinite(e.ibRange)) {
+        if (e.up > 0 || e.dn > 0) {
+          const seg = [];
+          if (e.up > 0) seg.push('↑' + fmtPx(e.up, tick) + (e.upFirstPeriod !== null ? '@' + (LETTERS[e.upFirstPeriod] || '?') : ''));
+          if (e.dn > 0) seg.push('↓' + fmtPx(e.dn, tick) + (e.dnFirstPeriod !== null ? '@' + (LETTERS[e.dnFirstPeriod] || '?') : ''));
+          parts.push('IB extension ' + seg.join(' ') + (e.side ? ' · one-sided ' + e.side : ' · both sides'));
+        } else {
+          parts.push('IB held — no range extension');
+        }
+        if (Number.isFinite(e.ibFrac)) parts.push('IB = ' + Math.round(e.ibFrac * 100) + '% of day range');
+      }
+      const t = s.tails;
+      if (t) {
+        if (t.sell) parts.push('selling tail ' + t.sell.rows + ' rows to ' + fmtPx(t.sell.to, tick));
+        if (t.buy) parts.push('buying tail ' + t.buy.rows + ' rows to ' + fmtPx(t.buy.to, tick));
+        if (t.poorHigh) parts.push('poor high (no excess)');
+        if (t.poorLow) parts.push('poor low (no excess)');
+      }
+      if (parts.length) {
+        font(9); ctx.fillStyle = rgba(p.muted, 0.9); ctx.textAlign = 'left';
+        ctx.fillText(parts.join(' · ') + '  — descriptive, tail ≥' + (t ? t.minRows : 2)
+          + ' rows is a convention', 4, 20);
+      }
     }
 
     /** slice = { sessions (buildTpo output, NEWEST-FIRST), tickSize } */
@@ -5207,7 +5238,9 @@
       root = el;
       root.insertAdjacentHTML('beforeend',
         '<div class="lvls-row lvls-head"><span>date</span><span>O</span><span>H</span><span>L</span><span>C</span>'
-        + '<span>POC</span><span>value area</span><span>vol</span><span></span></div>');
+        + '<span>POC</span><span>value area</span><span>vol</span>'
+        + '<span title="value migration vs the previous RECORDED day — Dalton: what direction did the market attempt, and did it succeed. Mechanical comparison of two settled value areas, never a forecast.">migration</span>'
+        + '<span></span></div>');
       list = document.createElement('div');
       list.className = 'lvls-list';
       root.appendChild(list);
@@ -5234,8 +5267,31 @@
         return;
       }
       let html = '';
+      // Value migration, day over day. The registry has stored VAH/VAL for every
+      // recorded day since it existed and nothing had ever diffed two rows —
+      // which is the difference between a list of prices and CONTEXT. Dalton's
+      // framework rests on one question: what direction did the market attempt,
+      // and did it succeed; comparing consecutive value areas answers it
+      // mechanically, with no forecast attached.
+      const MIG_TAG = {
+        higher: '↑ higher', lower: '↓ lower',
+        'overlapping-higher': '↗ ovl-higher', 'overlapping-lower': '↘ ovl-lower',
+        inside: '⊂ inside', engulfing: '⊃ engulfing', unchanged: '= unchanged',
+      };
       for (let i = days.length - 1; i >= 0; i--) {   // newest first
         const d = days[i];
+        // Tagged UPSTREAM by terminal.js from the pure S.valueMigration — same
+        // discipline as the liq feed's tier tagging: the view renders the
+        // comparison, it never re-derives it.
+        const mig = d.migration || null;
+        const migCell = mig
+          ? '<span class="mig mig-' + esc(mig.kind) + '" title="vs '
+            + esc(String(days[i - 1].date || '?')) + ': overlap ' + Math.round(mig.overlap * 100)
+            + '% of prior value area · POC ' + (mig.pocShift >= 0 ? '+' : '') + fmtUsd(mig.pocShift)
+            + (mig.gap ? ' · untraded gap ' + fmtUsd(mig.gap) : '')
+            + ' — mechanical comparison of two recorded value areas, never a forecast">'
+            + esc(MIG_TAG[mig.kind] || mig.kind) + '</span>'
+          : '<span class="mig mig-none" title="no earlier recorded day to compare with">—</span>';
         html += '<div class="lvls-row">'
           + '<span class="ts">' + esc(String(d.date || '—')) + '</span>'
           + '<span class="num">' + fmtUsd(d.o) + '</span>'
@@ -5245,6 +5301,7 @@
           + '<span class="num poc">' + fmtUsd(d.poc) + '</span>'
           + '<span class="num">' + fmtUsd(d.val) + '–' + fmtUsd(d.vah) + '</span>'
           + '<span class="num">' + fmtVol(d.vol) + '</span>'
+          + migCell
           + '<span>' + (d.naked ? '<span class="naked-badge" title="POC never revisited by a later recorded day\'s range — derived at serve time">NAKED</span>' : '') + '</span>'
           + '</div>';
       }

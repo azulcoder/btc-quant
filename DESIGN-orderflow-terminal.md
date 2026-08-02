@@ -631,9 +631,16 @@ VWAP proxy = `turnover24h/volume24h` (labeled `24h VWAP`).
   `[{coin, szi, side, entryPx, posValue, uPnl, leverage}]`.
 - **terminal-state.js additions (pure):**
   `buildScreener(tickers, {topN})` → rows sorted by turnover (default top 40, 'all'
-  passthrough); `confluenceReads(inputs)` → exactly 9 labeled categories (footprint
-  Δ-trend, CVD slope, price vs POC/VA, TPO position, funding sign/extreme, OI 1 h
-  change, liq-pressure 5 m imbalance, book top-10 imbalance, price vs SMA50 hist trend)
+  passthrough); `confluenceReads(inputs)` → exactly 10 labeled categories (footprint
+  Δ-trend, CVD slope, price vs POC/VA, TPO position, **vs prior-day value**, funding
+  sign/extreme, OI 1 h change, liq-pressure 5 m imbalance, book top-10 imbalance, price
+  vs SMA50 hist trend). *Was 9 until 2026-08-03: `vs prior-day value` is Dalton's
+  canonical acceptance reference, and it is a stronger statement than the two rows above
+  it — today's value area is partly circular as a reference, since price sits near its
+  own developing POC by construction, while the prior day settled before this session's
+  first print. The two live value rows also carry a SAMPLE GATE now (`vaLevels` /
+  `tpoLevels` < 12 distinct levels → `n/a` with a developing count), because a
+  directional read off a handful of prints is a fabricated read of a present feed.*
   each `{category, read:'bullish'|'bearish'|'neutral'|'n/a', detail}` + tally — output
   object carries `label:'un-validated descriptive reads — forward IC of board signals
   ≈ 0 (RESEARCH-ic-runlog); NOT a signal'`; `AlertEngine({rules})` — `evaluate(snap)`

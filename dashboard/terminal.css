@@ -1339,7 +1339,8 @@ table.farb-table tr.farb-spread td {
 .lvls-list { flex: 1 1 auto; min-height: 120px; max-height: 640px; overflow-y: auto; }
 .lvls-row {
   display: grid;
-  grid-template-columns: 74px repeat(4, minmax(0, 1fr)) minmax(0, 1.1fr) minmax(0, 1.6fr) minmax(0, 0.9fr) 50px;
+  /* +1 column (migration) — value migration vs the previous recorded day. */
+  grid-template-columns: 74px repeat(4, minmax(0, 1fr)) minmax(0, 1.1fr) minmax(0, 1.6fr) minmax(0, 0.9fr) minmax(0, 1.1fr) 50px;
   gap: var(--sp-2);
   font-family: var(--mono);
   font-size: var(--fs-xs);
@@ -1350,6 +1351,15 @@ table.farb-table tr.farb-spread td {
 .lvls-row .ts { color: var(--muted); }
 .lvls-row .num { text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lvls-row .num.poc { color: var(--accent); }   /* POC = the reference-marker token, panel-wide vocabulary */
+/* Value migration. Direction carries the SIGN only — the up/down tokens are the
+   panel-wide vocabulary for "value moved up/down", never a recommendation. The
+   containment and unchanged cases are deliberately muted: they are statements
+   about BALANCE, and giving them a hue would read as a call. */
+.lvls-row .mig { font-size: var(--fs-2xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lvls-row .mig-higher, .lvls-row .mig-overlapping-higher { color: var(--up); }
+.lvls-row .mig-lower,  .lvls-row .mig-overlapping-lower  { color: var(--down); }
+.lvls-row .mig-inside, .lvls-row .mig-engulfing,
+.lvls-row .mig-unchanged, .lvls-row .mig-none { color: var(--muted); }
 /* Naked badge: accent (an ANNOTATION about an untested level, not P&L). */
 .naked-badge {
   font-size: var(--fs-3xs);

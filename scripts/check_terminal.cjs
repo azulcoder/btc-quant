@@ -1735,9 +1735,17 @@ group('buildScreener turnover ranking + topN slice + honest total', () => {
   assert.deepStrictEqual(S.buildScreener(null), { rows: [], total: 0 }, 'no tickers → empty, total 0');
 });
 
-// ─── 28. confluenceReads: 9 categories, both directions, n/a rail (§4d) ──────
-group('confluenceReads all-9 both directions + n/a-on-missing + tally + IC label', () => {
+// ─── 28. confluenceReads: 10 categories, both directions, n/a rail (§4d) ─────
+//
+// Was 9. 'vs prior-day value' was added 2026-08-03 as a DELIBERATE contract
+// change, not an accident — this pinned list is what forced the decision to be
+// made in the open. Dalton's canonical acceptance reference is the PRIOR day's
+// value area; today's is partly circular, because price sits near its own
+// developing POC by construction. The tally counts rows dynamically, so nothing
+// downstream assumed nine.
+group('confluenceReads all-10 both directions + n/a-on-missing + tally + IC label', () => {
   const CATS = ['footprint Δ-trend', 'CVD slope', 'price vs POC/VA', 'TPO position',
+    'vs prior-day value',
     'funding sign/extreme', 'OI 1h change', 'liq-pressure 5m', 'book top-10 imbalance', 'price vs SMA50'];
   const LABEL = 'un-validated descriptive reads — forward IC of board signals ≈ 0 (RESEARCH-ic-runlog); NOT a signal';
   const readOf = (out, cat) => out.reads.find((r) => r.category === cat).read;
@@ -1748,28 +1756,30 @@ group('confluenceReads all-9 both directions + n/a-on-missing + tally + IC label
   // above SMA50.
   const bull = S.confluenceReads({
     fpDeltas: [2, 3, 1], cvdSlope: 5,
-    price: 110, poc: 100, vah: 105, val: 95,
-    tpoPoc: 100, tpoVah: 105, tpoVal: 95,
+    price: 110, poc: 100, vah: 105, val: 95, vaLevels: 40,
+    tpoPoc: 100, tpoVah: 105, tpoVal: 95, tpoLevels: 40,
+    prevPoc: 100, prevVah: 105, prevVal: 95,
     fundingRate: -0.0005,               // ×(8760/8)×100 = −54.8%/yr — crowded shorts
     oiChangePct1h: 1.0, liqImb5m: -0.8, bookImb: 0.5,
     sma50: 100, lastClose: 101,
   });
-  assert.deepStrictEqual(bull.reads.map((r) => r.category), CATS, 'EXACTLY the 9 §4d categories, in order');
+  assert.deepStrictEqual(bull.reads.map((r) => r.category), CATS, 'EXACTLY the 10 §4d categories, in order');
   for (const c of CATS) assert.strictEqual(readOf(bull, c), 'bullish', c + ' must read bullish on the bullish drive');
-  assert.deepStrictEqual(bull.tally, { bullish: 9, bearish: 0, neutral: 0, na: 0 }, 'tally counts every read');
+  assert.deepStrictEqual(bull.tally, { bullish: 10, bearish: 0, neutral: 0, na: 0 }, 'tally counts every read');
   assert.strictEqual(bull.label, LABEL, 'the mandatory IC-honesty sentence, VERBATIM');
 
   // All-bearish mirror (crowded LONGS: positive funding extreme → bearish).
   const bear = S.confluenceReads({
     fpDeltas: [-2, -3, -1], cvdSlope: -5,
-    price: 90, poc: 100, vah: 105, val: 95,
-    tpoPoc: 100, tpoVah: 105, tpoVal: 95,
+    price: 90, poc: 100, vah: 105, val: 95, vaLevels: 40,
+    tpoPoc: 100, tpoVah: 105, tpoVal: 95, tpoLevels: 40,
+    prevPoc: 100, prevVah: 105, prevVal: 95,
     fundingRate: 0.0005,
     oiChangePct1h: -1.0, liqImb5m: 0.8, bookImb: -0.5,
     sma50: 100, lastClose: 99,
   });
   for (const c of CATS) assert.strictEqual(readOf(bear, c), 'bearish', c + ' must read bearish on the bearish drive');
-  assert.deepStrictEqual(bear.tally, { bullish: 0, bearish: 9, neutral: 0, na: 0 });
+  assert.deepStrictEqual(bear.tally, { bullish: 0, bearish: 10, neutral: 0, na: 0 });
   assert.strictEqual(bear.label, LABEL);
 
   // §4d: the RESPONSE-PROVIDED funding interval must drive the annualization
@@ -1781,25 +1791,61 @@ group('confluenceReads all-9 both directions + n/a-on-missing + tally + IC label
 
   // n/a rail (§0.7): a missing feed must NEVER default to neutral — 'neutral'
   // claims "I looked and it is balanced", a fabricated read when nothing
-  // arrived. Empty inputs → all 9 n/a; a single present feed leaves 8 n/a.
+  // arrived. Empty inputs → all 10 n/a; a single present feed leaves 9 n/a.
   const na = S.confluenceReads({});
-  assert.deepStrictEqual(na.tally, { bullish: 0, bearish: 0, neutral: 0, na: 9 }, 'no feeds → 9 × n/a, ZERO neutral');
+  assert.deepStrictEqual(na.tally, { bullish: 0, bearish: 0, neutral: 0, na: 10 }, 'no feeds → 10 × n/a, ZERO neutral');
   assert.ok(na.reads.every((r) => r.read === 'n/a'), "every read is 'n/a', none invented");
   assert.strictEqual(na.label, LABEL, 'label present even on an all-n/a board');
   const one = S.confluenceReads({ cvdSlope: 0 });
   assert.strictEqual(readOf(one, 'CVD slope'), 'neutral', 'a PRESENT flat feed is a genuine neutral');
-  assert.deepStrictEqual(one.tally, { bullish: 0, bearish: 0, neutral: 1, na: 8 }, 'tally always sums to 9');
+  assert.deepStrictEqual(one.tally, { bullish: 0, bearish: 0, neutral: 1, na: 9 }, 'tally always sums to 10');
+
+  // SAMPLE GATE (2026-08-03 AMT audit): a value area built from a handful of
+  // levels is not a distribution, and a directional read off it is a fabricated
+  // read of a PRESENT feed — the one thing 'neutral' must never mean. Below the
+  // floor the row reports how far short it is, so the reader watches the profile
+  // FILL instead of watching nothing.
+  const thin = S.confluenceReads({
+    price: 110, poc: 100, vah: 105, val: 95, vaLevels: 3,
+    tpoPoc: 100, tpoVah: 105, tpoVal: 95, tpoLevels: 2,
+  });
+  assert.strictEqual(readOf(thin, 'price vs POC/VA'), 'n/a', 'thin live profile must not emit a direction');
+  assert.strictEqual(readOf(thin, 'TPO position'), 'n/a', 'a 2-level TPO session is not value');
+  const detail = thin.reads.find((r) => r.category === 'price vs POC/VA').detail;
+  assert.ok(/developing .* 3\/\d+ levels/.test(detail), 'says how far short it is: ' + detail);
+  // The SAME levels with an adequate sample DO read — the gate is about sample
+  // size, never about the levels themselves.
+  const thick = S.confluenceReads({
+    price: 110, poc: 100, vah: 105, val: 95, vaLevels: 40,
+    tpoPoc: 100, tpoVah: 105, tpoVal: 95, tpoLevels: 40,
+  });
+  assert.strictEqual(readOf(thick, 'price vs POC/VA'), 'bullish');
+  assert.strictEqual(readOf(thick, 'TPO position'), 'bullish');
+  // An ABSENT count is not a thin sample: callers that cannot supply one must
+  // not be silently downgraded to n/a.
+  const nocount = S.confluenceReads({ price: 110, poc: 100, vah: 105, val: 95 });
+  assert.strictEqual(readOf(nocount, 'price vs POC/VA'), 'bullish', 'no count supplied → gate does not fire');
+
+  // Dalton's canonical reference is the PRIOR day, and its absence is 'n/a' —
+  // never quietly substituted with today's own (circular) value area.
+  const noPrev = S.confluenceReads({ price: 110, poc: 100, vah: 105, val: 95, vaLevels: 40 });
+  assert.strictEqual(readOf(noPrev, 'vs prior-day value'), 'n/a', 'no prior day → n/a, never today as a stand-in');
+  const withPrev = S.confluenceReads({ price: 110, prevPoc: 100, prevVah: 105, prevVal: 95 });
+  assert.strictEqual(readOf(withPrev, 'vs prior-day value'), 'bullish', 'accepted ABOVE prior value');
+  const insidePrev = S.confluenceReads({ price: 100, prevPoc: 100, prevVah: 105, prevVal: 95 });
+  assert.strictEqual(readOf(insidePrev, 'vs prior-day value'), 'neutral', 'inside prior value = balance');
 
   // Dead-bands read neutral, not directional: balanced flow, inside-value
   // price, mild OI/liq/book/SMA moves.
   const mid = S.confluenceReads({
     fpDeltas: [1, -1], cvdSlope: 0,
-    price: 100, poc: 100, vah: 105, val: 95,
-    tpoPoc: 100, tpoVah: 105, tpoVal: 95,
+    price: 100, poc: 100, vah: 105, val: 95, vaLevels: 40,
+    tpoPoc: 100, tpoVah: 105, tpoVal: 95, tpoLevels: 40,
+    prevPoc: 100, prevVah: 105, prevVal: 95,
     fundingRate: 0.00001, oiChangePct1h: 0.2, liqImb5m: 0.1, bookImb: 0.1,
     sma50: 100, lastClose: 100.05,
   });
-  assert.deepStrictEqual(mid.tally, { bullish: 0, bearish: 0, neutral: 9, na: 0 }, 'dead-band drive → 9 × neutral');
+  assert.deepStrictEqual(mid.tally, { bullish: 0, bearish: 0, neutral: 10, na: 0 }, 'dead-band drive → 10 × neutral');
 });
 
 // ─── 29. AlertEngine: per-kind fire + cooldown + heuristic label (§4d) ───────
@@ -4759,6 +4805,136 @@ group('layout: one element per grid area, strips place themselves, anchors survi
   }
 });
 
+
+group('buildTpo range extension: raw-vs-raw, first breaking period, one-sided', () => {
+  const DAY = 86400000, HALF = 1800000;
+  const day0 = Math.floor(Date.UTC(2026, 7, 2) / DAY) * DAY;
+  const bar = (i, l, h) => ({ ts: day0 + i * HALF, o: l, h, l, c: h, v: 1 });
+
+  // IB = first two OBSERVED brackets -> [100, 104]. Period 2 stays inside;
+  // period 3 is the first to trade above; period 5 goes higher still.
+  const up = S.buildTpo([
+    bar(0, 100, 103), bar(1, 101, 104),   // IB
+    bar(2, 101, 103),                     // inside
+    bar(3, 102, 106),                     // FIRST extension up
+    bar(4, 103, 105),
+    bar(5, 104, 110),                     // higher, but not first
+  ], { tickSize: 1 })[0];
+  assert.ok(approx(up.ext.up, 6, 1e-9), 'rawHi 110 - ibHi 104 = 6');
+  assert.strictEqual(up.ext.dn, 0, 'never traded below the IB low');
+  assert.strictEqual(up.ext.upFirstPeriod, 3, 'FIRST breaking bracket, not the furthest');
+  assert.strictEqual(up.ext.dnFirstPeriod, null);
+  assert.strictEqual(up.ext.side, 'up', 'one-sided extension names the side');
+  assert.ok(approx(up.ext.ibRange, 4, 1e-9));
+  assert.ok(approx(up.ext.dayRange, 10, 1e-9));
+  assert.ok(approx(up.ext.ibFrac, 0.4, 1e-9), 'IB was 40% of the day range');
+
+  // Both sides broke: the day made no single directional attempt, so `side` is
+  // null rather than a coin-flip. Saying otherwise would be a fabricated read.
+  const both = S.buildTpo([
+    bar(0, 100, 103), bar(1, 101, 104),
+    bar(2, 96, 99),                       // extension DOWN
+    bar(3, 105, 108),                     // extension UP
+  ], { tickSize: 1 })[0];
+  assert.ok(approx(both.ext.up, 4, 1e-9) && approx(both.ext.dn, 4, 1e-9));
+  assert.strictEqual(both.ext.side, null, 'two-sided extension is NOT a direction');
+  assert.strictEqual(both.ext.dnFirstPeriod, 2);
+  assert.strictEqual(both.ext.upFirstPeriod, 3);
+
+  // A day that never left its initial balance: zero on both sides, side null.
+  const held = S.buildTpo([
+    bar(0, 100, 104), bar(1, 101, 103), bar(2, 101, 102), bar(3, 102, 103),
+  ], { tickSize: 1 })[0];
+  assert.strictEqual(held.ext.up, 0);
+  assert.strictEqual(held.ext.dn, 0);
+  assert.strictEqual(held.ext.side, null);
+  assert.ok(approx(held.ext.ibFrac, 1, 1e-9), 'IB WAS the whole day');
+
+  // Units: extension compares RAW bar extremes on both sides. If it compared a
+  // raw IB against BUCKETED row extremes it would report a phantom extension of
+  // up to one tick that is purely a grid artefact — in a number read as
+  // "the balance broke". A coarse tick is where that would show.
+  const coarse = S.buildTpo([
+    bar(0, 100.0, 104.0), bar(1, 101.0, 103.0), bar(2, 101.0, 103.9),
+  ], { tickSize: 10 })[0];
+  assert.strictEqual(coarse.ext.up, 0, 'no extension: 103.9 never exceeded ibHi 104.0');
+  assert.strictEqual(coarse.ext.dn, 0);
+});
+
+group('buildTpo tails + poor extremes (Steidlmayer excess)', () => {
+  const DAY = 86400000, HALF = 1800000;
+  const day0 = Math.floor(Date.UTC(2026, 7, 2) / DAY) * DAY;
+  const bar = (i, l, h) => ({ ts: day0 + i * HALF, o: l, h, l, c: h, v: 1 });
+
+  // One bracket pokes to 108 and comes straight back; every later bracket works
+  // 100..103. Rows 104..108 are therefore single-printed = a SELLING tail
+  // (price rejected upward). The low end is printed by many brackets = a POOR
+  // LOW: the auction stopped without finding a price that shut it off.
+  const s1 = S.buildTpo([
+    bar(0, 100, 108), bar(1, 100, 103), bar(2, 100, 103), bar(3, 100, 103), bar(4, 100, 103),
+  ], { tickSize: 1 })[0];
+  assert.ok(s1.tails.sell, 'a selling tail at the high');
+  assert.strictEqual(s1.tails.sell.rows, 5, 'rows 104..108 are single-printed');
+  assert.ok(approx(s1.tails.sell.to, 108, 1e-9), 'the tail reaches the session high');
+  assert.strictEqual(s1.tails.buy, null, 'the low was printed by every bracket');
+  assert.strictEqual(s1.tails.poorLow, true, 'multi-TPO low = no excess = unfinished');
+  assert.strictEqual(s1.tails.poorHigh, false, 'the high IS single-printed');
+
+  // Mirror: a downward poke leaves a BUYING tail and a poor high.
+  const s2 = S.buildTpo([
+    bar(0, 92, 100), bar(1, 97, 100), bar(2, 97, 100), bar(3, 97, 100),
+  ], { tickSize: 1 })[0];
+  assert.ok(s2.tails.buy, 'a buying tail at the low');
+  assert.strictEqual(s2.tails.sell, null);
+  assert.strictEqual(s2.tails.poorHigh, true);
+  assert.strictEqual(s2.tails.poorLow, false);
+
+  // The >=2-row minimum is a CONVENTION and it is enforced: a one-row poke is
+  // not a tail. Stated as a convention, not measured.
+  const s3 = S.buildTpo([
+    bar(0, 100, 104), bar(1, 100, 103), bar(2, 100, 103), bar(3, 100, 103),
+  ], { tickSize: 1 })[0];
+  assert.strictEqual(s3.tails.sell, null, 'a single single-print row is not a tail');
+  assert.strictEqual(s3.tails.minRows, 2, 'the convention is reported, not hidden');
+
+  // A session that is single-printed end to end is not two tails meeting: it has
+  // no distribution to be excess FROM, and naming tails there is noise.
+  const thin = S.buildTpo([bar(0, 100, 101), bar(1, 102, 103)], { tickSize: 1 })[0];
+  assert.strictEqual(thin.tails.sell, null);
+  assert.strictEqual(thin.tails.buy, null);
+});
+
+group('valueMigration: six exhaustive outcomes, overlap fraction, gap', () => {
+  const prev = { poc: 100, vah: 105, val: 95 };
+  const k = (t) => S.valueMigration(t, prev).kind;
+
+  assert.strictEqual(k({ poc: 120, vah: 125, val: 115 }), 'higher', 'entirely above, gap between');
+  assert.strictEqual(k({ poc: 80, vah: 85, val: 75 }), 'lower', 'entirely below');
+  assert.strictEqual(k({ poc: 100, vah: 103, val: 97 }), 'inside', 'balance inside prior value');
+  assert.strictEqual(k({ poc: 100, vah: 110, val: 90 }), 'engulfing', 'prior value fully contained');
+  assert.strictEqual(k({ poc: 104, vah: 108, val: 98 }), 'overlapping-higher');
+  assert.strictEqual(k({ poc: 96, vah: 102, val: 92 }), 'overlapping-lower');
+  assert.strictEqual(k({ poc: 100, vah: 105, val: 95 }), 'unchanged', 'neither edge moved');
+
+  // The scalar behind the label. Prior VA is 95..105, width 10; today 98..108
+  // re-covers 98..105 = 7 of it.
+  const m = S.valueMigration({ poc: 104, vah: 108, val: 98 }, prev);
+  assert.ok(approx(m.overlap, 0.7, 1e-12), 'overlap is a fraction of the PRIOR area');
+  assert.ok(approx(m.pocShift, 4, 1e-12));
+  assert.ok(approx(m.vahShift, 3, 1e-12));
+  assert.ok(approx(m.valShift, 3, 1e-12));
+  assert.strictEqual(m.gap, 0, 'overlapping days have no gap');
+
+  // A true gap-higher day: 115 - 105 = 10, and zero overlap.
+  const g = S.valueMigration({ poc: 120, vah: 125, val: 115 }, prev);
+  assert.ok(approx(g.gap, 10, 1e-12), 'the untraded space between the two value areas');
+  assert.strictEqual(g.overlap, 0);
+
+  // Absent or malformed input is null — never a guessed migration.
+  assert.strictEqual(S.valueMigration(null, prev), null);
+  assert.strictEqual(S.valueMigration({ poc: 1, vah: 1, val: 2 }, prev), null, 'vah < val is malformed');
+  assert.strictEqual(S.valueMigration({ poc: 1, vah: NaN, val: 1 }, prev), null);
+});
 
 group('buildTpo marks a DEVELOPING session and counts what it observed', () => {
   // The 2026-08-03 AMT audit finding: the running UTC day rendered identically

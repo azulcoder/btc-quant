@@ -1172,13 +1172,100 @@
       // anchoring to clock periods 0–1 would fabricate an IB from bars we
       // never received (§0.7) — we bracket what actually arrived instead.
       // Raw (un-bucketed) l/h: the bracket is a price range, not a row.
-      const ibIdx = new Set([...new Set(d.meta.map((m) => m.p))].sort((a, b2) => a - b2).slice(0, 2));
+      const obsPeriods = [...new Set(d.meta.map((m) => m.p))].sort((a, b2) => a - b2);
+      const ibIdx = new Set(obsPeriods.slice(0, 2));
       let ibHi = -Infinity, ibLo = Infinity;
       for (const m of d.meta) {
         if (!ibIdx.has(m.p)) continue;
         if (m.h > ibHi) ibHi = m.h;
         if (m.l < ibLo) ibLo = m.l;
       }
+
+      // ── Range extension beyond the Initial Balance ──────────────────────
+      //
+      // The question the IB bracket exists to answer and this panel never
+      // asked: did the initial balance hold, and which side broke. Steidlmayer
+      // and Dalton both treat extension as the day's first real evidence of
+      // other-timeframe participation — the first hour is where the day-timeframe
+      // locals set a range, and a break of it is someone with a longer horizon
+      // paying up to get filled.
+      //
+      // RAW prices on BOTH sides, deliberately. ibHi/ibLo above are raw bar
+      // extremes, while `lo`/`hi` are BUCKETED row prices — comparing the two
+      // would report a fictitious extension of up to one tick that is purely a
+      // grid artefact, in a number meant to be read as "the balance broke".
+      let rawHi = -Infinity, rawLo = Infinity;
+      for (const m of d.meta) {
+        if (m.h > rawHi) rawHi = m.h;
+        if (m.l < rawLo) rawLo = m.l;
+      }
+      // The FIRST post-IB period to trade beyond the bracket, on each side.
+      // "When" is half the read: an extension in period C is initiative; the
+      // same extension in period v is a late-day probe with no time to develop.
+      let extUpFirst = null, extDnFirst = null;
+      for (const m of d.meta) {
+        if (ibIdx.has(m.p)) continue;
+        if (m.h > ibHi && (extUpFirst === null || m.p < extUpFirst)) extUpFirst = m.p;
+        if (m.l < ibLo && (extDnFirst === null || m.p < extDnFirst)) extDnFirst = m.p;
+      }
+      const ibRange = ibHi - ibLo;
+      const dayRange = rawHi - rawLo;
+      const ext = {
+        up: Math.max(0, rawHi - ibHi),
+        dn: Math.max(0, ibLo - rawLo),
+        upFirstPeriod: extUpFirst,
+        dnFirstPeriod: extDnFirst,
+        ibRange,
+        dayRange,
+        // IB as a fraction of the whole day's range. Reported as a DESCRIPTIVE
+        // scalar and nothing more: the literature's day-type cutoffs on this
+        // ratio are calibrated to a ~13-period RTH session, and a UTC day has 48
+        // periods, so porting the constants would be a category error dressed as
+        // a classification (see the 2026-08-03 AMT audit).
+        ibFrac: dayRange > 0 ? ibRange / dayRange : NaN,
+        // Which side broke, when only one did. Both or neither -> null: a day
+        // that extended both ways made no single directional attempt, and
+        // saying otherwise would be the fabricated read the rails forbid.
+        side: (extUpFirst !== null) === (extDnFirst !== null)
+          ? null : (extUpFirst !== null ? 'up' : 'dn'),
+      };
+
+      // ── Tails and poor extremes (Steidlmayer excess) ────────────────────
+      //
+      // `singles` above deliberately excludes the session extremes, because an
+      // extreme is single-printed BY CONSTRUCTION — in Market Profile terms
+      // those rows are the TAILS, a different object that the code already knew
+      // about and then threw away. This builds it.
+      //
+      //   selling tail (at the HIGH): consecutive single-TPO rows down from the
+      //     top — price was rejected upward, aggressive sellers took it back.
+      //   buying tail (at the LOW): the mirror.
+      //   poor high/low: the extreme row itself holds 2+ TPOs, so there is NO
+      //     excess — the auction stopped without finding a price that shut it
+      //     off, which is why the literature calls it unfinished business.
+      //
+      // Minimum length 2 rows is the standard convention (Dalton: "at least two
+      // TPOs"), and it is a CONVENTION, not a measurement — labelled as such.
+      const TAIL_MIN_ROWS = 2;
+      let sellLen = 0;
+      for (let i = rows.length - 1; i >= 0 && rows[i].periods.length === 1; i--) sellLen++;
+      let buyLen = 0;
+      for (let i = 0; i < rows.length && rows[i].periods.length === 1; i++) buyLen++;
+      // A profile that is single-printed end to end (a very thin session) is not
+      // two tails meeting; it has no POC structure to speak of and claiming a
+      // tail on both sides of it would be noise wearing a name.
+      const degenerate = sellLen + buyLen >= rows.length;
+      const tails = {
+        sell: !degenerate && sellLen >= TAIL_MIN_ROWS
+          ? { rows: sellLen, from: rows[rows.length - sellLen].price, to: rows[rows.length - 1].price }
+          : null,
+        buy: !degenerate && buyLen >= TAIL_MIN_ROWS
+          ? { rows: buyLen, from: rows[0].price, to: rows[buyLen - 1].price }
+          : null,
+        poorHigh: rows[rows.length - 1].periods.length >= 2,
+        poorLow: rows[0].periods.length >= 2,
+        minRows: TAIL_MIN_ROWS,
+      };
 
       // How much of the UTC day this session has actually SEEN. A day with
       // fewer than its full 48 half-hour brackets is a DEVELOPING profile, and
@@ -1201,6 +1288,8 @@
         val: rows[va.loIdx].price,
         singles,
         ib: { hi: ibHi, lo: ibLo },
+        ext,
+        tails,
         periodsObserved: observed.size,
         periodsFull: PERIODS_PER_UTC_DAY,
         developing: observed.size < PERIODS_PER_UTC_DAY,
@@ -1209,6 +1298,71 @@
     // Newest-first (ISO dates sort lexicographically = chronologically).
     sessions.sort((a, b2) => (a.date < b2.date ? 1 : a.date > b2.date ? -1 : 0));
     return sessions;
+  }
+
+  // ─── valueMigration(today, prev) — where value went (Dalton) ─────────────
+  //
+  // The question Dalton's framework is actually built on: what direction did
+  // the market ATTEMPT, and did it succeed. Comparing today's value area with
+  // yesterday's answers it mechanically, with no forecast attached — which is
+  // why it sits comfortably on the descriptive rail.
+  //
+  // The registry already stores VAH/VAL for every recorded day and the levels
+  // panel already tabulates them; nothing had ever diffed two rows.
+  //
+  // The six outcomes are EXHAUSTIVE and mutually exclusive, tested in an order
+  // that matters. Both no-overlap cases come first, then containment both ways,
+  // then the two directional-overlap cases; anything left is a value area that
+  // moved by less than a tick on both edges.
+  //
+  //   higher              val > prevVah          entirely above, gap between
+  //   lower               vah < prevVal          entirely below, gap between
+  //   inside              within prev on both    balance INSIDE prior value
+  //   engulfing           outside prev on both   prior value fully contained
+  //   overlapping-higher  both edges up, overlaps
+  //   overlapping-lower   both edges down, overlaps
+  //   unchanged           neither edge moved
+  //
+  // `overlap` is the fraction of the PRIOR value area that today re-covers, in
+  // [0,1] — the scalar behind the label, so a reader can tell an 8% shave from a
+  // 95% repeat without trusting the word. Dalton's own heuristic (value that
+  // overlaps heavily = balance, value that barely overlaps = a real migration)
+  // is left to the READER; emitting a threshold here would be a signal.
+  function valueMigration(today, prev) {
+    const F = Number.isFinite;
+    if (!today || !prev) return null;
+    const vah = today.vah, val = today.val, pvah = prev.vah, pval = prev.val;
+    if (!F(vah) || !F(val) || !F(pvah) || !F(pval)) return null;
+    if (vah < val || pvah < pval) return null;   // malformed input, never guessed at
+
+    const inter = Math.max(0, Math.min(vah, pvah) - Math.max(val, pval));
+    const prevWidth = pvah - pval;
+    const overlap = prevWidth > 0 ? inter / prevWidth : (inter > 0 ? 1 : 0);
+
+    // Order matters, and `unchanged` must be tested BEFORE the containment
+    // pair: an IDENTICAL value area satisfies `inside` (>= and <=) and would be
+    // reported as balance-inside-prior-value, which is a different claim from
+    // "the market re-auctioned the same area". Exact equality is right here —
+    // both edges are prices on the same bucket grid, not floats from a sum.
+    let kind;
+    if (val > pvah) kind = 'higher';
+    else if (vah < pval) kind = 'lower';
+    else if (vah === pvah && val === pval) kind = 'unchanged';
+    else if (val >= pval && vah <= pvah) kind = 'inside';
+    else if (val <= pval && vah >= pvah) kind = 'engulfing';
+    else if (vah > pvah && val > pval) kind = 'overlapping-higher';
+    else kind = 'overlapping-lower';
+
+    return {
+      kind,
+      overlap,
+      // Signed POC travel: the single most compact statement of where the
+      // day's centre of rotation moved, when both days have one.
+      pocShift: F(today.poc) && F(prev.poc) ? today.poc - prev.poc : NaN,
+      vahShift: vah - pvah,
+      valShift: val - pval,
+      gap: kind === 'higher' ? val - pvah : kind === 'lower' ? pval - vah : 0,
+    };
   }
 
   // ─── buildKlineVp(bars, {tickSize}) — composite VP from klines (§4c) ─────
@@ -1487,8 +1641,23 @@
     // the value area = buyers accepting higher prices (bullish read), BELOW
     // = sellers accepting lower (bearish), INSIDE = balance/rotation —
     // a genuine 'neutral' read of a present feed, unlike 'n/a'.
-    const vaRow = (category, price, poc, vah, val) => {
+    //
+    // `n` is the SAMPLE GATE and it is not optional. Value is a statement about
+    // a distribution that has had time to develop (Dalton ch.4); twenty seconds
+    // after a tick-size change the live ProfileStore holds a handful of prints,
+    // and a directional read off that is a fabricated read of a present feed —
+    // the one thing 'neutral' must never mean. Everything else in this file
+    // already refuses that way (VpinView says "no completed buckets yet",
+    // KeyLevelsView withholds IB when the open was not witnessed); this row was
+    // the exception. Below the floor it reports how far short it is, so the
+    // reader can see the profile FILLING rather than see nothing.
+    const VA_MIN_LEVELS = 12;   // distinct occupied price levels — a shape, not a smear
+    const vaRow = (category, price, poc, vah, val, n) => {
       if (!fin(price) || !fin(poc) || !fin(vah) || !fin(val)) return row(category, 'n/a', NA);
+      if (fin(n) && n < VA_MIN_LEVELS) {
+        return row(category, 'n/a',
+          'developing — ' + n + '/' + VA_MIN_LEVELS + ' levels; value is not yet a distribution');
+      }
       if (price > vah) return row(category, 'bullish', 'price ' + price + ' > VAH ' + vah + ' (POC ' + poc + ')');
       if (price < val) return row(category, 'bearish', 'price ' + price + ' < VAL ' + val + ' (POC ' + poc + ')');
       return row(category, 'neutral', 'inside value ' + val + '..' + vah + ' (POC ' + poc + ')');
@@ -1525,11 +1694,22 @@
     }
 
     // 3. Price vs session POC/VA (live ProfileStore levels).
-    vaRow('price vs POC/VA', inp.price, inp.poc, inp.vah, inp.val);
+    vaRow('price vs POC/VA', inp.price, inp.poc, inp.vah, inp.val, inp.vaLevels);
 
     // 4. TPO position (buildTpo's newest session levels) — same rule, the
     //    structural (30m-period) counterpart to the live profile above.
-    vaRow('TPO position', inp.price, inp.tpoPoc, inp.tpoVah, inp.tpoVal);
+    vaRow('TPO position', inp.price, inp.tpoPoc, inp.tpoVah, inp.tpoVal, inp.tpoLevels);
+
+    // 4b. Price vs the PRIOR recorded day's value area. This is Dalton's
+    //     canonical acceptance reference, and it is a stronger statement than
+    //     either row above: today's developing value area is partly CIRCULAR as
+    //     a reference, because price sits near its own POC by construction —
+    //     the profile is built out of where price has been in the last few
+    //     hours. Yesterday's value area was settled before today's first print,
+    //     so "accepted above prior value" is a claim about this session rather
+    //     than a restatement of it. No sample gate: a prior day is complete by
+    //     definition, and its absence is already handled as 'n/a'.
+    vaRow('vs prior-day value', inp.price, inp.prevPoc, inp.prevVah, inp.prevVal);
 
     // 5. Funding sign/extreme — CONTRARIAN crowding read on the ANNUALIZED
     //    rate. WHY 30%/yr: neutral BTC perp funding ≈ 0.01%/8h ≈ 11%/yr, so
@@ -4119,7 +4299,7 @@
     DepthHistoryStore, SpoofIcebergDetector, LiqHeatmapModel,
     // O-3 (§4c): structure builders (pure functions over klines) + the
     // session-correlation store for history-less HIP-3 legs.
-    buildTpo, buildKlineVp, rollingCorr, SessionSeriesStore,
+    buildTpo, valueMigration, buildKlineVp, rollingCorr, SessionSeriesStore,
     // O-4 (§4d): intelligence builders — descriptive reads/triggers, never
     // signals (IC-honesty label mandatory on the confluence output).
     buildScreener, confluenceReads, AlertEngine,

@@ -4,6 +4,53 @@ Each entry: finding id, what changed, before/after, and the test that proves it.
 findings report (no Critical; 1 High; ~8 Medium; ~12 Low; 4 Info) was produced read-only
 before any edit, per the spec.
 
+## 2026-08-03 (2) — the auction surface reads the auction, and one panel is dark
+
+**Built (AMT audit items 1-4).** `buildTpo` now derives **range extension** beyond the
+Initial Balance (`up`/`dn`, the FIRST post-IB bracket to break each side, `ibFrac`, and a
+`side` that is null when both sides broke — a two-sided day made no single directional
+attempt) and **tails / poor extremes** (consecutive single-TPO rows in from each extreme,
+>=2 rows by convention and labelled as one; `poorHigh`/`poorLow` when the extreme row
+holds 2+ TPOs, i.e. no excess). Both are RAW-vs-RAW: `ibHi/ibLo` are raw bar extremes, so
+comparing them against the BUCKETED row extremes would report a phantom extension of up to
+one tick that is a pure grid artefact, inside a number read as "the balance broke".
+
+`valueMigration(today, prev)` classifies consecutive value areas into six exhaustive,
+mutually exclusive outcomes plus an `overlap` fraction of the PRIOR area, `pocShift`, and
+the untraded `gap` on a no-overlap day. `unchanged` is tested BEFORE the containment pair:
+an identical value area satisfies `inside` (>= and <=) and would otherwise be reported as
+balance-inside-prior-value, a different claim. The registry had stored VAH/VAL for every
+recorded day since it existed and nothing had ever diffed two rows.
+
+`confluenceReads` gains a **sample gate** on both live value rows (`vaLevels`/`tpoLevels`
+< 12 distinct levels -> `n/a` naming the shortfall) and a **10th category, `vs prior-day
+value`**. The 10th was a deliberate contract change: the pinned category list in
+check_terminal is what forced the decision into the open. Dalton's canonical acceptance
+reference is the prior day; today's value area is partly circular, since price sits near
+its own developing POC by construction.
+
+**Found and NOT fixed — the four collector-API panels do not populate in a live browser.**
+Correcting an earlier claim in this log's 2026-08-03 session notes: those panels were
+reported "LIVE" on the weak test of "the text does not contain 'collector API offline'".
+The daily-levels panel in fact shows its INITIAL note, `awaiting /v1/levels (collector API
+probe in flight)`, indefinitely.
+
+Characterised precisely, root cause NOT established:
+  * reproduced at HEAD, so it predates this session's changes;
+  * the API is healthy — `/health` and `/v1/levels` answer 200 with 26 recorded days from
+    the shell, and from inside the page, and `Access-Control-Allow-Origin: *` is sent;
+  * instrumentation confirms the init `/health` probe LINE is reached, and the browser
+    records a 200 response for it, yet neither `.then()` nor `.catch()` was observed to
+    fire within 20 s despite a 5 s AbortController;
+  * `fetchJson`'s exact pattern, run in the same page at t+20 s, resolves in 3 ms;
+  * 71 external REST responses (Binance, OKX, Polymarket) succeed in the same session, so
+    `fetch` itself is fine; the bybit kline fetch that feeds the TPO and hist panels also
+    never appears, which is why the TPO panel renders empty in that harness.
+
+So the recorded DATA is unaffected (collector 16/16 legs, rows verified on disk) and the
+endpoints are unaffected; what is broken is the browser-side init path that consumes them.
+Left open rather than guessed at.
+
 ## 2026-08-03 — RESOLVED: one shared local silently unsubscribed two venues
 
 **Finding fixed:** `_run_async` assigned three venue subscribe payloads to the SAME local

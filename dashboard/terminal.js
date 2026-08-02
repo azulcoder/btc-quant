@@ -2812,6 +2812,40 @@
     return out;
   }
 
+  /** Registry days, each tagged with its value migration against the day
+   *  BEFORE it (§4d/AMT). Tagged upstream from the pure S.valueMigration so the
+   *  view renders a comparison it never re-derives — the same discipline as the
+   *  liq feed's tier tagging.
+   *
+   *  levelsDays is date-ASCENDING, so days[i-1] is the prior day. The oldest row
+   *  has nothing to compare against and is left untagged rather than compared
+   *  with itself. Non-consecutive dates are fine and deliberate: "the previous
+   *  RECORDED day" is the honest reference when a day is missing from the store,
+   *  and the tooltip names the date it compared with so the reader can see the
+   *  gap instead of assuming adjacency. */
+  function levelsWithMigration() {
+    if (!levelsDays || !levelsDays.length) return levelsDays;
+    return levelsDays.map((d, i) => (
+      i > 0 ? Object.assign({}, d, { migration: S.valueMigration(d, levelsDays[i - 1]) }) : d
+    ));
+  }
+
+  /** The newest CLOSED recorded day from the levels registry, or null.
+   *
+   *  This is Dalton's canonical acceptance reference. It is deliberately NOT
+   *  today: today's value area is partly circular as a reference, because price
+   *  sits near its own developing POC by construction. Yesterday's was settled
+   *  before today's first print, so "accepted above prior value" is a claim
+   *  about this session rather than a restatement of it.
+   *
+   *  §4g: BTCUSDT only — the registry has no other symbol to answer with, and a
+   *  BTC level read against another symbol's price would be nonsense. */
+  function priorRecordedDay() {
+    if (SYM !== 'BTCUSDT' || !levelsDays || !levelsDays.length) return null;
+    const d = levelsDays[levelsDays.length - 1];
+    return d && Number.isFinite(d.poc) && Number.isFinite(d.vah) && Number.isFinite(d.val) ? d : null;
+  }
+
   /** Hist-chart levels overlay (LevelsView 'draw on charts'): prior recorded
    *  day's POC/VA + every naked POC (cap applied in the view). */
   function overlayLevels() {
@@ -3451,6 +3485,7 @@
     const prof = profile.profile();
     const tpo = tpoSessions && tpoSessions.length ? tpoSessions[0] : null;   // newest UTC session (REST — null in replay)
     const mBy = marks.bybit;
+    const prevDay = priorRecordedDay();
     const sm = sma50FromHist();
     const finished = [];
     for (const b of footprint.bars()) if (b.finished) finished.push(b.delta);
@@ -3459,7 +3494,18 @@
       cvdSlope: cvdSlope60s(),
       price: lastPrice,
       poc: prof.poc, vah: prof.vah, val: prof.val,
+      // Sample gates. A value-area read off a handful of prints is a fabricated
+      // read of a present feed — 20 s after a tick-size change the live store is
+      // rebuilt from scratch, and the TPO session is developing for most of a
+      // UTC day. Passing the level counts lets the builder say "developing k/N"
+      // instead of emitting a direction it cannot support.
+      vaLevels: prof.levels ? prof.levels.length : NaN,
       tpoPoc: tpo ? tpo.poc : NaN, tpoVah: tpo ? tpo.vah : NaN, tpoVal: tpo ? tpo.val : NaN,
+      tpoLevels: tpo && tpo.rows ? tpo.rows.length : NaN,
+      // Prior CLOSED recorded day — the canonical reference (see priorRecordedDay).
+      prevPoc: prevDay ? prevDay.poc : NaN,
+      prevVah: prevDay ? prevDay.vah : NaN,
+      prevVal: prevDay ? prevDay.val : NaN,
       fundingRate: mBy ? mBy.fundingRate : NaN,
       // Response-provided interval from the tickers poll when known (§4d —
       // beats the 8h constant); the builder falls back to 8 on its own.
@@ -4831,7 +4877,7 @@
           // §4g: with another symbol selected the registry table shows the
           // honest note through the view's existing note path (days: null).
           levelsView.render(SYM === 'BTCUSDT'
-            ? { days: levelsDays, note: apiUp === false ? API_OFFLINE_NOTE : levelsNote }
+            ? { days: levelsWithMigration(), note: apiUp === false ? API_OFFLINE_NOTE : levelsNote }
             : { days: null, note: byodSymNote() });
         });
         // T-1 (§4g): key-levels strip + VPIN — store/registry-fed, both modes
