@@ -15,7 +15,7 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare dsr-ab scan test fetch dash collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
+.PHONY: help install backtest compare dsr-ab scan test fetch dash local collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
@@ -57,7 +57,15 @@ fetch:
 
 dash:
 	@echo "Dashboard -> http://127.0.0.1:$(PORT)   (Ctrl-C to stop)"
-	python3 -m http.server $(PORT) --directory dashboard
+	python3 -m http.server $(PORT) --bind 127.0.0.1 --directory dashboard
+
+# The COMPLETE local terminal in one command: collector BYOD API + dashboard,
+# with a per-leg health report and an explicit list of what is degraded. Starts
+# only what is actually missing — a launchd-owned collector is probed, never
+# restarted, because a needless restart is a real hole in the recorded tape.
+# NO_API=1 for a charts-only run.
+local:
+	bash scripts/local_stack.sh
 
 # Tick collector v2 (DESIGN-orderflow-terminal.md §3 + §3c). Keyless public feeds ->
 # per-UTC-day files under data/ticks/ (event-time rotation; closed days are immutable
