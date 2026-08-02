@@ -481,6 +481,96 @@
   // /fapi/v1/premiumIndex and /fapi/v1/openInterest, responses captured in
   // fixtures). Not makeSocket-compatible on purpose — no socket to babysit;
   // returns { start(), stop() } and the caller owns the lifecycle.
+  // ─── Binance Futures aggTrades — REST, because the WS topic is filtered ─────
+  //
+  // §0.2 wire reality, re-probed 2026-08-03 and unchanged: `aggTrade` over
+  // fstream delivers ZERO frames on this network, alone AND combined with depth
+  // on one socket (20 s probes, sub-ack only). The venue is NOT blocked — the WS
+  // TOPIC is. Verified the same day:
+  //   GET fapi/v1/aggTrades?symbol=BTCUSDT&limit=1000 -> HTTP 200,
+  //   access-control-allow-origin: *  (browser-fetchable keyless, no proxy)
+  //   x-mbx-used-weight-1m rose 20 per call, CONSTANT for limit 100 and 1000.
+  // Futures budget is 2400 weight/min, so a 2 s poll costs 600/min = 25 %.
+  //
+  // This matters because binancef carries the DEEPEST book we have (~2,000
+  // levels over $243) and was the only leg with no aggressive layer at all — no
+  // tape rows, no heatmap circles, no price trail.
+  //
+  // What is honest to claim, and what is not:
+  //   * every row carries `T`, the venue's own trade time, so a circle's X
+  //     position is EXACT. Only FRESHNESS is quantised — a print can appear up
+  //     to one poll interval late. That is a very different (and much smaller)
+  //     claim than "x quantised to the poll".
+  //   * `a` is an AGGREGATED trade id: Binance merges same-price fills from one
+  //     taker order into one row spanning fills f..l. Same shape as Bybit's
+  //     publicTrade, and NOT raw tick-by-tick — the panel chrome says so.
+  //   * `m` is isBuyerMaker. A maker BUYER means the taker SOLD, so the
+  //     aggressor flag is the INVERSE (same trap as Coinbase's maker side).
+  //   * continuity is by id, not by time: fromId = lastA + 1 walks the id space
+  //     with no gaps. A poll that returns a full page means we are behind, so
+  //     the next tick fires immediately rather than dropping the remainder.
+  function makeBinanceFutAggTradePoller(sym, sink, opts) {
+    const o = opts || {};
+    const everyMs = o.everyMs || 2000;
+    const limit = o.limit || 1000;
+    const base = 'https://fapi.binance.com';
+    let timer = null, lastId = null, busy = false, stopped = false;
+
+    async function getJSON(url) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 8000);
+      try {
+        const res = await fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json();
+      } finally { clearTimeout(t); }
+    }
+
+    async function poll() {
+      if (busy || stopped) return;
+      busy = true;
+      try {
+        const u = base + '/fapi/v1/aggTrades?symbol=' + encodeURIComponent(sym)
+          + (lastId === null ? '&limit=' + limit : '&fromId=' + (lastId + 1) + '&limit=' + limit);
+        const rows = await getJSON(u);
+        if (!Array.isArray(rows) || !rows.length) return;
+        for (const r of rows) {
+          const price = Number(r.p), qty = Number(r.q), ts = Number(r.T), id = Number(r.a);
+          if (!Number.isFinite(price) || !Number.isFinite(qty) || !Number.isFinite(ts)) continue;
+          if (lastId !== null && Number.isFinite(id) && id <= lastId) continue;   // never replay
+          sink({
+            kind: 'trade', ex: 'binancef',
+            ts, price, qty,
+            aggressorBuy: r.m === false,   // m = isBuyerMaker -> taker sold when true
+            id: String(r.a),
+          });
+        }
+        const top = rows[rows.length - 1];
+        if (top && Number.isFinite(Number(top.a))) lastId = Number(top.a);
+        // A full page means the id cursor is behind real time; catch up now
+        // instead of leaving a hole the next tick would have to skip over.
+        if (rows.length >= limit && !stopped) setTimeout(poll, 0);
+      } catch (_) {
+        // Transient REST failure is not terminal: the next tick retries and the
+        // missing prints stay missing (§0.7 — no backfill, no interpolation).
+      } finally { busy = false; }
+    }
+
+    return {
+      start() {
+        if (timer) return;
+        stopped = false;
+        poll();
+        timer = setInterval(poll, everyMs);
+      },
+      stop() {
+        stopped = true;
+        if (timer) { clearInterval(timer); timer = null; }
+      },
+      get pollMs() { return everyMs; },
+    };
+  }
+
   function makeBinanceRestPoller(sym, sink, opts) {
     const o = opts || {};
     const premiumMs = o.premiumMs || 5000;
@@ -900,6 +990,8 @@
     // engine-feed conventions and the measured OKX checksum reality.
     makeBybitSpotAdapter, makeBinanceSpotAdapter, makeBinanceFutDepthDiff,
     makeOkxBooksAdapter, makeCoinbaseL2Adapter,
+    // §0.2: binancef trades exist only over REST — the WS topic is filtered.
+    makeBinanceFutAggTradePoller,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = ADAPTERS;

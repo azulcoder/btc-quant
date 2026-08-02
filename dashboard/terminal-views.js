@@ -2077,6 +2077,7 @@
         } else {
           tradeNote = ' · no ' + (slice.ex || 'venue') + ' prints inside this window/range';
         }
+        if (slice.tradeRoute) tradeNote += ' · ' + slice.tradeRoute;
       }
 
       // Last-price polyline overlay (--fg — a reference trace, not P&L).

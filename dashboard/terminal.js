@@ -1706,6 +1706,10 @@
   // flush performs it).
   const legHandles = {};   // legKey → socket handle ({close}) | null
   let restPoller = null;
+  // Separate handle from restPoller: mark/OI and trades have different cadences
+  // and different failure meanings, and a leg toggle must be able to stop the
+  // trade feed without the mark columns going stale beside it.
+  let binancefTrades = null;
   let legGen = 0;
   let bookLegs = {};       // legKey → engine-flush bookkeeping (see regBookLeg)
   let okxLegs = {};        // legKey → {adapter, restart, gen, lastRestartAt}
@@ -1823,11 +1827,20 @@
           const bl = regBookLeg(eng, { market: 'futures', id });
           legHandles.binancef = startLeg('binancef',
             A.makeBinanceFutDepthDiff(id, { book: tapDiff(eng, bl) }), { onStatus: chipStatus('binancef') });
-          // Trades stay ABSENT by wire reality (§0.2 topic filter; the
-          // collector's REST aggTrades poller records them — never duplicated
-          // here); mark/OI columns come from the REST poller as before.
+          // Trades over WS stay absent by wire reality (§0.2 topic filter,
+          // re-probed 2026-08-03: still zero frames). They now arrive by REST
+          // instead — the same route the collector uses, run here as well
+          // because the two serve different consumers: the collector's copy is
+          // the ARCHIVE, this one is the live tape/CVD/heatmap-circle feed. They
+          // write to different stores, so there is nothing to double-count.
+          //
+          // This closes the one real hole in the passive+aggressive composition:
+          // binancef carries the deepest book we have and had no aggressive
+          // layer at all. Cadence and route are stated in the panel chrome.
           restPoller = A.makeBinanceRestPoller(id, sink);   // mark 5s / OI 60s → 'binancef' columns
           restPoller.start();
+          binancefTrades = A.makeBinanceFutAggTradePoller(id, sink, { everyMs: 2000 });
+          binancefTrades.start();
         });
         break;
 
@@ -1904,6 +1917,7 @@
     delete okxLegs[key];
     // The REST poller is the binancef leg's other half (mark/OI columns).
     if (key === 'binancef' && restPoller) { restPoller.stop(); restPoller = null; }
+    if (key === 'binancef' && binancefTrades) { binancefTrades.stop(); binancefTrades = null; }
   }
 
   function stopAllLegs() {
@@ -1915,6 +1929,7 @@
     bookLegs = {};
     okxLegs = {};
     if (restPoller) { restPoller.stop(); restPoller = null; }
+    if (binancefTrades) { binancefTrades.stop(); binancefTrades = null; }
   }
 
   /** THE leg toggle (§4h): registry flip → persist → per-leg lifecycle.
@@ -4932,6 +4947,15 @@
             // tell "no aggression in view" apart from "no tape for this venue",
             // which are different facts and must not read the same.
             circlesCover: heatTrades.length ? circ : null,
+            // §0.2/§0.7: binancef trades reach us by REST poll, not WS, because
+            // fstream filters the aggTrade topic on this network. Each row still
+            // carries the venue's own trade time so a circle's X is EXACT — only
+            // its freshness is quantised. Stated in visible chrome because a
+            // reader comparing venues must know one of them is on a different
+            // transport, and that these are exchange-AGGREGATED prints.
+            tradeRoute: heatVenue === 'binancef'
+              ? 'REST aggTrades 2s (WS topic filtered) · exchange-aggregated prints'
+              : '',
             trail: priceTrail[heatVenue],   // empty for binancef (no trades leg, §0.2) — honestly absent
             // Detector markers belong to the venue they were computed on: shown
             // on the BYBIT heatmap only (drawing bybit flags over another
