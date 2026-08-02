@@ -637,7 +637,9 @@ table.ladder tr.spread .sp-x { color: var(--muted); margin: 0 5px; }
    the row itself can never overflow the panel (that overflow WAS the clip). */
 .tape-row {
   display: grid;
-  grid-template-columns: 62px 54px minmax(66px, 1.3fr) minmax(0, 1fr) minmax(0, 1.05fr);
+  /* col 1 is 84px, not 62px: the stamp is HH:MM:SS.mmm now. The extra 22px is
+     the cost of being able to tell a sweep from four unrelated prints. */
+  grid-template-columns: 84px 54px minmax(66px, 1.3fr) minmax(0, 1fr) minmax(0, 1.05fr);
   gap: var(--sp-2);
   font-family: var(--mono);
   font-size: var(--fs-xs);
@@ -653,6 +655,12 @@ table.ladder tr.spread .sp-x { color: var(--muted); margin: 0 5px; }
    original '▲ $…' gap without reintroducing a soft-wrap opportunity.) */
 .tape-row .px::before { display: inline-block; margin-right: 0.3em; }
 .tape-row .ts { color: var(--muted); }
+/* A print sharing the millisecond of the row above it: one aggressor order
+   walking the book. The stamp recedes and a left rule ties the run together, so
+   the group reads as ONE event. Nothing is hidden or merged — every swept level
+   is still its own row with its own size. */
+.tape-row.same-ms .ts { opacity: 0.34; }
+.tape-row.same-ms { box-shadow: inset 2px 0 0 -1px var(--muted); }
 .tape-row .qty, .tape-row .ntl { text-align: right; }
 .tape-row .px { text-align: right; }
 /* Exchange tag per print (§0.7 per-source label) — venue = categorical token,

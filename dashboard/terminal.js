@@ -4660,9 +4660,35 @@
         if (due('heat', now)) safePanel('heat', () => {
           const dh = depthHist[heatVenue];
           const dhSamples = dh.samples();
+          const dhRange = dh.priceRange();
+          // T-5 aggression overlay, composed HERE from the pure classifier —
+          // same discipline as the liq feed's tier tagging: the view draws the
+          // geometry and never re-derives the filter or the scale.
+          //
+          // The venue filter is the honest half: the tape is multi-venue, so an
+          // unfiltered pass would paint okx prints over a bybit ladder — exactly
+          // the silent blend the per-source rail (§0.7) forbids. Rows are the
+          // aggregator's own 100 ms same-price runs, so one sweep contributes one
+          // circle per LEVEL it took rather than one per fill, and the sweep keeps
+          // its shape. Window and range are the SAME values handed to the view,
+          // so a circle can never sit outside the ladder it is drawn on.
+          const heatTrades = dhSamples.length
+            ? tapeAgg.list().filter((r) => r.ex === heatVenue)
+            : [];
+          const circ = S.tradeCircles({
+            trades: heatTrades,
+            t0: dhSamples.length ? dhSamples[0].ts : NaN,
+            tN: dhSamples.length ? dhSamples[dhSamples.length - 1].ts : NaN,
+            minPx: dhRange.min, maxPx: dhRange.max,
+          });
           bookHeatView.render({
             samples: dhSamples,
-            range: dh.priceRange(),
+            range: dhRange,
+            circles: circ.circles,
+            // Present iff this venue produced ANY prints — the view uses it to
+            // tell "no aggression in view" apart from "no tape for this venue",
+            // which are different facts and must not read the same.
+            circlesCover: heatTrades.length ? circ : null,
             tickSize: settings.tick,
             trail: priceTrail[heatVenue],   // empty for binancef (no trades leg, §0.2) — honestly absent
             // Detector markers belong to the venue they were computed on: shown

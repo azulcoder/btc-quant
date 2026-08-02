@@ -3326,6 +3326,60 @@
   // (the ping fires on 'huge'), never a re-derived inline threshold.
   const LIQ_TIER_DEFAULTS = { big: 2.5e5, huge: 1e6 };
 
+  // ─── tradeCircles(opts) — aggression overlay geometry for the book heatmap ──
+  //
+  // Pure, so the one claim this overlay makes can be pinned by the gate instead
+  // of judged from a screenshot: every circle is a REAL print, inside the drawn
+  // window and inside the drawn price range, at its own event ts.
+  //
+  // AREA carries notional, not radius. Area is the perceptually linear channel
+  // for circles (Cleveland & McGill 1984); a radius-linear map overstates a
+  // large print by the square. So each circle carries `mag = sqrt(clamped
+  // notional / ref)` in [0,1], and the view's only job is the pixel mapping
+  // `r = rMin + (rMax - rMin) * mag`. The sqrt lives HERE, where it is pinned,
+  // rather than in a canvas function a future edit could quietly linearise.
+  //
+  // The reference is the p95 of VISIBLE notional, matching the depth cells' own
+  // p95 discipline. A max-normalised scale would let one whale flatten every
+  // other print to a dot — the encoding fault we deliberately did not copy.
+  // Prints above p95 clamp at mag = 1 rather than growing without bound.
+  //
+  // Callers pass ONE venue's prints: the tape is multi-venue and painting okx
+  // prints over a bybit ladder is the silent blend §0.7 forbids. That filter is
+  // the caller's, because only the caller knows which book is on screen.
+  function tradeCircles(opts) {
+    const o = opts || {};
+    const rows = o.trades || [];
+    const t0 = o.t0, tN = o.tN, lo = o.minPx, hi = o.maxPx;
+    const out = [];
+    for (const t of rows) {
+      if (!t) continue;
+      const ts = t.ts, price = t.price;
+      if (!Number.isFinite(ts) || !Number.isFinite(price)) continue;
+      if (ts < t0 || ts > tN) continue;                 // outside the drawn window
+      if (!(price >= lo && price <= hi)) continue;      // outside the drawn ladder
+      const n = Number.isFinite(t.notional) ? t.notional : price * t.qty;
+      if (!(n > 0)) continue;
+      out.push({ ts, price, n, isBuy: !!t.isBuy, mag: 0 });
+    }
+    if (!out.length) {
+      let oldestEmpty = Infinity;
+      for (const t of rows) if (t && Number.isFinite(t.ts) && t.ts < oldestEmpty) oldestEmpty = t.ts;
+      return { circles: [], ref: NaN, oldestTs: Number.isFinite(oldestEmpty) ? oldestEmpty : NaN };
+    }
+    const ns = Float64Array.from(out, (v) => v.n);
+    ns.sort();
+    const ref = ns[Math.floor(0.95 * (ns.length - 1))] || ns[ns.length - 1];
+    for (const v of out) v.mag = Math.sqrt(ref > 0 ? Math.min(1, v.n / ref) : 0);
+    // Smallest first so a whale is never painted behind dust.
+    out.sort((a, b) => a.n - b.n);
+    // oldestTs is over ALL supplied rows, not the visible ones: it answers "how
+    // far back does the tape reach", which is what the coverage caption states.
+    let oldestTs = Infinity;
+    for (const t of rows) if (t && Number.isFinite(t.ts) && t.ts < oldestTs) oldestTs = t.ts;
+    return { circles: out, ref, oldestTs };
+  }
+
   function liqTier(notional, thresholds) {
     if (!Number.isFinite(notional)) return 'baseline';
     const t = thresholds ? { ...LIQ_TIER_DEFAULTS, ...thresholds } : LIQ_TIER_DEFAULTS;
@@ -4077,6 +4131,7 @@
     // aggregated-ladder builder carries the cross-venue display-approximation
     // caveat at its implementation (never a merged truth).
     TapeAggregator, sizeTier, SIZE_TIER_DEFAULTS, liqTier, LIQ_TIER_DEFAULTS,
+    tradeCircles,
     filterTapeRows, BigPrintRail, TradeImprint,
     // T-4 (§4j): what the tape's min-notional floor took OUT of view (stated,
     // never discarded) + the news relevance read and its VISIBLE projection

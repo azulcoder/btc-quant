@@ -420,6 +420,9 @@ const HF = require(path.join(__dirname, '..', 'dashboard', 'terminal-hfdata.js')
 // T-2 (§4h): full-book sync engines — pure, constructed-sequence groups only
 // (no fixtures needed: continuity/checksum rules are exact arithmetic).
 const B = require(path.join(__dirname, '..', 'dashboard', 'terminal-books.js'));
+// Views are DOM-driven, but their pure formatters are not — and hmsMs makes an
+// honesty CLAIM (event time, ms resolution), so it gets pinned like any rail.
+const V = require(path.join(__dirname, '..', 'dashboard', 'terminal-views.js'));
 // quant.js is the O-4 views' options-math source (§4d: Γ via black76Greeks,
 // max pain via maxPain — the house rule forbids reimplementing either), so
 // group 30 drives it directly with normalized chain rows.
@@ -4754,6 +4757,157 @@ group('layout: one element per grid area, strips place themselves, anchors survi
   for (const t of navTargets) {
     assert.ok(new RegExp('id="' + t + '"').test(html), t + ' is a live anchor, not a dead link');
   }
+});
+
+
+group('hmsMs: millisecond event time, and the second-cache cannot skew it', () => {
+  // Fixed instant, chosen so every field is unambiguous.
+  const t = Date.UTC(2026, 7, 2, 15, 59, 50) + 358;
+  assert.strictEqual(V.hmsMs(t), '15:59:50.358');
+  assert.strictEqual(V.hms(t), '15:59:50', 'the second-resolution formatter is unchanged');
+
+  // Zero-padding: 7 ms must not render as ".7", which would sort and read wrong.
+  assert.strictEqual(V.hmsMs(Date.UTC(2026, 7, 2, 0, 0, 0) + 7), '00:00:00.007');
+  assert.strictEqual(V.hmsMs(Date.UTC(2026, 7, 2, 0, 0, 0) + 70), '00:00:00.070');
+  assert.strictEqual(V.hmsMs(Date.UTC(2026, 7, 2, 0, 0, 0) + 700), '00:00:00.700');
+
+  // The memoised second prefix is the only piece of state in the formatter.
+  // Walk time BACKWARDS and across a second boundary: a stale prefix would
+  // stamp a print with the wrong second, i.e. lie about event time.
+  const a = Date.UTC(2026, 7, 2, 12, 0, 1) + 5;
+  const b = Date.UTC(2026, 7, 2, 12, 0, 0) + 999;
+  assert.strictEqual(V.hmsMs(a), '12:00:01.005');
+  assert.strictEqual(V.hmsMs(b), '12:00:00.999', 'cache must not carry the previous second');
+  assert.strictEqual(V.hmsMs(a), '12:00:01.005', 'and must recover going forward again');
+
+  // Non-finite input stays the em-dash, never "NaN" and never a guessed now().
+  assert.strictEqual(V.hmsMs(NaN), '—');
+  assert.strictEqual(V.hmsMs(undefined), '—');
+});
+
+group('tradeCircles: only real prints, inside the drawn window and ladder', () => {
+  const t0 = 1000, tN = 9000, lo = 100, hi = 200;
+  const mk = (o) => Object.assign({ ts: 5000, price: 150, qty: 1, notional: 1000, isBuy: true }, o);
+  const rows = [
+    mk({}),                                   // in
+    mk({ ts: 999 }),                          // before the window
+    mk({ ts: 9001 }),                         // after the window
+    mk({ price: 99 }),                        // below the drawn ladder
+    mk({ price: 201 }),                       // above the drawn ladder
+    mk({ ts: NaN }), mk({ price: NaN }),      // unusable
+    mk({ notional: 0 }),                      // zero size is not a print
+    null,
+  ];
+  const r = S.tradeCircles({ trades: rows, t0, tN, minPx: lo, maxPx: hi });
+  assert.strictEqual(r.circles.length, 1, 'exactly the one print that is really on screen');
+  assert.strictEqual(r.circles[0].price, 150);
+  // Boundaries are INCLUSIVE on all four edges — a print exactly at the edge of
+  // the drawn ladder really is on the drawn ladder.
+  const edge = S.tradeCircles({
+    trades: [mk({ ts: t0, price: lo }), mk({ ts: tN, price: hi })], t0, tN, minPx: lo, maxPx: hi });
+  assert.strictEqual(edge.circles.length, 2, 'window and range edges are inclusive');
+
+  // oldestTs reports over ALL supplied rows, so the coverage caption can say how
+  // far back the tape reaches even when nothing is currently visible.
+  const none = S.tradeCircles({
+    trades: [mk({ ts: 10, price: 1e6 })], t0, tN, minPx: lo, maxPx: hi });
+  assert.strictEqual(none.circles.length, 0);
+  assert.strictEqual(none.oldestTs, 10, 'coverage is reported even with zero visible circles');
+  assert.deepStrictEqual(S.tradeCircles({ trades: [], t0, tN, minPx: lo, maxPx: hi }).circles, []);
+});
+
+group('tradeCircles: AREA carries notional, and one whale cannot flatten the rest', () => {
+  const t0 = 0, tN = 1e6, lo = 1, hi = 1e9;
+  const mk = (n, i) => ({ ts: 100 + i, price: 100, qty: 1, notional: n, isBuy: true });
+  // 20 prints at 1x and one at 100x. Under p95 normalisation the ordinary
+  // prints keep a readable magnitude; under MAX normalisation (the encoding we
+  // did not copy) they would collapse to sqrt(1/100) = 0.1 of full radius.
+  const rows = [];
+  for (let i = 0; i < 20; i++) rows.push(mk(1000, i));
+  rows.push(mk(100000, 99));
+  const { circles, ref } = S.tradeCircles({ trades: rows, t0, tN, minPx: lo, maxPx: hi });
+  assert.strictEqual(circles.length, 21);
+  assert.strictEqual(ref, 1000, 'p95 of this set is the ordinary print, not the whale');
+  const ordinary = circles.find((c) => c.n === 1000);
+  const whale = circles.find((c) => c.n === 100000);
+  assert.ok(approx(ordinary.mag, 1, 1e-12), 'an at-p95 print draws at full magnitude');
+  assert.ok(approx(whale.mag, 1, 1e-12), 'above p95 CLAMPS — it never grows without bound');
+  assert.ok(approx(Math.sqrt(0.1), 0.31622776601, 1e-9), 'sanity for the check below');
+
+  // Area, not radius: a print of 1/4 the notional must draw at 1/2 the radius,
+  // so that the AREA ratio is the notional ratio. A radius-linear encoding
+  // would give 0.25 here and overstate large prints by the square.
+  // Both compared prints sit BELOW p95 — above it, magnitude clamps at 1 by
+  // design and no ratio is observable (a 2-element set puts p95 at the smaller
+  // of the pair, which is what makes the naive version of this test wrong).
+  const many = [mk(400, 0), mk(100, 1)];
+  for (let i = 0; i < 100; i++) many.push(mk(10000, 10 + i));
+  const two = S.tradeCircles({ trades: many, t0, tN, minPx: lo, maxPx: hi });
+  assert.strictEqual(two.ref, 10000, 'p95 sits above both compared prints');
+  const big = two.circles.find((c) => c.n === 400);
+  const small = two.circles.find((c) => c.n === 100);
+  assert.ok(approx(big.mag, 0.2, 1e-12) && approx(small.mag, 0.1, 1e-12), 'sqrt of the ratio');
+  assert.ok(approx(small.mag / big.mag, 0.5, 1e-12),
+    'quarter the notional is HALF the radius (area ∝ notional)');
+  // The encoding we did NOT choose, stated as a live contrast: radius-linear
+  // would put this ratio at 0.25 and make the bigger print look 4x, not 2x.
+  assert.ok(Math.abs(small.mag / big.mag - 0.25) > 0.2, 'this is not a radius-linear map');
+
+  // Smallest first, so a whale is never painted behind dust.
+  for (let i = 1; i < circles.length; i++) {
+    assert.ok(circles[i].n >= circles[i - 1].n, 'circles are ordered small → large');
+  }
+});
+
+group('same-ms sweep marker requires same venue AND side, not just the stamp', () => {
+  // The tape is multi-venue. Two prints on DIFFERENT venues inside one
+  // millisecond are a coincidence, not one order — marking them as a sweep
+  // would be a fabricated causal claim (§0.7 per-source rail). Caught on a
+  // fixture screenshot where okx and bybit-spot shared a synthetic-clock ms.
+  // This pins the predicate the TapeView row loop applies.
+  const sameRun = (a, b) => V.hmsMs(a.ts) === V.hmsMs(b.ts) && a.ex === b.ex && !!a.isBuy === !!b.isBuy;
+  const t = 1785687590358;
+  const bybitBuyA = { ts: t, ex: 'bybit', isBuy: true, price: 63080 };
+  const bybitBuyB = { ts: t, ex: 'bybit', isBuy: true, price: 63081 };
+  const okxBuy    = { ts: t, ex: 'okx',   isBuy: true, price: 63080 };
+  const bybitSell = { ts: t, ex: 'bybit', isBuy: false, price: 63080 };
+  const bybitLate = { ts: t + 1, ex: 'bybit', isBuy: true, price: 63082 };
+
+  assert.ok(sameRun(bybitBuyB, bybitBuyA), 'same venue+side+ms IS one order taking two levels');
+  assert.ok(!sameRun(okxBuy, bybitBuyA), 'a different VENUE in the same ms is coincidence, not a sweep');
+  assert.ok(!sameRun(bybitSell, bybitBuyA), 'the opposite SIDE cannot be the same aggressor order');
+  assert.ok(!sameRun(bybitLate, bybitBuyA), 'one millisecond later is a different event');
+});
+
+group('TapeAggregator preserves a sweep: one row per LEVEL taken', () => {
+  // The claim the ms timestamp rests on. An aggressor lifting four ask levels
+  // inside one 100 ms window must stay four rows sharing one stamp — if the
+  // aggregator merged across price, ms resolution would show a single print and
+  // the sweep would be invisible in a different way.
+  const agg = S.TapeAggregator({ aggWindowMs: 100, size: 100 });
+  const t = 1785687590358;
+  const px = [63080.0, 63080.1, 63080.2, 63081.5];
+  for (const p of px) agg.push({ ts: t, ex: 'bybit', isBuy: true, price: p, qty: 0.5, notional: p * 0.5 });
+  const rows = agg.list();
+  assert.strictEqual(rows.length, px.length, 'a price change must FLUSH the run, not extend it');
+  for (const r of rows) {
+    assert.strictEqual(r.ts, t, 'every level of one sweep carries the same event ms');
+    assert.strictEqual(r.count, 1, 'no level was folded into another');
+  }
+  const seen = new Set(rows.map((r) => r.price));
+  assert.strictEqual(seen.size, px.length, 'every swept level survives as its own row');
+
+  // And the merge that SHOULD happen still does: same venue+side+price inside
+  // the window is one row with count 4, so a 200-print iceberg refill is still
+  // one line rather than 200.
+  const agg2 = S.TapeAggregator({ aggWindowMs: 100, size: 100 });
+  for (let i = 0; i < 4; i++) {
+    agg2.push({ ts: t + i * 10, ex: 'bybit', isBuy: true, price: 63080, qty: 0.25, notional: 63080 * 0.25 });
+  }
+  const r2 = agg2.list();
+  assert.strictEqual(r2.length, 1);
+  assert.strictEqual(r2[0].count, 4);
+  assert.ok(approx(r2[0].qty, 1.0, 1e-9), 'the merged row carries the summed size');
 });
 
 // ─── Verdict ─────────────────────────────────────────────────────────────────

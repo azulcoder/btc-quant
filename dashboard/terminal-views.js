@@ -110,6 +110,32 @@
   function hms(ts) { return Number.isFinite(ts) ? new Date(ts).toISOString().slice(11, 19) : '—'; }
   function hm(ts) { return Number.isFinite(ts) ? new Date(ts).toISOString().slice(11, 16) : '—'; }
 
+  /** UTC HH:MM:SS.mmm — the tape's resolution, and the reason it reads as a
+   *  SEQUENCE rather than a list. At second resolution a sweep (one aggressor
+   *  order walking several price levels) is indistinguishable from N unrelated
+   *  prints that happened to land in the same second; at millisecond resolution
+   *  the shared stamp IS the evidence that it was one order.
+   *
+   *  The hour is kept deliberately. Dropping it would fit a narrower column,
+   *  but a feed stalled by exactly one hour would then read as live — and the
+   *  whole point of stamping EVENT time (see hms above) is that a stalled feed
+   *  must look stalled.
+   *
+   *  The second prefix is memoised because the tape re-renders ~60 rows per
+   *  frame and those rows span only a few distinct seconds: one Date per second
+   *  instead of one per row. */
+  let _hmsSec = -1, _hmsPrefix = '';
+  function hmsMs(ts) {
+    if (!Number.isFinite(ts)) return '—';
+    const sec = Math.floor(ts / 1000);
+    if (sec !== _hmsSec) {
+      _hmsSec = sec;
+      _hmsPrefix = new Date(sec * 1000).toISOString().slice(11, 19);
+    }
+    const ms = Math.floor(ts - sec * 1000);
+    return _hmsPrefix + '.' + (ms < 10 ? '00' : ms < 100 ? '0' : '') + ms;
+  }
+
   /** h/mm/ss countdown for funding (negative → '—', a past nextFundingTs means
    *  the venue hasn't rolled the field yet — we don't guess the next window). */
   function countdown(ms) {
@@ -1266,8 +1292,27 @@
 
       const p = pal();
       let html = '', cum = 0;
+      // Same-millisecond grouping — ONE aggressor order walking the book, which
+      // is the read millisecond resolution exists to give. Rows are newest-first,
+      // so a run of identical stamps is that order's levels in reverse.
+      //
+      // The match requires the same VENUE and the same SIDE, not just the same
+      // stamp. This tape is multi-venue: two prints on different venues in one
+      // millisecond are a coincidence, and marking them as one order would be a
+      // fabricated causal claim — the same §0.7 per-source rail that keeps the
+      // aggregator from merging across venues. (Caught on a fixture screenshot
+      // where okx and bybit-spot shared a synthetic-clock millisecond.)
+      //
+      // Nothing is hidden or merged: the repeated stamps are dimmed and the run
+      // carries a left rule, but the aggregator still flushes on every price
+      // change (priceKey is in its merge key), so each level swept keeps its own
+      // row and its own size. This is emphasis, never aggregation.
+      let prevStamp = null, prevEx = null, prevBuy = null;
       for (const r of rows) {
         cum += r.notional;
+        const stamp = hmsMs(r.ts);
+        const sameMs = stamp === prevStamp && r.ex === prevEx && !!r.isBuy === prevBuy;
+        prevStamp = stamp; prevEx = r.ex; prevBuy = !!r.isBuy;
         const dir = r.isBuy ? 'up' : 'down';
         const col = r.isBuy ? p.up : p.down;
         const alpha = TIER_ALPHA[r.tier] || 0;
@@ -1286,10 +1331,12 @@
           : metric === 'cum' ? fmtCompactUsd(cum)
           : metric === 'ago' ? ageStr(nowMs - r.ts)
           : (mk + fmtCompactUsd(r.notional));
-        html += '<div class="tape-row tier-' + esc(r.tier) + (big ? ' big' : '') + '"'
+        html += '<div class="tape-row tier-' + esc(r.tier) + (big ? ' big' : '')
+          + (sameMs ? ' same-ms' : '') + '"'
           + ' title="' + esc(exLabel(r.ex)) + (spot ? ' (spot)' : '') + ' · ' + fmtCompactUsd(r.notional)
-          + ' · ' + r.tier + ' — labeled convention, not a signal">'
-          + '<span class="ts">' + hms(r.ts) + '</span>'
+          + ' · ' + r.tier + (sameMs ? ' · same venue, side and millisecond as the print above — one order taking another level' : '')
+          + ' — labeled convention, not a signal">'
+          + '<span class="ts">' + stamp + '</span>'
           + '<span class="ex ex-' + esc(r.ex) + (spot ? ' spot' : '') + '">'
           + '<i class="ex-dot" style="background:' + rgba(exColor(p, r.ex), spot ? 0.55 : 0.95) + '"></i>'
           + esc(EX_TAG[r.ex] || r.ex) + '</span>'
@@ -1791,6 +1838,9 @@
   function BookHeatmapView() {
     let root = null, canvas = null, velInput = null, velOn = false;
     let lastSlice = null, mouse = null, drawQueued = false;
+    // p95 of resting qty, memoised on (slice identity, stride, column count).
+    // Hover redraws reuse it; a new slice or a resize recomputes it.
+    let p95Cache = null;
     const GUT_AXIS = 64, ROW_TIME = 16;
 
     function mount(el, opts) {
@@ -1890,16 +1940,58 @@
       const dtMed = dts.length ? Math.max(dts[Math.floor(dts.length / 2)], 1) : 1000;
 
       // Ring-wide p95 of resting qty (see header note on why not max).
-      const qs = [];
-      for (const s of kept) {
-        for (const m of [s.bids, s.asks]) for (const q of m.values()) qs.push(q);
-      }
-      if (!qs.length) return;
-      qs.sort((a, b) => a - b);
-      const p95 = qs[Math.floor(0.95 * (qs.length - 1))];
+      //
+      // CACHED on (slice, stride). draw() is re-entered on every mousemove via
+      // scheduleDraw(lastSlice), and this scan+sort is ~41k floats — hovering
+      // alone was re-sorting the whole ring at frame rate for a p95 that had
+      // not changed. The key is the slice IDENTITY plus the stride, because
+      // `kept` is a function of exactly those two: a new slice or a resized
+      // pane recomputes, a mouse move does not.
+      const p95 = (() => {
+        if (p95Cache && p95Cache.slice === slice && p95Cache.stride === stride
+            && p95Cache.n === kept.length) return p95Cache.v;
+        let n = 0;
+        for (const s of kept) n += s.bids.size + s.asks.size;
+        if (!n) return NaN;
+        const qs = new Float64Array(n);
+        let k = 0;
+        for (const s of kept) {
+          for (const q of s.bids.values()) qs[k++] = q;
+          for (const q of s.asks.values()) qs[k++] = q;
+        }
+        qs.sort();   // typed-array sort is numeric by definition — no comparator
+        const v = qs[Math.floor(0.95 * (n - 1))];
+        p95Cache = { slice, stride, n: kept.length, v };
+        return v;
+      })();
       if (!(p95 > 0)) return;
-      const alphaOf = (q) => 0.05 + 0.72 * Math.min(1, q / p95);
 
+      // Quantized alpha buckets. The old loop set ctx.fillStyle once per CELL —
+      // ~41k string builds and ~41k CSS color parses per frame, which was the
+      // whole 19 ms. Cells never overlap (bid and ask levels are disjoint, and
+      // columns are adjacent-or-gapped, never stacked), so drawing them grouped
+      // by color instead of left-to-right is the SAME image with ~380 fillStyle
+      // sets instead of ~41k.
+      //
+      // A_STEPS is chosen so the quantization sits BELOW the framebuffer's own:
+      // the alpha span is 0.72, so the step is 0.72/191 = 0.0038, and the worst
+      // channel error from compositing is step x 255 = 0.96 — under one 8-bit
+      // level. This is not an approximation the eye can reach.
+      const A_LO = 0.05, A_SPAN = 0.72, A_STEPS = 192;
+      const bucketOf = (q) => {
+        const t = q < p95 ? q / p95 : 1;
+        const k = (t * (A_STEPS - 1) + 0.5) | 0;
+        return k < 0 ? 0 : k;
+      };
+      // rects[hue][bucket] = flat [x,y,w, x,y,w, ...]; hue 0=up 1=down 2=muted.
+      // h is cellH for every cell, so it is not stored.
+      const HUES = [p.up, p.down, p.muted];
+      const rects = [new Array(A_STEPS), new Array(A_STEPS), new Array(A_STEPS)];
+      const push = (hue, q, x, y, wCol) => {
+        const k = bucketOf(q);
+        const a = rects[hue][k] || (rects[hue][k] = []);
+        a.push(x, y, wCol);
+      };
       let prevComb = null;   // velocity-tint diff base (previous DRAWN column)
       for (let i = 0; i < kept.length; i++) {
         const s = kept[i];
@@ -1913,13 +2005,67 @@
           for (const m of [s.bids, s.asks]) for (const [b, q] of m) comb.set(b, (comb.get(b) || 0) + q);
           for (const [b, q] of comb) {
             const dq = prevComb ? q - (prevComb.get(b) || 0) : 0;
-            ctx.fillStyle = rgba(dq > 0 ? p.up : dq < 0 ? p.down : p.muted, alphaOf(q));
-            ctx.fillRect(x0, yOf(b), wCol, cellH);
+            push(dq > 0 ? 0 : dq < 0 ? 1 : 2, q, x0, yOf(b), wCol);
           }
           prevComb = comb;
         } else {
-          for (const [b, q] of s.bids) { ctx.fillStyle = rgba(p.up, alphaOf(q)); ctx.fillRect(x0, yOf(b), wCol, cellH); }
-          for (const [b, q] of s.asks) { ctx.fillStyle = rgba(p.down, alphaOf(q)); ctx.fillRect(x0, yOf(b), wCol, cellH); }
+          for (const [b, q] of s.bids) push(0, q, x0, yOf(b), wCol);
+          for (const [b, q] of s.asks) push(1, q, x0, yOf(b), wCol);
+        }
+      }
+      for (let hue = 0; hue < 3; hue++) {
+        const byBucket = rects[hue];
+        for (let k = 0; k < A_STEPS; k++) {
+          const a = byBucket[k];
+          if (!a) continue;
+          ctx.fillStyle = rgba(HUES[hue], A_LO + A_SPAN * (k / (A_STEPS - 1)));
+          for (let j = 0; j < a.length; j += 3) ctx.fillRect(a[j], a[j + 1], a[j + 2], cellH);
+        }
+      }
+
+      // ── Trade circles: aggression landing ON the resting liquidity ────────
+      //
+      // The single reading this panel could not previously give. A wall is only
+      // interesting relative to what hit it, and until now that inference had to
+      // be made across two panels with different time axes. Each circle is one
+      // REAL aggregated print from THIS venue's own tape (§0.7 — a bybit print
+      // over an okx book would be a silent venue blend), at its own event ts and
+      // price, so a big circle sitting on a band that then vanishes is absorption
+      // you can see in one fixation.
+      //
+      // slice.circles is composed UPSTREAM by terminal.js from the pure
+      // S.tradeCircles — same discipline as the liq feed's tier tagging: the
+      // view reads the geometry, it never re-derives the filter or the scale.
+      // Each circle carries mag = sqrt(notional/p95) in [0,1]; the only thing
+      // left here is the pixel mapping.
+      const circles = slice.circles || [];
+      const cover = slice.circlesCover || null;
+      let tradeNote = '';
+      if (cover) {
+        const R_MIN = 1.5, R_MAX = Math.max(R_MIN + 1, Math.min(18, plotH * 0.045));
+        for (const v of circles) {
+          ctx.beginPath();
+          ctx.arc(X(v.ts), yOf(v.price) + rowH / 2, R_MIN + (R_MAX - R_MIN) * v.mag, 0, 6.283185307179586);
+          ctx.fillStyle = rgba(v.isBuy ? p.up : p.down, 0.5);
+          ctx.fill();
+          ctx.strokeStyle = rgba(v.isBuy ? p.up : p.down, 0.9);
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+        const oldestTs = cover.oldestTs;
+        // Coverage, stated. The tape ring is shorter than the book ring, so the
+        // left of a long window can hold real depth with NO circles — and an
+        // unstated absence reads as "nothing traded here", which would be a lie
+        // of omission. Name the covered span instead. If the venue's prints are
+        // all outside the drawn ladder, say THAT rather than drawing nothing and
+        // letting the silence imply there was no aggression.
+        if (circles.length) {
+          tradeNote = Number.isFinite(oldestTs) && oldestTs > t0 + 2000
+            ? ' · circles: area ∝ notional (p95), last ' + Math.round((tN - oldestTs) / 60000)
+              + ' min only — tape ring is shorter than the book ring'
+            : ' · circles: area ∝ notional (p95-scaled)';
+        } else {
+          tradeNote = ' · no ' + (slice.ex || 'venue') + ' prints inside this window/range';
         }
       }
 
@@ -1963,6 +2109,7 @@
       // Corner tag: venue + scale statement (per-source label, §0.7).
       font(9, true); ctx.textAlign = 'left'; ctx.fillStyle = p.muted;
       ctx.fillText((slice.ex || '') + ' · α ∝ resting qty (p95-scaled)' + (velOn ? ' · velocity tint ON' : '')
+        + tradeNote
         + (slice.sessions && slice.sessions.length ? ' · shaded: Asia/London/NY sessions (UTC, FX-desk convention — §4f)' : ''), 6, 8);
 
       // Hover readout: ts · price · resting qty (+ side) at the cell.
@@ -5700,6 +5847,10 @@
   // ─── Export — ONE global + Node (quant.js dual-export pattern) ──────────
 
   const TerminalViews = {
+    // Pure formatters, exported so the JS gate can pin them without a DOM. They
+    // are the only view-layer code whose OUTPUT is an honesty claim (event time,
+    // never wall clock) rather than a pixel.
+    hms, hmsMs,
     FootprintView, DomLadderView, TapeView, AggBookView, HeaderStatsView, LiqFeedView,
     // O-2 (§4b): depth-history heatmap + labeled model/heuristic panels.
     BookHeatmapView, LiqHeatmapView, DetectionFeedView,

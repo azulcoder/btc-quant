@@ -684,6 +684,24 @@ changed the plan:
    opposite of what the sequencing assumed.) The `p95` full sort the view redoes every
    redraw is 1.34 ms and quickselect makes it 0.25 ms.
 
+**SHIPPED 2026-08-03 (T-5).** The bucketed path is now what `BookHeatmapView.draw` does, and
+the `p95` is memoised on `(slice identity, stride, column count)` so a hover redraw does not
+recompute it at all. Re-measured on the production loop over a larger 900x92 grid (82,800
+cells), JS half only — the CSS *parse* saving is browser-side and is not in these numbers, so
+they are a floor, not the win:
+
+| | as shipped before | after |
+|---|---|---|
+| cell loop | 13.01 ms | **2.80 ms** |
+| `fillStyle` assignments | 82,800 | **172** (481x fewer) |
+| `rgba()` strings built | 82,800 | **172** |
+| p95 on a hover redraw | 8.00 ms | **0.00 ms** (cached) |
+
+The ramp is 192 steps rather than 64: the alpha span is 0.72, so the step is 0.0038 and the
+worst channel error from compositing is **0.48 of 255** — below one 8-bit level, which makes
+the quantisation unreachable by the eye rather than merely close. `p95` parity with the old
+comparator sort is asserted exactly, not approximately.
+
 The zoom case does eventually favour the GPU, but far less than assumed, and only against a
 *naive* 2D draw: a 2000-bar footprint costs 74.9 ms drawn one rect per bar and **11.1 ms**
 LOD-decimated to ≥1 px columns; at 10,000 bars it is 330.8 ms naive versus **10.1 ms** LOD —
