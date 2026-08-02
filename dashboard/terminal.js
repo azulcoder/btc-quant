@@ -1948,7 +1948,54 @@
   // would fabricate liveness). Runs from frame() with the other ingestion-
   // side work: never gated by pause/visibility (§4e.2 — paint gates skip
   // PAINT, never data).
-  const BOOK_EMIT_LEVELS = 200;   // bybit-book parity; bounds the per-emit copy
+  // ── What gets emitted from a synced engine, and why it is a price WINDOW ──
+  //
+  // It used to be eng.topN(200) — a RANK cut. A rank cut makes the emitted band
+  // a function of book DENSITY: when the book is thick the 200th level sits a
+  // few dollars from the mid, when it thins the same 200 levels reach much
+  // further, and the surface built on top breathes in and out for reasons that
+  // have nothing to do with liquidity moving. That is why the heatmap could not
+  // show "detail at any price" the way a desk tool does — the Y axis was not a
+  // ruler, it was a density readout.
+  //
+  // A price window fixes the ruler: emit every level within +/- BOOK_EMIT_PCT of
+  // the mid, so the same $ band is carried whatever the book is doing.
+  //
+  // UNION with a rank floor, never a replacement. The emit carries
+  // isSnapshot:true and BookStore.applyDepth replaces both maps WHOLESALE
+  // (terminal-state.js:154), so a window narrower than the old top-200 would
+  // silently shrink the book for EVERY consumer — DOM ladder, agg book,
+  // liquidity bands, OFI. Taking max(window, BOOK_EMIT_MIN) per side guarantees
+  // this change can only ever widen what downstream sees.
+  //
+  // Measured spans (2026-08-03 live): bybit 400 levels over $70, okx 800 over
+  // $100, binancef ~2,000 over $243. At $63k mid, +/-0.5% is +/-$315 — so this
+  // captures the ENTIRE useful book on all three, where top-200 was cutting
+  // binancef down from ~2,000. Coinbase carries ~44k levels, which is what
+  // BOOK_EMIT_MAX bounds.
+  const BOOK_EMIT_MIN = 200;      // rank floor — never narrower than before
+  const BOOK_EMIT_MAX = 2000;     // per side; bounds the per-emit copy (coinbase)
+  const BOOK_EMIT_PCT = 0.005;    // +/-0.5% of mid
+
+  /** Levels within +/-pct of mid, with a rank floor so a thin or one-sided book
+   *  is never truncated below what the old top-N emitted. Pure. */
+  function emitWindow(eng) {
+    const top = eng.topN(BOOK_EMIT_MAX);
+    const b = eng.best();
+    const bb = b && b.bid ? b.bid[0] : NaN;
+    const ba = b && b.ask ? b.ask[0] : NaN;
+    const mid = Number.isFinite(bb) && Number.isFinite(ba) ? (bb + ba) / 2
+      : Number.isFinite(bb) ? bb : ba;
+    if (!Number.isFinite(mid)) return top;   // no book yet — nothing to window on
+    const w = mid * BOOK_EMIT_PCT;
+    const lo = mid - w, hi = mid + w;
+    const side = (rows) => {
+      let n = 0;
+      while (n < rows.length && rows[n][0] >= lo && rows[n][0] <= hi) n++;
+      return rows.slice(0, Math.max(n, Math.min(BOOK_EMIT_MIN, rows.length)));
+    };
+    return { bids: side(top.bids), asks: side(top.asks) };
+  }
   function flushBookLegs(now) {
     if (now - lastBookFlush < 100) return;
     lastBookFlush = now;
@@ -1974,9 +2021,10 @@
       if (!Number.isFinite(ts) || ts === bl.lastEmitTs) continue;   // no new frames → no fabricated tick
       // topN sorts the engine's whole side maps (its stated materialization
       // cost) — bounded at 10 Hz by this gate. Coinbase is the heavy case
-      // (~44k levels): a few ms/s, accepted; the emitted event itself carries
-      // only the top-200 window downstream.
-      const top = eng.topN(BOOK_EMIT_LEVELS);
+      // (~44k levels): a few ms/s, accepted. The sort dominates; slicing a
+      // wider window off the sorted result is free, so the price window below
+      // costs essentially nothing beyond the copy it carries.
+      const top = emitWindow(eng);
       if (!top.bids.length && !top.asks.length) continue;   // coinbase pre-snapshot
       bl.lastEmitTs = ts;
       sink({ kind: 'depth', ex: bl.ex, ts, bids: top.bids, asks: top.asks, isSnapshot: true });

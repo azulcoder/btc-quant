@@ -666,9 +666,29 @@
      *  heatmap's Y extent. NaN/NaN when empty (ProfileStore's NaN convention:
      *  "no data" must never look like price 0). Full scan on demand — callers
      *  redraw behind a dirty flag, not per frame, so O(samples×levels) is fine. */
-    function priceRange() {
+    /** Price extent to draw.
+     *
+     *  `mode: 'latest'` (default) returns the NEWEST sample's own band — which
+     *  is the current mid +/- nLevels x tick by construction. That makes the Y
+     *  axis a RULER: the same $ height whatever the session has done, so a band
+     *  at one screen position means the same distance from the touch at 09:00
+     *  and at 17:00.
+     *
+     *  `mode: 'session'` returns the union over the whole ring, which is what
+     *  this used to do unconditionally. It is honest but it is not a ruler: an
+     *  hour in which price travelled $400 stretches the axis to $400 and
+     *  squashes every level into sub-pixel rows, so the surface gets LESS
+     *  legible the more the market actually did.
+     *
+     *  Anchoring clips columns whose price left the band. That is off-screen,
+     *  not empty — the caller states the band in visible chrome so a reader
+     *  cannot mistake a clipped column for absent liquidity (§0.7). */
+    function priceRange(mode) {
+      const arr = ring.toArray();
+      if (!arr.length) return { min: NaN, max: NaN };
+      const scan = mode === 'session' ? arr : [arr[arr.length - 1]];
       let min = Infinity, max = -Infinity;
-      for (const s of ring.toArray()) {
+      for (const s of scan) {
         for (const m of [s.bids, s.asks]) {
           for (const p of m.keys()) {
             if (p < min) min = p;

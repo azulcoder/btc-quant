@@ -244,13 +244,16 @@
   function fitCanvas(canvas) {
     const rect = canvas.getBoundingClientRect();
     const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+    // dpr is RETURNED as well as applied: a caller that budgets columns or rows
+    // in CSS px on a 2x display throws away half the hardware resolution it
+    // already paid to allocate.
     const w = Math.max(40, Math.floor(rect.width));
     const h = Math.max(40, Math.floor(rect.height));
     const bw = Math.floor(w * dpr), bh = Math.floor(h * dpr);
     if (canvas.width !== bw || canvas.height !== bh) { canvas.width = bw; canvas.height = bh; }
     const ctx = canvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return { ctx, w, h };
+    return { ctx, w, h, dpr };
   }
 
   /** Escape-free text guard for innerHTML builders: every dynamic value we
@@ -1873,7 +1876,7 @@
     }
 
     function draw(slice) {
-      const { ctx, w, h } = fitCanvas(canvas);
+      const { ctx, w, h, dpr } = fitCanvas(canvas);
       const p = pal();
       ctx.clearRect(0, 0, w, h);
       ctx.textBaseline = 'middle';
@@ -1927,7 +1930,12 @@
       // CSS px. Plot RESOLUTION only — every drawn column is a real ladder
       // that stood on the wire; we drop columns, we never average two ladders
       // into a fictitious one (§0.7).
-      const stride = Math.max(1, Math.ceil(samples.length / Math.max(1, Math.floor(plotW / 1.5))));
+      // Column budget in DEVICE pixels. The canvas is allocated at w x dpr and
+      // the context carries a dpr transform, so budgeting in CSS px made every
+      // "column" 3 device px on a 2x screen — half the resolution already paid
+      // for, discarded. Same 1.5px target, counted in the units that exist.
+      const colBudget = Math.max(1, Math.floor((plotW * dpr) / 1.5));
+      const stride = Math.max(1, Math.ceil(samples.length / colBudget));
       const kept = [];
       for (let i = 0; i < samples.length; i += stride) kept.push(samples[i]);
       if (kept[kept.length - 1] !== samples[samples.length - 1]) kept.push(samples[samples.length - 1]);
@@ -1997,7 +2005,9 @@
         const s = kept[i];
         const x0 = X(s.ts);
         const nextTs = i + 1 < kept.length ? kept[i + 1].ts : s.ts + dtMed;
-        const wCol = Math.max(1, X(Math.min(nextTs, s.ts + 1.5 * dtMed)) - x0);
+        // Floor is ONE DEVICE pixel, not one CSS pixel: a 1-CSS-px floor would
+        // silently re-merge the columns the device-px budget just separated.
+        const wCol = Math.max(1 / dpr, X(Math.min(nextTs, s.ts + 1.5 * dtMed)) - x0);
         if (velOn) {
           // Combined bucket qty (bids+asks — same semantics as the store's
           // velocity()); hue = sign of the change vs the previous column.
