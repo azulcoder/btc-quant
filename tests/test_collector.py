@@ -2400,9 +2400,18 @@ def test_watchdog_end_to_end_kills_a_real_leg(tmp_path, monkeypatch, capsys):
                 "the alive-but-silent leg to be caught",
             )
             obs["E_health"] = stalled
-            assert any(
-                "STALLED" in ln and "binancef-premiumIndex" in ln for ln in logs
-            ), "a leg that stays alive while producing nothing went undetected"
+            # /health derives `verdict(now)` live, so it reports `stale` the moment
+            # the budget elapses, while the loud line is written on the NEXT
+            # watchdog tick. Asserting the log immediately is therefore a race the
+            # product wins about half the time. The incident MUST still be logged —
+            # so wait for the evidence rather than assume it has landed, and let a
+            # timeout stay RED.
+            await _await(
+                lambda: any(
+                    "STALLED" in ln and "binancef-premiumIndex" in ln for ln in logs
+                ),
+                "the STALLED line for the alive-but-silent leg",
+            )
             _ctl("binancef-premiumIndex")["mute"].clear()
             healed = await _await_health(
                 port,
