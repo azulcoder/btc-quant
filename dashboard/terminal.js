@@ -132,7 +132,19 @@
   // every existing profile behind forever. Bumped ONLY alongside a migration.
   const SETTINGS_VER = 4;
 
+  // Every leg the RECORDED store can answer a profile for. Wider than HIST_EXS:
+  // a profile needs trades, not a book, so coinbase qualifies and is often the
+  // cleanest spot reference. Declared BEFORE DEFAULTS on purpose: loadSettings()
+  // validates against it, and a `const` referenced from above its declaration is
+  // a TDZ ReferenceError that loadSettings' own try/catch would SWALLOW — the
+  // setting would silently never persist and nothing would say why.
+  const AUCTION_VENUES = ['bybit', 'binancef', 'okx', 'coinbase'];
+
   const DEFAULTS = {
+    // Which RECORDED leg the auction profile is built from. bybit by default
+    // (deepest book, and the leg the levels registry is keyed on), but the store
+    // holds one profile per venue and they are never merged (§0.7).
+    auctionVenue: 'bybit',
     // T-4 (§4j) tapeMin 0 → 10000: the floor was OFF, and `DEFAULTS.tapeMin: 0`
     // + TIER_ALPHA.baseline meant the 60-row DOM budget was spent on seconds of
     // sub-$100 dust with ZERO rows above the 'sig' tier. $10,000 is not a new
@@ -305,6 +317,7 @@
       if (TAPE_METRICS.indexOf(j.tapeMetric) >= 0) s.tapeMetric = j.tapeMetric;
       if (DOM_SOURCES.indexOf(j.domSource) >= 0) s.domSource = j.domSource;
       if (typeof j.domCum === 'boolean') s.domCum = j.domCum;
+      if (AUCTION_VENUES.indexOf(j.auctionVenue) >= 0) s.auctionVenue = j.auctionVenue;
     } catch (_) { /* corrupt storage → defaults */ }
     return s;
   }
@@ -328,6 +341,7 @@
         legs: settings.legs,
         // T-3 (§4i): tape tiers/audio/filters + ladder source.
         tapeTiers: settings.tapeTiers, tapeAudio: settings.tapeAudio,
+        auctionVenue: settings.auctionVenue,
         tapeMarket: settings.tapeMarket, tapeVenue: settings.tapeVenue, tapeMetric: settings.tapeMetric,
         domSource: settings.domSource, domCum: settings.domCum,
       }));
@@ -2854,8 +2868,30 @@
   }
 
   // ── Auction source loading ──
+  // The RECORDED venue this profile is built from. Selectable, and named in the
+  // panel chrome, because the store keeps one profile per venue and they are
+  // never merged (§0.7): a $10-bucket profile blended across bybit and coinbase
+  // would be a level structure that existed on no book at all. It used to be
+  // hard-coded to bybit, so the panel went blank whenever that one leg stopped
+  // recording even though another venue had a full day sitting in the same store.
+  //
+  // NOT applied to the /v1/vwap parity read: that one exists to be COMPARED with
+  // the live anchored VWAP, and silently pointing it at a different venue would
+  // make the comparison meaningless rather than merely different.
+  function setAuctionVenue(v) {
+    if (AUCTION_VENUES.indexOf(v) < 0 || v === settings.auctionVenue) return;
+    settings.auctionVenue = v;
+    for (const el of document.querySelectorAll('.js-auction-venue')) el.textContent = v;
+    saveSettings();
+    // Refetch, never re-label: the levels on screen were aggregated by the API
+    // for the OLD venue, and relabelling them would be the exact venue blend the
+    // per-source rail forbids.
+    if (auctionComposite.on) loadComposite();
+    else loadAuctionSource(auctionSource);
+  }
+
   function profileUrl(startMs, endMs) {
-    return BYOD_API + '/v1/profile?symbol=' + SYM + '&exchange=bybit&start_ms=' + startMs
+    return BYOD_API + '/v1/profile?symbol=' + SYM + '&exchange=' + settings.auctionVenue + '&start_ms=' + startMs
       + '&end_ms=' + endMs + '&tick=' + LEVELS_TICK + '&buckets_usd=' + AUCTION_BUCKETS.join(',');
   }
 
@@ -3195,7 +3231,8 @@
       const panel = el.closest('.panel');
       if (panel) panel.classList.add('panel--empty');
     }
-    for (const id of ['set-auction-src', 'set-auction-mode', 'set-auction-comp', 'set-auction-days',
+    for (const id of ['set-auction-venue', 'set-auction-src', 'set-auction-mode',
+      'set-auction-comp', 'set-auction-days',
       'set-levels-draw', 'set-vwap-on', 'set-vwap-anchor', 'set-vwap-ts']) {
       $(id).disabled = true;
     }
@@ -3214,6 +3251,13 @@
         else loadAuctionSource(auctionSource);
       },
     });
+    const auctionVenueSel = $('set-auction-venue');
+    auctionVenueSel.value = settings.auctionVenue;
+    for (const el of document.querySelectorAll('.js-auction-venue')) {
+      el.textContent = settings.auctionVenue;
+    }
+    auctionVenueSel.addEventListener('change', () => setAuctionVenue(auctionVenueSel.value));
+
     levelsView = V.LevelsView();
     const levelsDrawInput = $('set-levels-draw');
     levelsDrawInput.checked = levelsDrawOn;

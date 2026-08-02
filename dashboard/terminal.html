@@ -505,8 +505,21 @@
       <h2>auction profile — recorded ticks
         <span class="signal-tag st-desc" title="Tick-EXACT volume-at-price over the collector's recorded trades (bybit leg): today/local days via the BYOD API's /v1/profile (DuckDB aggregation, §4f), archived days read straight from the HF dataset in-browser (hyparquet, size-gated before download). POC/VAH/VAL use the ProfileStore-parity 70% expansion. Descriptive — recorded history, never a backtest input (§0.1).">descriptive</span>
       </h2>
-      <div class="panel-src">tick-exact · local store / hf archive (size-gated) · recorded bybit trades — never a backtest input</div>
+      <div class="panel-src">tick-exact · local store / hf archive (size-gated) · recorded <b class="js-auction-venue">bybit</b> trades — never a backtest input</div>
       <div class="auction-controls">
+        <!-- Venue is EXPLICIT and selectable. It used to be hard-coded to bybit,
+             which meant the panel went blank whenever that one leg stopped
+             recording even though other venues had a full day in the same store.
+             The label below and the hint both name whichever venue is showing —
+             a profile whose source you cannot see is a profile you cannot use
+             (§0.7 per-source rail). -->
+        <label for="set-auction-venue">venue</label>
+        <select id="set-auction-venue" title="which RECORDED leg to build the profile from — the store keeps one per venue; they are never merged (§0.7)">
+          <option value="bybit" selected>bybit</option>
+          <option value="binancef">binancef</option>
+          <option value="okx">okx</option>
+          <option value="coinbase">coinbase</option>
+        </select>
         <label for="set-auction-src">source</label>
         <select id="set-auction-src"><option value="today" selected>today (live BYOD)</option></select>
         <label for="set-auction-mode">mode</label>
@@ -521,7 +534,7 @@
         <span id="auction-status" class="auction-status"></span>
       </div>
       <div id="view-auction" class="auction-wrap"></div>
-      <div class="hint"><span class="hint-lead">levels are $10 buckets over <b>recorded bybit trades</b> (the collector's store — not this browser session).</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> delta mode = diverging ramp: hue = Δ sign, saturation = |Δ|/p95, <b>neutral gray at zero</b> (§4f dataviz rail, validated); size buckets = per-level notional classes. Archived days state their download size <b>before</b> fetching (~27 MiB/day) and render labeled <b>archived day · hf dataset</b>. Naked POC overlay = prior-day POCs never revisited (registry-derived, age labeled).</span></details></div>
+      <div class="hint"><span class="hint-lead">levels are $10 buckets over <b>recorded <span class="js-auction-venue">bybit</span> trades</b> (the collector's store — not this browser session).</span><details class="hint-more"><summary>more…</summary><span class="hint-rest"> delta mode = diverging ramp: hue = Δ sign, saturation = |Δ|/p95, <b>neutral gray at zero</b> (§4f dataviz rail, validated); size buckets = per-level notional classes. Archived days state their download size <b>before</b> fetching (~27 MiB/day) and render labeled <b>archived day · hf dataset</b>. Naked POC overlay = prior-day POCs never revisited (registry-derived, age labeled).</span></details></div>
     </section>
 
     <!-- Row A, right ~1/3 (spans both auction rows): the levels registry. -->
