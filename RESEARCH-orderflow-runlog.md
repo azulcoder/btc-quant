@@ -307,3 +307,119 @@ per-pair loop **1.48e-12**; OHLC exact, `volume` **2.40e-12**, `delta` **3.37e-1
 pure-Python splitting loop — 36/36 buckets, `vpin` **1.95e-12**, and the two new
 `window_span_s` / `window_gap_s` columns **exact** (0.0) against the same loop.
 `SCHEMA_VERSION` bumped to `2`, so no pre-review cached bar can be read back.
+
+---
+
+## 8. What M7 bought THIS module, measured (2026-08-02)
+
+M7 (`scripts/ingest_vision.py`, the `vision` source class, `check_ticks --vision`) is
+written up in full in **RESEARCH-vision-runlog.md**. This section records only the part
+that lands on `orderflow.py`, because §6's verdict above — *"the machinery works, the data
+does not yet exist"* — is now **half wrong and half unchanged**, and which half depends on
+the column.
+
+### 8.1 The one-line answer
+
+`data.binance.vision` publishes `futures/um/daily/aggTrades/BTCUSDT` for
+**2019-12-31 .. 2026-08-01 = 2,406 days = 6.587 yrs, zero missing days**, in the same
+aggTradeId space `binancef-aggTrades` already records. That is **244 % of MinBTL(N=5)**
+(209 % of N=20, 181 % of N=100) for every family whose clock needs only trades. It is
+**0 %** for every family that needs a book: the archive publishes no depth snapshots at
+all, so OFI, weighted mid / microprice, book imbalance, depth sums, the depth-imbalance
+slope and walls stay exactly where §6 left them — **1.8 % of MinBTL(5)**, buyable only
+with collector uptime (STRATEGY N4). §6's three numbers are therefore `[SUPERSEDED]` **as
+a summary of the module** and still exact **as a statement about the book families**.
+
+### 8.2 Dogfooded on the real trees, not asserted
+
+A genuinely mixed frame, built with the explicit opt-in against the live
+`data/vision/` tree (3 ingested days) and the closed recorded day file — `binancef`, 1h,
+`source=("local", "vision")`, `2026-07-31 .. 2026-08-02`:
+
+```
+frame 48 x 48;  source_code:  24 bars local (1.0) | 24 bars vision (3.0)
+attrs["archive"]: days 1 archive / 1 recorded · bars 24 / 24 · fraction 0.50
+                  book_bars_lost 24
+
+notna fraction BY source_code           local      vision
+  ofi_binancef                          0.875       0.000
+  mid_binancef                          0.875       0.000
+  depth_slope_imb_binancef              0.875       0.000
+  coverage_book_binancef                1.000       0.000
+  volume                                1.000       1.000
+  trade_count                           1.000       1.000
+```
+
+Every book column is NaN on **every** archive bar and non-NaN on the recorded ones, while
+the trade-derived columns span both — the split is visible in the frame itself, not only
+in prose. `coverage_book_*` is in that list deliberately: it is a **witness** measure, so
+0.0 means "the leg was observed and was silent", which on an archive day would be a
+fabricated zero. Unknown, not zero.
+
+The history block on that same frame, which is the number a reader is most likely to
+mis-quote:
+
+```
+fraction_of_minbtl_requested_window   0.203 %   <- the window ASKED FOR, not history
+fraction_of_minbtl_trade_derived      0.203 %
+fraction_of_minbtl_book_derived       0.102 %
+fraction_of_minbtl                    0.102 %   <- unqualified = SHORTEST family
+```
+
+The unqualified key equals the **book** number, because a frame mixing both families is
+only as long as its shortest one. `attrs["history"]["split_statement"]` says so per call,
+computed from the days that actually contributed rows, so it cannot go stale as the
+archive grows.
+
+### 8.3 Two limits specific to this module, both measured, neither fixed
+
+1. **The archive extends `binancef`. The M1 smoke runs on `bybit`.** `DEFAULT_VENUE =
+   "bybit"` (`scripts/orderflow_smoke.py:59`), chosen in §5 because bybit was the one
+   instrument with both a trade and a book leg across the 18-day window. `data.binance.vision`
+   is Binance's own distribution of Binance's own data; there is no bybit partition in it and
+   there never will be. So M7 buys the **default smoke exactly nothing**, and the second
+   reason is independent of the first: `--source` accepts only `{auto, local, hf}`
+   (`orderflow_smoke.py:89`) — the smoke has **no vision path at all**. Any future claim that
+   "the smoke now has 6.587 years" has to change both, and changing them means re-deciding
+   which venue the smoke reads, which is a research decision, not a flag.
+2. **Nothing was re-scored, and nothing should be read as re-scored.** §6's negative result
+   (OOS Sharpe −3.1 to −10.3 net of 12 bps, CPCV path SRs −23.6 to +4.1) stands unchanged
+   and untouched. It was a statement about transaction costs on a 3-week sample; a longer
+   trade-derived history makes it *testable*, not *answered*. Clearing MinBTL is necessary,
+   never sufficient — a pre-registered hypothesis and a kill criterion are still required
+   (DEVELOPMENT §6), and none exists yet.
+
+### 8.4 The smoke's own exit code is now overloaded — measured, and NOT M7's doing
+
+`make orderflow-smoke` on its default 18-day window currently fails before it builds a
+single bar:
+
+```
+OrderFlowError: cannot open the tick store: Invalid Input Error: Failed to read file
+"hf://datasets/azulcoder/btc-quant-ticks/data/date=2026-07-0X/depth_snapshots.parquet":
+ZSTD Decompression failure
+```
+
+Three consecutive runs failed on a **different day each time** (07-08, 07-05, 07-07), and
+an unmodified `HEAD` tree extracted with `git archive` failed the same way (07-06) — so it
+is a Hub transport failure on a ~2 GB multi-file materialize, **pre-existing and
+independent of M7**, not a corrupt object and not a regression. Isolating it: a single
+partition decompresses fine 3/3 (`sum(length(bids))` over 2026-07-08 = 104,743,978), and
+the 18-file `count(*)` union also succeeds — only the full-payload multi-file
+materialize trips. A narrower window runs clean and exits 0 with the right verdict:
+
+```
+python3 scripts/orderflow_smoke.py --start 2026-07-05 --end 2026-07-09
+  4 of 4 days resolved (4 contributed rows) · 7 of 96 usable bars
+  requested window 0.0110 yrs = 0.4 % of MinBTL(5)   [NOT history]
+  resolved history 0.0110 yrs = 0.4 % of MinBTL(5)   [what was actually read]
+  VERDICT: INSUFFICIENT HISTORY
+```
+
+That run is also what exercises M7's only change to the smoke: it prints the requested
+window and the resolved history as **two separate lines with two separate labels**,
+because the old single line divided the *requested window* by MinBTL — a two-day frame
+asking for six years reported `2.4412`, numerically identical to the 244 % the docs quote
+for the whole archive (vision runlog §9.5). Recorded here rather than fixed: making the
+smoke degrade to a printed verdict on an unreadable source would convert a transport
+failure into a number, which is the inverse of the rail this module exists to hold.

@@ -191,11 +191,65 @@ class StoreLocked(Exception):
 _DAY_FILE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
-def _store_size_bytes(path: Path) -> int:
-    """Store size on disk: the file itself, or (dir mode) every day file summed."""
+def _store_size_bytes(path: Path, mode: str = "recorded") -> int:
+    """Store size on disk: the file itself, (dir mode) every day file summed, or
+    (vision mode) every parquet partition under the archive root summed."""
+    if mode == "vision":
+        return sum(f.stat().st_size for f in Path(path).rglob("*.parquet"))
     if path.is_dir():
         return sum(f.stat().st_size for f in path.glob("*.duckdb"))
     return path.stat().st_size
+
+
+# --------------------------------------------------------------------------- #
+# Vision mode (DESIGN §3d): grade the PUBLIC-ARCHIVE partition with the SAME    #
+# code path as the recorded store. One gate definition, never two — the same    #
+# reason GAP_MS is pinned across this file and btcquant/orderflow.py.           #
+# --------------------------------------------------------------------------- #
+#: ``collector._TABLE_COLUMNS["trades"]`` — restated, like TABLES above, so a
+#: copied tree grades on a duckdb-only machine.
+_VISION_TRADES_COLUMNS = (
+    "exchange", "symbol", "trade_id", "ts_ms", "price", "qty", "aggressor_buy",
+)
+#: Hive partition dir under an archive family root.
+_VISION_PART_RE = re.compile(r"date=(\d{4}-\d{2}-\d{2})$")
+
+
+def connect_vision_readonly(
+    root: Path,
+) -> tuple["duckdb.DuckDBPyConnection", list[Path], list[str]]:
+    """Read-only view over ``<root>/date=*/trades.parquet`` (DESIGN §3d tree).
+
+    Returns ``(con, parquet_files, dates)``. Built as an explicit file list with
+    an explicit column projection rather than a glob-with-``SELECT *``: the hive
+    reader synthesises an extra ``date`` column that the recorded ``trades``
+    table does not have, and a union view that silently changed shape by backend
+    is exactly the class of drift this gate exists to catch.
+
+    Each row carries the same synthetic ``rowid`` scheme dir mode uses
+    (``partition_index * 2^40 + row_number``) so every existing query runs
+    unchanged — but see :func:`sec_integrity`: in vision mode that rowid is
+    **file order, not arrival order**, and the ts-inversion check says so instead
+    of passing vacuously.
+    """
+    parts: list[tuple[str, Path]] = []
+    for d in sorted(Path(root).glob("date=*")):
+        m = _VISION_PART_RE.search(d.name)
+        pq = d / "trades.parquet"
+        if m and pq.exists():
+            parts.append((m.group(1), pq))
+    con = duckdb.connect()
+    if not parts:
+        return con, [], []
+    proj = ", ".join(f'"{c}"' for c in _VISION_TRADES_COLUMNS)
+    union = " UNION ALL ".join(
+        f"SELECT {proj}, {i}::BIGINT * 1099511627776 + "
+        f"(row_number() OVER () - 1) AS \"rowid\" "
+        f"FROM read_parquet('{str(p).replace(chr(39), chr(39) * 2)}')"
+        for i, (_, p) in enumerate(parts)
+    )
+    con.execute(f"CREATE VIEW trades AS {union}")  # noqa: S608 — validated paths
+    return con, [p for _, p in parts], [d for d, _ in parts]
 
 
 def connect_dir_readonly(
@@ -283,6 +337,7 @@ def sec_inventory(
     wall_ms: int,
     day_files: Optional[list[Path]] = None,
     skipped_locked: Optional[list[Path]] = None,
+    mode: str = "recorded",
 ) -> tuple[dict, Optional[int]]:
     """Rows / exchanges / ts span per table, file size, projected GB/30d.
 
@@ -299,8 +354,26 @@ def sec_inventory(
     anchor: Optional[int] = None
     total_rows = 0
 
+    if mode == "vision":
+        # The archive family being graded publishes ONE table. Saying so up front
+        # is the difference between "absent by construction" and "empty", and
+        # those are different facts (the §0.7 zero-vs-unknown rail, applied to a
+        # whole table instead of a bar).
+        lines.append(
+            "[INFO] archive family aggTrades publishes TRADES ONLY — depth_snapshots / "
+            "liquidations / funding_mark / open_interest are ABSENT BY CONSTRUCTION here, "
+            "not empty. Every book-derived feature (OFI, weighted mid, depth-imbalance "
+            "slope, walls) gains NOTHING from this partition."
+        )
+
     for table in TABLES:
         if table not in present:
+            if mode == "vision":
+                # Absence is the documented shape of this partition, not damage.
+                verdicts.append("INFO")
+                lines.append(f"{table:<16} absent by construction (archive publishes trades only)")
+                per_table[table] = {"present": False, "absent_by_construction": True}
+                continue
             # A duckdb file without the collector schema is not a tick store —
             # that is corruption territory (wrong file), not a young store.
             verdicts.append("FAIL")
@@ -330,7 +403,7 @@ def sec_inventory(
     # ESTIMATE (DuckDB compression + block overhead vary with table mix) — the
     # point is a sanity order-of-magnitude against DESIGN §3's honest sizing note
     # (~0.5–1 GB/month trades + ~0.1 GB/month depth), not an accounting number.
-    size_b = _store_size_bytes(db_path)
+    size_b = _store_size_bytes(db_path, mode)
     window_start = (anchor if anchor is not None else wall_ms) - int(hours * 3_600_000)
     win_rows = 0
     for table in TABLES:
@@ -357,7 +430,11 @@ def sec_inventory(
     if day_files is not None:
         day_data = {"attached": [str(f) for f in day_files],
                     "skipped_locked": [str(f) for f in (skipped_locked or [])]}
-        for f in day_files:
+        if mode == "vision":
+            lines.append(
+                f"partitions {len(day_files)} parquet file(s) under {db_path}"
+            )
+        for f in day_files if mode != "vision" else []:
             lines.append(f"day {f.name:<20} {_fmt_bytes(f.stat().st_size)}")
         for f in skipped_locked or []:
             lines.append(
@@ -383,8 +460,16 @@ def sec_inventory(
 # --------------------------------------------------------------------------- #
 # Section 2 — Integrity: things that must NEVER be true of honest data.        #
 # --------------------------------------------------------------------------- #
-def sec_integrity(con, present: set, window_start: int) -> dict:
-    """Duplicate trade ids (FAIL), ts inversions (WARN), NULL/NaN/<=0 (FAIL)."""
+def sec_integrity(con, present: set, window_start: int, mode: str = "recorded") -> dict:
+    """Duplicate trade ids (FAIL), ts inversions (WARN), NULL/NaN/<=0 (FAIL).
+
+    ``mode="vision"`` changes exactly one thing, and it changes it toward LESS
+    confidence: the archive parquet is written ``ORDER BY ts_ms``, so DuckDB's
+    rowid there is FILE order, not arrival order, and an inversion check over it
+    would pass by construction while proving nothing. It reports
+    ``[INFO] not applicable`` instead of ``[OK]``. The duplicate-``trade_id``
+    FAIL is **unchanged** — being an archive earns no exemption.
+    """
     lines: list[str] = []
     verdicts: list[str] = []
     data: dict[str, Any] = {}
@@ -412,27 +497,37 @@ def sec_integrity(con, present: set, window_start: int) -> dict:
         # store that IS arrival order, so ts_ms < previous ts_ms flags a frame
         # that arrived out of order. WS out-of-order genuinely happens
         # (reconnect replays), so a small rate is wire reality: WARN >0.1%, not FAIL.
-        inversions, steps = con.execute(
-            """WITH recent AS (
-                   SELECT exchange, symbol, ts_ms, rowid AS rid
-                   FROM trades WHERE ts_ms >= ?),
-               scan AS (
-                   SELECT ts_ms - lag(ts_ms) OVER (
-                       PARTITION BY exchange, symbol ORDER BY rid) AS d
-                   FROM recent)
-               SELECT count(*) FILTER (WHERE d < 0), count(d) FROM scan""",
-            [window_start],
-        ).fetchone()
-        rate = (inversions / steps) if steps else 0.0
-        data["ts_inversions"] = inversions
-        data["ts_steps"] = steps
-        data["ts_inversion_rate"] = rate
-        v = "WARN" if rate > INVERSION_WARN_RATE else "OK"
-        verdicts.append(v)
-        lines.append(
-            f"[{v}] non-monotonic ts (window, arrival order): {inversions}/{steps} "
-            f"steps = {rate:.4%} — WARN if >{INVERSION_WARN_RATE:.1%}"
-        )
+        if mode == "vision":
+            data["ts_inversions"] = None
+            data["ts_inversion_applicable"] = False
+            verdicts.append("INFO")
+            lines.append(
+                "[INFO] non-monotonic ts: NOT APPLICABLE — the archive parquet is written "
+                "ORDER BY ts_ms, so arrival order is not recoverable and a pass here would "
+                "be vacuous. Reported as un-checkable rather than as OK."
+            )
+        else:
+            inversions, steps = con.execute(
+                """WITH recent AS (
+                       SELECT exchange, symbol, ts_ms, rowid AS rid
+                       FROM trades WHERE ts_ms >= ?),
+                   scan AS (
+                       SELECT ts_ms - lag(ts_ms) OVER (
+                           PARTITION BY exchange, symbol ORDER BY rid) AS d
+                       FROM recent)
+                   SELECT count(*) FILTER (WHERE d < 0), count(d) FROM scan""",
+                [window_start],
+            ).fetchone()
+            rate = (inversions / steps) if steps else 0.0
+            data["ts_inversions"] = inversions
+            data["ts_steps"] = steps
+            data["ts_inversion_rate"] = rate
+            v = "WARN" if rate > INVERSION_WARN_RATE else "OK"
+            verdicts.append(v)
+            lines.append(
+                f"[{v}] non-monotonic ts (window, arrival order): {inversions}/{steps} "
+                f"steps = {rate:.4%} — WARN if >{INVERSION_WARN_RATE:.1%}"
+            )
 
     # (c) NULL / NaN / <=0 in value columns anywhere (whole store — corruption
     # does not expire with the window). The collector normalizers float() real
@@ -655,6 +750,217 @@ def sec_liquidations(con, present: set) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Section 5b — ID continuity (VISION ONLY): the census a clock cannot do.      #
+# --------------------------------------------------------------------------- #
+def sec_partition_containment(con, parquet_files: Optional[list[Path]]) -> dict:
+    """A ``date=D`` partition holds day-D rows and nothing else. FAIL otherwise.
+
+    Vision-only, and it grades at the same severity as the duplicate-``trade_id``
+    check because it is the same class of fact: the whole per-UTC-day provenance
+    design (DESIGN §0.7 rail a) assumes a partition IS its day. If it is not,
+    ``orderflow`` unions those rows into ANOTHER day's bars — a day that may have
+    resolved to the recorded store and is therefore labelled RECORDED. Archive
+    rows becoming indistinguishable from recorded rows is the failure the whole
+    item is designed against, and no other check in this file can see it: the
+    ids need not collide, the timestamps are internally consistent, and the
+    union view drops the partition date entirely.
+
+    The recorded side has had this gate all along —
+    ``upload_hf.stage_day`` aborts with "a day file IS its partition" before
+    export. This is its archive-side twin, and it is a READ-side gate on purpose:
+    the write-side gate (``ingest_vision`` G4a) cannot cover a tree that was
+    copied, rsynced or half-written by an interrupted move, and the §3d tree is
+    designed to be copied.
+
+    Deliberately more expensive than the reader's version of the same check:
+    ``orderflow`` bounds ``ts_ms`` with the parquet row-group ``min``/``max``
+    (0.16 ms/file, statistics only — enough to REFUSE), while a QA card should
+    say how many rows offend, which costs a scan of one column
+    (measured 1.62 ms per day-file, ≈3.9 s over the full 2,406-day history).
+    """
+    lines: list[str] = []
+    verdicts: list[str] = []
+    data: dict[str, Any] = {"partitions": [], "offenders": []}
+    for pq in parquet_files or []:
+        m = _VISION_PART_RE.search(pq.parent.name)
+        if not m:
+            continue
+        date = m.group(1)
+        a = int(datetime.strptime(date, "%Y-%m-%d")
+                .replace(tzinfo=timezone.utc).timestamp() * 1000)
+        b = a + 86_400_000
+        n, tmin, tmax, outside = con.execute(
+            f"""SELECT count(*), min(ts_ms), max(ts_ms),
+                       count(*) FILTER (WHERE ts_ms < {a} OR ts_ms >= {b})
+                FROM read_parquet('{str(pq).replace(chr(39), chr(39) * 2)}')"""
+        ).fetchone()
+        entry = {"date": date, "path": str(pq), "rows": int(n),
+                 "ts_min_ms": int(tmin) if tmin is not None else None,
+                 "ts_max_ms": int(tmax) if tmax is not None else None,
+                 "rows_outside_own_day": int(outside)}
+        data["partitions"].append(entry)
+        if outside:
+            data["offenders"].append(entry)
+            verdicts.append("FAIL")
+            lines.append(
+                f"[FAIL] date={date}: {outside:,} of {n:,} row(s) fall OUTSIDE their own "
+                f"UTC day ({_fmt_ts(tmin)} .. {_fmt_ts(tmax)}). A partition IS its day — "
+                "provenance is resolved per UTC day, so these rows would be read into "
+                "ANOTHER day's bars, and that day may be labelled RECORDED. Re-ingest it "
+                "(scripts/ingest_vision.py --force); nothing here is filled or moved."
+            )
+        else:
+            verdicts.append("OK")
+            lines.append(f"[OK] date={date}: {n:,} row(s), all inside the day the path claims")
+    if not lines:
+        lines.append("[OK] no partitions to check")
+        verdicts.append("OK")
+    data["partitions_checked"] = len(data["partitions"])
+    data["partitions_failing"] = len(data["offenders"])
+    return {"name": "partition containment (archive)", "verdict": _worst(*verdicts),
+            "lines": lines, "data": data}
+
+
+def sec_id_continuity(con, present: set, dates: Optional[list[str]] = None) -> dict:
+    """Missing aggTradeIds inside each day, and day-to-day seams. REPORT, never fill.
+
+    This is the strongest thing the archive partition makes possible and it is
+    the whole reason M7 is admissible under DESIGN §0.7. Everywhere else in this
+    file a hole is inferred from SILENCE (>30 s between prints — a heuristic that
+    cannot distinguish a dead leg from a quiet market). Here the venue's own
+    monotonic counter states it: if ids 5..7 never appear, three trades are
+    missing, full stop. No threshold, no guess.
+
+    So it is graded honestly in both directions: a hole is a WARN (it is real
+    missing data and someone should look) and it is **never** filled, padded or
+    interpolated. A seam mismatch across a day boundary is the same — reported,
+    never patched, because patching would be inventing trades that the archive
+    did not publish.
+    """
+    lines: list[str] = []
+    verdicts: list[str] = []
+    data: dict[str, Any] = {"per_pair": {}, "seams": []}
+    if "trades" not in present:
+        return {"name": "id continuity (archive)", "verdict": "OK",
+                "lines": ["[OK] no trades table — nothing to grade"], "data": data}
+
+    # The census is PER DAY and summed, never one span over the whole union.
+    # An ingested range is a range the OPERATOR chose: a tree holding 07-30 and
+    # 08-01 has a 1.1 M-id "gap" that is simply the un-ingested 07-31, and
+    # calling that missing data reports a deliberate range choice as a defect —
+    # the exact reasoning the seam block below already applies. Grading it wrong
+    # is worse than not grading it: this is the one census in the file that is
+    # EXACT rather than a silence heuristic, and a census that cries wolf on a
+    # partial backfill teaches the operator to ignore it.
+    rows = con.execute(
+        f"""SELECT exchange, symbol, ts_ms // {86_400_000} AS d, count(*),
+                   count(DISTINCT trade_id),
+                   min(CAST(trade_id AS BIGINT)), max(CAST(trade_id AS BIGINT))
+            FROM trades GROUP BY 1, 2, 3 ORDER BY 1, 2, 3"""
+    ).fetchall()
+    per_pair: dict[str, dict[str, Any]] = {}
+    for ex, sym, d, n, ids, imin, imax in rows:
+        key = f"{ex}/{sym}"
+        e = per_pair.setdefault(key, {
+            # `distinct_in_day`, not `distinct`: this sums per-day distinct
+            # counts, so it says nothing about an id repeated across two days.
+            # That case is graded where it belongs — the global duplicate FAIL in
+            # sec_integrity — and a field that quietly meant two things would be
+            # the kind of half-true number this census exists to replace.
+            "rows": 0, "distinct_in_day": 0, "days": 0, "id_holes_in_day": 0,
+            "per_day": [], "id_min": int(imin), "id_max": int(imax),
+        })
+        span_d = int(imax) - int(imin) + 1
+        holes_d = span_d - int(n)
+        e["rows"] += int(n)
+        e["distinct_in_day"] += int(ids)
+        e["days"] += 1
+        e["id_holes_in_day"] += int(holes_d)
+        e["id_min"] = min(e["id_min"], int(imin))
+        e["id_max"] = max(e["id_max"], int(imax))
+        date = datetime.fromtimestamp(int(d) * 86400, tz=timezone.utc).strftime("%Y-%m-%d")
+        e["per_day"].append({"epoch_day": int(d), "date": date, "rows": int(n),
+                             "id_min": int(imin), "id_max": int(imax),
+                             "id_span": span_d, "id_holes": int(holes_d)})
+    for key, e in per_pair.items():
+        e["per_day"].sort(key=lambda p: p["epoch_day"])
+        # Ids that fall BETWEEN two ingested days are only missing data when the
+        # two days are calendar-ADJACENT — then the venue's counter really did
+        # skip them. Between NON-adjacent days they are the days the operator did
+        # not ask for, and counting those as missing reports a range choice as a
+        # defect (a 2-day tree skipping one day used to report that day's whole
+        # row count as "missing ids"). Same reasoning the seam block below
+        # already applies; it just was not applied to the census.
+        seam_missing = 0
+        range_choice = 0
+        for p, q in zip(e["per_day"], e["per_day"][1:]):
+            # A NEGATIVE gap (the next day starting at or below this day's max)
+            # is an overlap, not missing ids; it is not counted here and the seam
+            # block below WARNs on it, since first_id(D) != last_id(D-1)+1.
+            gap = q["id_min"] - p["id_max"] - 1
+            if q["epoch_day"] == p["epoch_day"] + 1:
+                seam_missing += max(0, gap)
+            else:
+                range_choice += max(0, gap)
+        e["id_holes_across_adjacent_days"] = int(seam_missing)
+        e["ids_between_non_adjacent_days"] = int(range_choice)
+        # The one number to quote: genuinely missing ids, in-day + adjacent seams.
+        e["id_holes"] = int(e["id_holes_in_day"] + seam_missing)
+        e["id_span_overall"] = e["id_max"] - e["id_min"] + 1
+        data["per_pair"][key] = e
+        v = "WARN" if e["id_holes"] > 0 else "OK"
+        verdicts.append(v)
+        lines.append(
+            f"[{v}] {key}: {e['rows']:,} rows over {e['days']:,} day(s) -> "
+            f"{e['id_holes']:,} missing id(s) ({e['id_holes_in_day']:,} inside days, "
+            f"{seam_missing:,} across adjacent days) — REPORTED, never filled"
+        )
+        for p in e["per_day"]:
+            if p["id_holes"]:
+                lines.append(
+                    f"      {p['date']}: {p['rows']:,} rows, id span {p['id_span']:,} "
+                    f"[{p['id_min']:,} .. {p['id_max']:,}] -> {p['id_holes']:,} missing"
+                )
+        if range_choice:
+            lines.append(
+                f"[INFO] {key}: {range_choice:,} further id(s) lie between NON-ADJACENT "
+                "ingested days — that is the un-ingested range, a request choice, not "
+                "missing data (overall id extent "
+                f"[{e['id_min']:,} .. {e['id_max']:,}])"
+            )
+
+    # Seams: first id of each day vs last id of the day before it. Only adjacent
+    # calendar days are compared — a deliberate hole in the ingested range is a
+    # range choice, not a data defect, and calling it one would be noise.
+    seam_rows = con.execute(
+        f"""SELECT ts_ms // {86_400_000} AS d,
+                   min(CAST(trade_id AS BIGINT)), max(CAST(trade_id AS BIGINT))
+            FROM trades GROUP BY 1 ORDER BY 1"""
+    ).fetchall()
+    checked = contiguous = 0
+    for (d0, _mn0, mx0), (d1, mn1, _mx1) in zip(seam_rows, seam_rows[1:]):
+        if int(d1) != int(d0) + 1:
+            continue  # non-adjacent days: not a seam, just a range the user chose
+        checked += 1
+        ok = int(mn1) == int(mx0) + 1
+        contiguous += int(ok)
+        if not ok:
+            date = datetime.fromtimestamp(int(d1) * 86400, tz=timezone.utc).strftime("%Y-%m-%d")
+            data["seams"].append({"date": date, "prev_id_max": int(mx0),
+                                  "first_id": int(mn1), "gap": int(mn1) - int(mx0) - 1})
+    v = "WARN" if checked and contiguous < checked else "OK"
+    verdicts.append(v)
+    lines.append(
+        f"[{v}] cross-day seams: {contiguous}/{checked} contiguous "
+        "(first_id(D) == last_id(D-1)+1) — REPORTED, never patched"
+    )
+    data["seams_checked"] = checked
+    data["seams_contiguous"] = contiguous
+    return {"name": "id continuity (archive)", "verdict": _worst(*verdicts),
+            "lines": lines, "data": data}
+
+
+# --------------------------------------------------------------------------- #
 # Section 6 — Research readiness: the honest MinBTL countdown. INFO ONLY.      #
 # --------------------------------------------------------------------------- #
 def sec_readiness(
@@ -662,6 +968,7 @@ def sec_readiness(
     day_files: Optional[list[Path]],
     skipped_locked: Optional[list[Path]],
     anchor_ms: Optional[int],
+    mode: str = "recorded",
 ) -> dict:
     """How far the recorded history is from MinBTL for N in {5, 20, 100} trials.
 
@@ -694,6 +1001,23 @@ def sec_readiness(
         "hypothesis + kill criterion is still required (DEVELOPMENT §6)"
     ]
     data: dict[str, Any] = {}
+
+    # DESIGN §0.7 rail b, enforced here rather than merely documented: the MinBTL
+    # countdown counts RECORDED days only. Computing ANY number over an archive
+    # partition — even a correct one, even labelled — creates a figure that can
+    # be screenshotted next to the recorded one and read as the same quantity.
+    # It is the one honest clock in this project; it does not get a second input.
+    if mode == "vision":
+        lines.append(
+            "[INFO] readiness is NOT computed over an archive partition — the MinBTL "
+            "countdown counts RECORDED days only (data/ticks/levels.jsonl). Archive "
+            "history extends the TRADE-derived families and nothing else; letting it "
+            "inflate this number would corrupt the gate every downstream verdict stands on."
+        )
+        data.update({"mode": "vision", "computed": False, "span_days": None,
+                     "registry_path": None, "registry_days": None, "minbtl": {},
+                     "pct_toward_target": None})
+        return {"name": "research readiness", "verdict": "INFO", "lines": lines, "data": data}
 
     # Registry path: the rotation root in dir mode; the single-file layout keeps
     # the registry in the sibling rotation dir (data/ticks.duckdb <-> data/ticks/).
@@ -798,6 +1122,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "rotation), unioned read-only; locked day files are skipped honestly.",
     )
     parser.add_argument(
+        "--vision",
+        default=None,
+        help="Grade a PUBLIC-ARCHIVE partition instead (DESIGN §3d): the family root "
+        "data/vision/<venue>/<symbol>/<family>, unioned read-only over its "
+        "date=*/trades.parquet files. Same duplicate-trade_id FAIL, same "
+        "report-never-fill gap census, plus an ID-continuity section — and it REFUSES "
+        "to print a MinBTL readiness number (archive days never count toward it).",
+    )
+    parser.add_argument(
         "--hours",
         type=float,
         default=24.0,
@@ -817,8 +1150,18 @@ def build_report(
     hours: float,
     day_files: Optional[list[Path]] = None,
     skipped_locked: Optional[list[Path]] = None,
+    mode: str = "recorded",
 ) -> dict:
-    """Run every section against an open read-only connection -> report dict."""
+    """Run every section against an open read-only connection -> report dict.
+
+    ``mode="vision"`` grades an archive partition (DESIGN §3d) with the SAME
+    sections — one gate definition, never two. What it changes is listed where it
+    is changed: inventory calls the four missing tables absent-by-construction,
+    integrity reports the ts-inversion check as un-checkable instead of OK,
+    readiness refuses to compute, and two archive-only censuses are added — a
+    partition-containment gate (FAIL, the twin of ``upload_hf.stage_day``'s "a
+    day file IS its partition") and the ID-continuity census.
+    """
     wall_ms = int(time.time() * 1000)
     present = {
         r[0]
@@ -828,7 +1171,7 @@ def build_report(
     }
 
     inventory, anchor = sec_inventory(
-        con, present, db_path, hours, wall_ms, day_files, skipped_locked
+        con, present, db_path, hours, wall_ms, day_files, skipped_locked, mode
     )
     # Window anchored at the newest observation (see sec_inventory WHY); empty
     # store falls back to wall clock, which leaves every window trivially empty
@@ -838,17 +1181,23 @@ def build_report(
 
     sections = [
         inventory,
-        sec_integrity(con, present, window_start),
+        sec_integrity(con, present, window_start, mode),
         sec_coverage(con, present, window_start, anchor_ms),
         sec_coherence(con, present, window_start),
         sec_liquidations(con, present),
+    ]
+    if mode == "vision":
+        sections.append(sec_partition_containment(con, day_files))
+        sections.append(sec_id_continuity(con, present))
+    sections.append(
         # (6) readiness gets the RAW anchor (None when the store is empty) — the
         # wall-clock fallback would invent a "newest local day" out of thin air.
-        sec_readiness(db_path, day_files, skipped_locked, anchor),
-    ]
+        sec_readiness(db_path, day_files, skipped_locked, anchor, mode)
+    )
     overall = _worst(*(s["verdict"] for s in sections))
     return {
         "db": str(db_path),
+        "mode": mode,
         "generated_utc": _fmt_ts(wall_ms),
         "window_hours": hours,
         "window": {"start_ms": window_start, "anchor_ms": anchor_ms,
@@ -863,7 +1212,9 @@ def build_report(
 
 def print_report(report: dict) -> None:
     """Human-readable report card (one [VERDICT] header per section)."""
-    print(f"tick-store QA — {report['db']}")
+    what = ("PUBLIC-ARCHIVE partition QA (DESIGN §3d — trades only)"
+            if report.get("mode") == "vision" else "tick-store QA")
+    print(f"{what} — {report['db']}")
     w = report["window"]
     print(
         f"window: last {report['window_hours']:g}h anchored at {_fmt_ts(w['anchor_ms'])} "
@@ -889,6 +1240,31 @@ def main(argv: Optional[list[str]] = None) -> int:
     if duckdb is None:  # guarded import — actionable hint, run_collector.py idiom
         print(f"ERROR: duckdb missing — {_INSTALL_HINT}", file=sys.stderr)
         return 1
+
+    if args.vision:
+        # Vision mode (DESIGN §3d): grade the archive partition with the same
+        # sections. No lock dance — these are immutable parquet files no writer
+        # holds, which is exactly why the archive tree is parquet and not duckdb.
+        root = Path(args.vision)
+        if not root.exists():
+            print(f"no archive partition yet at {root} — run `make vision-sync` "
+                  "to ingest one. (exit 0)")
+            return 0
+        con, parts, dates = connect_vision_readonly(root)
+        if not parts:
+            con.close()
+            print(f"no date=*/trades.parquet partitions under {root} — nothing to grade. "
+                  "(exit 0)")
+            return 0
+        try:
+            report = build_report(con, root, args.hours, parts, [], mode="vision")
+        finally:
+            con.close()
+        if args.json:
+            print(json.dumps(_json_safe(report), indent=2))
+        else:
+            print_report(report)
+        return report["exit_code"]
 
     db_path = Path(args.db)
     if not db_path.exists():

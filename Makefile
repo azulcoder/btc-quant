@@ -15,7 +15,7 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare dsr-ab scan test fetch dash collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels
+.PHONY: help install backtest compare dsr-ab scan test fetch dash collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
@@ -25,6 +25,8 @@ help:
 	@echo "archive: archive-dry (export closed months to local parquet ONLY) | archive (export + upload to GitHub Releases + prune) | archive-list (what is offsite)"
 	@echo "hf:      hf-sync (closed day files -> HF dataset, verify on Hub, then delete local; ARGS=--dry-run to stage only, ARGS=--yes for cron)"
 	@echo "levels:  backfill-levels (archived HF days -> data/ticks/levels.jsonl registry; idempotent, never touches day files)"
+	@echo "vision:  vision-list (what the PUBLIC archive publishes; downloads nothing) | vision-sync ARGS=\"--start .. --end ..\" | check-vision (L3 QA over the archive partition)"
+	@echo "         vision is TRADES ONLY: it lengthens CVD/footprint/delta/VPIN and gives the book families nothing. Archive rows never count toward the MinBTL readiness meter."
 	@echo "dsr-ab:  A/B/B Deflated-Sharpe convention aid (production A vs B1=1/n vs B2=own Lo/Mertens V); ARGS=--research for N=8, --json"
 	@echo "strategies: buy_and_hold ma_trend_filter tsmom pairs_coint carry"
 	@echo "collector needs opt-in deps: pip install -r requirements-collector.txt"
@@ -154,6 +156,36 @@ bench-render:
 #     reported, never filled). Run while the collector is stopped, or on a copy.
 check-ticks:
 	python3 scripts/check_ticks.py --db data/ticks
+
+# M7 public-archive ingest (DESIGN-orderflow-terminal.md §3d, STRATEGY.md M7).
+# Binance's own published aggTrades archive -> data/vision/ ZSTD parquet, seven
+# verification gates per day (checksum, zip shape, header sniff, day containment,
+# ms-unit, ID continuity, parquet re-read). A SEPARATE tree from data/ticks/:
+# archive rows are never written into a recorded day file, never unioned into an
+# hf:// partition, and never counted by the MinBTL readiness meter.
+#
+# THE LIMIT, because it is the whole point: aggTrades is TRADES ONLY. This
+# lengthens CVD / footprint / size-bucketed delta / VPIN. It gives OFI, weighted
+# mid, depth-imbalance slope and walls NOTHING — the archive publishes no book.
+#
+# Reading it back is an explicit opt-in and never the default:
+#   order_flow_bars(..., source=("local", "hf", "vision"))
+#
+#   make vision-list                                          # enumerate, download nothing
+#   make vision-sync ARGS="--start 2026-07-25 --end 2026-08-01"
+#   make vision-sync ARGS="--all --yes"                       # ~2,406 days, ~41 GiB, hours
+vision-sync:
+	python3 scripts/ingest_vision.py $(ARGS)
+
+vision-list:
+	python3 scripts/ingest_vision.py --list $(ARGS)
+
+# L3 QA over the archive partition — the SAME sections as check-ticks, with the
+# same duplicate-trade_id FAIL and the same report-never-fill gap census, plus an
+# ID-continuity census the recorded store cannot have. It REFUSES to print a
+# MinBTL readiness number: archive days never count toward it.
+check-vision:
+	python3 scripts/check_ticks.py --vision data/vision/binancef/BTCUSDT/aggTrades
 
 # M1 end-to-end smoke (STRATEGY.md M1): recorded ticks -> order-flow bars ->
 # features/walk_forward/DSR/PBO/MinBTL with ZERO harness change. The expected and

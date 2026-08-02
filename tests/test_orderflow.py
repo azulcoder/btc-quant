@@ -915,16 +915,21 @@ def test_provenance_notes_refuse_an_empty_approximation():
 
 
 def test_honesty_sentences_present_verbatim():
-    """The five load-bearing sentences must still be in the module docstring.
+    """The six load-bearing sentences must still be in the module docstring.
 
     Whitespace is normalized (the docstring is reflowed prose) but the wording is
     compared exactly, the ``check_terminal.cjs`` discipline: rewording a label is
     a test failure, not a style choice.
+
+    Six since M7: the sixth is the trades-only limit of the public archive. The
+    COUNT is asserted so a sentence cannot be deleted quietly — a rail that can
+    be removed without a red test is decoration.
     """
     doc = " ".join((of.__doc__ or "").split())
     for sentence in of.HONESTY_SENTENCES:
         assert " ".join(sentence.split()) in doc, sentence
-    assert len(of.HONESTY_SENTENCES) == 5
+    assert len(of.HONESTY_SENTENCES) == 6
+    assert "TRADES ONLY" in of.HONESTY_SENTENCES[5]
 
 
 def test_module_never_imports_dashboard_or_network_clients():
@@ -1376,3 +1381,568 @@ def test_cross_instrument_pairing_is_warned_and_recorded(tmp_path):
     assert bars["micro_minus_mid_bybit"].iloc[0] == pytest.approx(0.0, abs=1e-12)
     # ...while the naive cross-instrument difference is pure basis.
     assert bars["mid_bybit"].iloc[0] - bars["close"].iloc[0] == pytest.approx(40.0)
+
+
+# --------------------------------------------------------------------------- #
+# M7 — the PUBLIC-ARCHIVE source class (DESIGN §3d, §0.7 rails a-d).           #
+#                                                                              #
+# These tests are network-free: a vision partition is seeded by writing the    #
+# §3d tree directly with duckdb, exactly as scripts/ingest_vision.py does.     #
+# What they assert is the rails, and each one is a rail that would be silent   #
+# if it broke: the default must not widen, recorded must win, a bar must not   #
+# mix classes, book columns must be NaN on archive bars, and the readiness     #
+# clock must not move.                                                         #
+# --------------------------------------------------------------------------- #
+def _seed_vision(root: Path, date: str, rows, *, venue: str = "binancef",
+                 symbol: str = "BTCUSDT", family: str = "aggTrades") -> Path:
+    """Write one archive day partition — the same tree ingest_vision.py writes."""
+    part = Path(root) / venue / symbol / family / f"date={date}"
+    part.mkdir(parents=True, exist_ok=True)
+    dest = part / "trades.parquet"
+    con = duckdb.connect()
+    try:
+        con.execute("CREATE TEMP TABLE t (exchange VARCHAR, symbol VARCHAR, "
+                    "trade_id VARCHAR, ts_ms BIGINT, price DOUBLE, qty DOUBLE, "
+                    "aggressor_buy BOOLEAN)")
+        for r in rows:
+            con.execute("INSERT INTO t VALUES (?,?,?,?,?,?,?)", list(r))
+        esc = str(dest).replace("'", "''")
+        con.execute(f"COPY (SELECT * FROM t ORDER BY ts_ms) TO '{esc}' "
+                    "(FORMAT PARQUET, COMPRESSION ZSTD)")
+    finally:
+        con.close()
+    return dest
+
+
+def _vision_trades(date: str, *, ex: str = "binancef", minutes: int = 1440,
+                   step_s: int = 20, qty: float = 2.0, first_id: int = 1) -> list[tuple]:
+    """A metronome archive tape whose volume is DISTINCT from ``_dense_trades``.
+
+    ``step_s`` stays under :data:`of.GAP_MS` so coverage is exactly 1.0 — these
+    tests are about PROVENANCE, and a sparse tape would make every archive bar
+    NaN for a coverage reason and hide whatever the provenance path did.
+    """
+    t0 = _day_ms(date)
+    n = minutes * 60 // step_s
+    return [(ex, "BTCUSDT", str(first_id + i), t0 + i * step_s * 1000,
+             70_000.0 + (i % 5), qty, (i % 2) == 0) for i in range(n)]
+
+
+@pytest.fixture
+def no_hub(monkeypatch):
+    """Make ``source=(..., "hf", ...)`` HERMETIC: the Hub holds nothing.
+
+    Without this, any day not in the seeded local store sends
+    ``_hf_partitions`` at ``glob('hf://datasets/<repo>/data/date=*/*.parquet')``
+    — a live request to huggingface.co. Measured this session: under a real HTTP
+    429 the affected tests fail with ``OrderFlowError: cannot open the tick
+    store``, surfacing through ``pytest.warns`` as the far less helpful
+    ``Failed: DID NOT WARN``. DEVELOPMENT §4 gates every commit on
+    ``python3 -m pytest -q`` and calls the suite network-free; a test that needs
+    the internet to be up and un-throttled makes that claim false.
+
+    Stubbing the LISTING (rather than dropping ``"hf"`` from the call) is the
+    stronger choice: the precedence logic under test is exactly
+    ``hf_has or not want_vision`` — an hf day the Hub does not hold must fall
+    through to ``vision`` — and an empty Hub is the hermetic way to exercise it.
+    """
+    empty = {t: set() for t in of._TABLE_SCHEMA}
+    monkeypatch.setattr(of, "_hf_partitions", lambda con, repo: {t: set(v) for t, v in empty.items()})
+    return empty
+
+
+def test_normalize_source_keeps_auto_recorded_only():
+    """`auto` never widens. That is the whole guard-rail, asserted directly."""
+    assert of._normalize_source("auto") == ("local", "hf")
+    assert "vision" not in of._normalize_source("auto")
+    assert of.SOURCE_ALIASES["auto"] == ("local", "hf")
+    assert of._normalize_source("vision") == ("vision",)
+    # Order is precedence, not call order: recorded always resolves first.
+    assert of._normalize_source(("vision", "hf", "local")) == ("local", "hf", "vision")
+    assert of._normalize_source(["local", "local"]) == ("local",)
+    for bad in ("nope", "", 3, ("local", "nope"), ()):
+        with pytest.raises(of.OrderFlowError):
+            of._normalize_source(bad)
+
+
+def test_default_source_excludes_vision(tmp_path, no_hub):
+    """A vision partition sitting right there must NOT enter a default call.
+
+    Recorded and archive are seeded for the SAME day with DIFFERENT volumes, so
+    "the default ignored the archive" is a numeric fact and not an absence of
+    error.
+    """
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "binancef", minutes=1440, step_s=20))
+    _seed_vision(vroot, DAY, _vision_trades(DAY))
+
+    n_prints = 1440 * 60 // 20
+    recorded_volume = 0.5 * n_prints                # _dense_trades qty
+    archive_volume = 2.0 * n_prints                 # _vision_trades qty
+    assert recorded_volume != archive_volume
+
+    bars = of.order_flow_bars(DAY, DAY2, price_venue="binancef", bar="1h", vpin=False,
+                              store_dir=root, vision_root=vroot, cache=False)
+    assert bars["volume"].sum() == pytest.approx(recorded_volume)
+    assert (bars["source_code"] == of.SOURCE_CODES["local"]).all()
+    assert bars.attrs["orderflow"]["sources_used"] == ["local"]
+    assert bars.attrs["orderflow"]["archive"]["days"] == 0
+    assert bars.attrs["orderflow"]["archive"]["bars"] == 0
+
+    # Same call, explicit opt-in: recorded still WINS this day (precedence), so
+    # opting in never silently changes a day the recorded store already answers.
+    bars2 = of.order_flow_bars(DAY, DAY2, price_venue="binancef", bar="1h", vpin=False,
+                               store_dir=root, vision_root=vroot, cache=False,
+                               source=("local", "hf", "vision"))
+    assert bars2["volume"].sum() == pytest.approx(recorded_volume)
+    assert (bars2["source_code"] == of.SOURCE_CODES["local"]).all()
+
+    # And a day the recorded store does NOT have resolves to the archive only
+    # when the caller asked for it.
+    _seed_vision(vroot, DAY2, _vision_trades(DAY2))
+    d = of.order_flow_bars(DAY2, DAY3, price_venue="binancef", bar="1h", vpin=False,
+                           store_dir=root, vision_root=vroot, cache=False)
+    assert d["volume"].isna().all()                      # default: nothing to read
+    assert (d["source_code"] == of.SOURCE_CODES["unresolved"]).all()
+    with pytest.warns(UserWarning, match="PUBLIC ARCHIVE"):
+        a = of.order_flow_bars(DAY2, DAY3, price_venue="binancef", bar="1h", vpin=False,
+                               store_dir=root, vision_root=vroot, cache=False,
+                               source=("local", "hf", "vision"))
+    assert a["volume"].sum() == pytest.approx(archive_volume)
+    assert (a["source_code"] == of.SOURCE_CODES["vision"]).all()
+
+
+def test_recorded_wins_over_vision_for_the_same_day(tmp_path, no_hub):
+    """`local > hf > vision`: a recorded day is byte-comparable with/without opt-in."""
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "binancef", minutes=1440, step_s=20))
+    _seed_vision(vroot, DAY, _vision_trades(DAY))
+    kw = dict(price_venue="binancef", bar="1h", vpin=False, store_dir=root,
+              vision_root=vroot, cache=False)
+    a = of.order_flow_bars(DAY, DAY2, **kw)
+    b = of.order_flow_bars(DAY, DAY2, source=("local", "hf", "vision"), **kw)
+    assert list(a.columns) == list(b.columns)
+    for col in a.columns:
+        if a[col].dtype == bool:
+            assert (a[col] == b[col]).all(), col
+        else:
+            # Machine precision, not byte identity: DuckDB's parallel float
+            # aggregation is not order-stable (the repo's standing convention).
+            np.testing.assert_allclose(a[col].to_numpy(), b[col].to_numpy(),
+                                       rtol=0, atol=1e-7, equal_nan=True, err_msg=col)
+
+
+def test_bars_never_mix_sources_within_a_bar(tmp_path, no_hub):
+    """One bar, one provenance class — and it is true BY CONSTRUCTION.
+
+    Two halves of the proof: (a) every clock in BAR_FREQS divides the UTC day, so
+    no bar can straddle midnight, and `_bar_ms` refuses one that does not;
+    (b) on a range with a recorded day and an archive day, every bar carries
+    exactly one code and the codes change only at the day boundary.
+    """
+    for b in of.BAR_FREQS:
+        assert of.MS_PER_DAY % of._bar_ms(b) == 0, b
+
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "binancef", minutes=1440, step_s=20))
+    _seed_vision(vroot, DAY2, _vision_trades(DAY2))
+    with pytest.warns(UserWarning, match="PUBLIC ARCHIVE"):
+        bars = of.order_flow_bars(DAY, DAY3, price_venue="binancef", bar="1h",
+                                  vpin=False, store_dir=root, vision_root=vroot,
+                                  cache=False, source=("local", "hf", "vision"))
+    codes = bars["source_code"].to_numpy()
+    assert len(bars) == 48
+    assert set(np.unique(codes)) == {of.SOURCE_CODES["local"], of.SOURCE_CODES["vision"]}
+    assert (codes[:24] == of.SOURCE_CODES["local"]).all()
+    assert (codes[24:] == of.SOURCE_CODES["vision"]).all()
+    # The labelled views agree with the codes.
+    assert list(of.source_labels(bars).unique()) == ["local", "vision"]
+    assert of.archive_mask(bars).sum() == 24
+    assert len(of.drop_archive_bars(bars)) == 24
+
+
+def test_bar_ms_refuses_a_clock_that_does_not_divide_the_day():
+    """The structural half of rail 7, exercised on the guard itself."""
+    assert of.MS_PER_DAY % (7 * 60_000) != 0     # the case the guard exists for
+    import btcquant.orderflow as mod
+    saved = mod.BAR_FREQS
+    try:
+        mod.BAR_FREQS = saved + ("7min",)
+        with pytest.raises(of.OrderFlowError, match="does not divide the UTC day"):
+            mod._bar_ms("7min")
+    finally:
+        mod.BAR_FREQS = saved
+
+
+def test_source_code_is_emitted_even_on_recorded_only_runs(tmp_path):
+    """Its presence must never be the signal — otherwise absence would mean 'recorded'."""
+    root = tmp_path / "ticks"
+    _seed(root, DAY, trades=_dense_trades(DAY, "bybit", minutes=1440, step_s=20))
+    bars = _bars(root, DAY, DAY2, price_venue="bybit", bar="1h", vpin=False)
+    assert "source_code" in bars.columns
+    assert bars["source_code"].dtype == np.dtype("float64")
+    assert (bars["source_code"] == of.SOURCE_CODES["local"]).all()
+    assert bars.attrs["orderflow"]["archive"]["bars"] == 0
+    assert bars.attrs["orderflow"]["archive"]["fraction"] == 0.0
+
+
+def test_book_columns_are_nan_on_archive_days(tmp_path, no_hub):
+    """The split, made numeric: archive bars carry trade columns and NO book.
+
+    This is the defect-class the whole item is designed against — a reader
+    treating an archive-fed frame as if its OFI column meant something.
+    """
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "binancef", minutes=1440, step_s=20),
+          depth=_flat_book("binancef", DAY, minutes=1440, step_s=20, levels=4))
+    _seed_vision(vroot, DAY2, _vision_trades(DAY2))
+    with pytest.warns(UserWarning, match="PUBLIC ARCHIVE"):
+        bars = of.order_flow_bars(DAY, DAY3, price_venue="binancef", book_venue="binancef",
+                                  bar="1h", depth_levels=2, vpin=False, store_dir=root,
+                                  vision_root=vroot, cache=False,
+                                  source=("local", "hf", "vision"))
+    arc = of.archive_mask(bars).to_numpy()
+    assert arc.sum() == 24
+
+    book_cols = [c for c in bars.columns
+                 if any(str(c).startswith(p) for p in of._BOOK_PREFIXES)]
+    assert {"ofi_binancef", "microprice_binancef", "mid_binancef", "spread_binancef",
+            "depth_bid_binancef"} <= set(book_cols)
+    # EVERY one of them, including coverage_book_*: on an archive day the depth
+    # stream was never published, so its liveness is UNKNOWN. A 0.0 there would
+    # claim "the leg was observed and was silent for the whole bar" — an
+    # observation nobody made, i.e. exactly the fabricated zero §0.7 exists to
+    # prevent, and it would make the archive note false about one of the columns
+    # it names. Same decision _open_source already takes for liquidations.
+    for col in book_cols:
+        assert bars.loc[arc, col].isna().all(), col
+    # ...while every recorded bar still has its book, coverage included.
+    assert bars.loc[~arc, "mid_binancef"].notna().all()
+    assert (bars.loc[~arc, "coverage_book_binancef"] > 0.0).all()
+    # ...and the trade family spans BOTH.
+    assert bars["volume"].notna().all()
+    assert bars["delta_binancef"].notna().all()
+
+    a = bars.attrs["orderflow"]["archive"]
+    assert a["days"] == 1 and a["bars"] == 24 and a["book_bars_lost"] == 24
+    assert a["fraction"] == pytest.approx(0.5)
+    assert a["unit"] == "bar"
+    assert "24 of 48 bars" in a["note"]
+    assert "BY CONSTRUCTION" in a["note"]
+
+    # The machine-readable lists are what a consumer asserts on, so every name
+    # in them must be true of the frame. `coverage_book_*` is a quality column
+    # and is listed as one — the note used to call it a book column and claim it
+    # was NaN while it was 0.0.
+    assert "coverage_book_binancef" not in a["book_columns_nan_on_archive_bars"]
+    assert a["quality_columns_nan_on_archive_bars"] == ["coverage_book_binancef"]
+    for col in (a["book_columns_nan_on_archive_bars"]
+                + a["quality_columns_nan_on_archive_bars"]):
+        assert bars.loc[arc, col].isna().all(), col
+    assert "coverage_book_binancef" not in a["note"].split(" — ")[0]
+
+
+def test_liquidation_columns_are_nan_on_archive_days(tmp_path, no_hub):
+    """The archive publishes no liquidation stream: unknown, never a zero."""
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "bybit", minutes=1440, step_s=20))
+    _seed_vision(vroot, DAY2, _vision_trades(DAY2, ex="bybit"))
+    with pytest.warns(UserWarning, match="PUBLIC ARCHIVE"):
+        bars = of.order_flow_bars(DAY, DAY3, price_venue="bybit", bar="1h", vpin=False,
+                                  store_dir=root, vision_root=vroot, cache=False,
+                                  source=("local", "hf", "vision"))
+    arc = of.archive_mask(bars).to_numpy()
+    assert bars.loc[arc, "liq_count_bybit"].isna().all()
+    assert (bars.loc[~arc, "liq_count_bybit"] == 0.0).all()   # recorded + alive == honest 0
+
+
+def test_provenance_table_names_the_archive_per_column(tmp_path):
+    """No reader may mistake an archive-fed CVD for a recorded one."""
+    root = tmp_path / "ticks"
+    _seed(root, DAY, trades=_dense_trades(DAY, "bybit", minutes=1440, step_s=20),
+          depth=_flat_book("bybit", DAY, minutes=1440, step_s=20, levels=4),
+          liqs=[("bybit", "BTCUSDT", _day_ms(DAY) + 1000, "long", 1.0, 1.0, 1.0)])
+    bars = _bars(root, DAY, DAY2, price_venue="bybit", book_venue="bybit", bar="1h")
+    t = of.provenance_table(bars).set_index("column")["vision_contribution"]
+    assert list(of.provenance_table(bars)["column"]) == list(bars.columns)
+    assert (t.str.strip() != "").all()
+    assert t["cvd_bybit"].startswith("rows")
+    assert t["delta_bybit"].startswith("rows")
+    assert t["close"].startswith("rows")
+    assert t["ofi_bybit"] == "none — aggTrades carries no book; this column is NaN on every archive bar"
+    assert t["mid_bybit"].startswith("none —")
+    assert t["depth_slope_bid_bybit"].startswith("none —")
+    assert t["liq_count_bybit"] == "none — the um archive publishes no liquidation stream"
+    assert t["source_code"].startswith("n/a — this column IS")
+    # A witness column cannot answer for a stream the archive never published,
+    # and the generic `quality` sentence ("computed from whatever rows the
+    # resolved source provided") would read as if it could.
+    for col in ("coverage_book_bybit", "coverage_liq_bybit"):
+        assert t[col].startswith("none — the archive publishes no such stream"), col
+    assert t["coverage"].startswith("n/a —")          # the TRADE witness is unaffected
+
+
+def test_every_provenance_family_states_its_archive_contribution():
+    """A new feature family cannot ship without someone deciding what the archive gives it."""
+    fams = {n.family for n in of.PROVENANCE.values()}
+    unmapped = sorted(f for f in fams if f not in of._VISION_FAMILY_MAP)
+    assert unmapped == [], f"families with no vision_contribution decision: {unmapped}"
+    assert set(of._VISION_FAMILY_MAP.values()) <= set(of.VISION_CONTRIBUTION)
+
+
+def test_history_summary_splits_trade_and_book_spans(tmp_path, no_hub):
+    """Gap 1 SPLITS, and the frame reports both spans rather than the flattering one."""
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "binancef", minutes=1440, step_s=20))
+    _seed_vision(vroot, DAY2, _vision_trades(DAY2))
+    with pytest.warns(UserWarning, match="PUBLIC ARCHIVE"):
+        bars = of.order_flow_bars(DAY, DAY3, price_venue="binancef", bar="1h", vpin=False,
+                                  store_dir=root, vision_root=vroot, cache=False,
+                                  source=("local", "hf", "vision"))
+    h = bars.attrs["orderflow"]["history"]
+    assert h["days_resolved"] == 2
+    assert h["days_resolved_recorded"] == 1 and h["days_resolved_archive"] == 1
+    assert h["trade_derived_span_years"] == pytest.approx(2.0 / 365.0)
+    assert h["book_derived_span_years"] == pytest.approx(1.0 / 365.0)
+    need = risk.min_backtest_length(5)
+    assert h["fraction_of_minbtl_trade_derived"]["5"] == pytest.approx((2 / 365.0) / need)
+    assert h["fraction_of_minbtl_book_derived"]["5"] == pytest.approx((1 / 365.0) / need)
+    assert "SPLITS" in h["split_statement"]
+    assert "publishes no book" in h["split_statement"]
+
+    # Recorded-only: the two spans coincide and the statement says so.
+    rec = _bars(root, DAY, DAY2, price_venue="binancef", bar="1h", vpin=False)
+    hr = rec.attrs["orderflow"]["history"]
+    assert hr["trade_derived_span_years"] == hr["book_derived_span_years"]
+    assert "no archive day resolved" in hr["split_statement"]
+
+
+def test_available_days_lists_vision_only_when_asked(tmp_path):
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "binancef", minutes=60, step_s=60))
+    _seed_vision(vroot, DAY2, _vision_trades(DAY2))
+    d = of.available_days(store_dir=root, source="local", vision_root=vroot)
+    assert set(d["date"]) == {DAY}
+    v = of.available_days(store_dir=root, source=("local", "vision"), vision_root=vroot)
+    assert set(v["date"]) == {DAY, DAY2}
+    arc = v[v["date"] == DAY2]
+    assert set(arc["source"]) == {"vision"}
+    assert arc.loc[arc["table"] == "trades", "present"].all()
+    # trades only — the rest are absent BY CONSTRUCTION, and say so.
+    for table in ("depth_snapshots", "liquidations"):
+        row = arc[arc["table"] == table].iloc[0]
+        assert not row["present"]
+        assert "absent by construction" in str(row.get("note", ""))
+
+
+def test_vision_and_recorded_relations_have_the_same_shape(tmp_path, no_hub):
+    """The hive reader synthesises a `date` column; the projection must drop it.
+
+    A union whose shape depended on which backend answered is exactly the drift
+    the explicit projection exists to prevent — and it would show up first as a
+    silently wrong column count, not as an error.
+    """
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "binancef", minutes=1440, step_s=20))
+    _seed_vision(vroot, DAY2, _vision_trades(DAY2))
+    with pytest.warns(UserWarning, match="PUBLIC ARCHIVE"):
+        mixed = of.order_flow_bars(DAY, DAY3, price_venue="binancef", bar="1h",
+                                   vpin=False, store_dir=root, vision_root=vroot,
+                                   cache=False, source=("local", "hf", "vision"))
+    rec = _bars(root, DAY, DAY2, price_venue="binancef", bar="1h", vpin=False)
+    assert list(mixed.columns) == list(rec.columns)
+
+
+def test_a_vision_partition_that_is_not_its_own_day_is_REFUSED(tmp_path, no_hub):
+    """`date=D` holds day-D rows or the tree is not read. Enforced at READ time.
+
+    The whole per-UTC-day provenance design rests on this invariant, and the
+    write-side gate (ingest_vision G4a) cannot be the only enforcement: the tree
+    is designed to be copied between machines, and a partition holding another
+    day's rows would be unioned into THAT day's bars — a day that may have
+    resolved to the recorded store and is labelled `local`. Archive rows becoming
+    indistinguishable from recorded rows is the exact failure the item guards
+    against, so the reader re-checks.
+
+    The contaminating rows here carry ids that do not collide with anything, so
+    no duplicate-id gate can catch them: containment is its own rail.
+    """
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "binancef", minutes=1440, step_s=20))
+    # A partition labelled DAY2 that also carries DAY3 rows.
+    _seed_vision(vroot, DAY2,
+                 _vision_trades(DAY2, minutes=60) + _vision_trades(DAY3, minutes=60,
+                                                                   first_id=900_000))
+    with pytest.raises(of.OrderFlowError, match="outside its own UTC day"):
+        of.order_flow_bars(DAY, DAY3, price_venue="binancef", bar="1h", vpin=False,
+                           store_dir=root, vision_root=vroot, cache=False,
+                           source=("local", "hf", "vision"))
+    # The recorded-only default never touches the tree, so it still answers.
+    rec = _bars(root, DAY, DAY2, price_venue="binancef", bar="1h", vpin=False)
+    assert (rec["source_code"] == of.SOURCE_CODES["local"]).all()
+
+    # A clean partition of the same day reads fine — the refusal is about
+    # containment, not about the archive.
+    _seed_vision(vroot, DAY2, _vision_trades(DAY2))
+    with pytest.warns(UserWarning, match="PUBLIC ARCHIVE"):
+        ok = of.order_flow_bars(DAY, DAY3, price_venue="binancef", bar="1h", vpin=False,
+                                store_dir=root, vision_root=vroot, cache=False,
+                                source=("local", "hf", "vision"))
+    assert of.archive_mask(ok).sum() == 24
+    checked = ok.attrs["orderflow"]["manifest"]["vision_partitions_checked"]
+    assert [c["date"] for c in checked] == [DAY2]
+
+
+def test_the_archive_warning_is_re_emitted_on_a_cache_hit(tmp_path, monkeypatch, no_hub):
+    """`cache=True` is the DEFAULT, so a warning it skips is not mandatory.
+
+    Four of the five provenance labels already survive the round trip (the
+    `source_code` column and the attrs blocks come back from the JSON sidecar).
+    The fifth — the sentence that tells a reader half the frame has no book — was
+    emitted only on the miss.
+    """
+    monkeypatch.setattr(of, "_ORDERFLOW_CACHE", tmp_path / "of-cache")
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "binancef", minutes=1440, step_s=20))
+    _seed_vision(vroot, DAY2, _vision_trades(DAY2))
+    kw = dict(price_venue="binancef", bar="1h", vpin=False, store_dir=root,
+              vision_root=vroot, cache=True, source=("local", "hf", "vision"))
+    with pytest.warns(UserWarning, match="PUBLIC ARCHIVE"):
+        first = of.order_flow_bars(DAY, DAY3, **kw)
+    with pytest.warns(UserWarning, match="PUBLIC ARCHIVE"):
+        second = of.order_flow_bars(DAY, DAY3, **kw)
+    assert second.attrs["orderflow"]["archive"]["bars"] == \
+        first.attrs["orderflow"]["archive"]["bars"] == 24
+    assert (second["source_code"].to_numpy() == first["source_code"].to_numpy()).all()
+
+
+def test_volume_buckets_carries_the_same_five_archive_labels(tmp_path, no_hub):
+    """VPIN is the family the archive extends furthest, so it gets the labels.
+
+    Its volume clock needs only trades, which is exactly why an archive-fed VPIN
+    table is the most likely one to be built — and it was the one table that
+    carried no `source_code`, no archive block and no warning.
+    """
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "binancef", minutes=1440, step_s=20))
+    _seed_vision(vroot, DAY2, _vision_trades(DAY2))
+
+    # `bucket_volume` is PINNED here: the causal prior-days rule has no prior day
+    # for the first day of the range, and this test is about provenance labels,
+    # not about the volume clock.
+    kw = dict(venue="binancef", store_dir=root, bucket_volume=500.0, window_buckets=2)
+
+    # 1. default is recorded-only, and the archive tree is right there.
+    rec = of.volume_buckets(DAY, DAY3, vision_root=vroot, **kw)
+    assert "source_code" in rec.columns
+    assert set(of.source_labels(rec).unique()) == {"local"}
+    assert rec.attrs["orderflow"]["archive"]["bars"] == 0
+
+    # 2. opt-in labels every bucket, warns once, and says which unit it counted.
+    with pytest.warns(UserWarning, match="PUBLIC ARCHIVE"):
+        mix = of.volume_buckets(DAY, DAY3, vision_root=vroot,
+                                source=("local", "hf", "vision"), **kw)
+    a = mix.attrs["orderflow"]["archive"]
+    assert a["unit"] == "bucket" and "bucket" in a["note"]
+    assert a["days"] == 1 and a["bars"] == int(of.archive_mask(mix).sum()) > 0
+    assert set(of.source_labels(mix).unique()) == {"local", "vision"}
+    # The label is per bucket and agrees with the bucket's own UTC day.
+    day2 = mix["epoch_day"] == (_day_ms(DAY2) // MS_DAY)
+    assert (of.archive_mask(mix)[day2]).all()
+    assert not (of.archive_mask(mix)[~day2]).any()
+    # ...and vision_root is honoured, so the module default is never silently read.
+    empty = of.volume_buckets(DAY, DAY3, vision_root=tmp_path / "nowhere",
+                              source=("local", "hf", "vision"), **kw)
+    assert set(of.source_labels(empty).unique()) == {"local"}
+
+
+def test_fraction_of_minbtl_is_never_the_requested_window(tmp_path, no_hub):
+    """A 2-day frame must not report 244 % of MinBTL(5) because it ASKED for 6 yrs.
+
+    The unqualified key used to divide the requested window by MinBTL, which is
+    the same number the docs quote for the whole 2,406-day archive — produced by
+    a call that read two days.
+    """
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "binancef", minutes=1440, step_s=20))
+    _seed_vision(vroot, DAY2, _vision_trades(DAY2))
+    with pytest.warns(UserWarning):
+        bars = of.order_flow_bars("2019-12-31", DAY3, price_venue="binancef", bar="1h",
+                                  vpin=False, store_dir=root, vision_root=vroot,
+                                  cache=False, source=("local", "hf", "vision"))
+    h = bars.attrs["orderflow"]["history"]
+    need = risk.min_backtest_length(5)
+    assert h["days_requested"] > 1800 and h["days_resolved"] == 2
+    # The window basis is still available — under a name that says what it is.
+    assert h["fraction_of_minbtl_requested_window"]["5"] > 1.0   # "clears MinBTL(5)"
+    assert h["fraction_of_minbtl_requested_window"]["5"] == \
+        pytest.approx(h["span_years"] / need)
+    # The unqualified key is history, and history is the SHORTEST family.
+    assert h["fraction_of_minbtl"]["5"] == pytest.approx((1 / 365.0) / need)
+    assert h["fraction_of_minbtl"]["5"] == min(
+        h["fraction_of_minbtl_trade_derived"]["5"],
+        h["fraction_of_minbtl_book_derived"]["5"])
+    assert h["fraction_of_minbtl"]["5"] < 0.01
+    assert "shortest family" in h["fraction_of_minbtl_basis"]
+
+
+def test_an_archive_day_with_no_rows_for_this_venue_adds_no_history(tmp_path, no_hub):
+    """A day that resolved but supplied nothing is not history somebody read.
+
+    The archive partition holds binancef/BTCUSDT. Ask for another venue and the
+    partition still RESOLVES structurally — it must not lengthen the span the
+    whole item exists to make honest.
+    """
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "coinbase", minutes=1440, step_s=20))
+    _seed_vision(vroot, DAY2, _vision_trades(DAY2))          # binancef rows only
+    with pytest.warns(UserWarning):
+        bars = of.order_flow_bars(DAY, DAY3, price_venue="coinbase", bar="1h", vpin=False,
+                                  store_dir=root, vision_root=vroot, cache=False,
+                                  source=("local", "hf", "vision"))
+    arc = of.archive_mask(bars).to_numpy()
+    assert arc.sum() == 24                      # still LABELLED archive, honestly
+    assert bars.loc[arc, "volume"].isna().all()  # ...and empty, visibly
+    h = bars.attrs["orderflow"]["history"]
+    assert h["days_resolved"] == 2 and h["days_contributing_rows"] == 1
+    assert h["days_resolved_without_rows"] == [DAY2]
+    assert h["trade_derived_span_years"] == pytest.approx(1.0 / 365.0)
+    a = bars.attrs["orderflow"]["archive"]
+    assert a["days_no_rows"] == 1
+    assert "contributed ZERO rows" in a["note"]
+
+
+def test_cache_never_shares_an_entry_between_opted_in_and_default(tmp_path):
+    """The spec hash must see the source classes, or an opt-in run would poison
+    the recorded-only cache entry (and vice versa)."""
+    root = tmp_path / "ticks"
+    vroot = tmp_path / "vision"
+    _seed(root, DAY, trades=_dense_trades(DAY, "binancef", minutes=1440, step_s=20))
+    _seed_vision(vroot, DAY, _vision_trades(DAY))
+    base = dict(start="x", end="y")
+    h_default = of._spec_hash({**base, "source": list(of._normalize_source("auto"))})
+    h_opt = of._spec_hash({**base,
+                           "source": list(of._normalize_source(("local", "hf", "vision")))})
+    assert h_default != h_opt
+    # 'auto' and its expansion are the SAME request and must share an entry.
+    assert h_default == of._spec_hash({**base,
+                                       "source": list(of._normalize_source(("hf", "local")))})
+
+
+def test_schema_version_bumped_so_v2_cached_bars_cannot_be_read():
+    """A v2 frame has no `source_code`; reading one back as v3 would be a lie."""
+    assert of.SCHEMA_VERSION == "3"
+    assert "source_code" in of.PROVENANCE

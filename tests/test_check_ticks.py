@@ -208,3 +208,266 @@ def test_okx_null_mark_index_exempt_but_other_venues_still_fail(tmp_path):
     con.close()
     rep2 = ct.sec_integrity(duckdb.connect(str(db), read_only=True), {'funding_mark'}, 0)
     assert rep2["data"]["bad_values"]["funding_mark"] == 1, "non-okx NULL must still count"
+
+
+# --------------------------------------------------------------------------- #
+# M7 — vision mode (DESIGN §3d): L3 QA runs over the PUBLIC-ARCHIVE partition. #
+#                                                                              #
+# Guard-rail 4 is "the same gate, no exemption for being an archive", and      #
+# guard-rail 3 is "readiness counts RECORDED days only". Both are asserted     #
+# here against a partition written exactly the way scripts/ingest_vision.py    #
+# writes one.                                                                  #
+# --------------------------------------------------------------------------- #
+def _seed_vision(root: Path, date: str, rows) -> Path:
+    """One §3d archive partition: ``<root>/date=<date>/trades.parquet``."""
+    part = root / f"date={date}"
+    part.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    try:
+        con.execute("CREATE TEMP TABLE t (exchange VARCHAR, symbol VARCHAR, "
+                    "trade_id VARCHAR, ts_ms BIGINT, price DOUBLE, qty DOUBLE, "
+                    "aggressor_buy BOOLEAN)")
+        for r in rows:
+            con.execute("INSERT INTO t VALUES (?,?,?,?,?,?,?)", list(r))
+        dest = str(part / "trades.parquet").replace("'", "''")
+        con.execute(f"COPY (SELECT * FROM t ORDER BY ts_ms) TO '{dest}' "
+                    "(FORMAT PARQUET, COMPRESSION ZSTD)")
+    finally:
+        con.close()
+    return part / "trades.parquet"
+
+
+def _vision_rows(date: str, *, first_id: int, n: int = 20, step_s: int = 10,
+                 skip=()):
+    t0 = _ms(date, h=0)
+    out = []
+    for i in range(n):
+        tid = first_id + i
+        if tid in skip:
+            continue
+        out.append(("binancef", "BTCUSDT", str(tid), t0 + i * step_s * 1000,
+                    60_000.0 + i, 0.5, i % 2 == 0))
+    return out
+
+
+def _run_vision(root: Path, capsys) -> dict:
+    rc = ct.main(["--vision", str(root), "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert rc == report["exit_code"]
+    return report
+
+
+def _section(report: dict, name: str) -> dict:
+    return next(s for s in report["sections"] if s["name"] == name)
+
+
+def test_vision_mode_grades_a_clean_partition(tmp_path, capsys):
+    root = tmp_path / "vision" / "binancef" / "BTCUSDT" / "aggTrades"
+    _seed_vision(root, "2026-08-01", _vision_rows("2026-08-01", first_id=100))
+    _seed_vision(root, "2026-08-02", _vision_rows("2026-08-02", first_id=120))
+    report = _run_vision(root, capsys)
+    assert report["mode"] == "vision"
+    # WARN, not FAIL, and exit 0: this 40-row fixture has a 24 h silence between
+    # its two days, which the coverage census correctly calls a hole. That is the
+    # gate working — WARNs never fail it (§0.7: honest reporting must not go red).
+    assert report["exit_code"] == 0
+    assert _section(report, "integrity")["verdict"] == "OK"
+    assert _section(report, "coverage")["verdict"] == "WARN"
+
+    inv = _section(report, "inventory")
+    assert inv["verdict"] == "OK"
+    assert inv["data"]["tables"]["trades"]["rows"] == 40
+    for t in ("depth_snapshots", "liquidations", "funding_mark", "open_interest"):
+        assert inv["data"]["tables"][t]["absent_by_construction"] is True
+    assert any("TRADES ONLY" in l for l in inv["lines"])
+    assert any("ABSENT BY CONSTRUCTION" in l for l in inv["lines"])
+
+    cont = _section(report, "id continuity (archive)")
+    assert cont["data"]["per_pair"]["binancef/BTCUSDT"]["id_holes"] == 0
+    assert cont["data"]["seams_checked"] == 1
+    assert cont["data"]["seams_contiguous"] == 1
+
+
+def test_vision_mode_fails_on_a_duplicate_trade_id(tmp_path, capsys):
+    """Guard-rail 4: duplicates are corruption. Being an archive is no exemption."""
+    root = tmp_path / "vision" / "binancef" / "BTCUSDT" / "aggTrades"
+    rows = _vision_rows("2026-08-01", first_id=100, n=5)
+    _seed_vision(root, "2026-08-01", rows + [rows[2]])
+    report = _run_vision(root, capsys)
+    assert report["exit_code"] == 1 and report["overall"] == "FAIL"
+    integ = _section(report, "integrity")
+    assert integ["verdict"] == "FAIL"
+    assert integ["data"]["duplicate_trade_keys"] == 1
+    assert integ["data"]["duplicate_surplus_rows"] == 1
+    assert any("[FAIL] duplicate" in l for l in integ["lines"])
+
+
+def test_vision_mode_reports_id_holes_and_seam_gaps_never_fills(tmp_path, capsys):
+    """Gaps stay gaps — and here they are stated by the venue's own counter."""
+    root = tmp_path / "vision" / "binancef" / "BTCUSDT" / "aggTrades"
+    # 100..119 minus 105,106,107 -> 3 in-day holes.
+    _seed_vision(root, "2026-08-01",
+                 _vision_rows("2026-08-01", first_id=100, skip=(105, 106, 107)))
+    # Next day starts at 200, not 120 -> a seam gap of 79.
+    _seed_vision(root, "2026-08-02", _vision_rows("2026-08-02", first_id=200))
+    report = _run_vision(root, capsys)
+    cont = _section(report, "id continuity (archive)")
+    assert cont["verdict"] == "WARN"            # reported, never failed, never filled
+    pair = cont["data"]["per_pair"]["binancef/BTCUSDT"]
+    assert pair["id_holes"] == 3 + 80           # 3 in-day + the 120..199 seam run
+    assert pair["id_holes_in_day"] == 3
+    assert pair["id_holes_across_adjacent_days"] == 80
+    assert pair["ids_between_non_adjacent_days"] == 0
+    assert cont["data"]["seams_checked"] == 1
+    assert cont["data"]["seams_contiguous"] == 0
+    assert cont["data"]["seams"][0]["gap"] == 200 - 119 - 1
+    # WARN never fails the gate (§0.7 spirit: honest reporting must not go red).
+    assert report["exit_code"] == 0
+    # And nothing was invented to close them.
+    assert _section(report, "inventory")["data"]["tables"]["trades"]["rows"] == 17 + 20
+
+
+def test_a_skipped_day_is_a_range_choice_not_a_million_missing_ids(tmp_path, capsys):
+    """The census is per DAY. Ids belonging to a day nobody ingested are not holes.
+
+    Measured on the real tree this was 1,106,864 phantom "missing id(s)" — the
+    exact row count of the un-ingested 2026-07-31 — reported as a WARN by the one
+    census in this file that is EXACT rather than a silence heuristic. A census
+    that cries wolf on a partial backfill (a `--max-days` run, an `absent` day, a
+    resumed sync) teaches the operator to ignore it.
+    """
+    root = tmp_path / "vision" / "binancef" / "BTCUSDT" / "aggTrades"
+    _seed_vision(root, "2026-08-01", _vision_rows("2026-08-01", first_id=100))
+    # 08-02 is NOT ingested; 08-03 continues the counter where 08-02 would have
+    # ended, so ids 120..199 belong to the day that was never asked for.
+    _seed_vision(root, "2026-08-03", _vision_rows("2026-08-03", first_id=200))
+    report = _run_vision(root, capsys)
+    cont = _section(report, "id continuity (archive)")
+    pair = cont["data"]["per_pair"]["binancef/BTCUSDT"]
+    assert pair["id_holes"] == 0                     # nothing is missing
+    assert pair["id_holes_in_day"] == 0
+    assert pair["id_holes_across_adjacent_days"] == 0
+    assert pair["ids_between_non_adjacent_days"] == 80
+    assert cont["verdict"] == "OK"
+    assert cont["data"]["seams_checked"] == 0        # non-adjacent: not a seam
+    assert any("request choice" in l for l in cont["lines"])
+
+
+def test_vision_mode_FAILS_a_partition_that_is_not_its_own_day(tmp_path, capsys):
+    """A `date=D` partition holding foreign rows FAILs, like a duplicate id does.
+
+    No other section can see it: the ids need not collide, the timestamps are
+    internally consistent, and the union view drops the partition date. Yet
+    `orderflow` resolves provenance per UTC day, so those rows would be read into
+    another day's bars — a day that may be labelled RECORDED. The recorded side
+    has had this gate all along (`upload_hf.stage_day`: "a day file IS its
+    partition"); this is its archive-side twin.
+    """
+    root = tmp_path / "vision" / "binancef" / "BTCUSDT" / "aggTrades"
+    _seed_vision(root, "2026-08-01",
+                 _vision_rows("2026-08-01", first_id=100)
+                 + _vision_rows("2026-08-02", first_id=500, n=3))
+    _seed_vision(root, "2026-08-02", _vision_rows("2026-08-02", first_id=120))
+    report = _run_vision(root, capsys)
+    sec = _section(report, "partition containment (archive)")
+    assert sec["verdict"] == "FAIL"
+    assert report["overall"] == "FAIL" and report["exit_code"] == 1
+    assert sec["data"]["partitions_checked"] == 2
+    assert sec["data"]["partitions_failing"] == 1
+    off = sec["data"]["offenders"][0]
+    assert off["date"] == "2026-08-01" and off["rows_outside_own_day"] == 3
+    assert any("A partition IS its day" in l for l in sec["lines"])
+    # Nothing was moved or dropped to make it pass.
+    assert _section(report, "inventory")["data"]["tables"]["trades"]["rows"] == 43
+
+
+def test_a_clean_tree_passes_partition_containment(tmp_path, capsys):
+    root = tmp_path / "vision" / "binancef" / "BTCUSDT" / "aggTrades"
+    _seed_vision(root, "2026-08-01", _vision_rows("2026-08-01", first_id=100))
+    _seed_vision(root, "2026-08-02", _vision_rows("2026-08-02", first_id=120))
+    sec = _section(_run_vision(root, capsys), "partition containment (archive)")
+    assert sec["verdict"] == "OK"
+    assert sec["data"]["partitions_checked"] == 2 and sec["data"]["partitions_failing"] == 0
+
+
+def test_vision_mode_refuses_to_print_a_readiness_number(tmp_path, capsys):
+    """Guard-rail 3, in code: the MinBTL countdown has exactly one input."""
+    root = tmp_path / "vision" / "binancef" / "BTCUSDT" / "aggTrades"
+    _seed_vision(root, "2026-08-01", _vision_rows("2026-08-01", first_id=1))
+    report = _run_vision(root, capsys)
+    r = _readiness(report)
+    assert r["verdict"] == "INFO"
+    assert r["data"]["computed"] is False
+    assert r["data"]["span_days"] is None
+    assert r["data"]["minbtl"] == {}
+    assert r["data"]["pct_toward_target"] is None
+    joined = " ".join(r["lines"])
+    assert "NOT computed over an archive partition" in joined
+    assert "RECORDED days only" in joined
+    # No percentage, no day count, nothing screenshot-able as a countdown.
+    assert "%" not in joined.replace("100%", "")
+    assert not any("toward" in l for l in r["lines"])
+
+
+def test_vision_mode_does_not_claim_arrival_order_it_cannot_have(tmp_path, capsys):
+    """The parquet is ts-sorted, so an inversion check would pass vacuously."""
+    root = tmp_path / "vision" / "binancef" / "BTCUSDT" / "aggTrades"
+    _seed_vision(root, "2026-08-01", _vision_rows("2026-08-01", first_id=1))
+    report = _run_vision(root, capsys)
+    integ = _section(report, "integrity")
+    assert integ["data"]["ts_inversion_applicable"] is False
+    assert integ["data"]["ts_inversions"] is None
+    line = next(l for l in integ["lines"] if "non-monotonic ts" in l)
+    assert line.startswith("[INFO]")
+    assert "NOT APPLICABLE" in line and "vacuous" in line
+
+
+def test_vision_mode_on_an_empty_tree_is_not_an_error(tmp_path, capsys):
+    """Absence is a status, not corruption — the same §0.3 spirit as a young store."""
+    root = tmp_path / "vision" / "binancef" / "BTCUSDT" / "aggTrades"
+    assert ct.main(["--vision", str(root)]) == 0
+    assert "no archive partition yet" in capsys.readouterr().out
+    root.mkdir(parents=True)
+    assert ct.main(["--vision", str(root)]) == 0
+    assert "nothing to grade" in capsys.readouterr().out
+
+
+def test_vision_relation_has_the_recorded_column_shape(tmp_path):
+    """The hive reader synthesises a `date` column; the view must not expose it."""
+    root = tmp_path / "vision" / "binancef" / "BTCUSDT" / "aggTrades"
+    _seed_vision(root, "2026-08-01", _vision_rows("2026-08-01", first_id=1))
+    con, parts, dates = ct.connect_vision_readonly(root)
+    try:
+        cols = [r[0] for r in con.execute("DESCRIBE SELECT * FROM trades").fetchall()]
+    finally:
+        con.close()
+    assert cols == list(ct._VISION_TRADES_COLUMNS) + ["rowid"]
+    assert "date" not in cols
+    assert len(parts) == 1 and dates == ["2026-08-01"]
+    assert tuple(ct._VISION_TRADES_COLUMNS) == collector._TABLE_COLUMNS["trades"]
+
+
+def test_recorded_mode_readiness_is_unchanged_by_an_archive_tree(tmp_path, capsys):
+    """Guard-rail 3, end to end: the readiness section must not move.
+
+    A vision tree is planted right beside the recorded store and the readiness
+    section is snapshotted before and after. Equal dicts, or the one honest clock
+    in the project has a second input.
+    """
+    root = tmp_path / "ticks"
+    _seed_day(root, "2026-07-03")
+    _write_registry(root, ["2026-07-01", "2026-07-02", "2026-07-03"])
+    before = _readiness(_run_json(root, capsys))["data"]
+
+    vroot = tmp_path / "vision" / "binancef" / "BTCUSDT" / "aggTrades"
+    for d in ("2019-12-31", "2020-01-01", "2026-08-01"):
+        _seed_vision(vroot, d, _vision_rows(d, first_id=1))
+    after = _readiness(_run_json(root, capsys))["data"]
+
+    assert before == after
+    assert after["span_days"] == 3            # three RECORDED days, not six years
+    assert after["first_registry_date"] == "2026-07-01"
+    # The archive tree wrote nothing into the recorded store's registry.
+    assert list(root.glob("levels.jsonl")) != []
+    assert json.loads((root / "levels.jsonl").read_text().splitlines()[0])["date"] \
+        == "2026-07-01"

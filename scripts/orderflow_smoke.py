@@ -254,12 +254,26 @@ def main(argv: list[str] | None = None) -> int:
               f"({need * 365.0:,.0f} d)   -> have {have * 100:.1f}%")
     # The module measures the same thing itself (rail 4: the claim is computed,
     # never remembered) — printed here so the two are visibly the same number.
+    # BOTH bases are printed, because they are two different quantities and only
+    # one of them is history: the REQUESTED WINDOW is what the loop above divides
+    # (a six-year request that resolved two days still spans six years of
+    # calendar), while the RESOLVED span counts only days that actually supplied
+    # rows. Quoting the first as history is the mistake this line exists to make
+    # impossible to commit by accident.
     hist = meta.get("history", {})
+    f_win = float(hist.get("fraction_of_minbtl_requested_window", {})
+                  .get("5", float("nan"))) * 100.0
+    f_res = float(hist.get("fraction_of_minbtl", {}).get("5", float("nan"))) * 100.0
     print(f"  module attrs['history']          : {hist.get('days_resolved')} of "
-          f"{hist.get('days_requested')} days resolved, span "
-          f"{float(hist.get('span_years', float('nan'))):.4f} yrs = "
-          f"{float(hist.get('fraction_of_minbtl', {}).get('5', float('nan'))) * 100:.1f}% "
-          f"of MinBTL(5)")
+          f"{hist.get('days_requested')} days resolved "
+          f"({hist.get('days_contributing_rows')} contributed rows)")
+    print(f"    requested window               : "
+          f"{float(hist.get('span_years', float('nan'))):.4f} yrs = {f_win:.1f}% "
+          "of MinBTL(5)  [NOT history — the window asked for]")
+    res_years = min(float(hist.get("trade_derived_span_years", float("nan"))),
+                    float(hist.get("book_derived_span_years", float("nan"))))
+    print(f"    resolved history (shortest fam): {res_years:.4f} yrs = "
+          f"{f_res:.1f}% of MinBTL(5)  [what was actually read]")
     out["history"] = hist
     out["span_days"] = span_days
     out["span_years"] = span_years

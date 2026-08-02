@@ -59,6 +59,57 @@ liquidations, BYOD HTTP protocol). We adapt the *capabilities* into btc-quant's 
 7. **No fabricated history.** The terminal renders only what arrived over the wire this
    session (plus what the local collector genuinely recorded). No backfill from mixed
    sources into one series without an explicit per-source label.
+   **Extension (M7, 2026-08-02) — the public-archive partition, and the four rails that
+   let it exist at all.** `scripts/ingest_vision.py` writes Binance's own published
+   `aggTrades` archive into `data/vision/`, a tree the recorded store never touches (§3d).
+   It is admissible under this rail for one reason only: the archive is the **same venue,
+   same stream, same aggTradeId space** the `binancef-aggTrades` collector leg already
+   records, so overlap resolves by **exact key match** on `(exchange, symbol, trade_id)`
+   and missing history is found by **ID continuity**, not by a timestamp guess. Measured
+   2026-08-02 on 2026-08-01: 399,219 archive rows vs the recorded day, set difference
+   **0 both ways**, and **0 mismatches** across `ts_ms`/`price`/`qty`/`aggressor_buy` on
+   all 399,219 joined rows — the join being against the **DISTINCT** recorded relation,
+   stated because the raw recorded table holds 400,190 rows for that day: 971 exact
+   full-row duplicates from a RECORDED defect that predates this item (no unique constraint
+   on `trades`, in-memory-only `fromId` dedup, so a restart re-seeds a written range;
+   RESEARCH-vision-runlog.md §7). A plain join yields 400,190 rows and 0 mismatches either
+   way. It is not "another source"; it is the same source arriving by a slower road. The
+   rails, non-negotiable:
+   a. **Provenance class is per UTC day and never within a bar.** Recorded and archive
+      rows are never unioned into one day — precedence is `local > hf > vision`, recorded
+      always wins — and a bar therefore carries exactly one `source_code`. This is true
+      *by construction*, not by convention: bar boundaries are grid-aligned (refused
+      otherwise), and every clock in `BAR_FREQS` divides 86,400,000 ms, so no bar can
+      straddle midnight. `orderflow._bar_ms` refuses a clock that does not divide the UTC
+      day, precisely so a future addition cannot quietly break the property. The rail rests
+      on one more thing, and it is now checked on **both** sides: **a `date=D` partition
+      holds day-D rows and nothing else.** Enforcing that only where the tree is WRITTEN
+      (G4a) was not enough — the tree is designed to be copied between machines, and a
+      partition carrying foreign rows would be unioned into ANOTHER day's bars, a day that
+      may have resolved to the recorded store and is labelled as such. So
+      `orderflow._open_source` re-checks it per partition before reading (parquet
+      row-group `min`/`max` on `ts_ms`: exhaustive, one metadata read, refuses with
+      `OrderFlowError`), each partition is additionally fenced to its own day in the SQL,
+      and `check_ticks --vision` grades it as a **FAIL** section — the archive-side twin of
+      `upload_hf.stage_day`'s "a day file IS its partition".
+   b. **Archive rows never count toward `sec_readiness`.** The MinBTL countdown counts
+      RECORDED days only (`data/ticks/levels.jsonl`). It is the one honest clock in the
+      project; a partition that could inflate it would corrupt every downstream verdict.
+      `check_ticks --vision` therefore *refuses to print a readiness number at all*.
+   c. **`aggTrades` is TRADES ONLY, so Gap 1 SPLITS rather than closes.** Trade-derived
+      families reach 6.587 years (244 % of MinBTL(5)); book-derived families stay at
+      1.8 % because the archive publishes no book snapshots. Every book column is NaN on
+      every archive bar **by construction**, `provenance_table` says so per column, and a
+      frame mixing both families is only as long as its shortest family. `coverage_book_*`
+      and `coverage_liq_*` are NaN there too: a coverage column is a WITNESS measure, so
+      0.0 asserts "the leg was observed and was silent", and on an archive day the stream
+      was never published, never subscribed and never silent — unknown, not zero. Spans are
+      counted in resolved days that actually CONTRIBUTED rows, and the `attrs["history"]`
+      fraction keys each name their basis (`_requested_window` / `_trade_derived` /
+      `_book_derived`; the unqualified `fraction_of_minbtl` is the shortest family). An
+      unqualified fraction over the REQUESTED WINDOW is how a two-day frame reports 244 %.
+   d. **A day the archive does not publish is ABSENT.** No parquet, no zero-row file, no
+      interpolation — a ledger row saying it was asked for and not served.
 8. **The terminal is an OBSERVATION surface, not an execution venue.** It holds no keys and
    places no orders — verified zero signing/order/hmac path in `dashboard/terminal*.js`, kept
    as a rail so it stays true, not merely today's state. A GC'd single-thread JS event loop
@@ -120,8 +171,13 @@ batches and its `side` is the **maker** side.
   funding_mark + open_interest (merge partial deltas against the last snapshot!);
   Binance WS `depth20@100ms` → depth (1/s downsample); Binance REST `premiumIndex` (5 s)
   → funding_mark, `openInterest` (60 s) → open_interest; Coinbase WS `market_trades` →
-  trades (spot leg, maker-side inversion). Binance futures *trades* are NOT collected —
-  topic-filtered on this network (§0.2); documented, not proxied.
+  trades (spot leg, maker-side inversion). ~~Binance futures *trades* are NOT collected —
+  topic-filtered on this network (§0.2); documented, not proxied.~~ **`[SUPERSEDED]` by
+  §3c:** the WS topic filter is real and unchanged, but v2 added a **REST** `aggTrades`
+  poll (`binancef-aggTrades`, cursor `fromId` = last `a`+1) which is not topic-filtered,
+  so binancef *does* have a trades leg — 0.2–2.0 M rows/day across 2026-07-05..07-22 in
+  the recorded store. This sentence describes the original wire constraint, not today's
+  store; M7 (§3d) depends on that leg's existence for its exact-dedup argument.
 - **Schema** (all timestamps epoch **ms**, UTC; `exchange` short code `binancef|bybit|coinbase`):
   - `trades(exchange VARCHAR, symbol VARCHAR, trade_id VARCHAR, ts_ms BIGINT, price DOUBLE, qty DOUBLE, aggressor_buy BOOLEAN)` — trade_id VARCHAR (Bybit ids are UUIDs).
   - `liquidations(exchange, symbol, ts_ms BIGINT, side VARCHAR, price DOUBLE, qty DOUBLE, notional_usd DOUBLE)` — side = the *liquidated* position (`long|short`), normalized per exchange (Bybit `allLiquidation` side `Buy` = a **short** was liquidated — the printed order is the forced *buy-back*).
@@ -299,6 +355,131 @@ delete the local day file (today + yesterday never deleted). Query-back:
 and `load_dataset` streaming for ML. `check_ticks.py` learns dir/glob mode (union view
 across day files). Same prune-safety creed as the §3 lifecycle: no offsite verification,
 no local delete.
+
+## 3d. Public-archive trade ingest (M7) — `scripts/ingest_vision.py` (binding)
+
+Rails first, because the limit has to be in the doc before there is code that could hide
+it. **`aggTrades` is TRADES ONLY.** This partition extends the trade-derived families
+(CVD, footprint, size-bucketed delta, VPIN) and **nothing else**. OFI, weighted mid,
+depth-imbalance slope and walls gain zero rows: the archive publishes no book snapshots
+(`bookDepth` is 12 cumulative ±% bands at ~30 s — no levels, no price-per-level, no
+queue — and cannot satisfy `depth_snapshots(bids, asks)`; `bookTicker` is L1-only and
+exists for 320 days ending 2024-03-30, discontinuous with the recorded window). Gap 1
+SPLITS: trade-derived reaches **2,406 d = 6.587 yrs = 244 % of MinBTL(5)**, book-derived
+stays at **1.8 %**. §0.7 rails a–d bind every line below.
+
+**Scope allowlist, in code not in a comment.** Only `market="futures/um"` +
+`family="aggTrades"` is accepted; anything else raises with the reason. Spot is a
+different instrument with an 8-column layout, `True`/`False` capitalized booleans and
+microsecond timestamps since 2025-01-01 — a different ID space, so the exact-dedup
+argument does not hold for it. `metrics` has no unique key and its timestamp convention
+differs per metric inside one file (+300,000 ms for open interest vs 0 ms for the taker
+ratio). `liquidationSnapshot` does not exist for USD-M at all.
+
+**Tree.** Provenance readable from the path alone, so no schema migration is ever needed
+to know where a row came from:
+
+```
+data/vision/<venue>/<symbol>/<family>/date=<YYYY-MM-DD>/trades.parquet
+data/vision/<venue>/<symbol>/<family>/manifests/MANIFEST-<YYYY-MM-DD>.json
+data/vision/<venue>/<symbol>/<family>/manifests/FAILED-<YYYY-MM-DD>.json
+data/vision/_ledger.jsonl                      # append-only, one row per day ATTEMPTED
+```
+
+Parquet ZSTD, not `.duckdb`: this is a write-once immutable batch export, the same idiom
+`upload_hf.stage_day` already uses — and a `.duckdb` file under `data/vision/` would be
+one `ATTACH` away from being unioned into a recorded relation, which the tree exists to
+make structurally hard. The output root is `resolve()`d and **refused** if it lies inside
+the tick store or the order-flow cache. Schema is `collector._TABLE_COLUMNS["trades"]`
+exactly, written `ORDER BY ts_ms`; `first_trade_id`/`last_trade_id` are dropped from the
+rows (column identity is load-bearing — the relation must stay `UNION ALL`-compatible
+with recorded) and their extents kept in the manifest.
+
+**Column mapping** (measured, not assumed): `agg_trade_id → trade_id` as VARCHAR
+(identical to `str(t["a"])` in `collector.normalize_binance_aggtrades`), `price → price`,
+`quantity → qty` (BTC), `transact_time → ts_ms` (epoch **ms**), and
+`aggressor_buy = NOT is_buyer_maker` (§0.6 — `m` true means the buyer was the maker, so
+the aggressor SOLD). `exchange='binancef'` and `symbol='BTCUSDT'` come from the path, not
+the file. A fixture test drives the collector normalizer and the vision normalizer over
+the same trade and asserts the 7-tuples are identical, so "same stream" is mechanical
+rather than prose.
+
+**Seven gates. A day is not trusted until all seven pass, and the canonical parquet is
+never written before they do.**
+
+| | Gate | Refusal |
+|---|---|---|
+| G1 | CHECKSUM: sha256 of the zip matches the companion `.CHECKSUM`, **and** its filename field is the canonical name | abort — parse the hex in-process, never shell out to `shasum -c` (it fails on a renamed file for the wrong reason) |
+| G2 | Zip shape: exactly one entry, named `<stem>.csv` | abort |
+| G3 | Header sniff: line 1's first field is a base-10 integer ⇒ data, else header; a present header must match the expected 7 names exactly; column count ≠ 7 ⇒ abort | abort (this is what catches the spot layout) |
+| G4a | Day containment: every `ts_ms ∈ [day_start, day_end)`, integer epoch bounds | abort |
+| G4b | ms-unit guard: `ts_ms < 1e14` (13 digits). 16 digits = µs ⇒ abort | abort — read as ms it lands in year ~58500 |
+| G5 | ID continuity in-day: rows = distinct ids (**duplicates abort**); `max−min+1 − count` is recorded as `id_holes` + `id_hole_ranges` | holes **reported, never filled** |
+| G6 | Seam: if `date−1` is already ingested, `first_id(D) == last_id(D−1)+1` | mismatch recorded in both manifests, **never patched** |
+| G7 | Re-read verify: reopen the written parquet, match `(rows, ts_min, ts_max)` and containment | abort, keep `.bad` for inspection |
+
+Failure keeps the bad artifact for inspection (`trades.parquet.bad`), writes
+`FAILED-<date>.json`, skips that day, **continues** the run, and exits non-zero. A day
+the archive does not publish (HTTP 404) is `status="absent"` in the ledger and produces
+**no file at all** — never a zero-row parquet. Day bucketing is integer
+(`ts_ms // 86_400_000`), never a local-timezone date function.
+
+**Granularity.** `auto` uses monthly files for months wholly inside the range and wholly
+in the past (79 requests instead of 2,406 for the full history) and daily for the ragged
+ends. Monthly is set-identical to the daily files it contains (verified: 71,359 = 71,359
+rows for 2020-01-01, `EXCEPT` empty both ways), and every day split out of a monthly file
+passes the same G4–G7 — monthly buys request count, never leniency. Three things the
+monthly path must not do, all measured:
+
+* **A missing MONTHLY object is not an absent DAY.** Binance publishes the bundle days
+  after the month ends: on 2026-08-02 the `2026-08` monthly object was HTTP 404 while
+  `2026-08-01` daily was HTTP 200 (5,049,749 B, 399,219 rows). Marking the month's days
+  `absent` is a FABRICATED ABSENCE — the inverse of rail d — so a 404 on the bundle falls
+  back to the daily objects and lets each day answer for itself.
+* **Re-download a month whose days are complete.** Resume is checked BEFORE the wire, as
+  the daily path already did (measured: a completed 2020-01 re-run costs 0 B and 1.1 s
+  instead of 97.8 MiB and 23 s), and an `already` day reports its true row/byte counts.
+* **Escape.** The per-month handler catches `Exception`, not only `VisionError`: a duckdb
+  `ConversionException` or a `zipfile.BadZipFile` used to abort the whole backfill with a
+  traceback and no ledger row. Each day the month owed now gets `FAILED-<date>.json` + a
+  ledger row, and the run continues and exits non-zero. Manifests from the monthly path
+  carry the `first_trade_id`/`last_trade_id` extents the daily path records, computed in
+  one extra grouped scan.
+
+**Politeness and memory.** Sequential by default (measured 3.7–4.8 MB/s single-stream;
+concurrency buys nothing against the CDN edge and is what gets an IP throttled), `--sleep`
+between requests, exponential backoff with jitter honouring `Retry-After` on 429/5xx, no
+retry on 404/403 (404 is an answer), a descriptive UA, and `--all` prints the measured byte
+total and requires `--yes`. The zip **streams to a scratch `.part` file, hashed in the same
+pass**, so a ~530 MB monthly object is never buffered whole and G1 verifies exactly the
+bytes that landed; no file ever carries the canonical name before G1 passes, because the
+download never leaves the scratch directory. A failed attempt truncates and restarts rather
+than splicing a byte range — a silently spliced file is a worse failure than a re-fetch.
+
+**L3 QA covers it.** `check_ticks.py --vision <root>` grades the archive partition with
+the same code path as the recorded store — duplicate `trade_id` still **FAILs**, gaps
+stay gaps — plus two vision-only censuses: **partition containment** (rows outside the day
+their path claims: **FAIL**, same grade as a duplicate id) and **ID continuity**. The ID
+census is computed PER DAY and summed: in-day holes plus the gaps across calendar-ADJACENT
+ingested days are missing ids; ids lying between NON-adjacent days are the days the
+operator did not ask for and are reported as such (`INFO`), not as missing data. Measured:
+a tree holding only 2026-07-30 and 2026-08-01 used to WARN `1,106,864 missing id(s)` —
+exactly the row count of the un-ingested 2026-07-31. Two things it deliberately does *not* do: it prints
+`[INFO] not applicable` rather than `[OK]` for the ts-inversion check (the parquet is
+ts-sorted, so arrival order is not recoverable and a pass there would be vacuous), and it
+**refuses to compute a readiness number** (rail b). Make targets: `make vision-sync`,
+`make vision-list`, `make check-vision`.
+
+**Reading it back.** `orderflow.order_flow_bars(..., source=("local","hf","vision"))` and
+`orderflow.volume_buckets(..., source=(...))` are the only ways archive rows enter a frame;
+the default `"auto"` is recorded-only and stays that way. Every bar — and every VPIN
+bucket, which is the trade-derived table the archive extends furthest — carries
+`source_code` (always emitted, so its presence never signals anything), an
+`attrs["orderflow"]["archive"]` block, and its own `vision_root`/`vision_symbol` so the
+tree read is the caller's choice. `provenance_table` gains a `vision_contribution` column
+naming the archive per column, and a run touching archive days warns with the exact
+counts — **including on a cache hit**, since `cache=True` is the default and a warning the
+cache skips is not mandatory, it is incidental.
 
 ## 4b. O-2 contracts — heatmaps + OKX leg (binding, same style as §4)
 

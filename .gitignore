@@ -17,6 +17,11 @@ data/archive/
 # M1 order-flow bar cache (btcquant/orderflow.py) — derived, spec-hashed, and
 # re-buildable from the day files / HF mirror; never a source of truth.
 data/orderflow/
+# M7 public-archive partition (scripts/ingest_vision.py — DESIGN §3d): Binance's
+# own published aggTrades, re-fetchable at any time from data.binance.vision and
+# checksum-gated on arrival. ~13 GB of parquet for the full history, and a
+# SEPARATE tree from data/ticks/ on purpose — never committed.
+data/vision/
 data/*.duckdb.rebuild
 data/*.pre-archive.bak
 .DS_Store

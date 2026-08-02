@@ -66,11 +66,17 @@ and not an execution engine.
    precision), PBO, hierarchical-Bayes Sharpe shrinkage — cited to Bailey-López de Prado,
    single-source-of-truth (`expected_max_sharpe_ratio` shared byte-identical by DSR and
    MinBTL). No incumbent charting terminal has anything equivalent.
-   Caveat (state the tense, updated 2026-07-27): the shaft is now **built** — M1's
+   Caveat (state the tense, updated 2026-08-02): the shaft is now **built** — M1's
    `btcquant/orderflow.py` feeds order-flow bars into this same engine with zero harness
-   change — but it has not yet *validated* an order-flow strategy and cannot, because the
-   archive is at **1.8 % of MinBTL(N=5)**. So: coupling done, verdict pending on data.
-   Still a moat **in potential**; the constraint moved from code to the clock (Gap 1, N4).
+   change — but it has not yet *validated* an order-flow strategy. Since M7 the reason
+   depends on which family is asked, and the single figure that used to answer for both
+   is `[SUPERSEDED]`: the **trade-derived** families now have 2,406 published archive days
+   = **244 % of MinBTL(N=5)** and are no longer blocked by length; the **book-derived**
+   families are still at **1.8 %** and cannot be validated at all. So: coupling done,
+   trade-side verdict now pending on a pre-registered hypothesis rather than on the clock,
+   book-side verdict still pending on the clock. Still a moat **in potential**; the
+   constraint moved from code to the clock, and for half the feature set it has now moved
+   off the clock as well (Gap 1, N4).
 5. **Collector → HF lifecycle, production-grade and honestly-gapped.** Event-time daily
    rotation + 5-min grace, immutable closed-day files, re-read + sha256-verify + confirm
    on the Hub before local delete, L3 QA that FAILS on duplicate `trade_id` and reports
@@ -82,7 +88,10 @@ feature list.
 
 ## 3. Honest gaps (ranked by impact on the stated goals)
 
-- **Gap 1 — [critical, vision] the flywheel does not close.**
+- **Gap 1 — [SPLIT 2026-08-02 — half closed, half untouched; was: critical, vision] the
+  flywheel does not close.** Read the whole bullet before quoting a number from it: after
+  M7 there is no single "how much history do we have" figure, and a claim that does not
+  name its family is wrong by construction.
   ~~No research/backtest/feature code reads the tick store. `btcquant/features.py`
   (36 funcs) and `strategies.py` (18 funcs) are 100% OHLCV/options;
   `btcquant/orderflow.py` does not exist.~~ **Pipe closed 2026-07-26 (M1):**
@@ -99,6 +108,26 @@ feature list.
   (An earlier draft of this bullet said 51.8 % / 29 bars / 0.0033 yrs — those were
   pre-fix figures from before the per-leg witness change and are `[SUPERSEDED]` by the
   numbers above, which are what `make orderflow-smoke` prints today.)
+  **2026-08-02 — the gap SPLITS, it does not close (M7).** The public Binance archive
+  publishes `futures/um/daily/aggTrades/BTCUSDT` with **zero missing days** over
+  **2019-12-31 .. 2026-08-01 = 2,406 days = 6.587 calendar years** (enumerated from the
+  bucket listing, not extrapolated), in the **same aggTradeId space** the collector's
+  `binancef-aggTrades` leg already records. So the two families now stand on opposite
+  sides of a line, and every post-M7 claim must say which side it is on:
+  - **trade-derived** (CVD, footprint, size-bucketed delta, VPIN — its volume clock needs
+    only trades): 2,406 d = **244 % of MinBTL(5)** / 209 % of MinBTL(20) / 181 % of
+    MinBTL(100). Past the threshold, with margin.
+  - **book-derived** (OFI, weighted mid, depth-imbalance slope, walls): unchanged at
+    **1.8 % of MinBTL(5)**. The archive publishes **no book snapshots**. `bookDepth`
+    (2023-01-01..) is 12 *cumulative percentage bands* at ~30 s — no levels, no
+    price-per-level, no queue — so it cannot satisfy `depth_snapshots(bids, asks)` and
+    cannot reconstruct OFI/microprice/walls. `bookTicker` (L1 event-level, with
+    quantities) exists for **2023-05-16 .. 2024-03-30 only — 320 d = 0.876 yrs = 32.5 %
+    of MinBTL(5)** and is discontinuous with the recorded window; interesting for
+    event-level OFI without the sampling approximation, but it is a **separate item**,
+    not a closer of this gap.
+  A bar frame that mixes both families is only as long as its shortest family. Book
+  history is still bought only with collector uptime (**N4**).
 - **Gap 2 — [blocking deploy] paint loop has zero error isolation.** `frame()`
   (`terminal.js:3825-4099`) has no try/catch around its 32 `view.render()` calls, and
   `scheduleFrame()` is the last statement. One render throw (a NaN into a canvas path,
@@ -426,8 +455,17 @@ sequence to the calendar, not to enthusiasm.
 - [ ] **M6. Materialize a versioned feature store** (DVC stage → parquet order-flow bars)
       so the harness reads bars, not raw ticks; avoid a monthly re-scan per experiment;
       every figure reproducible.
-- [ ] **M7. Binance Vision historical trade ingest — the single item that actually moves
-      Gap 1.** `data.binance.vision` publishes daily `aggTrades` archives under a **public
+- [x] **M7. Binance Vision historical trade ingest — the single item that actually moves
+      Gap 1, and it moves HALF of it.** Done 2026-08-02 — `scripts/ingest_vision.py` + the
+      `vision` source class in `orderflow.py` + `check_ticks --vision`; measured on the real
+      archive: 2026-08-01 overlap 399,219 rows, set difference **0 both ways** and **0
+      mismatches** on ts/price/qty/side; `--granularity monthly` over 2020-01 split 71,359 /
+      160,454 / 291,080 rows into three day partitions with **0** in-day id holes and 2/2
+      contiguous seams; `sec_readiness` byte-identical with the tree in place; 346 tests,
+      network-free. **Gap 1 SPLITS rather than closes** — see the Gap 1 bullet for the
+      trade-derived vs book-derived numbers, and never quote one of them unqualified.
+      The original brief, kept for the audit trail:
+      `data.binance.vision` publishes daily `aggTrades` archives under a **public
       Binance URL scheme**; it is Binance's own distribution of Binance's own data, free for
       anyone, and needs **zero third-party code** to use (§6 states what stays clean-room).
       **Why the dedup is exact rather than heuristic.** The collector already ingests the
@@ -457,20 +495,48 @@ sequence to the calendar, not to enthusiasm.
       never inflate the MinBTL readout that gates every downstream verdict; (d) L3 QA runs
       over the vision partition too — same duplicate-`trade_id` FAIL, same report-never-fill
       gap census, no exemption for being an archive.
-      **Step zero, before any code:** `HEAD` one archive URL to confirm the file exists and
+      **Step zero, before any code:** ~~`HEAD` one archive URL to confirm the file exists and
       that the column layout matches what the normalizer expects (aggTradeId, price, qty,
       firstId, lastId, transact time, isBuyerMaker — whether a header row is present has
       differed by year), and check whether `futures/um/daily/` also publishes `bookTicker`,
       `bookDepth`, `liquidationSnapshot` and `metrics`. If it does, three of those map onto
       tables the repo already has (`depth_snapshots`, `liquidations`, `funding_mark` /
-      `open_interest`) and the trade-vs-book split above narrows — but design nothing around
-      them until a request actually returns 200.
+      `open_interest`) and the trade-vs-book split above narrows~~ — **done 2026-08-02, and
+      it corrected this bullet in three places.** The paragraph above is `[SUPERSEDED]` by
+      what the archive actually serves; RESEARCH-vision-runlog.md carries the measurements.
+      1. **The header row varies per FILE, not per year.** `2021-01-01` has one and
+         `2021-01-02` does not; `2022-08-10` has none and `2022-08-11` does; monthly
+         `2020-01` has none and `2026-07` does. A reader keyed on a year cutoff loses or
+         invents exactly one row on scattered days across 2,406 of them, silently. The
+         rail is therefore **sniff line 1** — first field not a base-10 integer ⇒ header.
+      2. **`liquidationSnapshot` does not exist for USD-M.** The prefix
+         `futures/um/daily/liquidationSnapshot/` lists **zero keys**; the family is
+         COIN-M only (`futures/cm/`, `BTCUSD_PERP`, 2023-06-25..2024-10-14, discontinued),
+         and COIN-M is a different instrument. So `liquidations` gains **nothing**, and
+         "three of those map onto tables the repo already has" was wrong.
+      3. **`bookDepth` is not a book.** 12 cumulative ±% bands at ~30 s
+         (`timestamp,percentage,depth,notional`) with no levels, no price-per-level and no
+         queue size — it cannot satisfy `depth_snapshots(bids, asks)`. And **`metrics`
+         must not ride along**: it has no unique key, and its timestamp convention differs
+         **per metric inside one file** (open interest matches the recorded `crowding`
+         rows at a **+300,000 ms** shift while the taker ratio matches at **0 ms**). That
+         is a time series without a key — i.e. exactly the mixed-history backfill §6
+         refuses. It gets its own item and its own argument, or it does not happen.
+      **Scope, locked:** `futures/um/{daily,monthly}/aggTrades/BTCUSDT` **only**, enforced
+      by an allowlist in code rather than a comment — the INSTRUMENT included
+      (`ALLOWED_SCOPE`), plus a target allowlist (`ALLOWED_TARGET`) so a vendor object can
+      only land under the venue/symbol whose recorded leg shares its id space. Downloading
+      and writing were two unrelated decisions before that: `--vendor-symbol ETHUSDT
+      --symbol BTCUSDT` wrote ETH rows into the `binancef/BTCUSDT` partition
+      `order_flow_bars` reads by default.
       *Accept:* one archive day lands under `data/vision/`; its overlap with a recorded day
       dedups to **zero** duplicate `(exchange,symbol,trade_id)` rows; `orderflow.py` builds
       bars with `source="vision"` while `auto` still returns recorded-only bars byte-identical
       to today; `sec_readiness` output is unchanged by the new rows; and `provenance_table`
       names the archive per column, so no reader can mistake an archive-fed CVD for a
-      recorded one.
+      recorded one. **All met and re-measured 2026-08-02** (see the runlog §9 for the
+      post-review round: a read-side partition-containment refusal, an L3 containment gate,
+      the monthly-404 daily fallback, and the per-day ID census).
 
 ### LONG — decompose, offload, expand, and place the execution interface (6-12 months)
 
@@ -748,12 +814,14 @@ Sequencing (revised). These items *use* the existing L1/M4 entries rather than d
 
 ## 7. Sustainable process (standing gates)
 
-- **Verification harness L0-L3 as a non-negotiable CI gate.** L0 (260 pytest + parity to
+- **Verification harness L0-L3 as a non-negotiable CI gate.** L0 (346 pytest + parity to
   machine-eps + the 83-group verbatim-assert gate over real wire frames), L1 (deterministic
   browser replay: REPLAY MODE + zero console error + non-blank canvas), L2 (live-wire
   invariants: book never crossed, mid coherent), L3 (tick-store gap census — report, never
-  fill). Every new panel carries one group; accept the linear carrying cost as the price of
-  the moat.
+  fill; since M7 the SAME gate definition also grades the `data/vision/` archive partition
+  via `make check-vision`, with one added FAIL — partition containment — and a refusal to
+  print a readiness number). Every new panel carries one group; accept the linear carrying
+  cost as the price of the moat.
 - **Pre-registration as a machine artifact** (once M2 exists): every candidate passes
   `{hypothesis_id, N_trials, MinBTL_target, kill criterion}` + a LockBox slice before data
   is touched. Prose run-logs evolve into an enforceable schema.

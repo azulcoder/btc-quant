@@ -53,6 +53,28 @@ Honesty rails (non-negotiable — they are the moat, not decoration)
    ex-post *data-availability* knowledge :func:`drop_gap_bars` and
    :func:`gap_flat_positions` are labelled with. It is disclosed here rather than
    defined away.
+7. **Provenance class is per UTC day, never mixed inside a bar, and never
+   silently widened.** ``source="auto"`` is RECORDED-ONLY and stays that way; the
+   public archive under :data:`VISION_DIR` (M7, DESIGN §3d) enters a frame only
+   when the caller names it — ``source=("local", "hf", "vision")``. Recorded wins
+   any day both could answer (:data:`SOURCE_PRECEDENCE`), every bar carries a
+   :data:`SOURCE_CODES` value in ``source_code``, and a run that touches archive
+   days warns with the exact bar counts. And the limit that makes the split real:
+   the PUBLIC ARCHIVE carries TRADES ONLY, so it lengthens the trade-derived
+   families and leaves every book-derived family exactly where it was — a frame
+   mixing both is only as long as its shortest family. ``ofi_*``/``microprice_*``/
+   ``mid_*``/``spread_*``/``depth_*`` are NaN on every archive bar **by
+   construction**, and so are ``coverage_book_*``/``coverage_liq_*`` — a coverage
+   column is a WITNESS measure, so 0.0 asserts "the leg was observed and was
+   silent", and on an archive day the stream was never published at all.
+   :func:`provenance_table` says so per column. Archive days never count toward
+   the ``check_ticks.sec_readiness`` MinBTL countdown, and the frame's own span
+   arithmetic counts only resolved days that CONTRIBUTED rows: every
+   ``attrs["history"]`` fraction names its basis, because an unqualified one over
+   the requested window is how a two-day frame reports 244 % of MinBTL(5). The
+   per-day rail rests on "a ``date=D`` partition holds day-D rows and nothing
+   else", which is re-checked at READ time (:func:`_assert_vision_partition_
+   contains_its_day`) rather than trusted from the path.
 
 Bar contract
 ------------
@@ -196,6 +218,13 @@ __all__ = [
     "FeatureNote",
     "STORE_DIR",
     "HF_REPO",
+    "VISION_DIR",
+    "VISION_VENUE",
+    "VISION_FAMILY",
+    "SOURCE_CLASSES",
+    "SOURCE_ALIASES",
+    "SOURCE_PRECEDENCE",
+    "SOURCE_CODES",
     "BAR_FREQS",
     "SIZE_BUCKETS_USD",
     "LIQUIDATION_VENUES",
@@ -213,6 +242,9 @@ __all__ = [
     "gap_flat_positions",
     "segments",
     "provenance_table",
+    "source_labels",
+    "archive_mask",
+    "drop_archive_bars",
 ]
 
 
@@ -231,6 +263,55 @@ STORE_DIR: Path = DATA_DIR / "ticks"
 #: Hugging Face dataset holding the archived day partitions — mirrors
 #: ``scripts/upload_hf.py`` ``DEFAULT_REPO``.
 HF_REPO: str = "azulcoder/btc-quant-ticks"
+
+#: PUBLIC-ARCHIVE tree root (M7, DESIGN §3d) — mirrors
+#: ``scripts/ingest_vision.py`` ``DEFAULT_OUT``. A **separate tree** on purpose:
+#: provenance is legible from the path alone, so no schema migration is ever
+#: needed to know where a row came from, and no recorded partition can union
+#: these rows by accident. Nothing here is read unless the caller explicitly
+#: asks for ``"vision"`` — :data:`SOURCE_ALIASES` keeps it out of ``"auto"``.
+VISION_DIR: Path = DATA_DIR / "vision"
+
+#: The one venue/family the archive partition is allowlisted for (§3d). Binance's
+#: ``futures/um`` ``aggTrades`` is the SAME stream the ``binancef-aggTrades``
+#: collector leg records, in the SAME aggTradeId space — which is the only reason
+#: reading it is admissible at all (exact dedup on ``(exchange, symbol,
+#: trade_id)``, gaps found by ID continuity rather than by a timestamp guess).
+VISION_VENUE: str = "binancef"
+VISION_FAMILY: str = "aggTrades"
+
+#: Provenance CLASSES a frame may be built from.
+#:
+#: ``"vision"`` is the public archive; ``"local"``/``"hf"`` are the RECORDED
+#: store. The split matters because they are not interchangeable: the archive
+#: publishes trades and nothing else, so a book column on an archive day is NaN
+#: by construction, and archive days never count toward the ``sec_readiness``
+#: MinBTL countdown (DESIGN §0.7 rail b).
+SOURCE_CLASSES: tuple[str, ...] = ("local", "hf", "vision")
+
+#: ``"auto"`` is **recorded-only, and stays that way**. Reaching for the archive
+#: is always an explicit, visible act by the caller — ``source=("local", "hf",
+#: "vision")`` or ``source="vision"``. A default that quietly widened to include
+#: a different provenance class is exactly the failure this whole item is
+#: guarded against.
+SOURCE_ALIASES: dict[str, tuple[str, ...]] = {"auto": ("local", "hf")}
+
+#: Per-UTC-day resolution order. **Recorded always wins.** An archive row must
+#: never displace a recorded one, because the recorded store is what
+#: ``sec_readiness`` counts and what L3 QA grades — letting the archive shift it
+#: would let a row from ``data/vision/`` change a number produced by a
+#: recorded-only audit.
+SOURCE_PRECEDENCE: tuple[str, ...] = ("local", "hf", "vision")
+
+#: Numeric code emitted per bar in the ``source_code`` column. Numeric, not a
+#: string or a categorical, because every other column in the frame is float64
+#: (bar two bools) and a consumer doing ``to_numpy(dtype=float)`` must not break.
+#: The column is emitted on **every** run, including recorded-only ones — so its
+#: presence never signals "the archive was used" and its absence never means
+#: "recorded". :func:`source_labels` maps it back for humans.
+SOURCE_CODES: dict[str, float] = {
+    "unresolved": 0.0, "local": 1.0, "hf": 2.0, "vision": 3.0,
+}
 
 #: Bar clocks this module will build. Deliberately short: each extra clock is an
 #: extra research trial, and the deflation maths charges for trials.
@@ -277,7 +358,10 @@ GRACE_CLOSE_MIN: int = 6
 #: and OFI pairing, ``coverage_liq_*`` / ``vpin_window_span_s_*`` /
 #: ``vpin_window_gap_s_*`` added. Every one of those changes a value, so the old
 #: cached bars must not be readable.
-SCHEMA_VERSION: str = "2"
+#: v3: the ``source_code`` provenance column is emitted on every frame (M7) and
+#: ``source`` became a class LIST rather than a single string. The column changes
+#: the frame's shape, so a v2 cached bar must not be read back as a v3 one.
+SCHEMA_VERSION: str = "3"
 
 MS_PER_DAY: int = 86_400_000
 _MS_PER_YEAR: int = 365 * MS_PER_DAY
@@ -437,6 +521,12 @@ HONESTY_SENTENCES: tuple[str, ...] = (
     # is measured per call into attrs["orderflow"]["history"] instead.
     "The recorded archive is FAR below MinBTL for any realistic trial count; this "
     "module builds the rail while the clock runs",
+    # M7. Also carries no numeral, for the same reason as the sentence above: the
+    # spans are measured per call into attrs["orderflow"]["history"], where a test
+    # can check them for TRUTH rather than for presence.
+    "the PUBLIC ARCHIVE carries TRADES ONLY, so it lengthens the trade-derived "
+    "families and leaves every book-derived family exactly where it was — a frame "
+    "mixing both is only as long as its shortest family",
 )
 
 #: Column template -> :class:`FeatureNote`. ``{v}`` is a trade venue, ``{b}`` the
@@ -520,6 +610,21 @@ PROVENANCE: dict[str, FeatureNote] = {
                       "only comparable WITHIN one segment, and a 20-minute hole inside a "
                       "1h bar is unobserved flow just as surely as a whole empty bar is",
         units="index", source_leg="derived"),
+    "source_code": _note(
+        column="source_code", family="quality",
+        formula="SOURCE_CODES[class that answered this bar's UTC day] — "
+                "0 unresolved, 1 local, 2 hf, 3 vision (PUBLIC ARCHIVE)",
+        citation=_CIT_NONE,
+        approximation="EXACT, not a summary: provenance is resolved per UTC day and no bar "
+                      "can straddle a day (every BAR_FREQS clock divides 86,400,000 ms and "
+                      "_bar_ms refuses one that does not), so a bar has exactly one class. "
+                      "But the code says only WHERE the rows came from, never how complete "
+                      "they are — read it with `coverage`. And code 3 (vision) carries a "
+                      "hard limit: the public archive publishes aggTrades only, so on those "
+                      "bars every book column (ofi_*, microprice_*, mid_*, spread_*, "
+                      "depth_*) and every liquidation column is NaN BY CONSTRUCTION, not "
+                      "for want of liquidity",
+        units="code", source_leg="derived"),
     "trade_count": _note(
         column="trade_count", family="quality", formula="number of prints in the bar",
         citation=_CIT_NONE,
@@ -802,7 +907,11 @@ PROVENANCE: dict[str, FeatureNote] = {
         formula="1 - gap_ms/bar_ms for the book venue's depth stream",
         citation="scripts/check_ticks.py GAP_MS",
         approximation="the depth stream is its own witness (1 Hz heartbeat), so this is a "
-                      "direct liveness measure rather than an inference from trades",
+                      "direct liveness measure rather than an inference from trades — on "
+                      "a RECORDED day. On a PUBLIC-ARCHIVE day (source_code==3) the depth "
+                      "stream was never published, so there is nothing to witness and this "
+                      "reads NaN, not 0.0: 0.0 would claim an observation of silence that "
+                      "nobody made",
         units="fraction", source_leg="depth_snapshots[{b}]"),
     # ---- liquidations ----
     "liq_count_{v}": _note(
@@ -831,7 +940,9 @@ PROVENANCE: dict[str, FeatureNote] = {
                       "(bybit prints 3-2000 liquidations a DAY, well past GAP_MS), so the "
                       "witness is the venue's two dense streams. That inference is why "
                       "this is a SEPARATE column from coverage_{v} instead of being "
-                      "quietly reused for the trade family",
+                      "quietly reused for the trade family. NaN on a PUBLIC-ARCHIVE day: "
+                      "the um archive publishes no liquidation stream, so its liveness is "
+                      "unknown there rather than witnessed by the trade leg",
         units="fraction", source_leg="trades[{v}] U depth_snapshots[{v}]"),
     "liq_notional_usd_{v}": _note(
         column="liq_notional_usd_{v}", family="liquidation",
@@ -879,6 +990,56 @@ def _note_for(column: str, trade_venues: Sequence[str],
     return None
 
 
+#: What the PUBLIC ARCHIVE contributes to a column, verbatim per family. This is
+#: the sentence that makes an archive-fed CVD unmistakable for a recorded one —
+#: and, more importantly, makes it impossible to read an archive-fed OFI as
+#: anything but empty, because the archive publishes no book at all.
+VISION_CONTRIBUTION: dict[str, str] = {
+    "trade": "rows — same venue, same stream, same aggTradeId space as the recorded leg",
+    "price": "rows — OHLCV is trade-derived, so the archive extends it",
+    "book": "none — aggTrades carries no book; this column is NaN on every archive bar",
+    "liquidation": "none — the um archive publishes no liquidation stream",
+    "quality": "n/a — computed from whatever rows the resolved source provided",
+    "provenance": "n/a — this column IS the provenance record",
+    # A coverage column is a WITNESS measure, so it cannot answer for a stream
+    # that was never published: 0.0 there would assert an observation of silence
+    # nobody made. The two book/liquidation witnesses therefore read NaN on an
+    # archive bar, and this sentence is what stops a reader treating that NaN as
+    # "the leg died" rather than "the archive has no such leg".
+    "witness_absent": "none — the archive publishes no such stream, so this witness is "
+                      "NaN (unknown) on every archive bar, never an observed 0.0",
+}
+
+#: Columns whose ``quality``-family sentence would be wrong on an archive bar.
+_VISION_WITNESS_ABSENT: tuple[str, ...] = ("coverage_book_", "coverage_liq_")
+#: ``FeatureNote.family`` -> the key above. Every family a note can carry must
+#: appear here; a test enumerates ``PROVENANCE`` and fails on an unmapped one, so
+#: a new feature family cannot ship without someone stating what the archive
+#: gives it.
+_VISION_FAMILY_MAP: dict[str, str] = {
+    "price": "price",
+    "trade": "trade",
+    "book": "book",
+    "liquidation": "liquidation",
+    "quality": "quality",
+}
+
+
+def _vision_contribution(column: str, note: Optional[FeatureNote]) -> str:
+    if column == "source_code":
+        return VISION_CONTRIBUTION["provenance"]
+    if any(str(column).startswith(p) for p in _VISION_WITNESS_ABSENT):
+        return VISION_CONTRIBUTION["witness_absent"]
+    if note is None:
+        return ""
+    fam = _VISION_FAMILY_MAP.get(str(note.family))
+    if fam is None:
+        # An unmapped family must not silently read as "rows". Say what is true:
+        # nobody has decided, and that is the answer until someone does.
+        return "unclassified — state the archive's contribution before relying on it"
+    return VISION_CONTRIBUTION[fam]
+
+
 def provenance_table(bars: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """One row per feature: column, family, formula, citation, approximation, ...
 
@@ -886,10 +1047,19 @@ def provenance_table(bars: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     actually carries and the result covers **exactly** its columns — so a column
     with no note shows up as a missing row and the contract test fails loudly.
     Without ``bars`` the unresolved templates are returned.
+
+    Every row also carries ``vision_contribution`` (M7): what the PUBLIC ARCHIVE
+    gives that column. It is emitted whether or not the frame used the archive,
+    for the same reason ``source_code`` always is — a field that only appeared
+    when the archive was used would itself become a signal, and the point is that
+    a reader can never mistake an archive-fed CVD for a recorded one, or an
+    archive-fed OFI for anything at all.
     """
     if bars is None:
-        rows = [asdict(n) for n in PROVENANCE.values()]
-        return pd.DataFrame(rows, columns=list(asdict(next(iter(PROVENANCE.values())))))
+        rows = [asdict(n) | {"vision_contribution": _vision_contribution(n.column, n)}
+                for n in PROVENANCE.values()]
+        cols = list(asdict(next(iter(PROVENANCE.values())))) + ["vision_contribution"]
+        return pd.DataFrame(rows, columns=cols)
 
     meta = bars.attrs.get("orderflow", {})
     tvs: Sequence[str] = tuple(meta.get("trade_venues", ()))
@@ -898,11 +1068,13 @@ def provenance_table(bars: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     for col in bars.columns:
         note = _note_for(str(col), tvs, bv)
         if note is not None:
-            rows.append(asdict(note) | {"column": str(col)})
+            rows.append(asdict(note) | {"column": str(col),
+                                        "vision_contribution": _vision_contribution(str(col), note)})
         else:
             rows.append({"column": str(col), "family": "", "formula": "",
                          "citation": "", "approximation": "", "units": "",
-                         "source_leg": "", "aggregation": "", "contested": ""})
+                         "source_leg": "", "aggregation": "", "contested": "",
+                         "vision_contribution": _vision_contribution(str(col), None)})
     return pd.DataFrame(rows)
 
 
@@ -917,7 +1089,19 @@ def _to_utc(value: Union[str, pd.Timestamp, datetime]) -> pd.Timestamp:
 def _bar_ms(bar: str) -> int:
     if bar not in BAR_FREQS:
         raise OrderFlowError(f"bar={bar!r} not in {BAR_FREQS} (each extra clock is an extra trial)")
-    return int(pd.Timedelta(bar) / pd.Timedelta("1ms"))
+    ms = int(pd.Timedelta(bar) / pd.Timedelta("1ms"))
+    # Rail 7, made structural. Provenance is resolved per UTC DAY, so "one bar
+    # never mixes provenance classes" holds only while no bar can straddle
+    # midnight. Grid alignment is already refused in ``order_flow_bars``; this is
+    # the other half — every clock must divide the day. All four current
+    # BAR_FREQS do (1440/288/96/24 bars per day); a future ``7min`` would not,
+    # and would break the property silently rather than loudly.
+    if MS_PER_DAY % ms:
+        raise OrderFlowError(
+            f"bar={bar!r} ({ms} ms) does not divide the UTC day ({MS_PER_DAY} ms) — a bar "
+            "that straddles midnight could mix provenance classes (recorded vs public "
+            "archive) inside itself, which rail 7 refuses. Pick a clock that divides the day.")
+    return ms
 
 
 def periods_per_year(bar: str) -> int:
@@ -989,6 +1173,129 @@ def _hf_url(repo: str, date: str, table: str) -> str:
     if date != "*" and not _DATE_RE.match(date):
         raise OrderFlowError(f"bad date {date!r}")
     return f"hf://datasets/{repo}/data/date={date}/{table}.parquet"
+
+
+def _normalize_source(source: Union[str, Sequence[str]]) -> tuple[str, ...]:
+    """``'auto'|'local'|'hf'|'vision'`` or a sequence of them -> an ordered tuple.
+
+    Ordered by :data:`SOURCE_PRECEDENCE`, deduplicated, and validated. The
+    **default ``"auto"`` never includes ``"vision"``** (:data:`SOURCE_ALIASES`) —
+    recorded-only is the default and opting into the public archive is always a
+    visible act in the call site.
+
+    A *list* rather than a fourth enum value on purpose: the actual use case is
+    "6.5 years of archive **plus** the recorded tail", and an exclusive enum
+    forces that into two calls plus a concat — which resurrects the midnight-seam
+    artifact this module builds its grid once precisely to avoid.
+    """
+    if isinstance(source, str):
+        raw: tuple[str, ...] = (source,)
+    elif isinstance(source, (list, tuple, set, frozenset)):
+        raw = tuple(str(s) for s in source)
+    else:
+        raise OrderFlowError(
+            "source must be a string or a sequence of "
+            f"{SOURCE_CLASSES + tuple(SOURCE_ALIASES)}, got {type(source).__name__}")
+    if not raw:
+        raise OrderFlowError("source must name at least one provenance class")
+    out: list[str] = []
+    for s in raw:
+        if s in SOURCE_ALIASES:
+            out.extend(SOURCE_ALIASES[s])
+        elif s in SOURCE_CLASSES:
+            out.append(s)
+        else:
+            raise OrderFlowError(
+                f"source={s!r} must be one of {SOURCE_CLASSES + tuple(SOURCE_ALIASES)}; "
+                "'auto' is RECORDED-ONLY (local, hf) and never includes 'vision' — pass "
+                "source=('local', 'hf', 'vision') to opt into the public archive")
+    seen = dict.fromkeys(out)
+    return tuple(s for s in SOURCE_PRECEDENCE if s in seen)
+
+
+def _vision_path(root: Union[str, Path], date: str, *, venue: str = VISION_VENUE,
+                 symbol: str = "BTCUSDT", family: str = VISION_FAMILY,
+                 table: str = "trades") -> Path:
+    """Local path of one public-archive day partition (the §3d tree).
+
+    ``<root>/<venue>/<symbol>/<family>/date=<YYYY-MM-DD>/<table>.parquet`` —
+    written by ``scripts/ingest_vision.py``. Provenance is readable from the path
+    alone, which is why no schema migration is needed to know where a row came
+    from and why an accidental union into a recorded relation is structurally
+    hard rather than merely discouraged.
+    """
+    if not _DATE_RE.match(date):
+        raise OrderFlowError(f"bad date {date!r}")
+    if not _VENUE_RE.match(venue):
+        raise OrderFlowError(f"bad venue code {venue!r}")
+    if not _SYMBOL_RE.match(symbol):
+        raise OrderFlowError(f"bad symbol id {symbol!r}")
+    if table not in _TABLE_SCHEMA:
+        raise OrderFlowError(f"unknown table {table!r}")
+    return Path(root) / venue / symbol / family / f"date={date}" / f"{table}.parquet"
+
+
+def _vision_partitions(root: Union[str, Path], *, venue: str = VISION_VENUE,
+                       symbol: str = "BTCUSDT",
+                       family: str = VISION_FAMILY) -> dict[str, set[str]]:
+    """``{table: {dates present in the archive tree}}`` — a LOCAL glob, no network.
+
+    Only ``trades`` can ever appear: the archive family publishes trades and
+    nothing else, so the book/liquidation tables are absent **by construction**
+    here — which is a different fact from "empty" and is kept as such (§0.7).
+    """
+    out: dict[str, set[str]] = {t: set() for t in _TABLE_SCHEMA}
+    base = Path(root) / venue / symbol / family
+    if not base.is_dir():
+        return out
+    for d in sorted(base.glob("date=*")):
+        date = d.name[len("date="):]
+        if not _DATE_RE.match(date):
+            continue
+        for table in _TABLE_SCHEMA:
+            if (d / f"{table}.parquet").exists():
+                out[table].add(date)
+    return out
+
+
+def _assert_vision_partition_contains_its_day(con: Any, date: str, path: Union[str, Path],
+                                              table: str) -> dict[str, Any]:
+    """A ``date=D`` partition holds day-D rows and nothing else — RE-CHECKED HERE.
+
+    The per-UTC-day provenance design (§0.7 rail a) rests on this invariant, and
+    until now it was enforced only where the tree is WRITTEN
+    (``ingest_vision.write_day_parquet`` G4a). A tree is copied between machines
+    by design, so the write-side gate cannot be the only one: a partition whose
+    rows belong to another day would be unioned in and land in that other day's
+    bars — which resolve to ``local``/``hf`` and are therefore labelled RECORDED.
+    Archive rows becoming indistinguishable from recorded rows is precisely the
+    failure the whole item is guarded against, so the reader re-checks rather
+    than trusting the path.
+
+    The check is exhaustive and costs one metadata read: parquet keeps per-row-
+    group ``min``/``max`` statistics, so ``min(ts_ms) >= day_start AND
+    max(ts_ms) < day_end`` proves containment for **every** row without scanning
+    one. Same predicate as G4a, same refusal — a partition IS its day.
+    """
+    a, b = _day_bounds(date)
+    esc = str(path).replace("'", "''")
+    n, tmin, tmax = con.execute(
+        f"SELECT count(*), min(ts_ms), max(ts_ms) FROM read_parquet('{esc}')").fetchone()
+    if not n:
+        return {"date": date, "table": table, "rows": 0, "ts_min": None, "ts_max": None}
+    if not (a <= int(tmin) and int(tmax) < b):
+        lo = datetime.fromtimestamp(int(tmin) // 1000, tz=timezone.utc).isoformat()
+        hi = datetime.fromtimestamp(int(tmax) // 1000, tz=timezone.utc).isoformat()
+        raise OrderFlowError(
+            f"archive partition date={date} ({path}) holds rows outside its own UTC day "
+            f"([{lo} .. {hi}] vs [{a}, {b})). A partition IS its day: provenance here is "
+            "per UTC day, so foreign rows would be unioned into ANOTHER day's bars — a "
+            "day that may have resolved to the RECORDED store and is labelled as such. "
+            "Refusing to read this tree; re-ingest the partition "
+            "(scripts/ingest_vision.py --force) or run `check_ticks.py --vision` for the "
+            f"full census. Table: {table}.")
+    return {"date": date, "table": table, "rows": int(n),
+            "ts_min": int(tmin), "ts_max": int(tmax)}
 
 
 def _hf_partitions(con: Any, repo: str) -> dict[str, set[str]]:
@@ -1119,9 +1426,11 @@ def _assert_one_symbol_per_venue(con: Any, rel: str, table: str) -> dict[str, st
 def _open_source(
     dates: Sequence[str],
     *,
-    source: str,
+    source: Union[str, Sequence[str]],
     store_dir: Path,
     hf_repo: str,
+    vision_root: Union[str, Path] = VISION_DIR,
+    vision_symbol: str = "BTCUSDT",
     exchanges: Sequence[str],
     t0_ms: int,
     t1_ms: int,
@@ -1143,7 +1452,18 @@ def _open_source(
     * **hf** — ``read_parquet`` over the day partitions that actually exist.
       Missing partitions produce a typed empty view so the SQL still runs, and
       the absence is recorded per (date, table).
+    * **vision** — ``read_parquet`` over the LOCAL public-archive tree
+      (:data:`VISION_DIR`, DESIGN §3d). **Trades only**, and never included by
+      ``"auto"``: the caller names it or it is not read (rail 7).
     * **auto** — per day: closed local file when present, else ``hf://``.
+      RECORDED-ONLY, by :data:`SOURCE_ALIASES`, permanently.
+
+    ``source`` is a class LIST. Resolution is per UTC day in
+    :data:`SOURCE_PRECEDENCE` order — ``local > hf > vision``, so **recorded
+    always wins** a day both could answer. That ordering is not a preference: the
+    recorded store is what ``sec_readiness`` counts and what L3 QA grades, and an
+    archive row displacing a recorded one would let ``data/vision/`` change a
+    number produced by a recorded-only audit.
 
     On that last point, precisely: the two backends were measured to agree on
     2026-07-25 (the only day both currently exist) across all emitted columns,
@@ -1168,8 +1488,7 @@ def _open_source(
     midnight seam artifact can appear.
     """
     _require_deps()
-    if source not in ("auto", "local", "hf"):
-        raise OrderFlowError(f"source={source!r} must be 'auto', 'local' or 'hf'")
+    classes = _normalize_source(source)
     for ex in exchanges:
         if not _VENUE_RE.match(ex):
             raise OrderFlowError(f"bad venue code {ex!r}")
@@ -1184,9 +1503,15 @@ def _open_source(
     skipped_locked: list[str] = []
     hf_dates: list[str] = []
     hf_present: dict[str, set[str]] = {}
+    vision_dates: list[str] = []
+    vision_present: dict[str, set[str]] = {}
+    vision_checked: list[dict[str, Any]] = []
 
-    want_local = source in ("auto", "local")
-    want_hf = source in ("auto", "hf")
+    want_local = "local" in classes
+    want_hf = "hf" in classes
+    want_vision = "vision" in classes
+    if want_vision:
+        vision_present = _vision_partitions(vision_root, symbol=vision_symbol)
 
     for i, date in enumerate(dates):
         rec: dict[str, Any] = {"date": date, "source": None, "tables_present": {}}
@@ -1211,15 +1536,35 @@ def _open_source(
                         rec["note"] = "day file locked by the live writer — skipped, not fought over"
                     else:
                         raise OrderFlowError(f"cannot attach {path}: {exc}") from exc
+        used_hf = False
         if not used_local and want_hf:
             if not hf_present:
                 hf_present = _hf_partitions(con, hf_repo)
-            hf_dates.append(date)
-            rec["source"] = "hf"
-        elif not used_local and not want_hf:
-            rec["source"] = None
+            # When the archive is ALSO in play, `hf` claims only the days it
+            # actually holds, so a day the Hub lacks can fall through to the
+            # next rank instead of resolving to an empty hf day. With
+            # `vision` absent this is exactly the previous behaviour (hf claims
+            # every non-local day and reports its own absences), so no existing
+            # caller changes shape.
+            hf_has = any(date in hf_present.get(t, set()) for t in tables)
+            if hf_has or not want_vision:
+                hf_dates.append(date)
+                rec["source"] = "hf"
+                used_hf = True
+        if not used_local and not used_hf and want_vision:
+            # Rank 3 (SOURCE_PRECEDENCE): the PUBLIC ARCHIVE, trades only. It is
+            # reached only because the caller named it, and only for a day
+            # neither recorded backend answered.
+            vis_has = any(date in vision_present.get(t, set()) for t in tables)
+            if vis_has:
+                vision_dates.append(date)
+                rec["source"] = "vision"
+                rec["vision_path"] = str(_vision_path(
+                    vision_root, date, symbol=vision_symbol, table="trades").parent)
+                rec["provenance_class"] = "public archive (data/vision) — TRADES ONLY"
+        if rec["source"] is None:
             rec.setdefault("note", "no readable source for this day under "
-                                   f"source={source!r}")
+                                   f"source={list(classes)!r}")
 
     # Which attached catalog holds which table (a v1-migrated day may lack a v2 table).
     have: dict[str, list[str]] = {t: [] for t in tables}
@@ -1249,6 +1594,26 @@ def _open_source(
         if urls:
             lst = ", ".join("'" + u.replace("'", "''") + "'" for u in urls)
             parts.append(f"SELECT {_projection(table)} FROM read_parquet([{lst}])")
+        for date in vision_dates:
+            present = date in vision_present.get(table, set())
+            per_day[date]["tables_present"][table] = present
+            if not present:
+                continue
+            vpath = str(_vision_path(vision_root, date, symbol=vision_symbol, table=table))
+            vision_checked.append(
+                _assert_vision_partition_contains_its_day(con, date, vpath, table))
+            a, b = _day_bounds(date)
+            esc = vpath.replace("'", "''")
+            # ONE SELECT PER PARTITION, each fenced to its own UTC day. Explicit
+            # file + explicit projection, never a glob with SELECT *: the hive
+            # reader synthesises a `date` column the recorded relations do not
+            # have, and a union whose shape depended on the backend is the drift
+            # this projection exists to prevent. The day predicate is the second
+            # half of the rail checked just above — the check makes foreign rows
+            # LOUD, the predicate makes them structurally unable to reach another
+            # day's bars even if a future edit softened the check.
+            parts.append(f"SELECT {_projection(table)} FROM read_parquet('{esc}') "
+                         f"WHERE ts_ms >= {int(a)} AND ts_ms < {int(b)}")
         body = " UNION ALL ".join(parts) if parts else _empty_view_sql(table)
         con.execute(f"CREATE VIEW _src_{table} AS {body}")
 
@@ -1266,8 +1631,23 @@ def _open_source(
             rec["liquidations_recorded"] = any(
                 date in hf_present.get(t, set()) for t in _TABLE_SCHEMA) \
                 if "liquidations" in tables else None
+        elif rec["source"] == "vision":
+            # NOT recorded, deliberately and permanently: the archive family
+            # publishes trades and nothing else, so an archive day says nothing
+            # about whether liquidations happened. That makes every liquidation
+            # column NaN on these bars — unknown, never a fabricated 0.0. The
+            # same absence is why every book column is NaN here too.
+            rec["liquidations_recorded"] = False if "liquidations" in tables else None
         else:
             rec["liquidations_recorded"] = False if "liquidations" in tables else None
+        # Same question for the BOOK leg, and it has the same answer on an
+        # archive day — for the same reason. `coverage_book_*` / `coverage_liq_*`
+        # are witness measures: 0.0 means "the leg was observed and was silent",
+        # which is a real observation on a recorded day and a FABRICATION on an
+        # archive one, where the stream was never published, never subscribed and
+        # never silent. Unknown, not zero (§0.7 rail c).
+        rec["book_recorded"] = rec["source"] != "vision"
+        rec["liq_stream_published"] = rec["source"] != "vision"
         rec["resolved"] = bool(rec["source"]) and any(rec["tables_present"].values())
 
     # Filter once, to the requested window, venues and instrument.
@@ -1314,6 +1694,18 @@ def _open_source(
                 "table": table, "exchange": ex, "rows": int(n),
             })
 
+    # Rows a day actually CONTRIBUTED to this request — after the window, venue
+    # and instrument filters. `resolved` is structural (the partition exists);
+    # this is the stronger fact, and the two differ whenever a day resolves for a
+    # venue it does not carry. The span arithmetic downstream counts THIS, so a
+    # day nobody read cannot lengthen a history claim.
+    rows_in_window: dict[str, int] = {}
+    for r in rows:
+        rows_in_window[r["date"]] = rows_in_window.get(r["date"], 0) + int(r["rows"])
+    for date, rec in per_day.items():
+        rec["rows_in_window"] = int(rows_in_window.get(date, 0))
+        rec["contributed"] = bool(rec["resolved"] and rec["rows_in_window"] > 0)
+
     unresolved = [d["date"] for d in per_day.values() if not d["resolved"]]
     manifest = {
         "days": list(per_day.values()),
@@ -1322,7 +1714,16 @@ def _open_source(
         "materialized": do_materialize,
         "hf_repo": hf_repo if hf_dates else None,
         "store_dir": str(store_dir),
-        "source_requested": source,
+        "vision_root": str(vision_root) if vision_dates else None,
+        "source_requested": list(classes),
+        # Keyed on RESOLVED, exactly like the `source_code` column: a class that
+        # was ASKED but supplied no day is not a class this frame was built from,
+        # and naming it here would put a provenance class in `sources_used` that
+        # contributed nothing.
+        "source_classes_used": sorted({d["source"] for d in per_day.values()
+                                       if d["source"] and d["resolved"]}),
+        "archive_days": sorted(vision_dates),
+        "vision_partitions_checked": vision_checked,
         "symbol_requested": sym_map or None,
         "symbols_observed": symbols,
         "day_anchored": {t: day_rel[t] != _REL[t] for t in tables},
@@ -1341,7 +1742,9 @@ def available_days(
     *,
     store_dir: Union[str, Path] = STORE_DIR,
     hf_repo: str = HF_REPO,
-    source: str = "auto",
+    vision_root: Union[str, Path] = VISION_DIR,
+    vision_symbol: str = "BTCUSDT",
+    source: Union[str, Sequence[str]] = "auto",
     by_exchange: bool = False,
     now_ms: Optional[int] = None,
 ) -> pd.DataFrame:
@@ -1352,24 +1755,50 @@ def available_days(
     because a per-venue breakdown of the Hub means scanning ~40 M trade rows
     while the aggregate comes straight out of the parquet footers. Today's day
     file is never listed as readable: it is open, locked, and still growing.
+
+    ``source`` takes the same class list as :func:`order_flow_bars`, with the
+    same default: ``"auto"`` lists the RECORDED store only. A day that exists
+    solely in the public archive appears only when ``"vision"`` is named.
     """
     _require_deps()
+    classes = _normalize_source(source)
     con = duckdb.connect()
     con.execute("SET enable_progress_bar=false")
     out: list[dict[str, Any]] = []
     try:
         local_dates: list[str] = []
-        if source in ("auto", "local"):
+        if "local" in classes:
             for p in sorted(Path(store_dir).glob("*.duckdb")):
                 if _DATE_RE.match(p.stem) and _day_is_closed(p.stem, now_ms):
                     local_dates.append(p.stem)
         hf_present: dict[str, set[str]] = {}
-        if source in ("auto", "hf"):
+        if "hf" in classes:
             hf_present = _hf_partitions(con, hf_repo)
+        vision_present: dict[str, set[str]] = {}
+        if "vision" in classes:
+            vision_present = _vision_partitions(vision_root, symbol=vision_symbol)
 
         hf_dates = sorted({d for s in hf_present.values() for d in s})
-        for date in sorted(set(local_dates) | set(hf_dates)):
-            use_local = date in local_dates and source in ("auto", "local")
+        vision_dates = sorted({d for s in vision_present.values() for d in s})
+        for date in sorted(set(local_dates) | set(hf_dates) | set(vision_dates)):
+            use_local = date in local_dates and "local" in classes
+            use_hf = (not use_local) and date in hf_dates
+            if not use_local and not use_hf:
+                # Archive-only day. Trades and nothing else — the other tables are
+                # absent BY CONSTRUCTION, which is a different fact from empty.
+                for table in _TABLE_SCHEMA:
+                    present = date in vision_present.get(table, set())
+                    if not present:
+                        out.append({"date": date, "source": "vision", "table": table,
+                                    "present": False, "exchange": "*", "rows": 0,
+                                    "note": "absent by construction — the public archive "
+                                            "family publishes trades only"})
+                        continue
+                    p = str(_vision_path(vision_root, date, symbol=vision_symbol,
+                                         table=table)).replace("'", "''")
+                    out.extend(_count_rows(con, f"read_parquet('{p}')", date, "vision",
+                                           table, by_exchange))
+                continue
             src = "local" if use_local else "hf"
             for table in _TABLE_SCHEMA:
                 if use_local:
@@ -1993,6 +2422,25 @@ def _read_bars_cache(spec: dict[str, Any]) -> Optional[pd.DataFrame]:
     return df
 
 
+def _emit_run_warnings(bars: pd.DataFrame, *, stacklevel: int = 3) -> None:
+    """Re-emit the mandatory per-run warnings from a frame's own ``attrs``.
+
+    A warning that a cache hit skips is not mandatory, it is incidental — and
+    ``cache=True`` is the default, so the second call of the day was the silent
+    one. The archive note in particular is the sentence that tells a reader half
+    their frame has no book; it must ride with the frame, not with the miss.
+    Driven off ``attrs`` rather than re-derived, so the cached text is the text
+    that was warned the first time.
+    """
+    meta = bars.attrs.get("orderflow") or {}
+    cross = meta.get("cross_instrument")
+    if isinstance(cross, dict) and cross.get("note"):
+        warnings.warn(str(cross["note"]), stacklevel=stacklevel)
+    archive = meta.get("archive") or {}
+    if archive.get("bars") and archive.get("note"):
+        warnings.warn(str(archive["note"]), stacklevel=stacklevel)
+
+
 # --------------------------------------------------------------------------- #
 # Public API                                                                    #
 # --------------------------------------------------------------------------- #
@@ -2011,9 +2459,11 @@ def order_flow_bars(
     vpin_window_buckets: int = 50,
     vpin_bucket_volume: Optional[float] = None,
     liquidations: bool = True,
-    source: str = "auto",
+    source: Union[str, Sequence[str]] = "auto",
     store_dir: Union[str, Path] = STORE_DIR,
     hf_repo: str = HF_REPO,
+    vision_root: Union[str, Path] = VISION_DIR,
+    vision_symbol: str = "BTCUSDT",
     cache: bool = True,
     materialize: Optional[bool] = None,
     now_ms: Optional[int] = None,
@@ -2065,8 +2515,32 @@ def order_flow_bars(
         Emit liquidation columns for the requested venues that actually have a
         liquidation leg (:data:`LIQUIDATION_VENUES`).
     source
-        ``"auto"`` (closed local day file when present, else ``hf://``),
-        ``"local"``, or ``"hf"``.
+        Which provenance CLASSES may answer, as a string or a sequence.
+        ``"auto"`` (the default) is **RECORDED-ONLY**: a closed local day file
+        when present, else ``hf://``. ``"vision"`` is the PUBLIC ARCHIVE under
+        ``vision_root`` (M7, DESIGN §3d) and **``"auto"`` never includes it** —
+        reaching for the archive is always explicit at the call site::
+
+            order_flow_bars(...)                                    # recorded only
+            order_flow_bars(..., source=("local", "hf", "vision"))  # explicit opt-in
+            order_flow_bars(..., source="vision")                   # archive only
+
+        Resolution is per UTC day in :data:`SOURCE_PRECEDENCE` order, so a day
+        the recorded store holds is **never** displaced by an archive day, and a
+        bar never mixes classes (its clock divides the UTC day and the window is
+        grid-aligned — both enforced). Every bar reports which class answered in
+        ``source_code``.
+
+        **The limit, because it does not go away by being read carefully:** the
+        archive publishes ``aggTrades`` and nothing else. Trade-derived columns
+        span archive days; ``ofi_*``, ``microprice_*``, ``mid_*``, ``spread_*``
+        and ``depth_*`` are NaN on every archive bar **by construction**, and so
+        are the liquidation columns. A frame mixing both families is only as long
+        as its shortest family, and a run that resolves any archive day says so
+        with a warning naming the exact bar counts.
+    vision_root, vision_symbol
+        Where the archive tree lives and which instrument to read from it.
+        Ignored unless ``"vision"`` is in ``source``.
     cache
         Read/write ``data/orderflow/<spec_hash>/<range>.parquet`` plus a JSON
         manifest sidecar. The hash covers every parameter **and**
@@ -2107,6 +2581,7 @@ def order_flow_bars(
     if not price_venue or not _VENUE_RE.match(price_venue):
         raise OrderFlowError("price_venue is required and must be a collector venue code "
                              "(no honest default exists across this archive)")
+    source_classes = _normalize_source(source)
     bar_ms = _bar_ms(bar)
     t_start, t_end = _to_utc(start), _to_utc(end)
     t0 = int(t_start.value // 1_000_000)
@@ -2139,12 +2614,22 @@ def order_flow_bars(
         "vpin": bool(vpin), "vpin_buckets_per_day": int(vpin_buckets_per_day),
         "vpin_window_buckets": int(vpin_window_buckets),
         "vpin_bucket_volume": vpin_bucket_volume,
-        "liquidations": bool(liquidations), "source": source,
+        "liquidations": bool(liquidations),
+        # The normalized tuple, not the raw argument: source=("hf","local") and
+        # source="auto" must hash to the same cache entry, and a run that opted
+        # into the archive must NEVER share a cache entry with one that did not.
+        "source": list(source_classes),
         "hf_repo": hf_repo, "store_dir": str(store_dir),
+        "vision_root": str(vision_root) if "vision" in source_classes else None,
+        "vision_symbol": vision_symbol if "vision" in source_classes else None,
     }
     if cache:
         cached = _read_bars_cache(spec)
         if cached is not None:
+            # The provenance warnings are part of the ANSWER, not part of the
+            # miss: a cached mixed-provenance frame says so exactly as loudly as
+            # a freshly-built one.
+            _emit_run_warnings(cached)
             return cached
 
     grid = _grid(t0, t1, bar_ms)
@@ -2157,7 +2642,8 @@ def order_flow_bars(
 
     try:
         src = _open_source(
-            dates, source=source, store_dir=Path(store_dir), hf_repo=hf_repo,
+            dates, source=source_classes, store_dir=Path(store_dir), hf_repo=hf_repo,
+            vision_root=vision_root, vision_symbol=vision_symbol,
             exchanges=exchanges, t0_ms=t0, t1_ms=t1, tables=tables,
             symbol=symbol, day_tables=("trades", "depth_snapshots"),
             materialize=materialize, now_ms=now_ms,
@@ -2169,6 +2655,7 @@ def order_flow_bars(
         if cached is not None:
             warnings.warn(f"order-flow source unavailable ({exc}); serving the cached bars "
                           "for this exact spec", stacklevel=2)
+            _emit_run_warnings(cached)
             return cached
         raise OrderFlowError(f"cannot open the tick store: {exc}") from exc
 
@@ -2185,7 +2672,10 @@ def order_flow_bars(
         src.close()
 
     cross = _cross_instrument_note(price_venue, book_venue)
+    archive = _archive_summary(src.manifest, bars, book_venue=book_venue)
     bars.attrs["orderflow"] = {
+        "sources_used": list(src.manifest.get("source_classes_used", [])),
+        "archive": archive,
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "params": spec,
@@ -2202,6 +2692,8 @@ def order_flow_bars(
     }
     if cross:
         warnings.warn(cross["note"], stacklevel=2)
+    if archive["bars"]:
+        warnings.warn(archive["note"], stacklevel=2)
     if not src.manifest.get("final", True):
         warnings.warn(
             "order-flow range is NOT final: "
@@ -2241,6 +2733,112 @@ def _cross_instrument_note(price_venue: str, book_venue: Optional[str]) -> Optio
     }
 
 
+#: Column prefixes that can only ever come from the book leg. Used to state, per
+#: run, exactly how many bars lost their book because the day resolved to the
+#: PUBLIC ARCHIVE — a number, not an adjective.
+_BOOK_PREFIXES: tuple[str, ...] = (
+    "mid_", "spread_", "microprice_", "micro_minus_mid_", "book_imbalance_",
+    "ofi_", "depth_", "book_snapshots_", "coverage_book_",
+)
+
+
+def _source_class_by_date(manifest: dict[str, Any]) -> dict[str, str]:
+    """``{UTC date: the provenance class that SUPPLIED that day}``.
+
+    Keyed on RESOLVED, not on which backend was asked: an ``hf`` day the Hub
+    turns out not to hold is ``unresolved``, not ``hf``. Shared by every entry
+    point that labels provenance, so a bar frame and a VPIN table can never
+    disagree about the same day.
+    """
+    return {d["date"]: (d.get("source") if d.get("resolved") else "unresolved") or "unresolved"
+            for d in manifest.get("days", [])}
+
+
+def _archive_summary(manifest: dict[str, Any], bars: pd.DataFrame, *,
+                     book_venue: Optional[str], unit: str = "bar") -> dict[str, Any]:
+    """How much of this frame came from the PUBLIC ARCHIVE, and what it cost.
+
+    Emitted on every run (all zeros on a recorded-only one) so its presence is
+    never itself a signal. The ``note`` is the text warned with when any archive
+    day resolved: it names the day and row counts, and it states the book loss as
+    a count rather than as a caveat someone can skim.
+
+    ``unit`` is the word for one row of ``bars`` — ``"bar"`` for
+    :func:`order_flow_bars`, ``"bucket"`` for :func:`volume_buckets`. The same
+    summary serves both because the same rail does: a caller must never have to
+    know which entry point labelled its provenance.
+    """
+    code = float(SOURCE_CODES["vision"])
+    codes = bars["source_code"].to_numpy(dtype="float64") if "source_code" in bars else \
+        np.zeros(len(bars))
+    n_arc = int(np.sum(codes == code))
+    n_rec = int(np.sum((codes == SOURCE_CODES["local"]) | (codes == SOURCE_CODES["hf"])))
+    days = [d for d in manifest.get("days", []) if d.get("resolved")]
+    d_arc = sum(1 for d in days if d.get("source") == "vision")
+    d_rec = len(days) - d_arc
+    # An archive day can RESOLVE (its partition exists) and still contribute no
+    # row to this request — the archive holds binancef/BTCUSDT and the caller
+    # asked for another venue or instrument. Such a day lengthens nothing, so it
+    # is counted separately instead of being folded into a history claim.
+    d_arc_empty = sum(1 for d in days
+                      if d.get("source") == "vision" and not d.get("contributed", True))
+    book_cols = [c for c in bars.columns
+                 if any(str(c).startswith(p) for p in _BOOK_PREFIXES)] if book_venue else []
+    out: dict[str, Any] = {
+        "days": d_arc, "days_recorded": d_rec, "bars": n_arc, "bars_recorded": n_rec,
+        "days_no_rows": d_arc_empty,
+        # What one row of the frame IS. The `bars` keys keep their names across
+        # both entry points so one consumer can read either, and this says which
+        # unit those counts are in.
+        "unit": unit,
+        "fraction": (n_arc / len(bars)) if len(bars) else 0.0,
+        "root": manifest.get("vision_root"),
+        "dates": list(manifest.get("archive_days", [])),
+        "families_extended": ["price (OHLCV)", "delta/CVD", "size-bucketed delta",
+                              "trade_count/dollar_volume/vwap", "VPIN"],
+        "families_unchanged": ["OFI", "weighted mid / microprice", "book imbalance",
+                               "depth sums + depth-imbalance slope", "walls",
+                               "liquidations"],
+        # The cost of the split, counted. `book_bars_lost` is bars where a book
+        # was ASKED for and the archive could not supply one — not a caveat, a
+        # number a test can assert on.
+        "book_bars_lost": int(n_arc) if book_venue else 0,
+        # Split in two because they are two different facts, and a machine-
+        # readable field that a consumer asserts `.isna().all()` on must be true
+        # of every entry it names. `coverage_book_*` is a quality column, not a
+        # book column: it is NaN on archive bars too (unknown liveness, never a
+        # fabricated 0.0) and is listed where it belongs.
+        "book_columns_nan_on_archive_bars": [c for c in book_cols
+                                             if not str(c).startswith("coverage_")],
+        "quality_columns_nan_on_archive_bars": [c for c in book_cols
+                                                if str(c).startswith("coverage_")],
+    }
+    named = ", ".join(out["book_columns_nan_on_archive_bars"]) if book_cols else None
+    book_sentence = (
+        f"Every book column ({named}) is NaN on all {out['book_bars_lost']} archive "
+        f"{unit}(s) BY CONSTRUCTION" if named else
+        "No book column was requested (book_venue=None); the archive publishes none "
+        "in any case"
+    )
+    empty_sentence = ""
+    if d_arc_empty:
+        empty_sentence = (
+            f" {d_arc_empty} of those archive day(s) contributed ZERO rows for the "
+            "requested venue/instrument and add no history — the archive partition holds "
+            f"{VISION_VENUE}/BTCUSDT only.")
+    out["note"] = (
+        f"order-flow range mixes provenance classes: {d_arc} of {d_arc + d_rec} resolved "
+        f"UTC days came from the PUBLIC ARCHIVE (data/vision, TRADES ONLY), "
+        f"{d_rec} from the RECORDED store — {n_arc} of {len(bars)} {unit}s. Trade-derived "
+        f"columns span both. {book_sentence} — the "
+        "archive publishes no book snapshots, and no liquidation stream either "
+        f"(coverage_book_* / coverage_liq_* read NaN on those {unit}s for the same "
+        "reason: unknown, never an observed 0.0). A frame "
+        f"mixing both families is only as long as its shortest family.{empty_sentence}"
+    )
+    return out
+
+
 def _history_summary(manifest: dict[str, Any], t0: int, t1: int) -> dict[str, Any]:
     """MinBTL arithmetic **measured**, never remembered (rail 4).
 
@@ -2252,21 +2850,78 @@ def _history_summary(manifest: dict[str, Any], t0: int, t1: int) -> dict[str, An
     from .risk import min_backtest_length  # local import: keeps `import btcquant` cheap
 
     days = [d for d in manifest.get("days", []) if d.get("resolved")]
+    arc = [d for d in days if d.get("source") == "vision"]
+    rec = [d for d in days if d.get("source") in ("local", "hf")]
     span_years = (t1 - t0) / float(_MS_PER_YEAR)
+    # The SPLIT, measured per call rather than asserted in prose (M7). A day
+    # resolved from the public archive lengthens the TRADE-derived families and
+    # nothing else, so the two families have genuinely different spans and the
+    # frame reports both instead of quoting the flattering one. Spans are counted
+    # in days that actually CONTRIBUTED rows, not in the requested window and not
+    # in structurally-present partitions: a range with unresolved days — or with
+    # a day that resolved for a venue it does not carry — would otherwise claim
+    # history nobody read.
+    contributed = [d for d in days if d.get("contributed", True)]
+    trade_days = len(contributed)
+    book_days = sum(1 for d in contributed if d.get("source") in ("local", "hf"))
     out: dict[str, Any] = {
         "days_requested": len(manifest.get("days", [])),
         "days_resolved": len(days),
+        "days_resolved_recorded": len(rec),
+        "days_resolved_archive": len(arc),
+        "days_contributing_rows": trade_days,
+        "days_resolved_without_rows": [d["date"] for d in days
+                                       if not d.get("contributed", True)],
         "days_unresolved": list(manifest.get("unresolved_days", [])),
         "span_days": (t1 - t0) / float(MS_PER_DAY),
         "span_years": span_years,
+        "trade_derived_span_years": trade_days * MS_PER_DAY / float(_MS_PER_YEAR),
+        "book_derived_span_years": book_days * MS_PER_DAY / float(_MS_PER_YEAR),
         "min_backtest_length_years": {},
+        # THREE fractions, three explicit bases, no unqualified one. The old
+        # unqualified `fraction_of_minbtl` divided the REQUESTED WINDOW by
+        # MinBTL, so a two-day frame over a six-year request reported 244 % —
+        # numerically identical to the headline claim for the whole archive, from
+        # a call that read two days. It is renamed rather than silently rebased:
+        # a reader who quotes it now has to quote which basis they meant.
+        "fraction_of_minbtl_requested_window": {},
+        "fraction_of_minbtl_trade_derived": {},
+        "fraction_of_minbtl_book_derived": {},
         "fraction_of_minbtl": {},
+        "fraction_of_minbtl_basis": (
+            "resolved days that contributed rows, SHORTEST family — a frame mixing "
+            "trade-derived and book-derived columns is only as long as its shortest "
+            "family (DESIGN §0.7 rail c). The per-family numbers are the two "
+            "fraction_of_minbtl_*_derived keys; the requested window (which is NOT "
+            "history) is fraction_of_minbtl_requested_window."),
         "statement": HONESTY_SENTENCES[4],
     }
     for n in (5, 20, 100):
         need = float(min_backtest_length(n))
         out["min_backtest_length_years"][str(n)] = need
-        out["fraction_of_minbtl"][str(n)] = span_years / need if need > 0 else float("nan")
+        out["fraction_of_minbtl_requested_window"][str(n)] = (
+            span_years / need if need > 0 else float("nan"))
+        out["fraction_of_minbtl_trade_derived"][str(n)] = (
+            out["trade_derived_span_years"] / need if need > 0 else float("nan"))
+        out["fraction_of_minbtl_book_derived"][str(n)] = (
+            out["book_derived_span_years"] / need if need > 0 else float("nan"))
+        out["fraction_of_minbtl"][str(n)] = min(
+            out["fraction_of_minbtl_trade_derived"][str(n)],
+            out["fraction_of_minbtl_book_derived"][str(n)])
+    if arc:
+        f_t = out["fraction_of_minbtl_trade_derived"]["5"] * 100.0
+        f_b = out["fraction_of_minbtl_book_derived"]["5"] * 100.0
+        out["split_statement"] = (
+            f"Gap 1 SPLITS on this range: trade-derived families reach "
+            f"{out['trade_derived_span_years']:.3f} yrs ({f_t:.1f} % of MinBTL(5)) across "
+            f"{trade_days} resolved day(s); book-derived families stay at "
+            f"{out['book_derived_span_years']:.3f} yrs ({f_b:.1f} %) across {book_days} "
+            "RECORDED day(s) — the public archive publishes no book. "
+            + HONESTY_SENTENCES[5])
+    else:
+        out["split_statement"] = (
+            "no archive day resolved in this range: trade-derived and book-derived spans "
+            "are the same because every day came from the RECORDED store.")
     return out
 
 
@@ -2327,6 +2982,24 @@ def _assemble(
     book_cov = None
     if book_venue:
         book_cov = _coverage(book_venue, ("depth_snapshots",))
+
+    # Per-bar UTC day, and the two per-day facts the masking below needs. A bar
+    # cannot straddle a day (`_bar_ms` refuses a clock that does not divide it),
+    # so this mapping is exact rather than a summary.
+    bar_dates = pd.to_datetime(grid, unit="ms", utc=True).strftime("%Y-%m-%d").to_numpy()
+
+    def _day_flag(key: str) -> np.ndarray:
+        by_date = {d["date"]: bool(d.get(key)) for d in src.manifest["days"]}
+        return np.array([by_date.get(str(d), False) for d in bar_dates])
+
+    # A coverage_* column is a WITNESS measure: 0.0 says "this leg was observed
+    # and was silent". On a PUBLIC-ARCHIVE day the book and liquidation streams
+    # were never published at all, so 0.0 there would be the fabricated zero
+    # §0.7 exists to prevent — and the archive note that calls every book column
+    # NaN would be false about one of its own entries. Unknown, not zero.
+    book_known = _day_flag("book_recorded")
+    liq_known = _day_flag("liq_stream_published")
+    book_cov_out = None if book_cov is None else np.where(book_known, book_cov, np.nan)
 
     out = pd.DataFrame(index=idx)
     price_alive = cov[price_venue] > 0.0
@@ -2434,13 +3107,10 @@ def _assemble(
             out[f"depth_slope_imb_{book_venue}"] = np.where(denom != 0, (sb - sa) / denom, np.nan)
         out[f"depth_levels_{book_venue}"] = _state(b["depth_levels"], alive)
         out[f"book_snapshots_{book_venue}"] = _flow(b["book_snapshots"], alive)
-        out[f"coverage_book_{book_venue}"] = book_cov
+        out[f"coverage_book_{book_venue}"] = book_cov_out
 
     # ---- liquidations -------------------------------------------------------
-    recorded_by_date = {d["date"]: bool(d.get("liquidations_recorded"))
-                        for d in src.manifest["days"]}
-    bar_dates = pd.to_datetime(grid, unit="ms", utc=True).strftime("%Y-%m-%d").to_numpy()
-    liq_recorded = np.array([recorded_by_date.get(str(d), False) for d in bar_dates])
+    liq_recorded = _day_flag("liquidations_recorded")
     for v in liq_venues:
         f = _reindex(_liq_bars(con, v, t0, bar_ms))
         # NaN unless the venue leg was demonstrably alive AND the source recorded
@@ -2453,12 +3123,34 @@ def _assemble(
         # The witness is the WIDER trades U depth stream: bybit prints 3-2000
         # liquidations a day, so the leg cannot witness its own liveness.
         alive = (cov_liq[v] > 0.0) & liq_recorded
-        out[f"coverage_liq_{v}"] = cov_liq[v]
+        # Same rule as coverage_book_*: on an archive day the liquidation stream
+        # does not exist, so its liveness is UNKNOWN. The witness (trades U depth)
+        # would otherwise read ~1.0 there — "the leg was observed alive" — next to
+        # an all-NaN liq_count. The gate above still uses the raw witness.
+        out[f"coverage_liq_{v}"] = np.where(liq_known, cov_liq[v], np.nan)
         for col, name in (("liq_count", f"liq_count_{v}"),
                           ("liq_notional_usd", f"liq_notional_usd_{v}"),
                           ("liq_long_notional", f"liq_long_notional_{v}"),
                           ("liq_short_notional", f"liq_short_notional_{v}")):
             out[name] = _flow(f[col], alive)
+
+    # ---- provenance (rail 7) ------------------------------------------------
+    # ALWAYS emitted, including on recorded-only runs where it is uniformly 1.0
+    # or 2.0. A column that appeared only when the archive was used would itself
+    # be a signal, and its absence would then have to mean "recorded" — two ways
+    # to be wrong. Numeric because the frame is float64 throughout (bar two
+    # bools) and consumers do `to_numpy(dtype=float)`; `source_labels` maps it
+    # back for humans. Per-bar rather than per-frame because provenance is
+    # resolved per UTC DAY, and a bar cannot straddle a day (`_bar_ms` refuses a
+    # clock that does not divide it) — so this is exact, not a summary.
+    # Keyed on RESOLVED, not on which backend was asked: an `hf` day the Hub
+    # turns out not to hold is `unresolved` (0.0), not `hf` (2.0). The column
+    # answers "which class supplied these rows", and a day that supplied none
+    # supplied none.
+    src_by_date = _source_class_by_date(src.manifest)
+    out["source_code"] = np.array(
+        [SOURCE_CODES.get(src_by_date.get(str(d), "unresolved"), 0.0) for d in bar_dates],
+        dtype="float64")
 
     for col in out.columns:
         if col not in ("is_gap", "ret_spans_gap"):
@@ -2477,9 +3169,11 @@ def volume_buckets(
     bucket_volume: Optional[float] = None,
     buckets_per_day: int = 50,
     window_buckets: int = 50,
-    source: str = "auto",
+    source: Union[str, Sequence[str]] = "auto",
     store_dir: Union[str, Path] = STORE_DIR,
     hf_repo: str = HF_REPO,
+    vision_root: Union[str, Path] = VISION_DIR,
+    vision_symbol: str = "BTCUSDT",
     materialize: Optional[bool] = None,
     now_ms: Optional[int] = None,
 ) -> pd.DataFrame:
@@ -2498,7 +3192,7 @@ def volume_buckets(
     moment the bucket is knowable — labelling at the open would leak. Columns:
     ``venue, epoch_day, bucket_index, bucket_volume, buy_volume, sell_volume,
     delta, imbalance, vpin, trade_count, open_ts_ms, close_ts_ms, duration_s,
-    window_span_s, window_gap_s``.
+    window_span_s, window_gap_s, source_code``.
 
     Only **complete** buckets are returned; each UTC day's trailing partial
     bucket is dropped rather than published half-formed. ``vpin`` carries the
@@ -2506,6 +3200,17 @@ def volume_buckets(
     published, toxicity is not claimed. ``window_gap_s`` says how much detected
     feed silence the rolling window spans — a mean over N buckets carries no
     wall-clock information on its own.
+
+    ``source`` takes the same class list :func:`order_flow_bars` does, with the
+    same default: ``"auto"`` is **RECORDED-ONLY** and the PUBLIC ARCHIVE is
+    reached only by naming it (``source=("local", "hf", "vision")``). VPIN is the
+    family the archive extends furthest — its volume clock needs trades and
+    nothing else — so this table carries the SAME five provenance labels the bar
+    frame does: a per-bucket ``source_code``, ``attrs['orderflow']['archive']``,
+    the mandatory warning, the manifest, and ``vision_root``/``vision_symbol`` so
+    the tree it reads is the caller's choice rather than a module default.
+    ``source_code`` is exact rather than a summary: a bucket is built inside one
+    UTC day (``epoch_day``), and provenance resolves per UTC day.
     """
     _require_deps()
     if not _VENUE_RE.match(venue):
@@ -2515,7 +3220,8 @@ def volume_buckets(
     t1 = int(t_end.value // 1_000_000)
     src = _open_source(
         _dates_between(t_start, t_end), source=source, store_dir=Path(store_dir),
-        hf_repo=hf_repo, exchanges=(venue,), t0_ms=t0, t1_ms=t1,
+        hf_repo=hf_repo, vision_root=vision_root, vision_symbol=vision_symbol,
+        exchanges=(venue,), t0_ms=t0, t1_ms=t1,
         tables=["trades"], symbol=symbol, day_tables=("trades",),
         materialize=materialize, now_ms=now_ms,
     )
@@ -2528,26 +3234,89 @@ def volume_buckets(
         src.close()
     if df.empty:
         out = df.copy()
+        out["source_code"] = np.zeros(0, dtype="float64")
         out.index = pd.DatetimeIndex([], tz="UTC", name="bucket_close")
         return out
     out = df.copy()
     out.index = pd.to_datetime(out["close_ts_ms"].to_numpy(), unit="ms", utc=True)
     out.index.name = "bucket_close"
+    # Provenance per BUCKET, by the same rule and the same map the bar frame
+    # uses. A bucket belongs to exactly one UTC day (`epoch_day` is what the
+    # volume clock resets on), so this is exact rather than a summary — and it
+    # travels on the row, where `attrs` (which pandas does not reliably
+    # propagate) cannot be lost.
+    src_by_date = _source_class_by_date(src.manifest)
+    bucket_dates = pd.to_datetime(out["epoch_day"].to_numpy(dtype="int64") * MS_PER_DAY,
+                                  unit="ms", utc=True).strftime("%Y-%m-%d").to_numpy()
+    out["source_code"] = np.array(
+        [SOURCE_CODES.get(src_by_date.get(str(d), "unresolved"), 0.0) for d in bucket_dates],
+        dtype="float64")
+    archive = _archive_summary(src.manifest, out, book_venue=None, unit="bucket")
     out.attrs["orderflow"] = {
         "schema_version": SCHEMA_VERSION,
         "venue": venue,
         "buckets_per_day": buckets_per_day,
         "window_buckets": window_buckets,
         "bucket_volume": bucket_volume,
+        "sources_used": list(src.manifest.get("source_classes_used", [])),
+        "archive": archive,
         "manifest": src.manifest,
         "contested": _CIT_AB,
     }
+    if archive["bars"]:
+        warnings.warn(archive["note"], stacklevel=2)
     return out
 
 
 # --------------------------------------------------------------------------- #
 # Downstream helpers — each labels what information it uses                     #
 # --------------------------------------------------------------------------- #
+def source_labels(bars: pd.DataFrame) -> pd.Series:
+    """``source_code`` -> the class name, for humans. ``local``/``hf``/``vision``.
+
+    The frame stores a float because everything else in it is a float and
+    consumers call ``to_numpy(dtype=float)``; this is the inverse map, kept next
+    to the mask helpers so nobody has to re-derive :data:`SOURCE_CODES` inline.
+    """
+    if "source_code" not in bars.columns:
+        raise OrderFlowError(
+            "frame has no `source_code` column — it predates SCHEMA_VERSION 3; rebuild it")
+    inv = {v: k for k, v in SOURCE_CODES.items()}
+    codes = pd.Series(bars["source_code"], dtype="float64")
+    return codes.map(lambda c: inv.get(float(c), "unknown")).rename("source")
+
+
+def archive_mask(bars: pd.DataFrame) -> pd.Series:
+    """Bars whose UTC day resolved to the PUBLIC ARCHIVE (``data/vision``).
+
+    On those bars every book column and every liquidation column is NaN **by
+    construction** — the archive publishes ``aggTrades`` and nothing else. This
+    mask is how a caller states which side of that split a claim stands on.
+    """
+    if "source_code" not in bars.columns:
+        raise OrderFlowError(
+            "frame has no `source_code` column — it predates SCHEMA_VERSION 3; rebuild it")
+    codes = pd.Series(bars["source_code"], dtype="float64")
+    return (codes == float(SOURCE_CODES["vision"])).rename("is_archive")
+
+
+def drop_archive_bars(bars: pd.DataFrame) -> pd.DataFrame:
+    """Keep only RECORDED bars — an explicit, labelled downstream choice.
+
+    Same discipline as :func:`drop_gap_bars`: dropping rows is a **sample
+    definition**, so it is a function the caller has to call rather than
+    something the loader does quietly. Use it when a study needs the book
+    families, which the archive cannot supply; do NOT use it to make a
+    trade-derived study look shorter than it is.
+
+    And the same caveat as ``drop_gap_bars``: this leaves a shorter index, and
+    ``backtest.run`` computes ``pct_change()`` on whatever index it is handed, so
+    a surviving bar chains its return back to the last SURVIVING bar. Use
+    :func:`segments` when that must not happen.
+    """
+    return bars.loc[~archive_mask(bars)]
+
+
 def coverage_mask(bars: pd.DataFrame, min_coverage: float = 1.0) -> pd.Series:
     """Boolean mask of bars whose coverage meets ``min_coverage`` and whose
     close-to-close return does not span a gap."""

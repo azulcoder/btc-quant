@@ -110,7 +110,7 @@ in the docstring so a quant can audit.
 ## 4. Verification suite (run before every commit)
 
 ```bash
-python3 -m pytest -q                      # 260 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
+python3 -m pytest -q                      # 346 tests — the honesty-rail teeth (incl. JS↔Python parity + collector normalizers)
 node --check dashboard/app.js             # JS syntax (also quant.js, charts.js, livewire.js, terminal-*.js)
 node dashboard/app.js --check             # ppy guard: ppy()=365 (1d)/8760 (1h); no literal-365 at an annualization site
 python3 scripts/check_parity.py           # JS↔Python mirror parity (79 shared fields; the one rule)
@@ -120,6 +120,9 @@ make verify-census                        # L1b: layout census — page height, 
 make verify-focus                         # L1c: panel data-tier stamped from the M3 registry + focus/maximize (dblclick header, Esc)
 make verify-wire                          # L2: ~45s live-wire invariants through the PRODUCTION adapters (exit 2 = offline, not a bug)
 make check-ticks                          # L3: tick-store QA report card (gaps/dupes/cadence/coherence — reported, never filled)
+make check-vision                         # L3 over the PUBLIC-ARCHIVE partition (M7): same duplicate-trade_id FAIL, plus a partition-containment FAIL (a date=D partition holding another day's rows) and a per-day ID-continuity census; refuses to print a readiness number
+make vision-list                          # M7: what data.binance.vision publishes (enumerated from the bucket, downloads nothing)
+make vision-sync ARGS="--start .. --end .."  # M7: ingest archive aggTrades -> data/vision/ (needs network + duckdb; NOT a CI gate — see below)
 make orderflow-smoke                      # M1: recorded ticks -> order-flow bars -> features/walk_forward/DSR/PBO/MinBTL, zero harness change (expect INSUFFICIENT HISTORY; needs duckdb, see below)
 # CSS brace balance:
 awk '{o+=gsub(/{/,"{");c+=gsub(/}/,"}")}END{print (o==c)?"balanced":"UNBALANCED"}' dashboard/styles.css
@@ -140,6 +143,81 @@ has recorded, not of the diff under review. `ARGS=` passes through
 (`make orderflow-smoke ARGS="--source local --json"`). Exit 0 means the deflation stack
 **refused** (INSUFFICIENT HISTORY); a non-zero exit means the span claims to clear MinBTL(5)
 on this archive, which is a clock bug, not a discovery.
+
+**Read that exit code carefully — it is currently overloaded, and the second meaning is not
+a clock bug.** Measured 2026-08-02: the DEFAULT 18-day window fails with
+`OrderFlowError: cannot open the tick store: ... ZSTD Decompression failure` on an `hf://`
+`depth_snapshots.parquet` — **a different day on each of three consecutive runs**
+(07-05, 07-07, 07-08), so it is a Hub transport failure on a ~2 GB multi-file materialize,
+not a corrupt object: the same partitions read fine one at a time (`sum(length(bids))` over
+2026-07-08 succeeded 3/3) and the 18-file `count(*)` union also succeeds. It is **not**
+caused by M7 — an unmodified `HEAD` tree extracted with `git archive` fails identically
+(2026-07-06). A narrower window runs clean end-to-end and exits 0 with the correct verdict:
+`python3 scripts/orderflow_smoke.py --start 2026-07-05 --end 2026-07-09` → 4/4 days
+resolved, 7 of 96 usable bars, **0.4 % of MinBTL(5)**, INSUFFICIENT HISTORY. Use that as
+the smoke until the transport is retried or the local days are back on disk; and until the
+error paths are told apart, treat a non-zero exit as *look at the traceback first*, not as
+a discovery. The refusal is deliberately **not** softened into a printed verdict — turning
+an unreadable source into a number is the opposite of the rail.
+
+**`make vision-sync` / `make check-vision` are the M7 pair, and they are not free either.**
+They need `duckdb` and (for the sync) network. `vision-sync` pulls Binance's own published
+`aggTrades` archive into `data/vision/` — a **separate tree** from `data/ticks/`, ZSTD parquet,
+seven verification gates per day, checksum-verified, and it never writes into a recorded day
+file. Sizing measured 2026-08-02: **~18 MB of zip per day** (median; 1 MB in 2020, 112 MB at the
+peak), **~3.6–3.9 bytes per row of parquet**, ~4.5 MB/s single-stream, so the full published
+history — **2,406 days, 2019-12-31 .. 2026-08-01, zero missing days** — is ~41 GiB of download
+(≈2.7 h) landing as ~13 GB of parquet. Use `--granularity auto` (the default): 79 monthly
+requests instead of 2,406 daily ones, with every split day passing the same gates.
+
+**What the operator actually looks at.** The tree is
+`data/vision/<venue>/<symbol>/<family>/date=<YYYY-MM-DD>/trades.parquet` — five provenance
+facts legible from the path with the file unopened — plus one append-only
+`data/vision/_ledger.jsonl` row per day attempted, which is the thing to read after a run:
+
+```
+{"date":"2026-08-01","status":"ok","rows":399219,"id_holes":0,"seam_contiguous":true,...}
+{"date":"2026-08-02","status":"absent","http_status":404,"rows":0,"url":"...","bytes":0}
+```
+
+`status` is `ok` / `absent` / `failed`, and the three are not interchangeable. **`absent`
+means the archive does not publish that day** (publication runs ~D+1 07:00–07:30 UTC, so
+"today" always 404s and that is an ANSWER, not an error) — no file is written and no
+zero-row parquet is invented. **`failed`** keeps `trades.parquet.bad` plus
+`FAILED-<date>.json` for inspection, skips the day, **continues the run**, and makes the
+process exit non-zero. Re-running is safe and cheap: a complete day is detected before the
+wire and reports `already complete — nothing downloaded` (measured 1.1 s / 0 B against
+22.2 s / 97.8 MiB for the first pass over monthly 2020-01); `--force` re-ingests. Two rails
+worth knowing before you point `--out` anywhere: it **refuses** an out-root that resolves
+inside `data/ticks`, `data/orderflow` or `data/hf-stage` (exit 2, asserted in the writers
+themselves and not only in `main()`), and `--vendor-symbol` is checked against
+`--venue`/`--symbol`, so an allowlisted object cannot land in a partition whose recorded
+leg does not share its id space. Grade the result with `make check-vision`; on the 3-day
+tree recorded here that reads `2,340,418 rows over 3 day(s) -> 0 missing id(s)`,
+`2/2 contiguous` seams, `0` duplicate keys, all three partitions contained in the day their
+path claims, and — deliberately — no readiness percentage at all.
+
+**The limit, restated because it is the point of the item:** `aggTrades` is **TRADES ONLY**. It
+lengthens CVD / footprint / size-bucketed delta / VPIN to 6.587 years (**244 % of MinBTL(5)**)
+and gives OFI / weighted mid / depth-imbalance slope / walls **nothing** — those stay at
+**1.8 %**, buyable only with collector uptime (STRATEGY N4). Reading archive rows back is always
+an explicit opt-in: `order_flow_bars(..., source=("local", "hf", "vision"))`. The default
+`source="auto"` is recorded-only and stays that way, and archive days never count toward the
+`sec_readiness` MinBTL countdown.
+
+`tests/test_vision.py` (36 tests), the M7 tests in `tests/test_orderflow.py` and the vision-mode
+tests in `tests/test_check_ticks.py` are **network-free** and run in the normal suite —
+verified by running the whole suite with every non-loopback TCP connect refused: `343 passed,
+3 skipped`, the three being the deliberately-networked overlap tests, which skip cleanly. The
+archive-day tests in `tests/test_orderflow.py` reach that state through the `no_hub` fixture,
+which stubs the Hub LISTING rather than dropping `"hf"` from the call, so the
+`hf_has or not want_vision` precedence is still exercised. `tests/test_vision_overlap.py` is the one that
+checks the load-bearing claim against the **real** archive (same venue, same aggTradeId space →
+exact dedup): it needs network *and* a closed recorded day the archive also publishes, and
+skips cleanly otherwise. `BTCQ_SKIP_NETWORK_TESTS=1` skips it outright. Measured 2026-08-02 on
+2026-08-01: 399,219 rows, set difference **0 both ways**, **0 mismatches** on
+ts/price/qty/side. It prints the recorded side's duplicate surplus rather than absorbing it —
+see the known-defect note in that file.
 
 **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the build gates on every push/PR:
 `pytest`, `node --check` ×N, **`node dashboard/app.js --check`** (the annualization guard — closes

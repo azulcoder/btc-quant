@@ -1,0 +1,85 @@
+{
+  "_notes": "REAL rows captured from data.binance.vision on 2026-08-02 (public Binance archive of Binance's own data; keyless). Kept as fixtures so tests/test_vision.py runs with ZERO network. Each block records what it proves. See DESIGN-orderflow-terminal.md §3d.",
+
+  "_header_is_per_file_not_per_year": "STRATEGY.md M7 said header presence 'differed by year'. It differs per FILE: 2021-01-01 HAS one, 2021-01-02 does NOT, 2022-08-10 does NOT, 2022-08-11 DOES, monthly 2020-01 does NOT, monthly 2026-07 DOES. A year cutoff would lose or invent exactly one row on scattered days out of 2,406, silently, and corrupt min(agg_trade_id) on those days. Hence the sniff.",
+
+  "futures_um_2021_01_01_with_header": {
+    "_source": "https://data.binance.vision/data/futures/um/daily/aggTrades/BTCUSDT/BTCUSDT-aggTrades-2021-01-01.zip",
+    "_proves": "a real day WITH a header row",
+    "lines": [
+      "agg_trade_id,price,quantity,first_trade_id,last_trade_id,transact_time,is_buyer_maker",
+      "225902528,28948.19,0.052,352562763,352562763,1609459200001,false",
+      "225902529,28948.18,0.070,352562764,352562767,1609459200010,true",
+      "225902530,28948.17,0.080,352562768,352562772,1609459200010,true",
+      "225902531,28946.70,0.017,352562773,352562773,1609459200028,false",
+      "225902532,28946.69,0.010,352562774,352562774,1609459200572,true"
+    ]
+  },
+
+  "futures_um_2021_01_02_no_header": {
+    "_source": "https://data.binance.vision/data/futures/um/daily/aggTrades/BTCUSDT/BTCUSDT-aggTrades-2021-01-02.zip",
+    "_proves": "the NEXT DAY of the same year has NO header row",
+    "lines": [
+      "226788260,29337.15,0.178,354074564,354074565,1609545600617,true",
+      "226788261,29336.93,0.040,354074566,354074566,1609545600648,true",
+      "226788262,29337.15,0.052,354074567,354074568,1609545600664,true",
+      "226788263,29336.93,0.685,354074569,354074569,1609545600678,true",
+      "226788264,29336.60,0.001,354074570,354074570,1609545600678,true"
+    ]
+  },
+
+  "futures_um_2026_08_01_with_header": {
+    "_source": "https://data.binance.vision/data/futures/um/daily/aggTrades/BTCUSDT/BTCUSDT-aggTrades-2026-08-01.zip",
+    "_proves": "the modern layout, and the exact rows the overlap proof joined against the recorded day file (399,219 rows, 0 set difference both ways, 0 field mismatches)",
+    "lines": [
+      "agg_trade_id,price,quantity,first_trade_id,last_trade_id,transact_time,is_buyer_maker",
+      "3399378200,62859.8,0.002,7945224454,7945224455,1785542400081,true",
+      "3399378201,62859.9,0.011,7945224456,7945224456,1785542400156,false",
+      "3399378202,62859.8,0.150,7945224457,7945224460,1785542400201,true"
+    ]
+  },
+
+  "spot_2026_08_01_REFUSED": {
+    "_source": "https://data.binance.vision/data/spot/daily/aggTrades/BTCUSDT/BTCUSDT-aggTrades-2026-08-01.zip",
+    "_proves": "why spot is refused by the allowlist and by G3/G4b: 8 columns (extra is_best_match), capitalized True/False, and transact_time in MICROSECONDS (16 digits, since 2025-01-01) which read as ms lands in year ~58500. Different instrument, different aggTradeId space, so the exact-dedup argument does not hold.",
+    "lines": [
+      "4027420997,62887.88000000,0.00007000,6550162200,6550162200,1785542400207874,False,True",
+      "4027420998,62887.87000000,0.00017000,6550162201,6550162201,1785542400422324,True,True",
+      "4027420999,62887.88000000,0.00007000,6550162202,6550162202,1785542400481671,False,True"
+    ]
+  },
+
+  "checksum_2026_08_01": {
+    "_source": "…/BTCUSDT-aggTrades-2026-08-01.zip.CHECKSUM",
+    "_proves": "the exact CHECKSUM line format: <64 hex><two spaces><canonical filename>",
+    "line": "6bfdb219726ab774c25ae782e4e8f4a5e4dbc69b807f1b7c200e71586d69b6fb  BTCUSDT-aggTrades-2026-08-01.zip",
+    "sha256": "6bfdb219726ab774c25ae782e4e8f4a5e4dbc69b807f1b7c200e71586d69b6fb",
+    "zip_bytes": 5049749
+  },
+
+  "overlap_2026_08_01": {
+    "_proves": "the load-bearing claim, measured twice independently on 2026-08-02 against data/ticks/2026-08-01.duckdb",
+    "archive_rows": 399219,
+    "archive_distinct_ids": 399219,
+    "archive_id_min": 3399378200,
+    "archive_id_max": 3399777418,
+    "archive_id_span": 399219,
+    "recorded_rows": 400190,
+    "recorded_distinct_ids": 399219,
+    "archive_minus_recorded": 0,
+    "recorded_minus_archive": 0,
+    "joined_rows": 399219,
+    "ts_mismatches": 0,
+    "max_abs_price_delta": 0.0,
+    "max_abs_qty_delta": 0.0,
+    "side_mismatches": 0,
+    "_recorded_defect": "the recorded side carries 971 duplicate (binancef,BTCUSDT,trade_id) rows (+68 coinbase) — a SEPARATE bug (trades has no unique constraint and the aggTrades dedup guard is in-memory only). The archive has zero duplicates. Recorded is compared through DISTINCT and the surplus is printed, never absorbed."
+  },
+
+  "seam_2026_07_31_to_08_01": {
+    "_proves": "ID continuity holds ACROSS a day boundary, so gap detection is by the venue's own counter rather than by a timestamp guess",
+    "prev_id_max": 3399378199,
+    "first_id": 3399378200,
+    "gap": 0
+  }
+}
