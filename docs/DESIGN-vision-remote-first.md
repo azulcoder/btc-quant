@@ -1,0 +1,129 @@
+# DESIGN — Vision ingest, remote-first
+
+**Design only. Nothing has been ingested. Peak disk is measured below and is the number to
+approve or reject before anything runs.**
+
+## Why this is not a disk workaround
+
+Four reasons, and only the last is about space:
+
+1. **Almost every analysis in this repo already reads from HF** via `hf://` + `hive_partitioning`
+   — the 2,160-cell coverage scan, the 859,264-snapshot spread aggregate, the Q0 verification.
+   The pattern is proven at scale; local Vision is the exception, not the norm.
+2. **HF partitions carry provenance a local copy does not.** Each manifest records a `sha256`
+   verified against the venue's own zip. That is exactly what the CVD precheck used as its
+   positive control — 120 partitions, 0 mismatches.
+3. **`hf://` queries return the same number on any machine.** `data/vision/` queries only work on
+   this laptop.
+4. **The ENOSPC that erased 295 days was a LOCAL DISK failure.** Moving Vision to HF removes that
+   failure class rather than mitigating it.
+
+## The measurement that decides the design [DIUKUR]
+
+2,085 manifests, split by the granularity the ingest actually fetched:
+
+| source granularity | n | zip (median) | extracted CSV (median) | parquet (median) | **peak disk** |
+|---|---:|---:|---:|---:|---:|
+| **monthly** | 2,081 | 502.1 MB | 2,585.4 MB | 5.2 MB | **~3.1 GB per month** |
+| **daily** | 4 | 7.7 MB | 41.0 MB | 2.4 MB | **~51 MB per day** |
+
+**The original ingest fetched MONTHLY archives.** That is why it died: a monthly object needs
+~3.1 GB of transient disk, and it hit ENOSPC.
+
+**Conservative daily estimate for the missing window**, since only 4 daily manifests exist and
+they are recent low-volume days — derived from the monthly figures divided by ~30 days:
+zip ≈ 16 MB + CSV ≈ 86 MB + parquet ≈ 5 MB = **~107 MB peak per day**.
+
+| | |
+|---|---:|
+| **peak disk, daily granularity, one partition at a time** | **~51 MB measured / ~107 MB conservative** |
+| free disk now | 2.3 GB |
+| headroom | **21×–45×** |
+| peak if monthly granularity were used | ~3.1 GB — **does not fit** |
+
+**So the design decision is forced by measurement: fetch DAILY, never monthly.** It costs 295
+requests instead of 10, and it bounds peak disk at ~107 MB regardless of how much history is
+ingested. Total parquet produced (~1.5 GB for 295 days) goes to HF and never accumulates locally.
+
+## Local disk state, and why this is urgent [DIUKUR]
+
+At the time of writing the volume was **100 % full, 593 MiB free**, and `/health` reported
+**`rows_dropped_error: 1`** — the collector had already lost a row to ENOSPC, on the LockBox
+slice. 2.1 GB of my own session scratchpad was cleared, taking free space to 2.3 GB, which is
+breathing room and not a fix.
+
+**`data/vision` is 12 GB and is NOT on HF** — checked, three candidate paths, none exist. **It is
+the only copy of 2,086 day-partitions.** Deleting it now would be a permanent loss, so the
+migration has to happen before the space can be reclaimed, not after.
+
+## 17a — the per-partition pipeline
+
+```
+FETCH(daily zip) → VERIFY zip sha256 against the venue's published checksum
+                 → NORMALIZE to parquet, compute parquet sha256
+                 → UPLOAD to HF
+                 → READ BACK from hf:// and recompute sha256
+                 → sha256 matches?  ── no ──→ KEEP LOCAL, record failure, continue
+                                     └─ yes ─→ DELETE LOCAL
+```
+
+**Peak disk = one partition, ~107 MB conservative.** Batch size N multiplies it: N=1 recommended
+at current free space; N=4 is ~430 MB and still fits.
+
+**The load-bearing rule: local deletion is gated on a REMOTE READ-BACK, never on the upload call
+returning success.** "The API said OK" and "the bytes are there and correct" are different
+claims, and only the second one licenses a delete. This is the same distinction §10 drew between
+fidelity and completeness, applied to a write path.
+
+sha256 read-back costs a re-download (~5 MB/day, ~1.5 GB total for 295 days). A cheaper check —
+comparing `count(*)`, `id_min`, `id_max`, `id_distinct` against the manifest — catches truncation
+but **not** silent corruption, so it is the fallback, not the default.
+
+## 17b — constraints that must be in the design because they have already happened
+
+### Partial ZSTD failures
+
+`2026-07-05` and `2026-07-13` failed to read from HF with `InvalidInputException` — a ZSTD
+decompression failure on already-published partitions. Two requirements follow:
+
+1. **Per-day reads, never a single glob over everything.** One corrupt partition must not kill a
+   query over 2,000 good ones. This is the pattern the 26-day spread aggregate already used:
+   *"1 partition, 2026-07-13, failed to read — it is excluded and counted, not silently dropped."*
+2. **The failure must be enumerable**, so a later query can list exactly which days are missing
+   and why. Absence that cannot be distinguished from "nothing looked" is blindness class B.
+
+### Upload failure mid-way
+
+Every partition ends in exactly one recorded state, and the state names the stage:
+
+| state | local retained? | meaning |
+|---|---|---|
+| `ok` | no — deleted after verified read-back | on HF, sha256 confirmed |
+| `absent` | n/a | the venue does not publish that day |
+| `fetch_failed` | n/a | network or HTTP error |
+| `checksum_mismatch` | yes | the venue's zip failed its own published checksum |
+| `normalize_failed` | yes | includes ZSTD and parse failures |
+| `upload_failed` | **yes** | never delete on an unconfirmed upload |
+| `remote_verify_failed` | **yes** | uploaded but the read-back disagreed — the dangerous case |
+
+**`remote_verify_failed` is the state that matters.** It is the only one where a naive
+implementation would have deleted local data that is not safely remote.
+
+### Idempotence
+
+Re-running must be safe. A partition already `ok` on HF is skipped without re-fetching; a
+partition in any retained state is retried from the start. The run is resumable after any
+interruption, including another ENOSPC.
+
+## What I could not measure
+
+- **The true daily peak for the missing window.** Only 4 daily manifests exist and they are
+  recent, low-volume days; the ~107 MB figure is **[DISIMPULKAN]** by dividing monthly sizes by
+  ~30, and October 2025 – July 2026 volumes are not known.
+- **Whether HF upload throughput makes 295 daily round trips practical.** Not tested; no upload
+  has been attempted.
+- **Whether the HF dataset has a size or file-count limit** that 2,086 partitions would hit.
+- **Whether the two known ZSTD failures are corruption at rest or a transient read error.** Never
+  re-tested since they were first seen.
+- **Whether `rows_dropped_error: 1` cost a real row or a retry-covered one.** The counter says one
+  drop; which row, and whether it was recovered, is not recorded.

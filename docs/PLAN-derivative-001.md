@@ -90,6 +90,57 @@ circular — see the retroactive result.
 **Positive control on every run:** `tsmom` must come out at **72 bps/yr**. It did, to the digit,
 against the value computed independently in the C1 precheck.
 
+## Threshold calibration — ATTEMPTED, and it FAILED. The thresholds stay arbitrary. [DIUKUR]
+
+The 2×/10× thresholds were picked, not derived, and the board offers 12 points to test against:
+does DSR collapse as drag rises?
+
+| strategy | DSR | drag | type |
+|---|---:|---:|---|
+| `tsmom_dir` | 0.87 | 188 | binary |
+| `tsmom_ls` | 0.80 | 143 | continuous |
+| `ma_trend_fixedR` | 0.59 | 97 | binary |
+| `pairs_ou` | 0.06 | 89 | binary |
+| `tsmom` / `tsmom_voltarget` | 0.93 | 72 | continuous |
+| `vwap_reversion_48` | 0.00 | 50 | binary |
+| `donchian_55_20` | 0.21 | 43 | binary |
+| `random_entry` | 0.11 | 40 | binary |
+| `pairs_coint` | 0.00 | 20 | binary |
+| `ma_trend_filter` | 0.65 | 9 | binary |
+| `buy_and_hold` | 0.72 | 1 | binary |
+
+**No relationship.** Pearson **r = +0.395 (p = 0.204)**, Spearman **+0.337 (p = 0.283)**, n = 12.
+Within the binary subgroup alone (n = 9): r = +0.339, p = 0.373.
+
+**And the sign is POSITIVE — the opposite of what the gate assumes.** Higher drag associates with
+*higher* DSR here, because drag is confounded with strategy family: the trend/momentum candidates
+turn over most and also score best, while the cheapest candidates include both `buy_and_hold`
+(0.72) and `pairs_coint` (0.00).
+
+**The deeper reason the calibration cannot work, and it is not sample size:** the gate fires at
+**≥ 1,880 bps/yr**, and the board's entire range is **1–188 bps/yr**. There are **zero calibration
+points in the region where the gate operates.** This is not a weak calibration — it is an absent
+one, and no amount of extra board strategies inside 1–188 would fix it.
+
+> **Therefore the 2×/10× thresholds are DECLARED ARBITRARY.** They are a stated convention, not a
+> measured boundary, and any verdict that turns on them inherits that. Recorded in the gate
+> itself rather than in a footnote.
+
+## What the anchor actually means — read this before quoting the gate
+
+**`tsmom_dir` sits at DSR 0.87, BELOW the 0.95 promotion bar.** So the gate measures
+
+> *"more expensive than the best strategy we have"*
+
+and **not**
+
+> *"more expensive than a strategy worth trading."*
+
+**Nothing in this repo has ever cleared the bar**, so the anchor is a **moving floor**, not an
+absolute standard. If a strategy ever clears 0.95 with a different turnover profile, the anchor
+should move to it and every prior verdict should be re-read against the new value.
+
+
 ## Decision rule
 
 | drag vs anchor | verdict |

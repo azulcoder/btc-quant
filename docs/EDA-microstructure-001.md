@@ -2242,7 +2242,9 @@ Per the standing rule, every look is counted and cannot be reduced later.
 | §19 options power test (coverage census, daily-mask control, CI curve) — **no ρ computed** | 4 | 0 |
 | step 0 + CVD precheck (4 endpoint probes, coverage distribution, 120-partition manifest control, 2 flip measurements, 3 anchor turnovers) | 11 | 0 |
 | §15 cost-drag gate (14 position series, turnover + binary/continuous classification, 1 positive control) | 15 | 0 |
-| **running total** | **497** | **81** |
+| §19-cal threshold calibration (12 DSR×drag pairs, 2 correlation tests, 1 subgroup control) — FAILED | 5 | 0 |
+| §20 vision remote-first design (2,085 manifest size reads, granularity split, 3 HF existence probes, disk census) | 6 | 0 |
+| **running total** | **508** | **81** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 
