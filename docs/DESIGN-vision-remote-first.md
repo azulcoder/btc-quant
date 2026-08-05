@@ -215,3 +215,83 @@ Every one of those consequences came from not measuring 30 seconds of disk state
 a multi-hour job. Migrating 295 partitions while the volume sits at 2.4 GB would repeat the
 pattern with better intentions. **Margin first, then migrate without a clock running.**
 
+---
+
+# §22 — ONE PARTITION END-TO-END: the pipeline control [DIUKUR]
+
+**`2026-07-30`, the last partition before the 295-day hole. This whole partition is a CONTROL
+for the pipeline, not a result about the data.** All seven states ran, twice: once `--dry-run`
+(states 1–6) and once for real (states 1–7).
+
+| state | outcome | time |
+|---|---|---:|
+| 1–4 fetch → verify zip sha256 vs venue → normalize → sha256 parquet | ok, 834,335 rows, `checksum_verified: True` | 3.3 s |
+| 5 upload (parquet + manifest) | 3.19 MB at **0.50 MB/s** | 6.4 s |
+| 6 **read back from the hub, recompute sha256** | `a847d540…` = `a847d540…` — **MATCH** | 2.5 s |
+| 7 delete local — gated on 6 | deleted 3.17 MB; partitions 2,086 → **2,085** | — |
+| | **TOTAL** | **12.3 s** |
+
+**Peak disk MEASURED, not estimated: 70.7 MB**, sampled every 250 ms by a background thread
+during the run. Against 2.4 GB free that is **34× headroom**, and it does not grow with the
+number of partitions.
+
+**`upload_hf.py` needed NO generalisation.** `hf_upload_file` and `hf_download_file` already take
+an arbitrary `path_in_repo`; only the prefix differs. Its discipline was reused verbatim.
+
+## The answers to the three questions that could have cancelled the plan
+
+| # | question | answer |
+|---|---|---|
+| **c** | is 295 round trips practical at HF upload throughput? | **Yes.** 0.41–0.50 MB/s, 12.3 s/partition end to end |
+| **d** | will 2,086 partitions hit an HF limit? | **No.** The repo holds **278 files** now; +4,172 for full migration = **~4,450**, against HF's ~100,000-file guidance |
+| **f** | were the ZSTD failures corruption or a transient read? | **TRANSIENT.** `2026-07-05` (150,174 rows) and `2026-07-13` (240,728 rows) both read **first try**. HF scans need **retry, not re-upload** |
+
+The uploaded partition is queryable through `hf://`: 834,335 rows, `id` span 3397437001–3398271335,
+contiguous, matching its manifest exactly.
+
+## The finding I did NOT expect, and it changes the migration plan
+
+**Parquet normalisation is NOT deterministic.** The same archive day, normalised three times,
+produced three different files:
+
+| when | sha256 | bytes |
+|---|---|---:|
+| original ingest, 2026-08-02 | `1523309d…` | 3,168,185 |
+| dry run today | `346d41cd…` | ~3,170,xxx |
+| real run today | `a847d540…` | ~3,190,000 |
+
+Row count identical at 834,335 every time; **bytes differ**.
+
+**So a manifest sha256 verifies TRANSPORT, not REPRODUCIBILITY.** State 6 remains sound — it
+compares the bytes just uploaded against the bytes read back, and that is exactly the claim
+needed to license a delete. But a sha256 cannot be used to check that a re-ingest reproduced an
+earlier partition.
+
+**Consequence, and it makes the migration cheaper:** the 2,085 partitions that are already local
+must be **uploaded as they are**, never re-fetched. Re-fetching would produce bytes that disagree
+with their own recorded manifests, which would look like corruption and is not. Upload-only also
+skips states 1–4 entirely.
+
+## Extrapolation [DISIMPULKAN from one partition]
+
+| path | per partition | count | total |
+|---|---:|---:|---:|
+| full (fetch + normalize + upload) — the 295 missing days | 12.3 s | 295 | **~60 min** |
+| upload-only — the 2,085 already local | ~8.9 s | 2,085 | **~5.2 h** |
+| | | | **~6.2 h combined** |
+
+**Peak disk stays ~71 MB throughout**, which is the property that makes the count irrelevant.
+Against §20's finding that free space is stable rather than draining, there is no clock on this.
+
+## What I could not measure
+
+- **Whether 12.3 s is representative.** One partition, one time of day, one network condition.
+  October 2025 – July 2026 days may be larger than 2026-07-30's 834,335 rows.
+- **Why the parquet is nondeterministic.** Compression nondeterminism and embedded metadata are
+  both plausible; not investigated. It matters only if a reproducibility claim is ever made.
+- **Whether the ZSTD failures recur.** One successful retest each proves the data is intact at
+  rest; it does not prove the read never fails again. Retry logic is still needed.
+- **Whether HF throttles sustained upload** over hours. Two uploads is not a rate-limit test.
+- **The upload-only path's timing.** The 8.9 s figure subtracts states 1–4 from a measured full
+  run; it has not itself been run.
+
