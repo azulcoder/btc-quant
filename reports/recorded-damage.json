@@ -37,10 +37,22 @@
       "symbol": "BTCUSDT",
       "missing_rows": 28428,
       "id_ranges": [
-        [3400365711, 3400377172],
-        [3400395947, 3400402841],
-        [3400507843, 3400513008],
-        [3400514462, 3400519366]
+        [
+          3400365711,
+          3400377172
+        ],
+        [
+          3400395947,
+          3400402841
+        ],
+        [
+          3400507843,
+          3400513008
+        ],
+        [
+          3400514462,
+          3400519366
+        ]
       ],
       "utc_blocks": [
         "00:39:13-01:03:33Z  11,462 prints  24.3 min",
@@ -52,10 +64,38 @@
       "cause": "aggTrades cursor reset on leg restart. _aggtrades_loop initialised `cursor: Optional[int] = None` per call (collector.py:2744 @ 57ad311), so a leg restart inside a live process resumed at the LIVE EDGE and silently dropped the backlog accumulated during the outage. The `cursor is not None` guard at :2754 suppressed the id-gap alarm that would have announced it. Attribution rests on the shape: all four holes are perfectly CONTIGUOUS id blocks, which is what jump-to-live-edge produces and what packet loss or a venue outage does not.",
       "introduced_by": "57ad311 (binancef: the aggressive layer, over REST because the WS topic is filtered)",
       "condition": "Four leg restarts on 2026-08-03 while the collector process itself stayed up (PID 14595, running since Mon 03:00). Host Maintenance Sleep is the leading candidate for the restarts themselves (reports/incident-2026-08-04-sleep/baseline.md), but that experiment was deferred and the link is NOT established.",
-      "fixed_by": "UNCOMMITTED as of 2026-08-04 — module-scope _AGGTRADES_CURSOR survives leg restarts, _AGGTRADES_SEEK_BACK_MAX = 50000 bounds the catch-up with a LOGGED skip count, and the id-gap alarm now fires where the guard suppressed it. The largest hole here is 11,462 prints = 22.9% of that ceiling, so the fix would have recovered ALL FOUR blocks with no loss. Not yet active: the collector has not been restarted.",
-      "recoverable_from": "data/vision/binancef/BTCUSDT/aggTrades/date=2026-08-03/ — the prints exist in the archive under their own source label. They are NOT backfilled into `trades`. Gaps stay gaps (scripts/check_ticks.py:12-16); a second labelled source is not a repair.",
+      "fixed_by": "UNCOMMITTED as of 2026-08-04 \u2014 module-scope _AGGTRADES_CURSOR survives leg restarts, _AGGTRADES_SEEK_BACK_MAX = 50000 bounds the catch-up with a LOGGED skip count, and the id-gap alarm now fires where the guard suppressed it. The largest hole here is 11,462 prints = 22.9% of that ceiling, so the fix would have recovered ALL FOUR blocks with no loss. Not yet active: the collector has not been restarted.",
+      "recoverable_from": "data/vision/binancef/BTCUSDT/aggTrades/date=2026-08-03/ \u2014 the prints exist in the archive under their own source label. They are NOT backfilled into `trades`. Gaps stay gaps (scripts/check_ticks.py:12-16); a second labelled source is not a repair.",
       "measured_on": "2026-08-04",
       "measured_how": "tests/test_vision_overlap.py against a fresh ingest of the published archive day, set difference in both directions. Fidelity on the 999,497 rows the collector DID record: ts_ms mismatch 0, max|dprice| 0.0, max|dqty| 0.0, side mismatch 0. UTC hour attribution computed with explicit floor division in Python after two SQL attempts silently disagreed (DuckDB rendered strftime in the session zone Asia/Jakarta, then CAST(x AS BIGINT) rounded instead of truncating); the three methods were compared and only the floor-division result is recorded here."
+    },
+    {
+      "date": "2026-08-04",
+      "venue": "binancef",
+      "symbol": "BTCUSDT",
+      "missing_rows": 21706,
+      "id_ranges": [
+        [
+          3401473404,
+          3401489307
+        ],
+        [
+          3401490308,
+          3401496109
+        ]
+      ],
+      "utc_blocks": [
+        "02:37:24-03:19:39Z  15,904 prints  42.3 min",
+        "03:22:05-03:34:41Z   5,802 prints  12.6 min"
+      ],
+      "utc_hour_profile": "100% in UTC 02-03 (off hours). 54.9 min of tape = 3.8% of the day.",
+      "cause": "Same defect as the 2026-08-03 entry: aggTrades cursor reset on leg restart (`cursor: Optional[int] = None` per call, collector.py:2744 @ 57ad311). gaps.jsonl records binancef-aggTrades `stalled` watchdog restarts at 03:23:23Z (restart_n=5) and 03:39:28Z (restart_n=6) with ~15.5 min silent gaps preceding each \u2014 the leg resumed at the live edge and dropped the backlog, and the `cursor is not None` guard suppressed the id-gap alarm. Contiguous id blocks are the jump-to-live-edge signature.",
+      "introduced_by": "57ad311 (same as the 2026-08-03 entry)",
+      "condition": "Two leg restarts during 2026-08-04 (the quarantine day, mid host-sleep experiment) while the process stayed up. THE FIX WAS NOT YET ACTIVE: dc9857b's cursor fix went live at the 2026-08-05 00:05:28Z restart, ~21 h after these blocks. This entry is damage from the already-diagnosed defect, measured after the fact by the completeness gate \u2014 not a recurrence.",
+      "fixed_by": "dc9857b, active since 2026-08-05 00:05:28Z. KNOWN RESIDUAL: the cursor dict is module-scope, so it survives LEG restarts but not PROCESS restarts (e.g. the 2026-08-06 05:23 local reboot); cross-process seeding from the day file's max recorded id is the open improvement.",
+      "recoverable_from": "Binance Vision daily archive for 2026-08-04 (published; not yet ingested). NOT backfilled into `trades` \u2014 gaps stay gaps.",
+      "measured_on": "2026-08-06",
+      "measured_how": "Flagged by tests/test_vision_overlap.py completeness gate (21,706 undocumented ids, exact). Block boundaries measured from recorded neighbor rows in data/ticks/2026-08-04.duckdb (max ts below id_min, min ts above id_max, TRY_CAST + symbol filter \u2014 the trades table holds non-numeric trade_ids for other venues). Sum of id ranges = 21,706, matching the gate to the digit; cross-referenced against gaps.jsonl restart events."
     }
   ]
 }

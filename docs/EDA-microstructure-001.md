@@ -1,6 +1,6 @@
 # EDA-microstructure-001 — descriptive exploration of the recorded L2 store
 
-**Status: §0 and §2 complete. §1 and §3–§7 not started.**
+**Status: living measurement record, §0–§19 + §E0 (in `EDA-execution-001.md`). The Look counter at the bottom is the authoritative index of what ran.** ~~§1 and §3–§7 not started~~ [header was stale from §2-era; caught by audit 2026-08-06].
 
 **Scope, locked before §2 and not revisable on §3 results:**
 
@@ -806,7 +806,7 @@ non-stationary" — is no longer supported by the number that produced it, and
   by design at 1.8 % of MinBTL, and §4bis closed it analytically at its own 12 bps round-turn
   assumption. Excluded with reason, not omitted.
 - **Whether `pairs_ou`'s flip survives its own PBO threshold.** `PBO < threshold` is unbound
-  prose in `STRATEGY.md:803` — no numeric threshold exists in code, so "PBO worsens" was the only
+  prose in `STRATEGY.md` (same grep target) — no numeric threshold exists in code, so "PBO worsens" was the only
   testable form.
 - **Any candidate not already carrying a recorded verdict.** By construction: adding one would be
   a new trial, and the declared set was fixed at 16 before the first run.
@@ -1207,7 +1207,7 @@ would not also have bought.
 
 ### Consequence for the promotion bar
 
-`STRATEGY.md:804` requires `DSR > 0.95` **AND** `PBO < threshold` **AND** `history ≥ MinBTL(N)`.
+`STRATEGY.md` (grep `` `DSR>0.95` net-of-cost AND `PBO<threshold` ``; was :804, drifted twice — §17) requires `DSR > 0.95` **AND** `PBO < threshold` **AND** `history ≥ MinBTL(N)`.
 §4bis already recorded that no numeric PBO threshold exists in code. This section adds the
 harder fact: **with sd ≈ 0.25, no threshold on PBO could resolve anything at this sample.** The
 clause is currently unmeasurable, not merely unbound. Any future bar must either raise `T`
@@ -1368,7 +1368,7 @@ were also missing from the list.
 
 **`liquidations` IS already being collected** [DIUKUR: 388 rows on 2026-08-03; `/health` reports
 697 rows written this process]. But **not from Binance `forceOrder`** — from **Bybit
-`allLiquidation.<SYM>`** (`collector.py:571`), riding the `bybit-ws` leg. The collector already
+`allLiquidation.<SYM>`** (`collector.py`, grep `def normalize_bybit_liq` — was :571, drifts with edits), riding the `bybit-ws` leg. The collector already
 documents its sparsity honestly at `collector.py:344-347`: *"bybit prints 3-2000/day and
 2026-07-25 had ZERO all day"*. This materially changes the premise of the liquidations proposal
 and is flagged here rather than absorbed.
@@ -1745,7 +1745,7 @@ The throttle hypothesis is refuted in both directions at once: too many sub-seco
 spike where the throttle would put one.
 
 **Structural confirmation, independent of the timing** [DIUKUR]: the Bybit frame carries a
-`data` **list** with the same envelope as `publicTrade` (`collector.py:571`), so multiple
+`data` **list** with the same envelope as `publicTrade` (`collector.py`, grep `def normalize_bybit_liq` — was :571, drifts with edits), so multiple
 liquidations arrive per push by design. Binance sends **one** order per snapshot. These are
 architecturally different delivery models, not two settings of the same one.
 
@@ -2209,6 +2209,17 @@ answer, because the date depends on a decision rather than on the calendar.
 ## Look counter
 
 Per the standing rule, every look is counted and cannot be reduced later.
+
+**RECONCILIATION [audit 2026-08-06]: the row sum is 492; the running total is 535; offset +43.**
+The offset is CONSTANT at every historical checkpoint quoted in other documents (386, 391, 418 —
+each exactly 43 above its row sum), and every increment inside the visible git history matches
+its added rows to the digit — so the 43 predate the visible history (the repo was squashed at
+`8c9bdb6`) and their itemization is lost. Per the standing rule the TOTAL is not reduced; the
+row below carries the offset explicitly so the table sums to its own total again. The predictive
+column (81), which is what enters DSR deflation, was never affected.
+
+| pre-squash looks, itemization lost at history squash (offset discovered by audit) | 43 | 0 |
+|---|---:|---:|
 
 | section | diagnostic looks | predictive trials |
 |---|---:|---:|

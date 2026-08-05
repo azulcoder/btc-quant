@@ -89,8 +89,31 @@ def main() -> int:
     print(f"  by-design grace-window drops (not defects): {benign}")
     print(f"  UNSTAMPED drop lines (predate the _stamped fix, cannot be placed): {unstamped}")
 
+    # The log lives in /tmp, which macOS WIPES on reboot (measured: the 2026-08-06
+    # 05:23 local reboot erased 2,7xx lines including the recorded defect's line).
+    # An entry whose timestamp predates the current log's first stamped line is
+    # therefore UNVERIFIABLE-BY-THIS-LOG, not phantom: the manifest — which quotes
+    # the log line verbatim — is by design the surviving record. Distinguishing the
+    # two matters because "phantom" accuses the manifest of overstating, and a
+    # verifier that fires on a wiped log would be class I (destroying a correct
+    # record to satisfy a broken check).
+    log_start = None
+    for line in a.log.read_text(errors="replace").splitlines():
+        m = DROP.match(line) or re.match(r"^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)", line)
+        if m:
+            log_start = parse_ts(m.group("ts"))
+            break
+    predates = {r for r in recorded
+                if log_start is not None and parse_ts(r[0]) < log_start}
+    if predates:
+        print(f"  entries predating the current log (log wiped/rotated at "
+              f"{log_start.strftime('%Y-%m-%dT%H:%M:%SZ') if log_start else '?'}): {len(predates)}")
+        for r in sorted(predates):
+            print(f"    {r[0]}  {r[1]}  {r[2]} row(s)  ->  UNVERIFIABLE BY THIS LOG; "
+                  f"the manifest (verbatim log quote inside it) is the surviving record")
+
     unrecorded = found - recorded
-    phantom = recorded - found
+    phantom = (recorded - found) - predates
     ok = True
     if unrecorded:
         ok = False

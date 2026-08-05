@@ -217,6 +217,26 @@ pattern with better intentions. **Margin first, then migrate without a clock run
 
 ---
 
+# §21 — the LockBox defect, located and durably recorded [DIUKUR]
+
+**This section number was cited by the look counter and §20 before the section existed — the
+audit found the hole; this stub heals it and says where the substance lives, because the work
+was done as artefacts rather than prose:**
+
+- **`reports/lockbox-manifest.json`** — the defect record: 1 `depth_snapshots` row lost at
+  `2026-08-05T17:26:26.870Z` to ENOSPC on the WAL, inside the LockBox, unrecoverable (no venue
+  endpoint serves historical book). Recorded there because `/health`'s counter resets on
+  restart.
+- **`scripts/lockbox_integrity.py`** (`make lockbox-integrity`) — cross-checks the stamped log
+  against the manifest with exact matching; 3 negative controls verified it bites.
+- **Post-reboot amendment 2026-08-06:** the 05:23-local reboot wiped `/tmp`, taking the log
+  line with it. The gate now distinguishes *entry-predates-current-log* (the manifest, which
+  quotes the line verbatim, is the surviving record — PASS with a note) from *phantom*
+  (entry after log start with no line — still FAIL). The log's `/tmp` location is a standing
+  risk; relocating it is an open recommendation.
+
+---
+
 # §22 — ONE PARTITION END-TO-END: the pipeline control [DIUKUR]
 
 **`2026-07-30`, the last partition before the 295-day hole. This whole partition is a CONTROL

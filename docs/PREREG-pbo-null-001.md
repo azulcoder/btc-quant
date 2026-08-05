@@ -8,7 +8,7 @@ that makes it worth anything.
 
 ## 0. Why the clause has to change
 
-`STRATEGY.md:804` requires `DSR > 0.95` **AND** `PBO < threshold` **AND** `history ≥ MinBTL(N)`.
+`STRATEGY.md` (grep `` `DSR>0.95` net-of-cost AND `PBO<threshold` ``) requires `DSR > 0.95` **AND** `PBO < threshold` **AND** `history ≥ MinBTL(N)`.
 
 Two facts, both measured in `docs/EDA-microstructure-001.md` §8:
 
@@ -19,7 +19,7 @@ Two facts, both measured in `docs/EDA-microstructure-001.md` §8:
   *centre* moves with column count — 0.500 at N = 8, 0.657 at N = 5 — so a fixed number is not
   even comparing like with like across boards of different width.
 
-**And the clause fails the repo's own tie-break rail** (`STRATEGY.md:812`, written 2026-08-04):
+**And the clause fails the repo's own tie-break rail** (`STRATEGY.md` §6, grep `flips with a free methodological choice`; written 2026-08-04):
 the CSCV block count `S` is a free methodological parameter that moves PBO by **0.33** on a fixed
 board (0.700 / 0.529 / 0.373 / 0.500 at S = 6 / 8 / 10 / 12). Under that rail, PBO as currently
 used may not decide anything. The rail executes itself here.
@@ -113,7 +113,7 @@ fully transparent construction and reproduces what §8 measured post-hoc.
 
 **Disagreement rule, fixed in advance:** if primary and secondary reach different verdicts, the
 result is **INDETERMINATE** and the clause abstains. This is not a free choice between two
-methods — the failure mode is abstention, never selection. It is the same rail as `STRATEGY.md:812`
+methods — the failure mode is abstention, never selection. It is the same rail as the tie-break refusal in `STRATEGY.md` §6
 applied to this instrument.
 
 ### 2.4 Decision rule — declared with its threshold

@@ -5,8 +5,9 @@ promoted, wired to the terminal, or read as a trading recommendation. It measure
 costs and what the tape says about passive fills. `descriptive-never-a-signal` applies in full.
 
 **Slice.** Exploration uses recorded `binancef` book and tape. The **LockBox
-(`2026-08-05 00:00 UTC` onward) is not touched, not read, not peeked** — same rule as
-`docs/EDA-microstructure-001.md`.
+(~~`2026-08-05 00:00 UTC`~~ → `2026-08-05 01:00 UTC` onward, boundary moved once for a
+documented data defect — see the amendment in `docs/EDA-microstructure-001.md`) is not touched,
+not read, not peeked.** Every query in this document predates the boundary either way.
 
 ---
 

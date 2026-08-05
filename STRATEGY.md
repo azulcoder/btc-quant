@@ -416,7 +416,7 @@ sequence to the calendar, not to enthusiasm.
 - [ ] **M2. Promote the gate from prose to a machine-checkable registry.** Per-candidate
       artifact `{hypothesis_id, feature, N_trials, MinBTL_target, kill DSR/PBO thresholds,
       LockBox slice}`. A signal is `status=CLEARED` iff OOS `DSR>0.95` net-of-cost AND
-      `PBO<threshold` AND recorded history ≥ `MinBTL(N)`. Wire the `LockBox`
+      `PBO<threshold` AND recorded history ≥ `MinBTL(N)`. **[PBO clause currently unmeasurable — see `docs/PREREG-pbo-null-001.md`, undecided.]** Wire the `LockBox`
       (`backtest.py:772-831`, currently opt-in and unused). *Accept:* the registry object
       exists, is read by a (future) terminal panel, and refusing an un-cleared signal is a
       mechanical property, not a discipline.
@@ -805,7 +805,7 @@ Sequencing (revised). These items *use* the existing L1/M4 entries rather than d
 ## 6. What to refuse (this is the product, not a limitation)
 
 
-### The taxonomy — eight classes behind the twelve instances
+### The taxonomy — nine classes behind the fourteen instances
 
 The ledger grows; the classes do not. **Read the classes, not the incidents.** Each names its own
 prevention, because a class without a countermeasure is just a nicer-sounding list.
@@ -905,6 +905,7 @@ instrument that cannot report its own blindness.
   category; pursuing it burns years in an arena lost by construction.
 - Refuse showing any signal before `status=CLEARED` via the registry (M2). Until OOS
   `DSR>0.95` net-of-cost AND `PBO<threshold` AND history ≥ `MinBTL(N)` — show a countdown,
+  **[CAVEAT 2026-08-06: the PBO clause is currently UNMEASURABLE at this sample — sd≈0.25, noise band [0.13,0.91]. Replacement declared in `docs/PREREG-pbo-null-001.md`, NOT run, undecided. The other two clauses stand.]**
   not a prediction. This refusal is the product.
 - **Refuse to promote a candidate whose verdict flips with a free methodological choice.**
   If two equally defensible settings of a parameter that is *not part of the strategy* — the

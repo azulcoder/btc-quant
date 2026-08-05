@@ -29,7 +29,7 @@ years each, and **C4 is confirmed frozen permanently** — not by assumption, by
 | source | span available | frozen? |
 |---|---|---|
 | `funding_mark`, `open_interest`, `crowding`, `dvol`, `options_chain` | **30 days** recorded | **YES** — every new day goes to the LockBox, not to exploration (§19) |
-| **`aggTrades` via the Vision archive** | **2,086 day-partitions, 2019-12-31 … 2026-08-01 = 6.59 years** | **NO** — already on disk, needs no further collection |
+| **`aggTrades` via the Vision archive** | **2,086 day-partitions, 2019-12-31 … 2026-08-01 = 6.59 years** (now 2,084 local + `2026-07-30` migrated to HF; ~128 more verified on HF, locals intact — `DESIGN-vision-remote-first.md` §24) | **NO** — on disk / on HF |
 | daily OHLCV (`BTC-USD`, coinbase) | 3,139 bars, 2018-01-01 … 2026-08-05 | no |
 
 So the candidate the request was most sceptical of — **daily CVD** — is the only one with a
@@ -37,13 +37,9 @@ sample worth testing today, and the three that sound most mechanically appealing
 30 observations. That is not an argument that CVD is more likely to work. It is an argument about
 what can be *answered* now.
 
-**Step 0 for the three frozen candidates is not analysis, it is availability:** Binance publishes
-keyless historical **funding rates** (`/fapi/v1/fundingRate`) and keyless historical **klines** for
-both perp and spot, which would unfreeze funding and basis without touching the LockBox. Whether
-those reach back far enough, and whether an equivalent exists for open interest, is **NOT CHECKED**
-— checking it costs one HTTP call each and must happen before any of them is designed further.
-
----
+~~Step 0 was NOT CHECKED when this paragraph was first written.~~ **[SUPERSEDED — step 0 RAN;
+its results are the block above.]** The paragraph is kept struck-through rather than deleted so
+the plan's own audit trail shows the check was once open.
 
 ---
 
@@ -217,7 +213,10 @@ instrument — its first number must reproduce a known value, e.g. total daily v
 independent source), **B** (days the archive lacks must be counted, not dropped — 321 of 2,406
 calendar days have no partition).
 
-**Verdict: DROPPED.** The precheck ran (`docs/PRECHECK-cvd-turnover.md`) and the mechanism is
+**Verdict: ~~DROPPED~~ → AMBIGUOUS, not proposed** — the original verdict below stands as
+recorded against its declared anchor, and the binary-anchor correction (this file, "C1's verdict,
+CORRECTED" above) moved it to AMBIGUOUS at 8.66×. Kept unrewritten per the audit-trail rule.
+The precheck ran (`docs/PRECHECK-cvd-turnover.md`) and the mechanism is
 absent: daily `sign(ΔCVD)` carries a cost drag of **1,629 bps/yr, 22.49× the `tsmom` anchor**,
 against a declared abort at 10×. The hourly drag is 45,336 bps/yr — 626× the anchor — which
 explains the original OOS Sharpe of −3.1 to −10.3 without any signal analysis. Dropped before a

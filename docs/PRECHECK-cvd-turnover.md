@@ -32,7 +32,7 @@ persisted within the day — a specific and unlikely shape, and exactly what thi
 
   **AMENDED before any block's numbers existed.** The rule first said "fractions of the calendar
   span". The archive is not uniformly covered — it is dense 2020-01-01 … 2025-10-07, then a
-  **295-day hole** (2025-10-08 … 2026-07-30, the ENOSPC that killed the ingest), then 3 days at
+  **296-day hole [count corrected by audit 2026-08-06]** (2025-10-08 … 2026-07-30, the ENOSPC that killed the ingest), then 3 days at
   the end. Block 4 landed inside the hole and returned nothing. Indexing by available partition
   cannot land in a hole by construction. The run aborted before any ΔCVD was computed, so no
   result influenced this change; all four blocks are recomputed under the new rule so the sample
