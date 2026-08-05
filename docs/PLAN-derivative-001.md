@@ -20,6 +20,12 @@ failure mode is class F by construction.
 **Three of the four proposed candidates hit the same frozen-sample wall that just killed the
 options test (§19), and the fourth does not.** [DIUKUR]
 
+**STEP 0 RESULT [DIUKUR]** — three of four unfrozen, measured rather than assumed:
+`fundingRate` reaches **2019-09-10**, perp klines **2019-09-08**, spot klines **2017-08-17**;
+`openInterestHist` serves exactly **30 rolling days** and rejects any `startTime` beyond ~30 days
+with HTTP 400 (boundary located between 25 and 35 days). So C2 and C3 are unblocked with ~6.9
+years each, and **C4 is confirmed frozen permanently** — not by assumption, by probe.
+
 | source | span available | frozen? |
 |---|---|---|
 | `funding_mark`, `open_interest`, `crowding`, `dvol`, `options_chain` | **30 days** recorded | **YES** — every new day goes to the LockBox, not to exploration (§19) |
@@ -73,8 +79,11 @@ instrument — its first number must reproduce a known value, e.g. total daily v
 independent source), **B** (days the archive lacks must be counted, not dropped — 321 of 2,406
 calendar days have no partition).
 
-**Verdict: the only candidate that can be tested now.** Proceed to the flip-rate precheck if
-approved.
+**Verdict: DROPPED.** The precheck ran (`docs/PRECHECK-cvd-turnover.md`) and the mechanism is
+absent: daily `sign(ΔCVD)` carries a cost drag of **1,629 bps/yr, 22.49× the `tsmom` anchor**,
+against a declared abort at 10×. The hourly drag is 45,336 bps/yr — 626× the anchor — which
+explains the original OOS Sharpe of −3.1 to −10.3 without any signal analysis. Dropped before a
+single return was scored, which is what the precheck was for.
 
 ---
 

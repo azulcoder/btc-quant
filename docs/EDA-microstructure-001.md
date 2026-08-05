@@ -2240,7 +2240,8 @@ Per the standing rule, every look is counted and cannot be reduced later.
 | §17 citation audit (4 citations verified against source) | 4 | 0 |
 | §18 (1 commit-message check) | 1 | 0 |
 | §19 options power test (coverage census, daily-mask control, CI curve) — **no ρ computed** | 4 | 0 |
-| **running total** | **471** | **81** |
+| step 0 + CVD precheck (4 endpoint probes, coverage distribution, 120-partition manifest control, 2 flip measurements, 3 anchor turnovers) | 11 | 0 |
+| **running total** | **482** | **81** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 
