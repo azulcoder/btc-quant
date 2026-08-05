@@ -228,6 +228,26 @@ _WS_SEND_TIMEOUT_S = 10.0
 # mechanism that detects a half-open peer, and it does not get to change under us
 # on a library bump. Legs that DO carry app_ping pass ping_interval=None: see the
 # connect() call for the measurement that forced that split.
+# --------------------------------------------------------------------------- #
+# aggTrades cursor survival (fix 2026-08-05). MEASURED failure: `_aggtrades_loop` #
+# initialised `cursor = None` at loop start, so every watchdog restart re-seeded  #
+# at the LIVE EDGE and silently dropped the whole backlog — and because the       #
+# id-gap warning was guarded on `cursor is not None`, the drop was not even       #
+# logged. That is how binancef tape coverage sat at 67.5 % in book-OFF hours      #
+# against 78.3 % in book-ON hours (EDA-microstructure-001 §0b).                   #
+#                                                                                 #
+# The cursor now lives at MODULE scope, keyed by symbol, because the supervisor   #
+# recreates the coroutine but never the module. Restart therefore resumes.        #
+_AGGTRADES_CURSOR: dict[str, int] = {}
+# Seek-back ceiling. Derived, not picked: `aggTrades` serves 1000 rows per request
+# at weight 20, the poll runs every 5 s (12 polls/min = 240 weight/min, 10 % of the
+# 2400/min futures budget), and BTCUSDT prints ~11.6 aggTrades/s (~696/min). Net
+# catch-up is therefore ~11,300 trades/min, so 50,000 rows — about 72 minutes of
+# tape — is caught up in ~4.4 minutes without raising the weight footprint.
+# Past that the leg jumps to the live edge, because a leg spending an hour
+# catching up is a leg not recording the present.
+_AGGTRADES_SEEK_BACK_MAX = 50_000
+
 _WS_PING_INTERVAL_S = 20.0
 _WS_PING_TIMEOUT_S = 20.0
 
@@ -384,6 +404,33 @@ _CURRENT_LEG: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
 # full disk) but never silent: they are counted and surfaced in /health. What is
 # swallowed must be counted.
 _LOG_DROPS = 0
+
+
+def _stamped(log):
+    """Wrap a log sink so every line carries a UTC timestamp with milliseconds.
+
+    Added 2026-08-04 after a measurement was BLOCKED by its absence: the log had
+    0 of 2,123 lines carrying a date, so socket-drop -> reconnect duration could
+    not be recovered from it. The gap ledger measures time-since-last-ROW, which
+    is a different quantity, and the difference between the two is exactly the
+    number the reconnect rail needs to be judged on.
+
+    ISO-8601 UTC with ms, deliberately: the whole store is event-time UTC epoch-ms
+    (DESIGN §3), so a log line and a `ts_ms` row can be aligned without a
+    conversion step or a timezone assumption. `time.time()` and not the event
+    clock, because this stamps when the PROCESS said something -- that is a wall
+    -clock fact about the host, and treating it as event time would be the
+    category error the replay rail exists to prevent.
+
+    Wraps whatever sink was passed rather than hard-coding print, so a test that
+    supplies its own list still gets stamped lines and cannot silently diverge
+    from what the daemon writes.
+    """
+    def _emit(msg: str) -> None:
+        t = time.gmtime()
+        ms = int((time.time() % 1) * 1000)
+        log(f"{time.strftime('%Y-%m-%dT%H:%M:%S', t)}.{ms:03d}Z {msg}")
+    return _emit
 
 
 def _safe_log(log, msg: str) -> None:
@@ -2741,8 +2788,39 @@ async def _aggtrades_loop(
       back-fills them; §0.7). The cursor also never moves backwards, so a
       stale/re-served batch cannot regress it into a refetch loop.
     """
-    cursor: Optional[int] = None
+    # RESUME, do not re-seed. A restart that starts at the live edge throws away
+    # every print since the leg died, and the venue serves that history happily.
+    cursor: Optional[int] = _AGGTRADES_CURSOR.get(symbol)
     last_id: Optional[int] = None  # highest aggTradeId ever handed to the writer
+    if cursor is not None:
+        # Bounded catch-up. One bare poll (weight 20) reads the live edge; if the
+        # backlog exceeds the ceiling the leg jumps forward and SAYS SO with the
+        # count. The hole stays a hole (§0.7) — this records it, never fills it.
+        try:
+            edge_payload = await asyncio.to_thread(_fetch_binance_aggtrades, symbol, None)
+            edge = max((int(r["a"]) for r in edge_payload), default=None)
+            if edge is not None and edge - cursor > _AGGTRADES_SEEK_BACK_MAX:
+                skipped = edge - cursor
+                _safe_log(
+                    log,
+                    f"[collector] binancef-aggTrades: backlog {skipped:,} aggTrade id(s) exceeds the "
+                    f"{_AGGTRADES_SEEK_BACK_MAX:,} seek-back ceiling — SKIPPING to the live "
+                    f"edge at id {edge}. Those {skipped:,} print(s) are MISSING and stay "
+                    "missing (no backfill, no interpolation).",
+                )
+                cursor = edge
+                _AGGTRADES_CURSOR[symbol] = cursor
+            else:
+                _safe_log(
+                    log,
+                    f"[collector] binancef-aggTrades: resuming at id {cursor}"
+                    + (f" ({edge - cursor:,} id(s) of backlog to catch up)" if edge else ""),
+                )
+        except Exception as exc:  # noqa: BLE001 — a failed probe must not kill the leg
+            # Probe failed: keep the cursor and let the normal loop resume from it.
+            # Worst case the first poll is a large catch-up, which is bounded by
+            # the 1000-row page anyway.
+            _safe_log(log, f"[collector] binancef-aggTrades: seek-back probe failed: {exc!r} (cursor kept)")
     while not stop_event.is_set():
         try:
             payload = await asyncio.to_thread(_fetch_binance_aggtrades, symbol, cursor)
@@ -2772,6 +2850,7 @@ async def _aggtrades_loop(
                 writer.add("trades", rows)
             if next_from_id is not None and (cursor is None or next_from_id > cursor):
                 cursor = next_from_id  # advance ONLY on success — never skip ahead
+                _AGGTRADES_CURSOR[symbol] = cursor   # survive a leg restart
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — a failed poll must not kill the leg
@@ -3887,6 +3966,11 @@ def run(
             "mode pruning is the HF lifecycle's job (verify offsite, then delete; §3c)"
         )
     try:
+        # Stamp at the single bind point, not inside _safe_log: the startup
+        # banner, the deribit-chain line and the shutdown line all call log()
+        # directly (collector.py ~3549, ~3786-3811), so stamping only the safe
+        # wrapper would leave exactly the lines that bracket a session unstamped.
+        log = _stamped(log)
         asyncio.run(_run_async(symbol, exchanges, db, api_port, retention_days, log=log))
     except KeyboardInterrupt:
         # Fallback path when add_signal_handler is unavailable; the batched tail

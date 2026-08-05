@@ -2356,6 +2356,137 @@ def test_no_late_binding_closure_in_run():
     )
 
 
+def test_aggtrades_cursor_survives_a_leg_restart(monkeypatch):
+    """U11 — the 2026-08-05 fix. `cursor` used to be re-initialised to None on every
+    loop start, so a watchdog restart re-seeded at the LIVE EDGE and dropped the
+    whole backlog. Measured consequence: binancef tape at 67.5 % coverage in
+    book-OFF hours vs 78.3 % in book-ON hours, with the drop never logged."""
+    collector._AGGTRADES_CURSOR.clear()
+    seen_from_ids: list = []
+
+    def fake_fetch(symbol, from_id):  # noqa: ARG001
+        seen_from_ids.append(from_id)
+        base = 5000 if from_id is None else int(from_id)
+        return [{"a": base + i, "p": "63000.0", "q": "0.001", "T": 1_785_000_000_000 + i,
+                 "m": False} for i in range(3)]
+
+    monkeypatch.setattr(collector, "_fetch_binance_aggtrades", fake_fetch)
+    monkeypatch.setattr(collector, "_AGGTRADES_POLL_S", 0.01)
+
+    class _W:
+        def __init__(self): self.rows = []
+        def add(self, table, rows): self.rows.extend(rows)
+
+    async def one_pass():
+        stop = asyncio.Event()
+        w = _W()
+        task = asyncio.create_task(
+            collector._aggtrades_loop("BTCUSDT", w, stop, log=lambda _m: None))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+        return w
+
+    asyncio.run(one_pass())
+    after_first = collector._AGGTRADES_CURSOR.get("BTCUSDT")
+    assert after_first is not None, "cursor must be persisted at module scope"
+    assert seen_from_ids[0] is None, "cold start seeds at the live edge (correct)"
+
+    # SECOND run = the restart. It must NOT seed at the live edge again.
+    seen_from_ids.clear()
+    asyncio.run(one_pass())
+    assert seen_from_ids, "second run polled"
+    # First call of the restart is the seek-back probe (None), then the RESUME
+    # must carry the preserved cursor — never None.
+    resume_calls = [f for f in seen_from_ids[1:] if f is not None]
+    assert resume_calls, f"restart re-seeded instead of resuming: {seen_from_ids}"
+    assert min(resume_calls) >= after_first, "resumed BEHIND the preserved cursor"
+
+
+def test_aggtrades_seek_back_ceiling_skips_LOUDLY(monkeypatch):
+    """U11b — a backlog past the ceiling jumps to the live edge, and the jump is
+    logged WITH the count. Silently skipping would be the original bug wearing a
+    different hat: the data loss would be bounded but still invisible."""
+    collector._AGGTRADES_CURSOR.clear()
+    collector._AGGTRADES_CURSOR["BTCUSDT"] = 1_000
+    EDGE = 1_000 + collector._AGGTRADES_SEEK_BACK_MAX + 12_345
+    logs: list[str] = []
+
+    def fake_fetch(symbol, from_id):  # noqa: ARG001
+        base = EDGE if from_id is None else int(from_id)
+        return [{"a": base + i, "p": "63000.0", "q": "0.001",
+                 "T": 1_785_000_000_000 + i, "m": True} for i in range(2)]
+
+    monkeypatch.setattr(collector, "_fetch_binance_aggtrades", fake_fetch)
+    monkeypatch.setattr(collector, "_AGGTRADES_POLL_S", 0.01)
+
+    class _W:
+        def add(self, table, rows): pass
+
+    async def main():
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            collector._aggtrades_loop("BTCUSDT", _W(), stop, log=logs.append))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(main())
+    skip_lines = [ln for ln in logs if "seek-back ceiling" in ln]
+    assert skip_lines, f"the skip was SILENT — that is the bug, not the fix: {logs}"
+    # The count must be in the line: "bounded loss" is only honest if it is stated.
+    # Expected is derived from the probe's own max id (EDGE + 1, since the fake
+    # returns two rows), not hard-coded — an off-by-one in the test would otherwise
+    # read as an off-by-one in the fix.
+    expected_skipped = (EDGE + 1) - 1_000
+    assert f"{expected_skipped:,}" in skip_lines[0], skip_lines[0]
+    assert "stay missing" in skip_lines[0], "the §0.7 no-backfill statement is part of the line"
+    assert collector._AGGTRADES_CURSOR["BTCUSDT"] >= EDGE, "cursor advanced to the live edge"
+
+
+def test_aggtrades_id_gap_alarm_fires_where_the_guard_used_to_suppress_it(monkeypatch):
+    """U11c — the third half of the fix, and the one that is easy to skip.
+
+    The gap warning is guarded on `cursor is not None`. While the cursor was reset
+    on every restart, that guard suppressed the alarm exactly when a restart had
+    just skipped a backlog — the code lost data and hid the loss in one motion.
+    With the cursor preserved, a venue that resumes AHEAD of it must now be loud.
+
+    This is the fourth instance of one pattern (a gauge blind to churn, a health
+    check that slept with its host, a guard suppressing its own trigger), so it
+    gets its own regression test rather than a comment."""
+    collector._AGGTRADES_CURSOR.clear()
+    collector._AGGTRADES_CURSOR["BTCUSDT"] = 4_000
+    logs: list[str] = []
+
+    def fake_fetch(symbol, from_id):  # noqa: ARG001
+        # Venue resumes 500 ids AHEAD of our cursor — inside the seek-back ceiling,
+        # so no skip line; the GAP line is the one that must appear.
+        base = 4_500 if from_id is not None else 4_500
+        return [{"a": base + i, "p": "63000.0", "q": "0.001",
+                 "T": 1_785_000_000_000 + i, "m": False} for i in range(2)]
+
+    monkeypatch.setattr(collector, "_fetch_binance_aggtrades", fake_fetch)
+    monkeypatch.setattr(collector, "_AGGTRADES_POLL_S", 0.01)
+
+    class _W:
+        def add(self, table, rows): pass
+
+    async def main():
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            collector._aggtrades_loop("BTCUSDT", _W(), stop, log=logs.append))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(main())
+    gap_lines = [ln for ln in logs if "id GAP" in ln]
+    assert gap_lines, f"the alarm stayed silent on a real gap: {logs}"
+    assert "500" in gap_lines[0], f"the missing count must be stated: {gap_lines[0]}"
+    assert not [ln for ln in logs if "seek-back ceiling" in ln], "500 is inside the ceiling"
+
+
 def test_writer_run_survives_flush_failure(tmp_path):
     """U7 — the periodic-flush task must outlive a raising flush. A dead flush
     task means every leg keeps buffering into RAM while the store quietly stops

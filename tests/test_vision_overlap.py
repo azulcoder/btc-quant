@@ -120,20 +120,36 @@ def ingested(tmp_path_factory, overlap_day):
     return out, overlap_day
 
 
-def test_archive_day_equals_recorded_day(ingested, capsys):
-    """Same rows, same fields. Set difference 0 both ways, 0 field mismatches.
+DAMAGE = json.loads((_REPO / "reports" / "recorded-damage.json").read_text())
 
-    The whole item rests on this. Compared through DISTINCT on the recorded side
-    (see the module docstring) with the duplicate surplus PRINTED, never absorbed.
+
+def _documented_missing(date: str, venue: str = "binancef", symbol: str = "BTCUSDT") -> set:
+    """The EXACT set of ids a recorded damage entry accounts for. Empty if none."""
+    out: set = set()
+    for e in DAMAGE["entries"]:
+        if e["date"] == date and e["venue"] == venue and e["symbol"] == symbol:
+            for lo, hi in e["id_ranges"]:
+                out.update(range(int(lo), int(hi) + 1))
+    return out
+
+
+@pytest.fixture(scope="module")
+def measured(ingested):
+    """Measure once; the assertions below are separate so they can differ in kind.
+
+    FIDELITY and COMPLETENESS are not the same claim and must not share a gate.
+    Completeness can carry a labelled, itemised exception (the recorded store has
+    permanent holes and pretending otherwise would be the lie). Fidelity cannot:
+    a collector that invents a print, or disagrees with the venue about one it did
+    record, is broken in a way no record of past damage can excuse.
     """
     out, date = ingested
     pq = out / "binancef" / "BTCUSDT" / "aggTrades" / f"date={date}" / "trades.parquet"
-    day_file = STORE / f"{date}.duckdb"
 
     # Copy the day file: the live collector must never contend for a lock, and a
     # closed day is immutable so a copy is the same bytes.
     scratch = out / f"{date}.copy.duckdb"
-    shutil.copy2(day_file, scratch)
+    shutil.copy2(STORE / f"{date}.duckdb", scratch)
 
     con = duckdb.connect()
     try:
@@ -144,50 +160,114 @@ def test_archive_day_equals_recorded_day(ingested, capsys):
         con.execute("CREATE VIEW r AS SELECT * FROM rec.trades "
                     "WHERE exchange = 'binancef' AND symbol = 'BTCUSDT'")
 
-        v_rows, v_ids, v_min, v_max = con.execute(
+        m = {"date": date}
+        m["v_rows"], m["v_ids"], m["v_min"], m["v_max"] = con.execute(
             "SELECT count(*), count(DISTINCT trade_id), "
-            "min(CAST(trade_id AS BIGINT)), max(CAST(trade_id AS BIGINT)) FROM v"
-        ).fetchone()
-        r_rows, r_ids = con.execute(
+            "min(CAST(trade_id AS BIGINT)), max(CAST(trade_id AS BIGINT)) FROM v").fetchone()
+        m["r_rows"], m["r_ids"] = con.execute(
             "SELECT count(*), count(DISTINCT trade_id) FROM r").fetchone()
-        dup_keys, dup_surplus = con.execute(
+        m["dup_keys"], m["dup_surplus"] = con.execute(
             "SELECT count(*), coalesce(sum(c - 1), 0) FROM (SELECT count(*) AS c FROM r "
             "GROUP BY trade_id HAVING count(*) > 1)").fetchone()
-
-        v_only = con.execute(
-            "SELECT count(*) FROM (SELECT trade_id FROM v EXCEPT "
-            "SELECT trade_id FROM r)").fetchone()[0]
-        r_only = con.execute(
+        # The missing IDS, not merely how many: the completeness gate matches the
+        # exact set, so one print of NEW loss cannot hide behind a documented count.
+        m["v_only"] = {int(x[0]) for x in con.execute(
+            "SELECT CAST(trade_id AS BIGINT) FROM (SELECT trade_id FROM v EXCEPT "
+            "SELECT trade_id FROM r)").fetchall()}
+        m["r_only"] = con.execute(
             "SELECT count(*) FROM (SELECT trade_id FROM r EXCEPT "
             "SELECT trade_id FROM v)").fetchone()[0]
-        n, ts_mm, d_px, d_qty, side_mm = con.execute(
+        (m["n"], m["ts_mm"], m["d_px"], m["d_qty"], m["side_mm"]) = con.execute(
             """SELECT count(*),
                       count(*) FILTER (WHERE v.ts_ms <> d.ts_ms),
                       max(abs(v.price - d.price)), max(abs(v.qty - d.qty)),
                       count(*) FILTER (WHERE v.aggressor_buy <> d.aggressor_buy)
                FROM v JOIN (SELECT DISTINCT trade_id, ts_ms, price, qty, aggressor_buy
-                            FROM r) d USING (trade_id)"""
-        ).fetchone()
+                            FROM r) d USING (trade_id)""").fetchone()
     finally:
         con.close()
+    return m
 
+
+def test_the_archive_side_is_internally_sound(measured, capsys):
+    """Before comparing against it, the reference must be a valid reference."""
+    m = measured
     with capsys.disabled():
-        print(f"\noverlap {date}: archive {v_rows:,} rows / {v_ids:,} distinct, "
-              f"id span {v_max - v_min + 1:,}")
-        print(f"  recorded {r_rows:,} rows / {r_ids:,} distinct "
-              f"-> duplicate keys {dup_keys:,}, surplus rows {dup_surplus:,} "
+        print(f"\noverlap {m['date']}: archive {m['v_rows']:,} rows / {m['v_ids']:,} distinct, "
+              f"id span {m['v_max'] - m['v_min'] + 1:,}")
+        print(f"  recorded {m['r_rows']:,} rows / {m['r_ids']:,} distinct "
+              f"-> duplicate keys {m['dup_keys']:,}, surplus rows {m['dup_surplus']:,} "
               "(a RECORDED defect, separate from M7 — `trades` has no unique "
               "constraint and the aggTrades dedup guard is in-memory only)")
-        print(f"  archive\\recorded {v_only} | recorded\\archive {r_only}")
-        print(f"  joined {n:,}: ts_mismatch {ts_mm}, max|Δprice| {d_px}, "
-              f"max|Δqty| {d_qty}, side_mismatch {side_mm}")
+        print(f"  archive\\recorded {len(m['v_only'])} | recorded\\archive {m['r_only']}")
+        print(f"  joined {m['n']:,}: ts_mismatch {m['ts_mm']}, max|Δprice| {m['d_px']}, "
+              f"max|Δqty| {m['d_qty']}, side_mismatch {m['side_mm']}")
+    assert m["v_rows"] == m["v_ids"], "the archive itself must carry no duplicate aggTradeId"
+    assert m["v_max"] - m["v_min"] + 1 == m["v_rows"], "no in-day ID holes on a published day"
 
-    assert v_rows == v_ids, "the archive itself must carry no duplicate aggTradeId"
-    assert v_max - v_min + 1 == v_rows, "no in-day ID holes on a published day"
-    assert v_only == 0 and r_only == 0, "the two are the SAME set of aggTradeIds"
-    assert n == v_ids
-    assert ts_mm == 0 and side_mm == 0
-    assert d_px == 0.0 and d_qty == 0.0
+
+def test_FIDELITY_recorded_never_invents_a_print(measured):
+    """recorded \\ archive == 0. NO EXCEPTION PATH — by construction.
+
+    `reports/recorded-damage.json` is deliberately not consulted here. A print the
+    venue never published, appearing in our store, is fabricated history: the exact
+    thing DESIGN §0.7 and STRATEGY §6 refuse. There is no damage record that makes
+    that acceptable, so there is no code path that reads one.
+    """
+    assert measured["r_only"] == 0, (
+        f"{measured['r_only']} recorded id(s) do not exist in the venue's own archive — "
+        "fabricated history, and no damage record can excuse it")
+
+
+def test_FIDELITY_every_recorded_field_matches_the_venue(measured):
+    """Every field of every print we DID record. NO EXCEPTION PATH — by construction."""
+    m = measured
+    assert m["n"] == m["v_ids"] - len(m["v_only"]), "join lost rows unexpectedly"
+    assert m["ts_mm"] == 0, f"{m['ts_mm']} ts_ms mismatches against the venue"
+    assert m["side_mm"] == 0, f"{m['side_mm']} aggressor-side mismatches against the venue"
+    assert m["d_px"] == 0.0, f"max |Δprice| {m['d_px']} — recorded price disagrees with the venue"
+    assert m["d_qty"] == 0.0, f"max |Δqty| {m['d_qty']} — recorded qty disagrees with the venue"
+
+
+def test_COMPLETENESS_is_zero_or_exactly_the_documented_damage(measured):
+    """archive \\ recorded == 0, unless `reports/recorded-damage.json` names it.
+
+    Not a date-based exemption: the documented ID RANGES must equal the measured
+    missing set EXACTLY. New loss on a day that already has an entry still fails,
+    down to a single print, and the failure names the ids it did not expect.
+    """
+    m = measured
+    documented = _documented_missing(m["date"])
+    undocumented = m["v_only"] - documented
+    over_claimed = documented - m["v_only"]
+    assert not undocumented, (
+        f"{len(undocumented)} UNDOCUMENTED missing print(s) on {m['date']} "
+        f"(e.g. {sorted(undocumented)[:5]}). Either the collector lost new data, or "
+        "reports/recorded-damage.json is stale. Measure the UTC blocks and the cause, "
+        "then write an entry — do not widen an existing range to make this pass.")
+    assert not over_claimed, (
+        f"reports/recorded-damage.json claims {len(over_claimed)} missing id(s) on "
+        f"{m['date']} that are actually present (e.g. {sorted(over_claimed)[:5]}). "
+        "The record overstates the damage; narrow it to what is measured.")
+
+
+def test_damage_record_is_a_record_not_a_list_of_dates():
+    """Every entry carries every required field, non-empty. Enforced, not hoped for.
+
+    A damage list that degrades into bare dates becomes a place to dump failures.
+    The schema is the thing that stops that, so it is asserted rather than asked for.
+    """
+    required = DAMAGE["_required_fields"]
+    for i, e in enumerate(DAMAGE["entries"]):
+        for f in required:
+            assert f in e, f"entry {i} ({e.get('date', '?')}) is missing '{f}'"
+            assert e[f] not in (None, "", [], {}), (
+                f"entry {i} ({e.get('date', '?')}) has an empty '{f}' — a field that is "
+                "present but blank is the decay this test exists to prevent")
+        assert e["missing_rows"] == sum(hi - lo + 1 for lo, hi in e["id_ranges"]), (
+            f"entry {i} ({e['date']}): missing_rows disagrees with the id_ranges it lists")
+        assert len(e["utc_blocks"]) == len(e["id_ranges"]), (
+            f"entry {i} ({e['date']}): every id range must state its UTC block")
 
 
 def test_cross_day_seam_is_contiguous(ingested):

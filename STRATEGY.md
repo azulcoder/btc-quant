@@ -601,6 +601,12 @@ sequence to the calendar, not to enthusiasm.
       maximize it. Proven by `make verify-focus`, which covers the nested case
       explicitly and asserts no store count regresses across the toggle. The
       docking/pop-out/saved-layout half is still open.
+- [ ] **L7. LockBox candidate queue — NOT RUN.** First entry: the daily trend/momentum
+      candidate whose two `N_eff` estimators straddle the bar (0.938 hierarchical vs 0.965
+      spectral — `docs/EDA-microstructure-001.md` §7). Under the tie-break refusal above it is
+      NOT CLEARED and cannot be adjudicated on any slice already looked at. It is queued for a
+      **single** test on the LockBox slice (`2026-08-05` onward, untouched) — not for promotion,
+      for adjudication. One shot: looking twice destroys the slice's only property.
 - [ ] **L6. Pre-register the FIRST order-flow candidate** with a kill criterion; score it
       continuously as history accrues. Wire the gated terminal signal panel LAST — until
       `CLEARED` it shows a countdown, never a prediction.
@@ -803,6 +809,15 @@ Sequencing (revised). These items *use* the existing L1/M4 entries rather than d
 - Refuse showing any signal before `status=CLEARED` via the registry (M2). Until OOS
   `DSR>0.95` net-of-cost AND `PBO<threshold` AND history ≥ `MinBTL(N)` — show a countdown,
   not a prediction. This refusal is the product.
+- **Refuse to promote a candidate whose verdict flips with a free methodological choice.**
+  If two equally defensible settings of a parameter that is *not part of the strategy* — the
+  `N_eff` estimator, the CSCV block count, the cost model, the fold count — place a candidate on
+  opposite sides of the bar, that candidate is **NOT CLEARED**. Choosing the setting that clears
+  it is precisely the failure pre-registration exists to prevent. Choosing the one that kills it
+  is the same act aimed the other way, and is not made honest by sounding conservative — both
+  select a method with knowledge of its result. The only admissible resolutions are evidence
+  **independent of the choice**: longer history, or a LockBox slice no one has looked at.
+  Applies to every candidate, now and afterwards.
 - Refuse mixed-history backfill / book-gap smoothing / tick interpolation. Gaps stay gaps.
 - Refuse loosening the CI verbatim-assert gate for speed. That gate is what makes the moat
   mechanical rather than cosmetic.

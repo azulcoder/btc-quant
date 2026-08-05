@@ -90,6 +90,110 @@ fitted OU parameters are non-stationary in crypto, so the parametric normalizer 
 in this sample subtracts. The simple empirical z-score is the better choice; `pairs_coint` stays
 the board's pair strategy.
 
+### AMENDMENT 2026-08-05 — the verdict above no longer follows from its own numbers
+
+**The verdict as written is preserved.** This is an amendment, not a revision: what was concluded
+in 2026-07 stands as the record of what was concluded then, and is wrong now for the reasons below.
+
+**Trigger.** `docs/EDA-microstructure-001.md` §2 measured transaction cost from the recorded book
+instead of assuming it. `backtest.py:84` charges `cost_bps=10 + slippage_bps=2` = 24 bps
+round-trip; measured for BTCUSDT perp at a $1-5k clip is **10.02 bps round-trip** (fee 10.0
+published + spread 0.0157 measured + slippage 0.0079 measured). The standing assumption is
+**2.4x conservative**, so every verdict scored under it was scored against the wrong toll.
+
+**The full candidate set was re-scored, not a subset.** 16 candidates, declared before running,
+all reported including the 15 that did not move (`EDA-microstructure-001.md` §4bis-B). Running
+only the interesting ones would have been a search; the distinction is not intent, it is whether
+the failures appear.
+
+**What changed for B2:**
+
+| state | `pairs_ou` DSR | baseline DSR | delta | verdict |
+|---|---:|---:|---:|---|
+| original run-log (24 bps, 8.4 yr data) | 0.04 | 0.07 | **-0.03** | KILL |
+| re-score (24 bps, 8.6 yr data) | 0.03 | 0.00 | **+0.02** | KILL |
+| re-score (**10.02 bps**, 8.6 yr data) | 0.06 | 0.00 | **+0.05** | **SURVIVES** |
+
+**The flip is NOT attributable to the cost correction alone, and the data is the larger driver**
+[DIUKUR]. Holding cost fixed at 24 bps, extending the window from 8.4 to 8.6 years moved delta by
+**+0.05** — mostly because the baseline `pairs_coint` fell from 0.07 to 0.00. The cost correction
+then moved delta a further **+0.03**. Attributing the whole flip to the audit would overstate
+what the audit found.
+
+**Read "SURVIVES" precisely.** The B2 criterion is **relative** — does the OU normaliser beat a
+fixed z-score — and it now passes at delta = 0.05, **exactly on the threshold**. `pairs_ou` sits
+at **DSR 0.06**, which is **0.89 below the 0.95 promotion bar**. Not tradeable, not promotable,
+and not a finding about profitability. A hair either way flips it back.
+
+**Net change to the public board: still none.** `pairs_ou` is not promoted.
+
+**What the re-score establishes, and it is the more useful half:** *fifteen of sixteen verdicts
+did not move.* "We re-checked every recorded verdict under a corrected cost and one relative
+criterion shifted" is a far stronger statement about this run-log's reliability than "one
+shifted" would be alone. The two candidates an analytic bound could not close —
+`donchian_breakout` and `ma_trend + fixed_r_exit` — were resolved by the re-score at DSR 0.21 and
+0.59 and stand comfortably.
+
+---
+
+## ADDENDUM 2026-08-04 — two findings the DSR column did not carry
+
+Both measured on the same instrument that reproduces this run-log's numbers: `compare.py`'s own
+data (`BTC-USD`, coinbase, `1d`, `start=2018-01-01`, 3,138 bars) and `backtest.walk_forward`
+(5 folds, 10.02 bps round-trip). Positive control: `donchian_breakout` re-measures at OOS DSR
+**0.2108**, reproducing the **0.21** recorded above.
+
+### `donchian_breakout` is correlated with the RANDOM CONTROL, and that is the stronger verdict [DIUKUR]
+
+| pair (OOS returns, n = 2,615) | ρ |
+|---|---:|
+| **`donchian_breakout` ~ `random_entry`** | **0.5255** |
+| `donchian_breakout` ~ `buy_and_hold` | 0.0762 |
+| `ma_trend_filter` ~ `random_entry` | 0.3085 |
+| `ma_trend_filter` ~ `buy_and_hold` | 0.7257 |
+| **`buy_and_hold` ~ `random_entry`** | **−0.0460** |
+
+**The obvious confound is refuted by its own control.** "Both are long a market that rose" would
+predict a high `buy_and_hold ~ random_entry` correlation. It is **−0.05**. And `donchian` tracks
+the coin-flip control **7× more closely than it tracks buy-and-hold** (0.53 vs 0.08). Shared
+market exposure does not explain this; `ma_trend_filter` is the strategy that *is* mostly long
+BTC (ρ 0.73 with buy-and-hold), and it is a different animal.
+
+**Not a seed artefact.** Over 15 seeds of `random_entry`, ρ with `donchian` has median **0.5255**
+(range 0.2895–0.6824), while ρ of the same 15 controls with `buy_and_hold` has median **−0.1137**
+(range −0.2102–0.3048). The separation holds across every seed.
+
+**Why this is stronger than the DSR.** DSR 0.21 says *not distinguishable from luck*. The
+correlation says something sharper and harder to argue with: **not distinguishable from the
+random control itself.** Whatever the 55/20 channel logic contributes, it is mostly the act of
+trading sporadically in both directions — which is precisely what `random_entry` does by
+construction. A KILL on DSR can be re-litigated by finding a better cost model or a longer
+sample. This cannot: the candidate would first have to stop resembling a coin flip.
+
+### `pairs_coint` falling 0.07 → 0.00 is BREADTH, not regime and not a bug [DIUKUR]
+
+`pairs_coint` holds a position on **58 of 2,615 OOS bars — 2.2 %**. Per calendar year the active
+bar count is 7 / 3 / 4 / 7 / 9 / 10 / 3 / 15 (2019→2026). Yearly Sharpe on 3–15 active bars is
+not an estimate of anything.
+
+- **Not a bug.** `pairs_coint(entry=2.0, exit=0.5, stop=4.0, window=60, max_half_life=60)`
+  (`strategies.py:525-532`) enters only at `|z| > 2` on a 60-day rolling window, then gates
+  again on a cointegration half-life guard. Under normality `|z| > 2` is ~4.6 % of bars; ~2.2 %
+  after the guard is what the design asks for.
+- **Not regime.** The per-year sign alternates (−0.70, −1.56, −1.13, +0.43, −0.68, +1.20, −1.09,
+  −1.00) with no trend. Nothing decayed; there was never a stable level to decay from.
+- **Sample, specifically near-zero breadth.** Grinold–Kahn: `IR ≈ IC·√breadth`. At 58 bets over
+  8.6 years the breadth term is so small that the whole-period Sharpe (−0.40) is a handful of
+  trades. **A move of 0.07 → 0.00 is inside this series' own noise**, and extending the window by
+  0.2 years is more than enough to produce it.
+
+**Consequence, recorded but NOT adjudicated.** The B2 verdict compares `pairs_ou` against
+`pairs_coint` **as the baseline**, and lands on Δ = 0.05 exactly at the threshold. That baseline
+is flat 97.8 % of the time — closer to cash than to a strategy. This does not change the B2
+verdict, which stands as recorded; it records that the verdict's denominator is thinner than the
+comparison implies. Any future re-reading of B2 must start here.
+
+
 ---
 
 ## B3 — carry as a validated entry
@@ -137,6 +241,7 @@ promoted, which is the intended result.
 |---|---|---|---|---|
 | B1 tsmom_voltarget | 0.89 | 0.89 (board tsmom) | **KILL** | corr 1.00 — literal duplicate |
 | B2 pairs_ou | 0.04 | 0.07 (fixed-z) | **KILL** | Δ −0.03 — model, not edge |
+| B2 pairs_ou *(amended 2026-08-05)* | 0.06 | 0.00 (fixed-z) | **SURVIVES** its relative criterion | delta +0.05, exactly at threshold — but DSR 0.06 is 0.89 below the promotion bar; **not promoted**. Driven more by the extended data window than by the cost correction. See the B2 amendment. |
 | B3 carry | — | — | **descriptive** | ~0.18 yr ≪ MinBTL |
 
 **Net change to the public board: none.** The pass succeeded by correctly rejecting all three. The

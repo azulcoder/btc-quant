@@ -1,0 +1,61 @@
+{
+  "_what_this_is": [
+    "A DAMAGE RECORD, not an exception list. Each entry states a known, measured,",
+    "permanent hole in the RECORDED store, with enough detail that anyone can",
+    "re-derive it from the public archive without trusting this file.",
+    "",
+    "It is consulted by exactly one assertion: COMPLETENESS (archive \\ recorded).",
+    "It is NEVER consulted for FIDELITY. If the collector invents a print, or",
+    "disagrees with the venue on any field of any print it did record, the gate",
+    "goes red and this file offers no way out. Completeness may carry a labelled",
+    "exception; fidelity may not, ever.",
+    "",
+    "The completeness assertion matches the EXACT SET of missing ids against the",
+    "id_ranges below. A single print of new loss fails the gate. This file cannot",
+    "be used to wave through damage it does not already name to the print.",
+    "",
+    "Every field in _required_fields is enforced by test_damage_record_is_a_record",
+    "so this cannot decay into a bare list of dates."
+  ],
+  "_required_fields": [
+    "date",
+    "venue",
+    "symbol",
+    "missing_rows",
+    "id_ranges",
+    "utc_blocks",
+    "cause",
+    "introduced_by",
+    "condition",
+    "measured_on",
+    "measured_how"
+  ],
+  "entries": [
+    {
+      "date": "2026-08-03",
+      "venue": "binancef",
+      "symbol": "BTCUSDT",
+      "missing_rows": 28428,
+      "id_ranges": [
+        [3400365711, 3400377172],
+        [3400395947, 3400402841],
+        [3400507843, 3400513008],
+        [3400514462, 3400519366]
+      ],
+      "utc_blocks": [
+        "00:39:13-01:03:33Z  11,462 prints  24.3 min",
+        "01:31:26-01:51:43Z   6,895 prints  20.3 min",
+        "05:38:04-05:50:52Z   5,166 prints  12.8 min",
+        "05:55:02-06:08:15Z   4,905 prints  13.2 min"
+      ],
+      "utc_hour_profile": "100% in UTC 00-07 (off hours). 0% in UTC 16-22 (NY session, the best-coverage window). 70.6 min of tape = 4.91% of the day.",
+      "cause": "aggTrades cursor reset on leg restart. _aggtrades_loop initialised `cursor: Optional[int] = None` per call (collector.py:2744 @ 57ad311), so a leg restart inside a live process resumed at the LIVE EDGE and silently dropped the backlog accumulated during the outage. The `cursor is not None` guard at :2754 suppressed the id-gap alarm that would have announced it. Attribution rests on the shape: all four holes are perfectly CONTIGUOUS id blocks, which is what jump-to-live-edge produces and what packet loss or a venue outage does not.",
+      "introduced_by": "57ad311 (binancef: the aggressive layer, over REST because the WS topic is filtered)",
+      "condition": "Four leg restarts on 2026-08-03 while the collector process itself stayed up (PID 14595, running since Mon 03:00). Host Maintenance Sleep is the leading candidate for the restarts themselves (reports/incident-2026-08-04-sleep/baseline.md), but that experiment was deferred and the link is NOT established.",
+      "fixed_by": "UNCOMMITTED as of 2026-08-04 — module-scope _AGGTRADES_CURSOR survives leg restarts, _AGGTRADES_SEEK_BACK_MAX = 50000 bounds the catch-up with a LOGGED skip count, and the id-gap alarm now fires where the guard suppressed it. The largest hole here is 11,462 prints = 22.9% of that ceiling, so the fix would have recovered ALL FOUR blocks with no loss. Not yet active: the collector has not been restarted.",
+      "recoverable_from": "data/vision/binancef/BTCUSDT/aggTrades/date=2026-08-03/ — the prints exist in the archive under their own source label. They are NOT backfilled into `trades`. Gaps stay gaps (scripts/check_ticks.py:12-16); a second labelled source is not a repair.",
+      "measured_on": "2026-08-04",
+      "measured_how": "tests/test_vision_overlap.py against a fresh ingest of the published archive day, set difference in both directions. Fidelity on the 999,497 rows the collector DID record: ts_ms mismatch 0, max|dprice| 0.0, max|dqty| 0.0, side mismatch 0. UTC hour attribution computed with explicit floor division in Python after two SQL attempts silently disagreed (DuckDB rendered strftime in the session zone Asia/Jakarta, then CAST(x AS BIGINT) rounded instead of truncating); the three methods were compared and only the floor-division result is recorded here."
+    }
+  ]
+}
