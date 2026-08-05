@@ -820,6 +820,30 @@ prevention, because a class without a countermeasure is just a nicer-sounding li
 | **F. Instrument reports numbers with no control** | 1, 9 | a classifier returning 38/17/21 with no error bars and recall 0 | **the first number out of a new instrument is a CONTROL, not a result** — see the rail below |
 | **G. Claim with no checker** | 8, 11, 12, 13 | prose asserting observed behaviour that nothing re-runs | cite the query; place the conclusion beside the number; and in files under active edit cite a **grep-able string, never a line number** — see the rails below |
 | **H. Silent default** | 5 | `get_ohlcv` returning 300 bars; DuckDB rendering in the session zone and rounding on CAST | any library call feeding a published number must have its defaults inspected, or the result re-derived by an independent route |
+| **I. The verifier cries wolf** | 13-check, 14 | a checker that fails toward ALARM rather than toward silence | **test the verifier on cases known to PASS, not only on cases known to fail** — a verifier tested only against failures has measured recall and never precision, and bad precision in a verifier destroys correct work rather than merely adding noise |
+
+**Why I is its own class, and not a variant of F.** F is *no control at all*; I is *a control
+that only measures one direction*. The distinction is not pedantic, because the two fail with
+opposite cost functions:
+
+| failure direction | consequence |
+|---|---|
+| fails toward **silence** | damage is **missed** — an omission |
+| fails toward **alarm** | correct work is **destroyed** — an active harm, disguised as diligence |
+
+The second is worse and harder to see, because a noisy verifier looks like rigour. Instance 13's
+checker reported 3 failures out of 4 and **2 were its own grep patterns**; acting on it would have
+sent two correct citations to be rewritten. F's prevention ("reproduce a known value") does not
+close this on its own: for a *verifier*, "a known value" must include a known **PASS**, and a
+control built only from known failures satisfies F while leaving precision untested.
+
+**This class is live in this repo right now**, which is why it is worth naming. `make gate` and
+`tests/test_vision_overlap.py` are verifiers; a false alarm there would send someone to "fix"
+correct data — the exact thing §0.7 forbids. The completeness gate is written against this on
+purpose: its failure message names **both** possibilities ("either the collector lost new data, or
+`recorded-damage.json` is stale") rather than accusing the data, and it matches an exact id set so
+it cannot fire on drift alone. That is the pattern to copy.
+
 
 *Instance 1's exact mechanism predates this session and was reconstructed, not measured; its
 placement in class F is [DISIMPULKAN] and may be wrong.*
@@ -867,6 +891,7 @@ of unrelated bugs.
 | 11 | **azul** — "starting to be hard to call coincidence" | an empirical claim with no checker: the exact class instance 8 rails against, asserted while that rail was being written | §14 |
 | 12 | **Claude** — hard-coded conclusion contradicted by its own script | a script printed "never happened in 89 hours of history" three lines below its own output showing 29.7 %. Recorded as EVIDENCE THE RAIL TOUCHES SOMETHING REAL: it was caught only because the number was printed beside the claim | §14a |
 | 13 | **Claude** — `file:line` citation into a file I was editing | `CLAUDE.md` cited `STRATEGY.md:804` for the promotion bar; ~77 lines added to that file the same session moved it to :881. Written into the very file that rails against class G, and caught by spot-checking every citation immediately after writing them | §17 |
+| 14 | **Claude** — the no-AI-attribution check fired on a FILENAME | the post-commit guard grepped the commit body for `claude`, and matched the two mentions of the file `CLAUDE.md`. The commit was clean; the checker was not. **Class I, on the checker enforcing the rule, in the same turn class I was being written** | §18 |
 
 **Instance 5 replaces a withdrawn candidate.** The Binance `forceOrder` throttle was proposed as
 instance 5 before it was checked; the collector already sources liquidations from Bybit

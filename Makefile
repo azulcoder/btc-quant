@@ -15,7 +15,7 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare dsr-ab scan test fetch dash local collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
+.PHONY: help install backtest compare dsr-ab scan test fetch dash local collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision churn-threshold coverage-census orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
@@ -164,6 +164,15 @@ bench-render:
 #     reported, never filled). Run while the collector is stopped, or on a copy.
 check-ticks:
 	python3 scripts/check_ticks.py --db data/ticks
+
+# Where are we against the §14b churn pre-registration? Idempotent, read-only, and
+# it refuses to report if its own control fails. Exit 2 = the instrument is wrong.
+churn-threshold:
+	python3 scripts/churn_threshold.py
+
+# Coverage cells normalised by TIME covered, not sample count (EDA §11-N).
+coverage-census:
+	python3 scripts/coverage_census.py
 
 # M7 public-archive ingest (DESIGN-orderflow-terminal.md §3d, STRATEGY.md M7).
 # Binance's own published aggTrades archive -> data/vision/ ZSTD parquet, seven

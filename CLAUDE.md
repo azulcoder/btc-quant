@@ -20,10 +20,9 @@ Research only. No orders, no API keys, no authenticated endpoints.
   `PBO < threshold` AND history ≥ `MinBTL(N)`. The PBO clause is currently **unmeasurable** —
   `docs/PREREG-pbo-null-001.md`, undecided.
 
-## Instrument blindness — the eight classes
+## Instrument blindness — the nine classes
 
-Twelve recorded instances, and **8 of 12 were wrong the day they were written**, not rotted.
-Read the classes; the incidents are in `STRATEGY.md` (ledger + taxonomy).
+Fourteen instances, **8 of the first 13 wrong the day they were written**. Read the classes — the incidents are in `STRATEGY.md`.
 
 | class | prevention |
 |---|---|
@@ -35,6 +34,7 @@ Read the classes; the incidents are in `STRATEGY.md` (ledger + taxonomy).
 | **F** instrument reports numbers with no control | **the first number out of a new instrument is a CONTROL, not a result** |
 | **G** claim with no checker | cite the query, or mark [UNVERIFIED]; print conclusions BESIDE their numbers; cite a **grep-able string**, not a line number, in files under active edit |
 | **H** silent default | inspect the defaults of any library call feeding a published number, or re-derive by an independent route |
+| **I** the verifier cries wolf | **test a verifier on cases known to PASS, not only on cases known to fail** — bad precision in a checker destroys correct work, it does not merely add noise |
 
 ## Labels, everywhere
 

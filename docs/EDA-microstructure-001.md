@@ -2100,6 +2100,112 @@ twice in one turn is not a pointer that needs better maintenance; it is the wron
 - **Whether the three "correct" citations are semantically right**, not merely pointing at
   existing lines. Each was read, but by me, and by the same person who wrote them.
 
+---
+
+# §18 — instance 14: the no-AI-attribution check fired on a FILENAME [DIUKUR]
+
+The post-commit guard greps the commit body for `co-authored-by|claude|anthropic`. On commit
+`988610d` it reported **2 matches**. Both were the filename **`CLAUDE.md`**, mentioned twice in a
+message describing the file being added. **The commit was clean** — no trailer, no "Generated
+with", no attribution. **The checker was not.**
+
+This is **class I on the checker that enforces the rule**, in the same turn class I was being
+written. The fix is precision: match the trailer form (`^Co-Authored-By:`) and attribution
+phrases, never the bare product name, which legitimately appears as a path.
+
+**Why it is worth a ledger row rather than a shrug:** acting on it would have meant editing a
+correct commit message to satisfy a broken check — the class-I signature exactly, *active damage
+disguised as diligence*.
+
+---
+
+# §19 — options orthogonality: the test CANNOT DECIDE, and the reason is structural [DIUKUR]
+
+## The gap-mask control (6-0a) turns out to be MOOT, which is itself the finding
+
+The concern was that holes manufacture pseudo-orthogonality. Measured at the resolution the test
+would actually run at:
+
+| | |
+|---|---:|
+| days in the exploration window with ≥ 1 options snapshot | **30 / 30** |
+| hourly snapshots present | 434 / 720 = **60.3 %** |
+| median snapshots per day | 14 (intended 24) |
+| median distinct strikes per day | 93 |
+
+**At DAILY resolution the mask is complete.** The 14 OOS series are daily, so any options-derived
+signal compared against them is daily, and every one of the 30 days has data. The hole-mask
+control therefore has nothing to bite on: a series holed by this mask and correlated against its
+intact self returns 1.000 by identity. **Holes are not the problem here.**
+
+### Reconciling 60.3 % against §11-N's 7.1 % — both are right
+
+They measure different things and the difference is the coverage kernel, not an error:
+
+- **60.3 %** = hours containing at least one snapshot.
+- **7.1 %** = hours whose *time* is ≥ 90 % covered under §11-N's forward kernel `[t, t+3600s)`.
+  A snapshot at minute 45 covers 15 minutes of its own hour, so the cell scores PARTIAL.
+
+§11-N's own "what I could not measure" flagged the forward kernel as the choice that bites
+hardest at the coarsest cadence. This is that consequence arriving, not a contradiction. **For
+options research the relevant figure is 30/30 days and 434 hourly snapshots**, not 7.1 %.
+
+## 6-0b — the binding constraint is N, and the CI settles it
+
+`options_chain` exists for **30 days**. The 14 OOS series run 2,615 daily bars. The intersection
+is **30 daily observations**, full stop.
+
+| target CI half-width on ρ | days required |
+|---:|---:|
+| ±0.36 | **30 — what we have** |
+| ±0.30 | 43 |
+| ±0.20 | 96 |
+| ±0.15 | 171 |
+
+**At N = 30 the 95 % interval for ρ = 0 is [−0.360, +0.360].** The pre-declared abort threshold
+was ±0.30. **The orthogonality test cannot decide, and no look is spent on 6c.**
+
+## The distinction that decides whether this path closes or waits
+
+**"Options cannot be TESTED with 30 days of data" — NOT "options are useless."** The first is a
+statement about the sample; the second about the signal. Nothing measured here says anything
+about whether options information is orthogonal. The mechanism argument stands untouched:
+everything else in the store is realised flow, and options are forward expectations.
+
+## But the sample is FROZEN, not merely small [DIUKUR]
+
+**This is the part that changes the decision.** Exploration is `2026-07-05 … 08-03`; the LockBox
+begins `2026-08-05 01:00 UTC`. **Every new day recorded goes into the LockBox, not into
+exploration.** So N = 30 is not "wait and it grows" — it is structurally fixed. Waiting 13 more
+days does not reach N = 43.
+
+Four ways out, three with a cost that is not mine to decide:
+
+| # | route | cost |
+|---|---|---|
+| 1 | wait for more exploration data | **impossible** — the set is frozen by construction |
+| 2 | move the LockBox boundary forward again | destroys the slice's only property; already moved once, for a data defect |
+| 3 | spend the LockBox once on this | it is the single shot, spent on a **descriptive** question rather than a hypothesis |
+| 4 | backfill options history from an archive | needs a keyless historical source; **existence not checked** |
+
+**Recommendation: route 4 first, because it is the only one with no cost to pay before knowing
+whether it works.** If Deribit or another venue publishes a keyless historical chain, N grows
+without touching the LockBox and without spending the shot. If it does not, the honest position
+is that this path is **DEFERRED with no date**, not closed — and "no date" is the accurate
+answer, because the date depends on a decision rather than on the calendar.
+
+## What I could not measure in §19
+
+- **Whether a keyless historical options source exists.** Not checked; that is route 4's first
+  step and it was not taken.
+- **Anything about ρ itself.** No correlation was computed, deliberately — computing an
+  uninterpretable number and reporting it with a caveat is how uninterpretable numbers become
+  cited.
+- **Whether an hourly formulation would help.** The 14 series are daily strategies; an hourly
+  counterpart is a different strategy, not a re-sampling, so this was not pursued.
+- **Whether 30 daily observations are even iid.** The CI assumes they are; daily crypto returns
+  are close but not exactly, so ±0.360 is if anything optimistic.
+
 ## Look counter
 
 Per the standing rule, every look is counted and cannot be reduced later.
@@ -2132,7 +2238,9 @@ Per the standing rule, every look is counted and cannot be reduced later.
 | §15 prose-claim surface (AST scan + 2-way classification of collector.py) | 2 | 0 |
 | §16 tombstone (1 commit-order verification for the born-wrong count) | 1 | 0 |
 | §17 citation audit (4 citations verified against source) | 4 | 0 |
-| **running total** | **466** | **81** |
+| §18 (1 commit-message check) | 1 | 0 |
+| §19 options power test (coverage census, daily-mask control, CI curve) — **no ρ computed** | 4 | 0 |
+| **running total** | **471** | **81** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 
