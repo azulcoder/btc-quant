@@ -1,0 +1,56 @@
+{
+  "_what_this_is": [
+    "The LockBox integrity manifest. The LockBox slice (2026-08-05 01:00:00Z onward)",
+    "can be LOOKED AT ONCE. So a defect inside it that is not labelled before the look",
+    "cannot be re-examined without burning the slice — which is what makes an unrecorded",
+    "drop categorically worse here than anywhere else in the store.",
+    "",
+    "This file records DEFECTS, not data. Nothing here reveals any market observation:",
+    "it says a row was lost, when, from which table, and why. Reading the collector's own",
+    "log for integrity events is NOT reading the slice — and if it were forbidden, the",
+    "slice's integrity could never be known at all, which would be worse.",
+    "",
+    "It exists because /health's rows_dropped_error is a PROCESS counter: it resets to 0",
+    "on the next restart (collector.py:1233, :1734). A defect recorded only there is",
+    "erased by the next routine restart. This file survives.",
+    "",
+    "Enforced by tests/test_lockbox_integrity.py: every entry carries every field in",
+    "_required_fields, and scripts/lockbox_integrity.py cross-checks the stamped log so",
+    "an UNRECORDED drop inside the LockBox window fails loudly."
+  ],
+  "lockbox_start_utc": "2026-08-05T01:00:00Z",
+  "lockbox_start_note": [
+    "Moved forward once, from 2026-08-05T00:00:00Z, for a documented data-quality defect",
+    "(the cursor=None tape loss) and BEFORE any byte of the slice was read.",
+    "See docs/EDA-microstructure-001.md, LockBox amendment."
+  ],
+  "_required_fields": [
+    "ts_utc",
+    "table",
+    "rows_lost",
+    "cause",
+    "log_line",
+    "detected_by",
+    "recoverable",
+    "consequence"
+  ],
+  "defects": [
+    {
+      "ts_utc": "2026-08-05T17:26:26.870Z",
+      "table": "depth_snapshots",
+      "rows_lost": 1,
+      "cause": "ENOSPC. The DuckDB WAL write failed — 'Could not write file \"data/ticks/2026-08-05.duckdb.wal\": No space left on device' — and the connection was evicted. Root cause is the 12 GB local Vision archive filling the volume to 100 % (593 MiB free at detection), which is itself the residue of the monthly-granularity ingest that also caused the 295-day archive hole.",
+      "log_line": "2026-08-05T17:26:26.870Z [collector] DROPPED 1 depth_snapshots row(s) for 2026-08-05: TransactionException('TransactionContext Error: Failed to commit: Could not write file \"/Users/azul/Code/btc-quant/data/ticks/2026-08-05.duckdb.wal\": No space left on device') — connection evicted; the gap stays a gap",
+      "detected_by": "The _stamped log fix (commit dc9857b). Before it, 0 of 2,123 log lines carried a timestamp, so this drop would have been known to exist from a /health counter and NOT locatable in time, table, or cause. This is the first production payoff of that fix.",
+      "recoverable": "NO. depth_snapshots has no historical endpoint at any venue — the book at that second exists nowhere. Unlike the aggTrades loss of 2026-08-03, which the public archive could still witness, this row is simply gone. Gaps stay gaps: no backfill, no interpolation.",
+      "consequence": "One second of one venue's book is missing from the LockBox. Material impact on any future evaluate-once scoring is [DIASUMSIKAN] negligible — one row against a 1/s cadence — but it is recorded rather than judged, because the slice cannot be re-examined to check."
+    }
+  ],
+  "benign_drops_not_counted_here": [
+    "Two other DROPPED lines exist in the log and are a DIFFERENT, by-design class:",
+    "crowding rows arriving after the 5-minute grace window for an already-closed day",
+    "(2026-08-02 and 2026-08-04). Those are the rotation policy working, not a defect,",
+    "and neither falls inside the LockBox window. Listed so their absence here is",
+    "deliberate rather than an oversight."
+  ]
+}

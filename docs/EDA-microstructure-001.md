@@ -2244,7 +2244,9 @@ Per the standing rule, every look is counted and cannot be reduced later.
 | §15 cost-drag gate (14 position series, turnover + binary/continuous classification, 1 positive control) | 15 | 0 |
 | §19-cal threshold calibration (12 DSR×drag pairs, 2 correlation tests, 1 subgroup control) — FAILED | 5 | 0 |
 | §20 vision remote-first design (2,085 manifest size reads, granularity split, 3 HF existence probes, disk census) | 6 | 0 |
-| **running total** | **508** | **81** |
+| §20 disk survey (volume census, 2-level breakdown, tick-store retention verification) | 6 | 0 |
+| §21 LockBox defect (stamped-log scan, 3 negative controls on the new gate) | 4 | 0 |
+| **running total** | **518** | **81** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 

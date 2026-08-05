@@ -125,5 +125,93 @@ interruption, including another ENOSPC.
 - **Whether the HF dataset has a size or file-count limit** that 2,086 partitions would hit.
 - **Whether the two known ZSTD failures are corruption at rest or a transient read error.** Never
   re-tested since they were first seen.
-- **Whether `rows_dropped_error: 1` cost a real row or a retry-covered one.** The counter says one
-  drop; which row, and whether it was recovered, is not recorded.
+- ~~**Whether `rows_dropped_error: 1` cost a real row.**~~ **ANSWERED in §21** — the stamped log
+  locates it exactly: 1 `depth_snapshots` row at `2026-08-05T17:26:26.870Z`, ENOSPC on the WAL,
+  inside the LockBox, unrecoverable. Recorded in `reports/lockbox-manifest.json`.
+
+---
+
+# §20 — disk margin BEFORE migration, and a correction to my own runway claim
+
+## The claim that was wrong [DIUKUR]
+
+I reported **"runway ~9 days"** on the basis that the collector writes ~268 MB/day. **That was
+wrong, and the repo already contained the evidence.** `scripts/upload_hf.py` states its own rule:
+
+> *"No offsite verification, no local delete."* … *"Today and yesterday are never deleted (§3c):
+> they stay local … until it ages out of the keep-local window."*
+
+**The tick store is bounded at two day-files.** Measured now: `2026-08-04.duckdb` 250 MB (closed)
++ `2026-08-05.duckdb` 263 MB (open) = **490 MB, steady state**. `2026-08-03` is already gone,
+verified on HF. **The collector consumes ~0 GB/day cumulatively**; it oscillates within ~520 MB.
+
+**So free space is STABLE at 2.4 GB, not draining.** The question is not "how many days until
+full" but "how much headroom against a single transient".
+
+**And the correction cuts the other way too:** the remote-first pipeline I designed in §17a is
+not a new idea — `upload_hf.py` already implements exactly that discipline for the tick store
+(verify offsite, then delete local). The Vision design should **reuse that proven path**, not
+reinvent it. I designed something this repo already had.
+
+## 20a — what occupies the volume [DIUKUR, listed only, nothing touched]
+
+195 GB used of 228 GB. `~/Code/btc-quant` is 12 GB of it.
+
+| # | path | size |
+|---:|---|---:|
+| 1 | **`~/Parallels/Windows 11.pvm`** | **55 GB** |
+| 2 | `~/Library/Application Support` | 18 GB |
+| 3 | `~/Library/Group Containers` | 17 GB |
+| 4 | **`~/Code`** (this repo is 12 GB of it) | 12 GB |
+| 5 | `/Library` | 7.3 GB |
+| 6 | `~/projects` | 6.7 GB |
+| 7 | `~/Library/Parallels` | 4.9 GB |
+| 8 | `/Applications` | 4.3 GB |
+| 9 | `~/Library/Caches` (total) | 3.6 GB |
+| 10 | `~/Library/Containers` | 2.1 GB |
+| 11 | `~/.vscode` | 1.7 GB |
+| 12 | ↳ `~/Library/Caches/com.microsoft.VSCode.ShipIt` | 1.5 GB |
+| 13 | `~/.local` | 1.1 GB |
+| 14 | ↳ `~/Library/Caches/ms-playwright` | 1.0 GB |
+| 15 | `~/Downloads` | 943 MB |
+
+Also: `~/.gemini` 932 MB · `~/google-cloud-sdk` 661 MB · `~/.cargo` + `~/.rustup` 1.1 GB ·
+`~/private/var/folders` 601 MB · `~/.codex` 477 MB · `~/fordiscord-archive` 448 MB.
+
+Rows 12 and 14 are **inside** row 9, not additional. **Nothing was deleted and nothing outside
+the repo was touched.** `~/Parallels/Windows 11.pvm` at 55 GB is 4.5× everything else on this
+list combined that is plausibly reclaimable, and it is a single file — but whether that VM is
+needed is not mine to judge.
+
+## 20b — what freeing space actually buys
+
+Because nothing grows cumulatively, the table is not "days until full" but "what fits":
+
+| free space | covers a full day of tick growth (270 MB) | covers the daily Vision pipeline (~107 MB peak) | covers a MONTHLY fetch (3.1 GB) |
+|---:|:--|:--|:--|
+| **2.4 GB (now)** | yes, 9× | yes, 22× | **NO** |
+| 10 GB | yes, 37× | yes, 93× | yes, 3× |
+| 30 GB | yes | yes | yes, 10× |
+| 50 GB | yes | yes | yes, 16× |
+
+**14.4 GB arrives for free once Vision migrates to HF** — the 12 GB local copy becomes
+deletable, and that is the migration's real payoff. So the answer to *"how much must I free to
+stop worrying"* is: **nothing on a schedule.** What is needed is enough headroom that one
+transient cannot reach zero, and the migration itself supplies 12 GB of it.
+
+**The single live risk at 2.4 GB is a monthly-granularity fetch (3.1 GB), which is precisely what
+caused the original ENOSPC.** The daily-granularity design removes that risk by construction, so
+the margin question and the design question have the same answer.
+
+## 20c — why margin comes before migration
+
+**A decision taken under time pressure is a bad decision, and the proof is already in this
+repo.** The 12 GB Vision ingest was launched in the background without first checking free space.
+It filled the volume, killed itself at `2025-10-01` with ENOSPC, left a **295-day hole in the
+archive**, and — nine days later — dropped a row from the **LockBox**, the one slice that can be
+looked at only once.
+
+Every one of those consequences came from not measuring 30 seconds of disk state before starting
+a multi-hour job. Migrating 295 partitions while the volume sits at 2.4 GB would repeat the
+pattern with better intentions. **Margin first, then migrate without a clock running.**
+

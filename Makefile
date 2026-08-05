@@ -15,7 +15,7 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare dsr-ab scan test fetch dash local collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision churn-threshold coverage-census orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
+.PHONY: help install backtest compare dsr-ab scan test fetch dash local collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision churn-threshold coverage-census lockbox-integrity orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
@@ -169,6 +169,11 @@ check-ticks:
 # it refuses to report if its own control fails. Exit 2 = the instrument is wrong.
 churn-threshold:
 	python3 scripts/churn_threshold.py
+
+# Is every LockBox defect recorded where it survives a restart? /health resets; this
+# reads the append-only stamped log. Exit 1 = a drop is unrecorded, or overstated.
+lockbox-integrity:
+	python3 scripts/lockbox_integrity.py
 
 # Coverage cells normalised by TIME covered, not sample count (EDA §11-N).
 coverage-census:
