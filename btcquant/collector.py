@@ -342,10 +342,20 @@ _STREAM_BUDGET_S = 120.0
 #
 # NEVER CRY WOLF (the N5 lesson). The budget attaches to the LEG (one task), not
 # to a TABLE — a sparse stream cannot witness its own liveness. Liquidations are
-# the proof: bybit prints 3-2000/day and 2026-07-25 had ZERO all day, honestly.
+# the proof: over 2026-07-05..08-03 the median day carries 309 rows and 58.2 % of
+# all (day, hour) cells are ZERO, with the daily count spanning 3 to 1,219.
+# Query: docs/EDA-microstructure-001.md §12 (HF mirror, hive-partitioned scan).
 # `liquidations` therefore has no budget of its own; it rides bybit-ws, whose
 # publicTrade flow is the witness. Same for bybit funding_mark/open_interest
 # (sub-topics of bybit-ws) and okx books (sub-topic of okx-ws).
+#
+# THIS COMMENT USED TO CITE 2026-07-25 AS AN HONEST ZERO. IT WAS NOT. On that day
+# the bybit carrier wrote 0 rows in 0 of 24 hours — the leg was dark all day, so
+# the store's zero was the collector's absence, not the market's silence (§12).
+# The example offered as PROOF that sparsity is reported honestly was itself an
+# instance of the blindness this comment describes. Kept as the correction rather
+# than quietly swapped, because the failure mode is the lesson: prose claims have
+# no tests, so they rot while looking authoritative.
 LEG_BUDGET_S: dict[str, Optional[float]] = {
     # --- continuous WS streams: see _STREAM_BUDGET_S above ---
     "bybit-ws": _STREAM_BUDGET_S,

@@ -1427,6 +1427,10 @@ against the intended cadence: **ON ≥ 90 %**, **OFF < 10 %**, else PARTIAL. Bui
 | `options_chain` | deribit | 425 | 0 | 295 | 59.0 % | 33 / 53 / 73 / **83** / 83 |
 | *`depth_snapshots` (§0a reference)* | *3 venues* | *752* | *445* | *963* | *34.8 %* | *10-21 / 19-38 / 40-47 / 56-61 / 49* |
 
+**[SUPERSEDED for the `%ON` column — see §11-N.]** The UTC-block profile above stands;
+the `%ON` figures are not comparable across tables and are re-measured time-normalised in §11-N.
+`options_chain` in particular falls from 59.0 % to 7.1 %.
+
 ## Does host sleep hit these the same way? YES on coverage, NO on damage [DIUKUR]
 
 **The answer splits into two claims that must not be merged.**
@@ -1492,6 +1496,610 @@ because there is no cursor. What makes them survivable is Claim 2, not recoverab
   in 30 days is 0.38/s, so the 1.0 s median coexists with long silences — the low %ON (12.4 %)
   says the silences dominate, but their cause is not established.
 
+---
+
+# §12 — LIVENESS WITNESS for sparse streams (instance six)
+
+`collector.py:344-347` already states the principle — *"a sparse stream cannot witness its own
+liveness"* — but the research consequence was never drawn: **every zero in the liquidation series
+is [UNVERIFIED]**. Zero liquidations and a dead leg are byte-identical in the store, and for
+cascade research that is fatal, because the zero days are exactly the ones a baseline most needs
+to trust.
+
+## How bad it is, measured [DIUKUR]
+
+30 days (`2026-07-05 … 08-03`), HF mirror, 720 `(date, hour)` cells. 11,294 liquidation rows
+total, median 309/day. **3 days have no `liquidations` partition at all** (2026-07-24, 07-25,
+08-01).
+
+| | cells | share | interpretation |
+|---|---:|---:|---|
+| ≥ 1 liquidation | 301 | 41.8 % | value is unambiguous |
+| **zero, but the CARRIER leg was alive** | **179** | **24.9 %** | **zero CONDITIONAL on subscription health — see §12d** |
+| **zero, and the carrier was dark too** | **240** | **33.3 %** | **truly ambiguous** |
+
+**A partial witness already exists in the data** [DIUKUR + DIASUMSIKAN]. The `liquidations` leg
+rides `bybit-ws`, which also writes `funding_mark` and `open_interest`. So bybit `funding_mark`
+rows in an hour prove the **carrier socket was connected** in that hour.
+
+**But connection is not subscription.** A zero under a live carrier is a real zero **only if the
+`allLiquidation` subscription was itself healthy** — and nothing in the recorded data proves that.
+A subscription that silently failed while `publicTrade` and `tickers` kept flowing would look
+exactly like a quiet market. The `subscribed` field in the 12a design exists precisely for this
+and **cannot be recovered retroactively**. So these 179 cells are **[DISIMPULKAN], one confidence
+level below [DIUKUR]**, and must not be cited as measured zeros. Median carrier volume in a live hour is 2,812 rows, so
+the connection evidence itself is not marginal. **The remaining 57.3 % of zero hours stay
+[UNVERIFIED] permanently**; no retroactive method can reach them.
+
+## 12d — the subscription assumption, BOUNDED rather than accepted [DIUKUR]
+
+The assumption is not fully testable, but it is not untestable either. A silently dead
+subscription would leave a **long run** of carrier-alive-but-zero hours; a quiet market would
+scatter them.
+
+| | |
+|---|---:|
+| hours with carrier alive | 480 |
+| of those, zero liquidations | 179 |
+| `p(zero \| carrier alive)` | 0.373 |
+| **longest run of carrier-alive-and-zero** | **10 consecutive hours**, from **2026-07-17 01Z** |
+| expected longest run over 480 Bernoulli(0.373) trials | ~5.8 hours |
+
+**One window is worth suspicion: 2026-07-17 01Z–11Z.** Observed 10 against an expected maximum of
+5.8 is roughly 2 standard deviations on the longest-run distribution — elevated, not decisive.
+
+**And the baseline is known to be wrong in the same way §14's was.** Liquidations cluster with
+volatility, so hours are **not** independent, and a genuinely quiet 10-hour market produces this
+run with no subscription failure at all. Having just rejected a Poisson model for exactly this
+reason, asserting the independence result here would repeat the error. **The honest reading: one
+flagged window, no verdict**, and the flag is recorded so a future cascade study excludes it or
+justifies keeping it.
+
+**What this changes downstream:** every derived series inherits `[DISIMPULKAN]` for the 179
+cells, not `[DIUKUR]`. A cascade baseline built on them must state the assumption in its own
+text — *"zero, assuming the allLiquidation subscription was healthy, which is unproven for all
+recorded history"* — or it is overstating what the store knows.
+
+### The codebase's own example is wrong, and that is the point [DIUKUR]
+
+`collector.py:344-347` cites *"2026-07-25 had ZERO all day, honestly"* as evidence the collector
+reports sparsity truthfully. **It was not an honest zero.** On 2026-07-25 the bybit carrier wrote
+**0 rows in 0 of 24 hours** — the leg was dark the entire day. The same holds for 2026-07-24.
+2026-08-01 is mixed: the carrier was alive for 3 of 24 hours (4,688 rows), so **those three hours
+are genuine zeros and the other 21 are not interpretable**.
+
+A comment offered as proof of honest reporting was itself an instance of the blindness it was
+describing. Correcting it is the finding.
+
+## 12a — Design for the liveness witness (DESIGN ONLY — not implemented)
+
+**New table `stream_liveness`:**
+
+| column | meaning |
+|---|---|
+| `exchange`, `symbol` | as elsewhere |
+| `ts_ms` | heartbeat time |
+| `topic` | the sparse topic being witnessed, e.g. `allLiquidation` |
+| `subscribed` | the leg believes its subscription is active |
+| `carrier_leg` | which stream carries it, e.g. `bybit-ws` |
+| `carrier_frame_age_ms` | age of the last frame on the carrier — the actual witness |
+| `events_since_last` | rows written to the sparse table since the previous heartbeat |
+
+**Cadence: one row per 60 s per witnessed topic** — 1,440 rows/day, negligible next to 3.3 M
+trades/day.
+
+**The load-bearing design decision, and it is the direct lesson from `cursor=None`: the heartbeat
+MUST be written from the watchdog/writer loop, never from the frame handler.** If the same code
+path that writes liquidation rows also wrote the heartbeat, a dead handler would kill both, the
+heartbeat would go silent exactly when it is needed, and the blindness would be perfectly
+reinstated one level up. The witness has to be able to report the failure of the thing it
+witnesses.
+
+**Reading rule this enables:** a zero in `liquidations` at time *T* is a **real** zero iff a
+heartbeat covers *T* with `subscribed = true` and a small `carrier_frame_age_ms`. Otherwise it is
+[UNVERIFIED]. That turns 100 % of future zeros into decidable values, against 42.7 % today.
+
+**Not implemented, and not a reason to restart.** Merge with the next restart that happens for
+another reason.
+
+## 12b — Historical labelling, binding from now
+
+**Every zero in `liquidations` before `stream_liveness` exists is [UNVERIFIED] unless the carrier
+cross-check clears it.** Specifically:
+
+- **2026-07-24 and 2026-07-25: [UNVERIFIED, carrier dark all day].** Not zero-liquidation days.
+- **2026-08-01: 3 hours [DIUKUR zero], 21 hours [UNVERIFIED].**
+- All other zero hours: [DIUKUR zero] iff bybit `funding_mark` has rows in that hour, else
+  [UNVERIFIED].
+
+Any derived series — cascade counts, liquidation intensity, notional flows — **inherits this
+label permanently**. A cascade study on this history must report which of its zero baselines are
+verified and which are not, or it is not reporting a baseline at all.
+
+## What I could not measure in §12
+
+- **Whether a live carrier guarantees the `allLiquidation` subscription specifically was
+  healthy.** Bounded in §12d, not resolved: the run-length test flags one window and cannot
+  decide it, because liquidation arrivals are clustered rather than independent. The `subscribed`
+  field in 12a is the only real fix and it works forward only.
+- **Whether 2026-07-17 01Z-11Z was a dead subscription or a quiet market.** Not separable from
+  this data. Deribit `dvol` over the same window would be weak independent evidence of whether
+  the market was actually calm; not run.
+- **The 57.3 % of zero hours with a dark carrier.** Permanently unverifiable; no method exists.
+- **Whether Bybit itself drops liquidation messages** — measured separately in §13.
+
+---
+
+# §11-N — coverage thresholds NORMALISED (instance 7, fixed permanently)
+
+The §11 census classified a cell on **distinct samples as a fraction of intended cadence**. That
+reads as normalised and is not: the *granularity* differs. `options_chain` expects 1 sample/hour,
+so its coverage fraction can only be 0 or 1 — it can never be PARTIAL (§11 shows PART = 0 for it),
+and a 15-minute outage usually misses its single poll entirely, leaving the cell ON.
+`funding_mark` binancef expects 720 and needs 648 to score ON, so the same outage removes it from
+ON immediately. Comparing their `%ON` compared two different questions.
+
+**Fixed permanently in `scripts/coverage_census.py`**, not as a footnote. A sample at `t` now
+covers `[t, t + cadence)`, truncated at the next sample and clipped to the hour; the union is
+divided by 3600 s. **ON ≥ 90 % of the hour covered, OFF < 10 %.** A 15-minute outage now removes
+15 minutes of coverage from any table whose cadence is finer than the outage.
+
+## Positive control — the two methods MUST agree where cadence is 1 s
+
+At a 1 s cadence, "fraction of intended samples" and "fraction of the hour covered" are nearly
+the same quantity, so `depth_snapshots` is the control:
+
+| method | depth_snapshots %ON |
+|---|---:|
+| §0a, sample-fraction, 3 venues pooled | **34.8 %** |
+| §11-N, time-fraction, mean of binancef 51.0 / bybit 15.8 / okx 41.5 | **36.1 %** |
+
+Agreement to 1.3 points on the table where the two definitions coincide. The new instrument is
+not measuring something else.
+
+## The delta — how big the artefact actually was [DIUKUR]
+
+| table | source | %ON old (sample) | **%ON new (time)** | Δ | mean covered |
+|---|---|---:|---:|---:|---:|
+| `options_chain` | deribit | 59.0 % | **7.1 %** | **−51.9** | 29.2 % |
+| `funding_mark` | okx | 32.2 % | **19.4 %** | **−12.8** | 50.0 % |
+| `dvol` | deribit | 43.9 % | 46.9 % | +3.0 | 52.3 % |
+| `open_interest` | okx | 44.0 % | 46.9 % | +2.9 | 52.4 % |
+| `funding_mark` | binancef | 41.4 % | 44.2 % | +2.8 | 50.3 % |
+| `funding_mark` | bybit | 12.4 % | 13.2 % | +0.8 | 41.2 % |
+| `open_interest` | bybit | 12.4 % | 13.2 % | +0.8 | 41.2 % |
+| `open_interest` | binancef | 52.2 % | 51.8 % | −0.4 | 57.1 % |
+| `crowding` | binancef | 55.4 % | 55.4 % | 0.0 | 63.2 % |
+
+**The ranking inverts at the top.** `options_chain` was the *best*-covered table in §11 at
+59.0 %; it is the **worst** at 7.1 %. Everything else moves by ≤ 3.0 points except okx
+`funding_mark` at −12.8. So the artefact was **concentrated almost entirely in the coarsest
+cadence**, exactly where the granularity argument predicted it, and the other eight rows of §11
+survive largely intact.
+
+**The corrected reading of `options_chain`:** its mean hourly coverage is **29.2 %** — the poll
+fires hourly and misses most hours entirely. It is not a well-covered table that happened to look
+good; it is a sparsely-covered table that a coarse threshold flattered. **Any options research
+must start from 29.2 % coverage**, and §6a of the options inventory (if approved) has to be read
+against that number, not against 59.0 %.
+
+**§11's two claims are unaffected.** Claim 1 (the host-sleep signature is present in every
+source) is about the *shape* of the UTC gradient, not its level. Claim 2 (interpolation damage
+1.4–5.9 % vs 100 % for the book) never used `%ON` at all. What changes is only the cross-table
+comparison §11 already flagged as suspect — now quantified rather than hedged.
+
+## What I could not measure in §11-N
+
+- **The right cadence for the push streams.** bybit's is substituted from its measured median
+  inter-arrival (1.0 s), which coexists with long silences; if the true intended push rate is
+  slower, its 13.2 % is too harsh.
+- **Whether `[t, t + cadence)` is the right coverage kernel.** A centred kernel
+  `[t − cadence/2, t + cadence/2)` would credit a sample for the time before it. Forward-looking
+  was chosen because a sample cannot describe a state that preceded it; the choice is declared
+  rather than tuned, and it matters most for the coarsest table.
+- **Any window other than 2026-07-05 … 08-03.**
+
+---
+
+# §13 — is Bybit `allLiquidation` throttled like Binance `forceOrder`? NO [DIUKUR]
+
+## The Binance premise, verified first [DIUKUR — vendor documentation]
+
+Positive control on the claim itself, before comparing anything to it. Binance's own docs for the
+liquidation order streams state that **only the latest liquidation order within 1000 ms is pushed
+as the snapshot**, that no stream is pushed if no liquidation happened in that interval, and that
+the market streams "no longer push realtime data feed" but a snapshot at a maximum of one push
+per second. **The premise is correct**: `forceOrder` is blindest exactly during a cascade,
+because a cascade is by definition several liquidations per second.
+
+## The Bybit documentation is SILENT, and that is what it says [DIUKUR]
+
+Bybit's `allLiquidation` page states a **push frequency of 500 ms** and **nothing about
+completeness** — no statement that all orders are delivered, and no statement that any are
+aggregated or dropped. Reporting this as "not throttled" would be inventing a guarantee the
+vendor did not give.
+
+**So the documentation answer is: not documented.**
+
+## The measurement answers it anyway, for the specific throttle in question [DIUKUR]
+
+Inter-message spacing, bybit liquidations, 30 days (`2026-07-05 … 08-03`), n = 11,294 messages /
+11,293 gaps:
+
+| gap | count | share |
+|---|---:|---:|
+| 0 ms (same timestamp, one batch) | 212 | 1.88 % |
+| 1–99 ms | **5,235** | **46.36 %** |
+| 100–499 ms | 2,429 | 21.51 % |
+| 500–899 ms | 495 | 4.38 % |
+| **900–1100 ms (where a 1 s throttle would pile up)** | **122** | **1.08 %** |
+| 1.1–5 s | 784 | 6.94 % |
+| 5–60 s | 913 | 8.08 % |
+| > 60 s | 1,103 | 9.77 % |
+
+**72.80 % of messages arrive less than 1000 ms after the previous one, and 46.36 % arrive within
+99 ms.** A Binance-style rule — one order per symbol per 1000 ms window — makes those gaps
+impossible by construction. And the signature a 1 s throttle leaves is a **pile-up at exactly
+1000 ms**; the 900–1100 ms bucket holds **1.08 %**, the smallest non-zero bucket in the table.
+The throttle hypothesis is refuted in both directions at once: too many sub-second gaps, and no
+spike where the throttle would put one.
+
+**Structural confirmation, independent of the timing** [DIUKUR]: the Bybit frame carries a
+`data` **list** with the same envelope as `publicTrade` (`collector.py:571`), so multiple
+liquidations arrive per push by design. Binance sends **one** order per snapshot. These are
+architecturally different delivery models, not two settings of the same one.
+
+## Verdict
+
+**Do not add a Binance `forceOrder` leg.** The existing Bybit source is not subject to the
+Binance snapshot rule, so adding Binance would add a **strictly worse** stream, and the
+cross-check argument does not apply — that argument required both to be throttled independently.
+
+**The fifth blindness instance was avoided before this session began**, by the choice to take
+liquidations from Bybit. That was not luck the repo can claim credit for knowingly, but it is
+the outcome, and it is recorded rather than assumed.
+
+**One label that does NOT go away.** "Not Binance-throttled" is not "complete". Bybit publishes
+no completeness guarantee, so `liquidations` remains **unproven-complete** — a much weaker
+caveat than `forceOrder`'s severity-dependent lower bound, and a real one. Combined with §12,
+the honest standing label for this series is: **event detection is sound where a live carrier can
+be shown; magnitude is unproven; zeros are [UNVERIFIED] unless the carrier cross-check clears
+them.**
+
+## What I could not measure in §13
+
+- **Whether Bybit drops messages under extreme load.** The 30-day window contains no
+  exchange-wide cascade, so the stream has not been observed at the load where any queueing
+  system would degrade. This is the case that matters most for cascade research and it is
+  **untested**.
+- **Whether our own collector dropped messages** the venue did send. There is no published
+  Bybit archive to diff against, so the ground-truth check that settled the aggTrades question
+  (§10) has no equivalent here.
+- **The meaning of the 212 identical-timestamp messages.** They are consistent with genuine
+  same-millisecond liquidations inside one batch, and with a normaliser collapsing distinct
+  events; not distinguished.
+
+---
+
+# §14 — the "zero restarts" observation: REFUTED [DIUKUR]
+
+**Verdict first: this is not a finding.** A 9.575-hour stretch with zero restarts is an
+**ordinary** event under the old code — it occurred in **29.7 %** of comparable historical
+windows, and **two longer quiet stretches happened before the fix existed**. Both my own
+"starting to be hard to call coincidence" and the 1e-13 estimate were wrong, and wrong for the
+same reason.
+
+## 14a — the arithmetic, at three levels of correctness [DIUKUR]
+
+| model | rate | P(zero in 9.575 h) |
+|---|---|---:|
+| **(A) naive** — restarts independent | 12.6/h | **4.0e-53** |
+| **(B) Poisson on BURSTS** — the correct unit | 1.339/h | **2.7e-06** |
+| **(C) empirical** — no distributional assumption | — | **29.7 %** |
+
+**(A) is wrong because restarts are not independent.** One host sleep kills many legs at once:
+over 755 ledger events collapsing to **119 bursts** (30 s join, the `baseline.md` method), the
+**median burst hits 7 legs** and 72 of 119 hit ≥ 6. Counting leg-restarts as independent trials
+inflates the event count by roughly the legs-per-burst factor. The proposed 1e-13 used this model.
+
+**(B) is still wrong, by five orders of magnitude, because bursts are not Poisson either.**
+Inter-burst spacing is median **16.0 min** but maximum **1877 min (31.29 h)**. A Poisson process
+at 1.339/h assigns that gap a probability of ~6e-19; it is sitting in the data. The process is
+bimodal — dense churn while the host cycles, then long quiet regimes — exactly the on/off shape
+§0a found in coverage. **Any Poisson model of this series is misspecified.**
+
+**(C) is the answer.** Sliding a 9.575-hour window across the 88.9-hour ledger in 6-minute steps:
+**236 of 794 windows contain zero bursts — 29.7 %.**
+
+## The quiet periods are REAL, checked before being used [DIUKUR]
+
+`gaps.jsonl` is itself a sparse stream and cannot witness its own liveness — the §12 problem,
+applied to the instrument being used here. A "quiet" stretch could be a dead collector. So each
+was checked against rows actually written:
+
+| quiet period | duration | trades written | hours with rows | verdict |
+|---|---:|---:|---|---|
+| 08-01 06:03Z | 31.29 h | 1,049,400 | 32/31 | **alive, genuinely quiet** |
+| 08-02 20:57Z | 3.87 h | 508,993 | 5/4 | alive |
+| 08-03 11:10Z | 4.18 h | 1,504,435 | 5/4 | alive |
+| 08-03 15:21Z | 4.86 h | 926,860 | 6/5 | alive |
+| 08-03 20:13Z | 4.10 h | 394,204 | 5/4 | alive |
+| 08-04 10:45Z | 11.42 h | 2,186,562 | 13/11 | **alive, genuinely quiet** |
+
+All six are real. The empirical test is not contaminated by downtime.
+
+## The decisive comparator [DIUKUR]
+
+**Two quiet stretches ≥ 9.575 h occurred with the OLD code, the bug fully active:**
+
+- **2026-08-01 06:03Z — 31.29 hours** (13:03 WIB)
+- **2026-08-04 10:45Z — 11.42 hours** (17:45 WIB) — the day before the fix
+
+The current stretch is **shorter than both** and **0.31× the record**. There is nothing to
+explain.
+
+**And no hour-of-day effect rescues it.** The current window starts at 00:05Z, historically inside
+the worst-coverage block. Zero-burst rate for windows starting at 00Z is **33.3 %**, against
+29.7 % overall — if anything *more* likely, not less. Windows starting 04Z–05Z are the only ones
+at 0 %.
+
+## 14b — PRE-REGISTRATION, binding [declared before the next window]
+
+The observation is refuted at 9.575 h, but the underlying question stays open. The bar is set
+from the empirical curve rather than from taste:
+
+| D (hours clean) | historical windows with zero bursts |
+|---:|---:|
+| 6 | 37.0 % |
+| **9.575 (current)** | **29.7 %** |
+| 12 | 25.1 % |
+| 20 | 16.4 % |
+| 24 | 11.2 % |
+| 28 | **5.4 %** |
+| **31.3** | **0.0 %** |
+
+**BINDING — declared now, not revisable after seeing a result:**
+
+- **CONFIRMS a real change: a clean stretch of ≥ 36 continuous hours** — beyond the 31.29 h
+  record set with the buggy code, with margin. Below that, host-awake and network explain it.
+- **REFUTES it: churn returns at ≥ 1.0 bursts/hour sustained over any 6-hour window.** That is
+  75 % of the old 1.339/h rate; anything at or above it means the fix is not the cause.
+- **AMBIGUOUS BAND, named now so a half-result cannot be narrated: 12–36 hours clean, or churn
+  returning at 0.2–1.0 bursts/hour.** Confirms nothing, refutes nothing. The honest response is
+  **more history**, not a re-reading of these numbers.
+
+**Power limitation, stated rather than buried:** the 88.9-hour ledger contains only ~2.8
+*independent* 31.3-hour windows, so "0.0 %" at that duration means "never seen in about three
+tries", not "shown to be rare". The 36-hour bar is a distribution-free statement — *longer than
+anything ever observed* — and it is weak evidence even if met. Only a longer ledger fixes this.
+
+## 14c — the four candidate causes [DIUKUR / DISIMPULKAN]
+
+| # | candidate | what would confirm | what would refute | **status** |
+|---|---|---|---|---|
+| i | the cursor fix | churn stops and stays stopped past 36 h | a pre-fix quiet stretch of equal length | **REFUTED** — two exist (31.29 h, 11.42 h); and the fix touches a REST poll cursor, never a WebSocket connection, so no mechanism was ever articulable |
+| ii | host awake because in use | quiet stretches align with working hours | quiet stretches at 03:00 local | **LEADING** — the window is 07:05–16:40 WIB, the working day, and the 31.29 h record also began 13:03 WIB |
+| iii | network happens to be good | churn correlates with ISP incidents | churn continues on a clean link | **UNTESTABLE HERE** — no network telemetry is collected; cannot be separated from (ii), the same limitation `prediction.md` already recorded |
+| iv | restart cleared accumulated state | churn rate rises with process uptime | flat or falling rate with age | **WEAK** — see 14d |
+
+## 14d — does churn grow with process uptime? [DIUKUR]
+
+Ledger split at per-leg `restart_n` resets, giving 9 process runs; two are long enough to test:
+
+| run | duration | first half | second half | ratio |
+|---|---:|---:|---:|---:|
+| 9 | 45.6 h | 14.2/h | 16.1/h | **1.13×** |
+| 7 | 1.4 h | 22.0/h | 8.8/h | 0.40× |
+
+**1.13× over 45.6 hours is not a leak signature**, and the shorter run moves the other way. A
+socket or memory leak producing meaningful degradation would show a far steeper slope. Candidate
+(iv) is **not supported**, and a scheduled-restart remedy is not justified by this evidence.
+
+## 14e — both outcomes are informative, stated in advance
+
+If churn **returns**, that is not a setback: it supplies the leg restart that b-ii and b-iii need
+to be verified in production, which is currently blocked on nothing else. If churn **stays away
+past 36 h**, that is a real finding about host behaviour. Neither outcome is the one to hope for,
+and this paragraph exists so that no later reading can pretend one was.
+
+## What I could not measure in §14
+
+- **Whether host sleep and network failure are separable.** They are not, in this data — the same
+  limitation `reports/incident-2026-08-04-sleep/prediction.md` recorded, and it still binds.
+- **Anything beyond 88.9 hours of ledger.** Every threshold above is conditional on that, and the
+  independent-sample count at long durations is ~3.
+- **Whether `gaps.jsonl` records every restart.** It is the collector's own ledger, and no
+  independent record exists to diff it against.
+- **What the host was actually doing.** No `pmset` log was read for this window; the working-day
+  correlation is circumstantial and untested.
+
+---
+
+# §15 — the surface of unverified empirical prose [DIUKUR]
+
+Three written claims were proven wrong by measurement in a single session:
+
+| claim | where | what measurement showed |
+|---|---|---|
+| "2026-07-25 had ZERO all day, honestly" | `collector.py:344` | the bybit carrier wrote 0 rows in 0 of 24 hours — the leg was dark, not the market silent (§12) |
+| `options_chain` is the best-covered table at 59.0 % `%ON` | §11 | 7.1 % under a cadence-neutral threshold — best to worst, 51.9 points (§11-N) |
+| add a Binance `forceOrder` leg | my own recommendation | Bybit `allLiquidation` is not throttled the Binance way; the addition would be strictly worse (§13) |
+
+**The pattern: code has tests, prose has nothing.** A claim that could be checked but has no
+checker rots while looking authoritative, and being written in the source makes it look *more*
+authoritative than a document would.
+
+## 15b — how large the surface is [UNVERIFIED — the classifier FAILED its audit]
+
+AST-scoped scan of `collector.py` (3,983 lines), restricted to comments and docstrings making
+claims about **observed data behaviour** rather than design constants:
+
+| | count |
+|---|---:|
+| empirical claims about data behaviour | **38** |
+| — with provenance (a date, "measured", or a named probe) | 17 |
+| — **with no provenance at all** | **21** |
+
+**Provenance in the weak sense is not enough.** The one claim proven false — `collector.py:344` —
+sits in the *with-provenance* group: it named a date and used the word "measured", and was still
+wrong. What it lacked was a **re-runnable** reference. That is why the rail requires naming the
+query, not the date.
+
+**Not fixed wholesale, deliberately.** Only `collector.py:344` is corrected (§15c). The other 20
+unprovenanced claims are listed so the size of the problem is visible; retro-fitting citations to
+all of them would be a large edit with no measurement behind it, and several may be true.
+
+### The audit — and every number above fails it [DIUKUR]
+
+**The tell was there before the audit and I did not act on it:** three regexes over the same file
+returned **2, then 113, then 38**. A 56× swing from rewording the pattern is not refinement — it
+is an instrument whose answer is set by its own phrasing.
+
+**Method, declared before the sample was drawn.** *Empirical claim* = a statement about what the
+data or the system was **observed** to do — a rate, count, frequency, duration, rarity, or
+distribution — checkable in principle by querying recorded data or logs, and falsifiable if the
+world changed. *Not empirical* = design constants, vendor API contracts, §rail references,
+mechanism explanations carrying no measured quantity, and code behaviour a unit test covers.
+**Sample: 20 lines drawn with `random.Random(20260805)` from the 1,180 non-empty
+comment/docstring lines.** Manual verdicts were fixed before the classifier's verdicts were
+revealed.
+
+| | |
+|---|---:|
+| true negatives | 18 |
+| true positives | **0** |
+| false positives | 0 |
+| **false negatives** | **2** |
+| accuracy | 90 % |
+| **recall** | **0 %** |
+| precision | undefined — it flagged nothing |
+
+**The 90 % accuracy is worthless**: a classifier that answers "not empirical" to everything scores
+the same on this sample. **Recall is the number that matters and it is zero.**
+
+**Both misses are structural, not marginal:**
+
+- **`:215`** — *"On 2026-08-02 bybit-ws and okx-ws each …"*. A **dated incident claim**. The
+  pattern requires words like `measured|observed|prints|p50`; a bare date matches none of them,
+  so every "on DATE, X happened" claim is invisible.
+- **`:452`** — *"six legs died exactly this way"*. The number is spelled as a **word**. The
+  pattern opens with `re.search(r"\d", t)`, so no claim using *one, two, six, dozens* can ever
+  be seen.
+
+**Consequence, binding: 38 / 17 / 21 are [UNVERIFIED] and are not to be cited again** — including
+by me, including in `STRATEGY.md`, until the classifier is repaired and re-audited. With recall 0
+the true surface is **larger** than 38, not smaller, and by an unknown factor.
+
+**The irony is the finding, again.** The classifier is an instrument that reported confident
+counts with no error bars and could not report its own blindness — the same class it was built
+to measure. It is entered in the ledger rather than quietly patched.
+
+## 15c — the correction, kept as a correction [DIUKUR]
+
+`collector.py:344` now cites the measurement (median 309 rows/day, 58.2 % of cells zero, range
+3–1,219, query named as §12) **and keeps the wrong example on the record** with the note that it
+was itself an instance of the blindness the comment was describing. Swapping it out quietly would
+have destroyed the only part worth keeping.
+
+**Comment-only change.** The running collector holds the previous bytes; no behaviour differs, and
+this does not justify a restart.
+
+## What I could not measure in §15
+
+- **Whether the other 20 unprovenanced claims are true.** They are counted, not checked. The
+  count is a measure of exposure, not of error.
+- **The same surface in `terminal*.js`, `strategies.py`, `backtest.py`, or the 22 rail
+  documents.** Only `collector.py` was scanned.
+- **Whether the classifier is right.** "Empirical claim about data behaviour" versus "design
+  constant" is a regex judgement over 3,983 lines; both false positives and false negatives are
+  likely and neither was hand-audited.
+
+---
+
+# §16 — TOMBSTONE: the prose-claim classifier, deleted
+
+**Deleted, not repaired.** A broken instrument that looks official is worse than no instrument:
+its numbers had already reached a permanent rail in `STRATEGY.md` before anyone asked whether it
+worked.
+
+**It never had a home in the repository.** The classifier lived only inside shell heredocs — it
+was never written to `scripts/`, never committed, never testable by anyone else. So "delete the
+code" was already true by accident, and that is its own finding: **numbers from an unrunnable
+instrument were cited in a permanent rail.** Nothing in the repo could have reproduced 38/17/21
+even to check it.
+
+**The two structural failure modes, recorded so a rebuild does not repeat them:**
+
+1. **A bare date matches nothing.** The pattern required one of
+   `measured|observed|probes|recorded|caught|carries|prints|p50|p95|p99|max`, or `~digit`. A claim
+   of the form *"On 2026-08-02, X happened"* contains none of them, so **every dated incident
+   claim was invisible** — `collector.py:215` was missed this way.
+2. **Numbers spelled as words are unreachable.** The pattern opened with `re.search(r"\d", text)`
+   as a cheap prefilter. Any claim using *one, two, six, dozens, several* can therefore never be
+   seen at all — `collector.py:452` ("six legs died exactly this way") was missed this way.
+
+**A rebuild must also fix what the audit could not see:** the sample contained only 2 positives,
+so precision was never tested at all. A replacement needs a sample stratified to contain enough
+positives to measure both directions, not 20 lines drawn uniformly.
+
+**The surface size is now NOT MEASURED, and no replacement figure is offered.** Substituting a
+second unverified count would be the same error with a different number. `STRATEGY.md` states
+"not measured"; §15b keeps 38/17/21 struck as [UNVERIFIED] rather than deleted, so the audit trail
+survives.
+
+## What I could not measure in §16
+
+- **Whether the classifier's two known blind spots are its only ones.** Recall was 0 on the
+  sample, so no true positive was ever observed and no other failure mode could surface.
+- **What the real surface is.** Unknown, and known to be **larger** than 38 rather than smaller.
+
+---
+
+# §17 — instance 13: a `file:line` citation that rotted in one session [DIUKUR]
+
+`CLAUDE.md` was written this session with four `file:line` citations. **Every one was
+spot-checked immediately, and one was already wrong.**
+
+| citation | verdict |
+|---|---|
+| `DEVELOPMENT.md:61` — no AI attribution | **correct** |
+| `scripts/check_ticks.py:12-16` — gaps stay gaps | **correct** (text at :14-15) |
+| `DESIGN-orderflow-terminal.md:27-121` — the §0.x rails | **correct** (section runs :27–:122) |
+| **`STRATEGY.md:804` — the promotion bar** | **WRONG — now :881** |
+
+**Cause:** ~77 lines were added to `STRATEGY.md` **in the same session** — the taxonomy, the
+ledger rows, and two new rails — so the bar moved 77 lines down while a file citing it was being
+written. The citation was accurate when composed and false by the time it was saved.
+
+**This is class G with a specific, fixable mechanism**: a `file:line` reference into a file under
+active edit is a claim that rots on a timescale of minutes. The prevention added to class G is to
+cite a **grep-able string** and treat the line number as a hint — `CLAUDE.md` now says
+*"currently :881, but that file is edited often — grep the string, not the line"*.
+
+**It then drifted a SECOND time, in the same turn.** Adding the instance-13 row to the ledger
+moved the bar from :881 to :882 **while this section was being written about it**. The line
+number was corrected once and was stale again inside the same tool call. `CLAUDE.md` now carries
+**no line number at all** for that reference — only the grep-able string. A pointer that rots
+twice in one turn is not a pointer that needs better maintenance; it is the wrong kind of pointer.
+
+**Two things worth separating, because they point opposite ways:**
+
+- **It was caught**, and caught within a minute, because every citation was checked immediately
+  after being written rather than trusted. That is the class-F rail (*the first number out of a
+  new instrument is a control*) applied to prose.
+- **My checking instrument was also bad.** The first spot-check reported **3 failures out of 4**;
+  two of those were my own grep patterns, not the citations — `"commits carry NO AI attribution"`
+  missed the markdown bold, and `"A QA gate that fixed data"` spans a line break. So the verifier
+  had a **50 % false-alarm rate** and would have sent me rewriting two correct citations. A check
+  that cries wolf is not free: it costs the credibility of the next check.
+
+## What I could not measure in §17
+
+- **How many other `file:line` citations across the 22 rail documents are already stale.** Not
+  scanned; the instrument that would scan them is exactly the class of thing §16 just deleted.
+- **Whether the three "correct" citations are semantically right**, not merely pointing at
+  existing lines. Each was read, but by me, and by the same person who wrote them.
+
 ## Look counter
 
 Per the standing rule, every look is counted and cannot be reduced later.
@@ -1515,7 +2123,16 @@ Per the standing rule, every look is counted and cannot be reduced later.
 | §10a (1 set difference, 3 independent hour attributions, 1 block decomposition) | 5 | 0 |
 | §E0 maker viability gate (in `docs/EDA-execution-001.md`) | 5 | 0 |
 | §11 inventory (9 cadence measurements, 9 coverage censuses, 4 interpolation tests) — pure inventory, no forward returns | 22 | 0 |
-| **running total** | **418** | **81** |
+| §12 liveness witness (30-day zero census, carrier cross-reference, 3 control days) | 5 | 0 |
+| §12d subscription bound (run-length census + independence control) | 2 | 0 |
+| §15b classifier audit (seeded 20-line manual audit + confusion matrix) | 1 | 0 |
+| §11-N normalised census (12 source/table pairs re-measured, 1 positive control) | 13 | 0 |
+| §13 bybit throttle test (1 gap-distribution census, 2 vendor-doc checks, 1 structural check) | 4 | 0 |
+| §14 zero-restart test (burst structure, 3 arithmetic models, sliding-window census, 6 liveness checks, hour-of-day census, survival curve, 2 uptime-trend tests) | 16 | 0 |
+| §15 prose-claim surface (AST scan + 2-way classification of collector.py) | 2 | 0 |
+| §16 tombstone (1 commit-order verification for the born-wrong count) | 1 | 0 |
+| §17 citation audit (4 citations verified against source) | 4 | 0 |
+| **running total** | **466** | **81** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 

@@ -804,6 +804,78 @@ Sequencing (revised). These items *use* the existing L1/M4 entries rather than d
 
 ## 6. What to refuse (this is the product, not a limitation)
 
+
+### The taxonomy — eight classes behind the twelve instances
+
+The ledger grows; the classes do not. **Read the classes, not the incidents.** Each names its own
+prevention, because a class without a countermeasure is just a nicer-sounding list.
+
+| class | instances | what it looks like | **prevention** |
+|---|---|---|---|
+| **A. Observer shares fate with the observed** | 2 | the health check slept with the host, so downtime read as uptime | the witness must run on a path that survives the failure it reports — different process, different code path, or an external record |
+| **B. Absence is ambiguous** | 4, 6 | empty cells dropped instead of counted OFF; a sparse stream's zero is identical to a dead leg | every "nothing here" must be separable from "nothing looked": cross-join the grid, write a heartbeat, or label it [UNVERIFIED] |
+| **C. The guard suppresses its own trigger** | 3 | `cursor is not None` silenced the id-gap alarm in exactly the case that raised it | when writing a condition that suppresses an alarm, enumerate the states where it is true and check the alarm's real case is not among them |
+| **D. Incommensurable scale** | 7 | `%ON` compared across tables whose thresholds meant different things | before comparing two numbers, ask what units the threshold is in and whether both sides mean the same thing |
+| **E. Misspecified model used with contrary evidence in hand** | 10 | Poisson applied to a process §0a had already shown bimodal | prefer distribution-free tests; if a parametric model is used, name its assumption and check it against what is already known |
+| **F. Instrument reports numbers with no control** | 1, 9 | a classifier returning 38/17/21 with no error bars and recall 0 | **the first number out of a new instrument is a CONTROL, not a result** — see the rail below |
+| **G. Claim with no checker** | 8, 11, 12, 13 | prose asserting observed behaviour that nothing re-runs | cite the query; place the conclusion beside the number; and in files under active edit cite a **grep-able string, never a line number** — see the rails below |
+| **H. Silent default** | 5 | `get_ohlcv` returning 300 bars; DuckDB rendering in the session zone and rounding on CAST | any library call feeding a published number must have its defaults inspected, or the result re-derived by an independent route |
+
+*Instance 1's exact mechanism predates this session and was reconstructed, not measured; its
+placement in class F is [DISIMPULKAN] and may be wrong.*
+
+**Born wrong, not rotted: 8 of 12** [DIUKUR where checkable]. Instances **1, 2, 3, 4, 6, 7, 9, 12**
+were wrong on the day they were written — they never had a correct period to decay from.
+Instance 3 was verified rather than assumed: the per-leg watchdog that makes leg restarts possible
+landed at commit **78**, the `cursor is not None` guard at commit **92**, so restarts were already
+possible **14 commits before** the guard was written. Only **8 and 11** rotted, and only **5 and
+10** are misuse of something that was itself sound.
+
+**That ratio writes the rail:**
+
+- **Refuse to cite a number from a NEW instrument until it has reproduced a known value from an
+  independent route.** The first number out of a new instrument is a **control**, not a result.
+  This would have caught the classifier (recall 0 on its first and only run), the coverage scan
+  (empty cells dropped), and the ON/OFF thresholds (never checked against a table where both
+  definitions coincide). It is the rule the three-route spread measurement in
+  `docs/EDA-execution-001.md` §E0 already followed by accident.
+
+- **Refuse to print a conclusion apart from the number that produced it.** Instance 12 was caught
+  within seconds because a script printed a claim three lines below the output contradicting it;
+  instance 9 survived into a permanent rail and was caught only because an audit was demanded.
+  **The difference was placement, not vigilance.** Scripts must print the verdict adjacent to the
+  evidence, in the same block, so a contradiction is visible without anyone looking for it.
+
+### The instrument-blindness ledger — kept sequential so the pattern stays visible
+
+Every entry is the same failure: **an instrument that cannot report its own blindness.** They are
+numbered because the count is the point — this is a recurring class in this project, not a series
+of unrelated bugs.
+
+| # | instrument | how it was blind | where |
+|---|---|---|---|
+| 1 | churn gauge | reported a healthy rate while legs were dead | collector history |
+| 2 | health check | slept with the host, so downtime looked like uptime | `reports/incident-2026-08-04-sleep/` |
+| 3 | aggTrades id-gap alarm | the `cursor is not None` guard suppressed the alarm in exactly the case that triggered it | `docs/EDA-microstructure-001.md` §10, fixed in `dc9857b` |
+| 4 | coverage scan | cells with no rows were dropped rather than counted OFF, so absence read as absence-of-problem | §0a |
+| 5 | silent library defaults | `data.get_ohlcv` returned 300 bars, not the full history, with no warning; DuckDB `strftime` rendered in the session zone and `CAST(x AS BIGINT)` rounded instead of truncating — each silently corrupted a number that was about to be published | §10a method note |
+| 6 | sparse liquidation stream | cannot witness its own liveness; 58.2 % of hours are zero and 57.3 % of those are permanently undecidable | §12 |
+| 7 | coverage ON/OFF thresholds | applied against each table's own cadence, so `%ON` was not comparable across tables and a threshold artefact read as better coverage | §11, normalised in §11-N |
+| 8 | empirical claims in prose | no test, so they rot silently; 3 proven wrong in one session (`collector.py:344`, §11 `%ON` ranking, the Binance `forceOrder` recommendation) | §15, railed above |
+| 9 | the classifier built to measure instance 8 | reported 38/17/21 with no error bars; a seeded audit put its recall at **0 %**. **DELETED** — see the tombstone in §16 | §15b, §16 |
+| 10 | **azul** — Poisson applied to a process already shown bimodal | §0a had established the on/off structure; the model was used anyway and returned 1e-13 for an event empirically 29.7 % likely. The evidence that the model was misspecified was already in hand | §14a |
+| 11 | **azul** — "starting to be hard to call coincidence" | an empirical claim with no checker: the exact class instance 8 rails against, asserted while that rail was being written | §14 |
+| 12 | **Claude** — hard-coded conclusion contradicted by its own script | a script printed "never happened in 89 hours of history" three lines below its own output showing 29.7 %. Recorded as EVIDENCE THE RAIL TOUCHES SOMETHING REAL: it was caught only because the number was printed beside the claim | §14a |
+| 13 | **Claude** — `file:line` citation into a file I was editing | `CLAUDE.md` cited `STRATEGY.md:804` for the promotion bar; ~77 lines added to that file the same session moved it to :881. Written into the very file that rails against class G, and caught by spot-checking every citation immediately after writing them | §17 |
+
+**Instance 5 replaces a withdrawn candidate.** The Binance `forceOrder` throttle was proposed as
+instance 5 before it was checked; the collector already sources liquidations from Bybit
+`allLiquidation`, so that instance was never ours to claim. It is recorded here as withdrawn
+rather than deleted, because a ledger that quietly drops its wrong entries is itself an
+instrument that cannot report its own blindness.
+
+
+
 - Refuse native execution / order entry / L3 emulation in `terminal*.js`. Wrong substrate
   category; pursuing it burns years in an arena lost by construction.
 - Refuse showing any signal before `status=CLEARED` via the registry (M2). Until OOS
@@ -818,6 +890,25 @@ Sequencing (revised). These items *use* the existing L1/M4 entries rather than d
   select a method with knowledge of its result. The only admissible resolutions are evidence
   **independent of the choice**: longer history, or a LockBox slice no one has looked at.
   Applies to every candidate, now and afterwards.
+- **Refuse to use a SPARSE stream as a feature until it has a separate liveness witness.**
+  A stream that is legitimately silent most of the time cannot witness its own liveness: "no
+  event" and "leg dead" are byte-identical in the store. Every zero is [UNVERIFIED] until an
+  independent heartbeat — written from a code path that does NOT share the event handler — can
+  say the leg was connected at that moment. Measured cost of ignoring this: 58.2 % of
+  liquidation hours over 30 days are zero, and only 42.7 % of those can be cleared retroactively
+  (`docs/EDA-microstructure-001.md` §12). The witness must be able to report the failure of the
+  thing it witnesses, or it reinstates the blindness one level up.
+- **Refuse an empirical claim in prose that does not name the query behind it.** Any statement
+  in a comment, docstring, or document that asserts something about *observed data behaviour* —
+  a frequency, a rarity, "usually N per day", "ZERO all day" — must cite the query, script, or
+  document section that produced it, or carry **[UNVERIFIED]**. Code has tests; prose has
+  nothing, so a claim that could be checked but has no checker **will rot into a falsehood while
+  looking authoritative**, and being written in the source makes it look more authoritative, not
+  less. **The size of this surface is NOT MEASURED.** The instrument that produced 38/17/21 scored
+  recall 0 % against a seeded audit and was deleted; no replacement number is offered, because a
+  second unverified count would repeat the error (`docs/EDA-microstructure-001.md` §15b, §16). Citing a *date* is not enough —
+  the one claim proven false (`collector.py:344`, 2026-07-25 "ZERO all day") carried a date and
+  the word "measured", and was still wrong, because nothing in it could be re-run.
 - Refuse mixed-history backfill / book-gap smoothing / tick interpolation. Gaps stay gaps.
 - Refuse loosening the CI verbatim-assert gate for speed. That gate is what makes the moat
   mechanical rather than cosmetic.
