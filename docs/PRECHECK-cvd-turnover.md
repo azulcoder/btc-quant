@@ -149,3 +149,26 @@ ratio was forced by my own `bars_per_day` arithmetic rather than measured.
 class-G placement rail doing its job. The rerun uses explicit integer division `//` and asserts
 the bar count against its expected value before reporting anything. This is **class H** again —
 the third silent-default instance after `get_ohlcv`'s 300 bars and `CAST` rounding.
+
+---
+
+## CORRECTION 2026-08-06 — the anchor bias was real and material
+
+This document's own limitations said: *"a fairer comparison would be against a binary board
+strategy, and none exists."* **One does: `tsmom_dir`**, binary ±1, the highest-DSR binary
+strategy on the board (0.87), drag **188 bps/yr**.
+
+| anchor | ratio | verdict |
+|---|---:|---|
+| `tsmom` (continuous) — as run above | 22.62× | mechanism ABSENT |
+| **`tsmom_dir` (binary) — the fair anchor** | **8.66×** | **AMBIGUOUS** |
+
+**The result above is not rewritten.** It was computed against the anchor declared in advance and
+it stands as recorded. The correction is admissible because the bias and its **direction** were
+named before the number was seen — a continuous vol-scaled anchor understates the fair threshold
+for a binary candidate.
+
+**Consequence: C1 moves from DROPPED to AMBIGUOUS**, and stays NOT PROPOSED under the declared
+ambiguous-band rule. The claim weakens from "the mechanism is absent" to "the mechanism is real
+and not demonstrably sufficient at 8.7× the board's highest turnover". See
+`PLAN-derivative-001.md`, standard procedure.

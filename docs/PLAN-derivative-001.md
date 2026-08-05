@@ -45,6 +45,93 @@ those reach back far enough, and whether an equivalent exists for open interest,
 
 ---
 
+---
+
+# STANDARD PROCEDURE — the cost-drag gate, run BEFORE any design
+
+**Every candidate passes this before a line of its design is written.** It costs **0 predictive
+trials**, because turnover is a property of the *position series*, never of returns.
+
+```
+cost_drag_bps_per_year = (Σ|Δposition| / years) × 5.01 bps      # 10.02 bps round trip, §2 MEASURED
+```
+
+**This is the turnover twin of §4's perfect-foresight bound.** §4 closed candidates on HORIZON —
+if the move is smaller than the cost, no skill helps. This closes them on TURNOVER — if the
+trading is more expensive than a strategy that survives, no skill helps either. Two cheap gates,
+both before anything expensive.
+
+## The anchor — FIXED NOW, at 188 bps/yr
+
+| board strategy | type | turnover/yr | cost drag |
+|---|---|---:|---:|
+| **`tsmom_dir`** | **BINARY** (±1) | 37.60 | **188 bps/yr ← ANCHOR** |
+| `tsmom_ls` | continuous | 28.52 | 143 |
+| `ma_trend_fixedR` | binary | 19.32 | 97 |
+| `pairs_ou` | binary | 17.69 | 89 |
+| `tsmom` / `tsmom_voltarget` | continuous | 14.46 | 72 |
+| `vwap_reversion_48` | binary | 10.01 | 50 |
+| `donchian_55_20` | binary | 8.61 | 43 |
+| `random_entry` (control) | binary | 8.03 | 40 |
+| `pairs_coint` | binary | 3.96 | 20 |
+| `ma_trend_filter` | binary | 1.86 | 9 |
+| `buy_and_hold` | binary | 0.12 | 1 |
+
+**Why `tsmom_dir`:** it is the **highest-DSR binary strategy** on the board (0.87), and a binary
+anchor is the only fair comparison for a binary candidate — a vol-scaled continuous position
+turns over less by construction, so anchoring on `tsmom` understates the fair threshold. That
+weakness was flagged when the C1 precheck ran, and correcting it **changed C1's verdict**
+(below), so it was material rather than pedantic.
+
+**The anchor is fixed at 188 bps/yr as an absolute reference from here on**, not recomputed from
+whatever the board contains at the time. A moving anchor drawn from the set under test is
+circular — see the retroactive result.
+
+**Positive control on every run:** `tsmom` must come out at **72 bps/yr**. It did, to the digit,
+against the value computed independently in the C1 precheck.
+
+## Decision rule
+
+| drag vs anchor | verdict |
+|---|---|
+| ≤ 2× | passes; the candidate may be designed |
+| 2–10× | **AMBIGUOUS** — not proposed, pending a stated reason rather than a re-reading |
+| ≥ 10× | dropped before any return is scored |
+
+## Retroactive result on the 14 board candidates — and why it is nearly vacuous [DIUKUR]
+
+**Zero of 14 would have been dropped**, and that is **largely by construction**: the anchor is
+drawn from the same set being tested, so nothing in it can be 10× its own maximum. The
+non-circular statement is the useful one:
+
+> Daily `sign(ΔCVD)` at **1,629 bps/yr is 8.7× the HIGHEST drag on the entire board**.
+
+The board spans **1 to 188 bps/yr — a 188× range** — and every member sits inside it. The gate's
+discriminating power is therefore against candidates from **outside** the board's turnover
+regime, which is exactly where a new family comes from. Fixing the anchor at 188 removes the
+circularity for every future candidate.
+
+## C1's verdict, CORRECTED — and this reverses part of the last result
+
+| anchor | drag ratio | verdict |
+|---|---:|---|
+| `tsmom` (continuous, DSR 0.93) — used in the precheck | **22.62×** | mechanism ABSENT |
+| **`tsmom_dir` (binary, DSR 0.87) — the fair anchor** | **8.66×** | **AMBIGUOUS** |
+
+**Both are recorded; the original is not rewritten.** The correction is legitimate because the
+bias was named *before* the result was seen — "a fairer comparison would be against a binary board
+strategy, and none exists" was written into the precheck's own limitations. One did exist, and
+finding it moved C1 from **DROPPED** to **AMBIGUOUS**.
+
+**C1 remains NOT PROPOSED**, because the declared rule for the ambiguous band is "not proposed
+pending a stated reason, not a re-reading". What changed is the *reason*: not "the mechanism is
+absent" but "the mechanism is real, and at 8.7× the board's maximum turnover it is not
+demonstrably enough". That is a weaker claim than the one made last turn, and the weaker one is
+the correct one.
+
+
+---
+
 ## C1 — Daily CVD
 
 **Mechanism, and it must be stated honestly because the hourly version already died.**

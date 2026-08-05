@@ -36,6 +36,13 @@ Fourteen instances, **8 of the first 13 wrong the day they were written**. Read 
 | **H** silent default | inspect the defaults of any library call feeding a published number, or re-derive by an independent route |
 | **I** the verifier cries wolf | **test a verifier on cases known to PASS, not only on cases known to fail** — bad precision in a checker destroys correct work, it does not merely add noise |
 
+## Class H checklist — the environment traps that actually bit here
+
+- **DuckDB `/` is FLOAT division.** `ts_ms/3600000` grouped per millisecond and both horizons reported identical bar counts. Use `//`, and assert the bar count.
+- **`CAST(x AS BIGINT)` ROUNDS, it does not truncate.** 00:39 landed in hour 01. `floor()` first.
+- **DuckDB `strftime` renders in the SESSION time zone** — it produced Asia/Jakarta, not UTC. `SET TimeZone='UTC'`, or compute the bucket in Python.
+- **`data.get_ohlcv` defaults to 300 bars.** A correlation was nearly published from 300 bars as if it were 8.6 years. Always pass `start=`.
+
 ## Labels, everywhere
 
 `[DIUKUR]` measured · `[DISIMPULKAN]` inferred · `[DIASUMSIKAN]` assumed · `[UNVERIFIED]` claimed

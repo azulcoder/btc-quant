@@ -2241,7 +2241,8 @@ Per the standing rule, every look is counted and cannot be reduced later.
 | §18 (1 commit-message check) | 1 | 0 |
 | §19 options power test (coverage census, daily-mask control, CI curve) — **no ρ computed** | 4 | 0 |
 | step 0 + CVD precheck (4 endpoint probes, coverage distribution, 120-partition manifest control, 2 flip measurements, 3 anchor turnovers) | 11 | 0 |
-| **running total** | **482** | **81** |
+| §15 cost-drag gate (14 position series, turnover + binary/continuous classification, 1 positive control) | 15 | 0 |
+| **running total** | **497** | **81** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 
