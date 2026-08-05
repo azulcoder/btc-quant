@@ -295,3 +295,182 @@ Against §20's finding that free space is stable rather than draining, there is 
 - **The upload-only path's timing.** The 8.9 s figure subtracts states 1–4 from a measured full
   run; it has not itself been run.
 
+---
+
+# §23 — the upload-only path: declarations, made BEFORE the first batch ran
+
+## ㉓ What the 2,08x old manifest sha256s still prove — and what they no longer do [DISIMPULKAN from §22's measured nondeterminism]
+
+§22 measured parquet normalisation as nondeterministic: the same venue zip, normalised three
+times, gave three different byte streams (row count identical each time). Every consequence
+below follows from that one measurement.
+
+**Claims each old manifest `normalized.sha256` STILL supports:**
+
+| claim | why it survives |
+|---|---|
+| **"The local file is byte-identical to what the venue-verified ingest produced"** | hashing the file at rest is deterministic; a mismatch = bit-rot or tamper since ingest. **This is the pre-upload gate** (`local_manifest_mismatch` state). |
+| **"A copy of THESE bytes arrived intact"** | hash both ends of the copy. **This is the transport check.** |
+
+**Claims it can NO LONGER support:**
+
+| claim | why it fails |
+|---|---|
+| "This is *the* correct normalisation of the venue zip" | no canonical byte-form exists — three normalisations, three hashes |
+| "A re-ingest can be verified against this hash" | a mismatch there is *expected*, not corruption |
+| "Byte-level dedup or reconciliation across ingest generations" | two valid partitions of the same day may differ byte-wise; dedup must key on `date`, never on content hash |
+
+**What carries content proof instead — deterministic and source-bound:** the zip sha256
+verified against the venue's own published checksum at ingest (`checksum_verified: true`),
+and the normalized stats `rows / id_min / id_max / id_distinct / id_span / id_holes / ts range`
+— properties of the *data*, invariant across normalisations [DIUKUR: identical across all three
+§22 runs].
+
+**Therefore the upload-only read-back gate is three checks, all required, same run as any
+delete:** `sha256(read-back) == sha256(local)` (transport) **AND** content stats(read-back) ==
+manifest.normalized (content) **AND** read-back manifest byte-identical to the local manifest.
+sha256 answers *"the copy is intact"*; the stats answer *"the content is what the verified zip
+contained"*. For 2,08x partitions that distinction is what licenses each delete.
+
+**Worked example already in the store:** `2026-07-30` on HF carries sha `a847d540…` while its
+old local manifest recorded `1523309d…` — different bytes, identical stats, both valid. The HF
+pair (parquet + freshly-written manifest) is self-consistent; the stale local manifest remains
+as the record of bytes that no longer exist. Any future auditor who diffs those hashes must
+reach for this section, not for a corruption alarm.
+
+## ㉔ Checkpoint and the sleeping host
+
+**24a — checkpoint:** `reports/vision-migration.jsonl`, append-only, fsync per line. Every
+partition ends each run in exactly one recorded state; a crash loses at most the in-flight
+partition. **Checkpoint state never licenses a delete** — prior `readback_ok` only
+short-circuits the re-UPLOAD; the read-back that licenses a delete happens in the same run as
+the delete, every time.
+
+**24b — the host sleeps: BOTH, not either.** `caffeinate -i` wraps the batch (prevents the
+documented Maintenance-Sleep interruptions that §14 measured at 1.3 bursts/h), **and** the
+checkpoint stands regardless (network drops, HF outages, and process death are not sleep, and
+caffeinate does nothing for them). Choosing only caffeinate trusts one failure class; choosing
+only the checkpoint accepts fragmentation of a 5 h measurement for no reason.
+
+**Declared contamination rule, BEFORE the first caffeinated batch:** artificially-awake hours
+are exactly the confound of §14c's leading candidate ("host awake because in use"), so **any
+§14b clean-stretch claim that overlaps a caffeinated window must exclude or flag it**. The
+`batch_start`/`batch_end` checkpoint lines carry `caffeinated: true/false` and are the durable
+record of those windows. (As it happens, the first post-fix burst arrived at
+`2026-08-05 18:21:40Z`, before any caffeinated window existed — that 18.27 h stretch is
+uncontaminated and already ended.)
+
+**24c — rate-limit test is part of the first batch:** per-partition upload seconds are recorded
+as a series; throttling shows as a rising tail (first-10 mean vs last-10 mean) and as recorded
+429/backoff events. One commit per partition (parquet + manifest staged together), so 100
+partitions = ~100 commits — a real probe of commit-rate limits, which two §22 uploads were not.
+
+## ㉕ First batch: size and order, with the reasons
+
+**Size 100.** (1) ~100 commits at a ~400/hr instantaneous pace is where anecdotal HF hourly
+commit quotas would surface if they exist — large enough to trip a real limit, which is the
+point; (2) a 100-point timing series gives the first/last-decile comparison some power;
+(3) bounded: ~15–20 min, ~400 MB transferred, **0 deletes** (dry-run); (4) ~5 % of the
+population checks the 8.9 s/partition extrapolation before it is trusted ×2,084.
+
+**Order NEWEST first.** The "oldest first — longest without backup" argument conflates age with
+hazard: the risk to these bytes is *this disk failing*, which strikes all partitions equally,
+so age measures exposure already survived (sunk), not future risk. What ordering actually
+controls is **which prefix is safe if the migration halts partway** — and the valuable prefix
+is the one research queries: the recent regime (the CVD precheck's blocks 3–4, any future
+C2/C3 work). It is also the instrument-honest choice: the §22 control was a recent daily-form
+partition, so newest-first keeps the first batches inside the regime the control actually
+measured; the 2020 monthly-ingested partitions (including March 2020) can be measured when the
+migration reaches them.
+
+**One nuance recorded rather than implied:** "the only copy in the world" is exact for the
+*bytes*; the *content* is probably re-derivable from Binance Vision, which still publishes the
+monthly archives [DIASUMSIKAN — not verified, and Binance's retention policy is not a
+guarantee]. The migration's urgency rests on the verified claim, not the assumed one.
+
+---
+
+# §24 — FIRST BATCH RESULTS (dry-run, 100 partitions, newest first) [DIUKUR]
+
+**Adversarial review first, then the run.** A 17-agent review (5 lenses, every non-low finding
+independently attacked) confirmed **6 findings** before the batch touched HF; all six were fixed:
+the `--date` path could delete a live local file whose bytes were never in its verify chain
+(normalisation nondeterminism makes them provably different — `--date` now REFUSES locally-held
+days); `run_single` recorded `deleted` *before* deleting (state now follows the action, and
+`deleted` was removed from the skip set so a stranded file is re-verified, never skipped);
+`--plan` silently ran the full fetch path in `--date` mode (now rejected); the throttle detector
+confounded size trend with throttling (now size-normalised MB/s); the extrapolation
+double-subtracted deleted partitions; and `checksum_verified: true` is a **same-channel** check —
+zip and `.CHECKSUM` come from the same host, so it proves channel-consistency, not independent
+attestation [label downgraded]. Notably, two verifiers reached opposite verdicts on the same
+underlying live-delete issue through different lenses — the redundancy is what caught it.
+
+## The batch
+
+| | |
+|---|---:|
+| partitions | 100 (`2026-08-01` → `2025-07-02`, newest first) |
+| content-checker control (known partition `2026-07-30`) | **MATCH, first number of the run** |
+| `readback_ok` (transport sha + content stats + manifest byte-compare) | **96** |
+| `upload_failed` | 4 — all `Errno 60`/read timeouts, **home network, not HF** |
+| deletes | **0** (dry run — verified against the live tree, 2,084 parquet intact) |
+| upload MB/s, size-normalised | median 0.98 · first-10 1.03 · last-10 0.88 — **no throttle trend inside the batch** |
+| 429 events inside the batch | 0 |
+| **peak disk** | **24.5 MB** |
+| wall clock | 1,189.9 s = **11.9 s/partition** |
+
+**Resume logic verified live, not by argument:** a rerun skipped all 96 `readback_ok`, selected
+the 4 failures first, and **all 4 cleared in 2.1–2.7 s** — confirming the timeouts were
+transient. The retry rule for the real run follows: `retry_hf` should also retry plain network
+timeouts (short backoff), not only 429 signatures; a 4 % loss rate to home-network blips is
+noise the checkpoint absorbs but should not generate.
+
+## The rate limit EXISTS, and it arrived just past the mandate
+
+**Scope honesty first: the rerun was my selection logic doing what it says, not what I said.**
+"First 100 not yet ok" = the 4 retries **plus 96 new partitions**; I described it as a
+4-partition resume test, launched it, and killed it at ~partition 31 when the mismatch was
+clear. The overrun was a mistake against the stated scope — and it accidentally delivered the
+answer the mandated batch was too small to reach:
+
+> **`429 Too Many Requests` on `upload 2025-06-03` — three consecutive, surviving 60/120/180 s
+> backoffs — at roughly commit ~128 within ~37 minutes.**
+
+So HF's commit budget at this pace is **~125–130 commits per short window**, and the
+one-commit-per-partition design **cannot run 2,084 commits in 6.9 h**. The honest extrapolations:
+
+| design | commits | est. duration |
+|---|---:|---:|
+| 1 commit/partition, throttle-paced (~125/h sustained [DIASUMSIKAN from one observation]) | 2,084 | **~17 h** |
+| **N partitions per commit** (e.g. 25 staged per `hf_upload_folder` call) | 84 | **~6–7 h, throttle-free with margin** |
+
+**Recommendation for the real run: batch ~25 partitions per commit.** Read-back and delete stay
+**per-partition** (the licensing step is untouched); only the upload commit granularity changes.
+This needs a small, reviewable change to `migrate_one_local`'s upload step and a re-control on
+its first batch, per the standing rail: the first number out of the modified instrument is a
+control, not a result.
+
+## Standing after this batch
+
+- **128 partitions now live on HF, verified, local copies intact** (96 + 4 retried + 28 from the
+  overrun before the kill). On the real run they skip upload and go straight to
+  read-back → delete.
+- Checkpoint: `reports/vision-migration.jsonl` — 2 `batch_start` (both `caffeinated: true`,
+  windows recorded for §14b), 128 `readback_ok`, 4 `upload_failed` (all later cleared),
+  3 `throttle` events.
+- Free disk rose 3.3 → 5.6 GB during the run for reasons outside the repo [cause UNVERIFIED —
+  nothing in `data/` changed size]; the migration itself peaked at 24.5 MB.
+
+## What I could not measure
+
+- **The sustained commit budget.** One 429 episode bounds it (~125–130 commits in ~37 min);
+  the recovery window and the hourly quota are not measured — the ~17 h figure assumes the
+  observed bound is the steady state.
+- **Whether the 4 timeout failures cluster by time of day** (all four sit in the same run;
+  no second run at another hour exists).
+- **Why free disk rose 2.3 GB mid-run.** Outside the repo; likely macOS purgeable space, not
+  established.
+- **The `--date` path post-fix, end to end.** The refusal guard is tested; the happy path for a
+  genuinely-missing day has not been rerun since the fixes (it will be, as the 295-day
+  backfill's own first-partition control).
+

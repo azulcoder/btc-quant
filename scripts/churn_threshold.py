@@ -83,6 +83,12 @@ def load_bursts(path: Path) -> list[int]:
     if not ev:
         return []
     load_bursts.n_events = len(ev)   # noqa: B010 — the control needs the raw count
+    # PRE-FIX events only: the control compares against a CLOSED window. Passing the
+    # total count instead coupled the control to "no event ever arrives after the
+    # fix" — it matched while total == pre-fix and broke on the first post-fix
+    # burst (2026-08-05 18:21:40Z), which is exactly when the instrument was
+    # needed. Caught by the always-on control refusing to report.
+    load_bursts.n_events_pre_fix = sum(1 for t in ev if t < FIX_ACTIVE_MS)  # noqa: B010
     out = [ev[0]]
     last = ev[0]
     for t in ev[1:]:
@@ -149,7 +155,7 @@ def main() -> int:
 
     # ---- CONTROL FIRST. Its numbers print beside its verdict, never apart. ----
     print("  CONTROL — reproduce four values measured before this script existed:")
-    passed, lines = run_control(quiet, getattr(load_bursts, 'n_events', 0), bursts)
+    passed, lines = run_control(quiet, getattr(load_bursts, 'n_events_pre_fix', 0), bursts)
     for ln in lines:
         print(ln)
     if not passed:

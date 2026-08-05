@@ -2247,7 +2247,8 @@ Per the standing rule, every look is counted and cannot be reduced later.
 | §20 disk survey (volume census, 2-level breakdown, tick-store retention verification) | 6 | 0 |
 | §21 LockBox defect (stamped-log scan, 3 negative controls on the new gate) | 4 | 0 |
 | §22 vision pipeline control (1 partition x 7 states x2 runs, 3 ZSTD retests, HF repo census, 3-way sha256 comparison) | 9 | 0 |
-| **running total** | **527** | **81** |
+| §23-24 upload-only control (review workflow verdicts, 100-partition series, resume test, 429 bound, churn-instrument bug caught by its own control) | 8 | 0 |
+| **running total** | **535** | **81** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 
