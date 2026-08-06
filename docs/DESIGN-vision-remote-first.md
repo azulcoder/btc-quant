@@ -496,3 +496,43 @@ control, not a result.
   genuinely-missing day has not been rerun since the fixes (it will be, as the 295-day
   backfill's own first-partition control).
 
+---
+
+# §25 — the concurrency race, and the lock that closes it [DIUKUR]
+
+**What happened.** The ledger records three `batch_start` events on 2026-08-06 — `03:15` (n=1944),
+`04:03` (n=1524), `04:50` (n=1107). The third one's `todo` was a filesystem snapshot taken while
+the second was still deleting, so it walked straight into partitions that had been verified,
+uploaded and removed **seconds earlier**: five consecutive `[Errno 2] No such file or directory`,
+then the systemic-abort rule fired and the batch ended having done nothing. Measured overlap on
+`2023-02-04`: deleted at `04:50:18.278Z`, re-attempted at `04:50:57.143Z` — a 39-second gap.
+
+**No data was lost, and the reason is the design rather than luck.** Every delete is gated on a
+same-run verified read-back, and the ledger confirms **1,371 of 1,371 deletes carry all three
+verifications** (`transport_ok`, `content_ok`, `manifest_ok`). All five contested dates were
+checked directly against the hub afterwards and are intact there (0.5–1.4 M rows each), with
+their local manifests still in place — exactly the residue a *successful* delete leaves. The
+loser of the race deletes nothing; it can only fail to find a file.
+
+**What it did cost** was honesty of the record: `upload_failed` is the wrong name for "the file
+was already gone", and five of those inflate the failure count with something that is not a
+failure of uploading at all.
+
+**Two fixes, both narrow:**
+
+1. **`SingleRun` PID lock** (`reports/.vision-migration.lock`) — a second run REFUSES to start
+   while a live PID holds it, and a lock whose PID is gone is reported and cleared rather than
+   blocking forever. `--plan` never takes the lock, since planning touches nothing.
+2. **`vanished_before_processing`** — a distinct terminal state for a partition that disappeared
+   between the snapshot and its turn. It does **not** count toward the systemic-abort rule, which
+   exists to catch a broken remote, not a stale list.
+
+**Both paths controlled** [DIUKUR]: a lock holding a live PID produces `REFUSED` naming the pid;
+a lock holding a dead PID is cleared with a printed note. The first control attempt was itself
+flawed — it wrote the PID of a `python3 -c` process that had already exited, so it exercised the
+stale-lock path while appearing to test refusal. Re-run against a genuinely live process.
+
+**Method note, recorded because it bit twice today:** a shell pipeline reports the exit code of
+its LAST stage, so `python … | grep …` returned 0 while the python had been killed at partition
+800 of 1,524. Migration runs now redirect to a file and record the real exit code separately.
+

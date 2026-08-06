@@ -302,6 +302,45 @@ def migrate_one_local(date: str, uh, dry_run: bool, skip_upload: bool,
         shutil.rmtree(part_tmp, ignore_errors=True)
 
 
+class SingleRun:
+    """One migration at a time. Measured need: three batch_start records appeared in the
+    ledger on 2026-08-06 (03:15 n=1944, 04:03 n=1524, 04:50 n=1107) and the third spent its
+    whole life hitting files the second had just deleted — 5 consecutive Errno 2s, then the
+    abort rule fired. No data was lost (every delete is still gated on a same-run verified
+    read-back, and 1,371/1,371 deletes carry all three verifications), but a stale `todo`
+    snapshot racing a live deleter wastes work and manufactures failures that read like
+    real ones. A PID lock removes the class."""
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def __enter__(self):
+        if self.path.exists():
+            try:
+                pid = int(self.path.read_text().split()[0])
+            except Exception:  # noqa: BLE001 — an unreadable lock is a stale lock
+                pid = -1
+            alive = False
+            if pid > 0:
+                try:
+                    os.kill(pid, 0)
+                    alive = True
+                except OSError:
+                    alive = False
+            if alive:
+                raise SystemExit(
+                    f"REFUSED: another migration is running (pid {pid}, lock {self.path}).\n"
+                    "Two concurrent runs race on a stale todo snapshot: the loser deletes\n"
+                    "nothing but records Errno 2 failures that look like real ones.")
+            print(f"  stale lock from pid {pid} removed (process is gone)")
+            self.path.unlink(missing_ok=True)
+        self.path.write_text(f"{os.getpid()} {now_iso()}\n")
+        return self
+
+    def __exit__(self, *exc):
+        self.path.unlink(missing_ok=True)
+
+
 def run_batch(a, uh) -> int:
     states = load_states()
     all_parts = list_local_partitions(a.order)
@@ -393,12 +432,21 @@ def run_batch(a, uh) -> int:
                                             throttle_log=throttle_log,
                                             chunk_up_s=per_part_up,
                                             chunk_size=len(need_upload))
+                except FileNotFoundError as e:
+                    # The partition disappeared between the todo snapshot and now — the
+                    # signature of a concurrent run (now prevented by the lock) or of a
+                    # manual delete. It is NOT an upload failure and must not count toward
+                    # the systemic-abort rule, which exists to catch a broken remote.
+                    rec = {"ts": now_iso(), "date": d, "state": "vanished_before_processing",
+                           "err": str(e)[:200]}
                 except Exception as e:  # noqa: BLE001 — one partition must not kill the batch
                     rec = {"ts": now_iso(), "date": d, "state": "upload_failed",
                            "err": str(e)[:200]}
                 append_state(rec)
                 recs.append(rec)
                 ok = rec["state"] in ("readback_ok", "deleted")
+                if rec["state"] == "vanished_before_processing":
+                    continue        # neither success nor systemic failure
                 consec_fail = 0 if ok else consec_fail + 1
                 rate = rec.get("mb", 0) / rec["up_s"] if rec.get("up_s") else 0
                 print(f"  [{i:>4}/{len(todo)}] {d}  {rec['state']:<22} "
@@ -569,10 +617,13 @@ def main() -> int:
                  "(a flag advertised as 'no network' must never reach the fetch path)")
 
     uh = _load("upload_hf", REPO / "scripts" / "upload_hf.py")
-    if a.date:
-        iv = _load("ingest_vision", REPO / "scripts" / "ingest_vision.py")
-        return run_single(a, iv, uh)
-    return run_batch(a, uh)
+    if a.plan:                      # planning never touches the network or the lock
+        return run_batch(a, uh)
+    with SingleRun(REPO / "reports" / ".vision-migration.lock"):
+        if a.date:
+            iv = _load("ingest_vision", REPO / "scripts" / "ingest_vision.py")
+            return run_single(a, iv, uh)
+        return run_batch(a, uh)
 
 
 if __name__ == "__main__":
