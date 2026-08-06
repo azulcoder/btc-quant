@@ -1,26 +1,26 @@
 # HANDOFF — generated, do not hand-edit
 
-**Generated 2026-08-06T07:20:06Z by `make handoff`.** Every field below is read from a source; an
+**Generated 2026-08-06T08:31:57Z by `make handoff`.** Every field below is read from a source; an
 unreadable source says `UNKNOWN` rather than carrying a stale value forward. Hand-editing
 this file defeats its purpose — regenerate it instead (`make gate` does so automatically).
 
 ## Commit
 
-- `2c5f143` — Vision archive is remote-first: 2,084 verified deletes, migration closed
-- authored 2026-08-06T14:01:37+07:00 · working tree **dirty** · unpushed commits: 2
+- `311f126` — Land the Hasbrouck extractions, verified independently — and correct my own two errors
+- authored 2026-08-06T14:20:27+07:00 · working tree **dirty** · unpushed commits: 3
 - public repo: <https://github.com/azulcoder/btc-quant> — a web session can fetch it directly
 
 ## State [all values generated this run]
 
 | field | value |
 |---|---|
-| collector `/health` | legs 16/16 · writer running · rows_dropped_error 0 · uptime 4.4 h |
+| collector `/health` | legs 16/16 · writer running · rows_dropped_error 0 · uptime 5.6 h |
 | last GREEN gate | GREEN at 2026-08-06T04:26:13Z on cf77e9e (an EARLIER commit) · UNKNOWN |
 | look counter (owner: `docs/EDA-microstructure-001.md`) | 557 diagnostic / 81 predictive |
 | vision partitions still local | 0 |
 | migration states | {'readback_ok': 128, 'upload_failed': 9, 'deleted': 2084} |
 | migration last record | 2019-12-31 -> deleted @ 2026-08-06T06:57:33.556Z |
-| disk free | 23.9 GB |
+| disk free | 23.5 GB |
 | recorded damage (date, prints) | 2026-08-03 28,428 · 2026-08-04 21,706 · 2026-08-05 1,744 |
 
 **Who may raise the look counter:** only a session that actually ran the look, in the same

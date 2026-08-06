@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hasbrouck estimators on simulated series — btc-quant</title>
+<meta name="description" content="Six panels checking btcquant/hasbrouck.py against planted truth on simulated series. No real market data.">
+<style>
+:root{
+  color-scheme:light;
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --rule:rgba(11,11,11,.12); --accent:#2a78d6;
+  --accent-soft:rgba(42,120,214,.16); --good:#0ca30c; --warn:#fab219; --serious:#ec835a;
+  --crit:#d03b3b; --band:rgba(42,120,214,.18);
+}
+@media (prefers-color-scheme:dark){
+  :root:where(:not([data-theme="light"])){
+    color-scheme:dark;
+    --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --axis:#383835; --rule:rgba(255,255,255,.14); --accent:#3987e5;
+    --accent-soft:rgba(57,135,229,.22); --band:rgba(57,135,229,.24);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --rule:rgba(255,255,255,.14); --accent:#3987e5;
+  --accent-soft:rgba(57,135,229,.22); --band:rgba(57,135,229,.24);
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--page); color:var(--ink);
+  font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;
+  overflow-x:hidden;
+}
+.wrap{max-width:1180px; margin:0 auto; padding:28px 20px 80px}
+h1{font-size:26px; line-height:1.25; margin:0 0 6px; letter-spacing:-.01em}
+h2{font-size:18px; margin:0 0 10px; display:flex; align-items:baseline; gap:10px}
+h3{font-size:14px; margin:22px 0 8px; color:var(--ink2); text-transform:uppercase;
+   letter-spacing:.06em}
+p{margin:0 0 10px}
+a{color:var(--accent)}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.92em}
+.sub{color:var(--ink2); font-size:14px; margin:0 0 4px}
+.topbar{display:flex; flex-wrap:wrap; gap:14px; align-items:flex-start;
+        justify-content:space-between; margin-bottom:18px}
+.themer{display:flex; gap:0; border:1px solid var(--rule); border-radius:7px; overflow:hidden}
+.themer button{background:transparent; border:0; color:var(--ink2); font:inherit; font-size:12px;
+  padding:5px 10px; cursor:pointer; border-right:1px solid var(--rule)}
+.themer button:last-child{border-right:0}
+.themer button:hover{background:var(--accent-soft); color:var(--ink)}
+.banner{border:1px solid var(--rule); border-left:3px solid var(--accent); background:var(--surface);
+  border-radius:8px; padding:14px 16px; margin:0 0 22px}
+.banner strong{letter-spacing:.02em}
+.panel{background:var(--surface); border:1px solid var(--rule); border-radius:10px;
+  padding:18px 18px 14px; margin:0 0 20px}
+.pid{display:inline-block; min-width:1.6em; font:600 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:var(--surface); background:var(--ink2); padding:5px 7px; border-radius:5px}
+.planted{font-size:13.5px; color:var(--ink2); border-left:2px solid var(--accent);
+  padding-left:12px; margin:0 0 14px}
+.body{display:grid; grid-template-columns:minmax(0,1fr) minmax(15rem,19rem); gap:22px;
+  align-items:start}
+@media (max-width:960px){ .body{grid-template-columns:minmax(0,1fr)} }
+.figure{min-width:0}
+.rail{font-size:13.5px; color:var(--ink2); border-left:1px solid var(--rule); padding-left:16px;
+  position:sticky; top:16px}
+.rail h4{margin:0 0 6px; font-size:11px; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--muted)}
+.rail p{margin:0 0 10px}
+.rail .concl{color:var(--ink); font-weight:600}
+@media (max-width:960px){ .rail{position:static; border-left:0; border-top:1px solid var(--rule);
+  padding:14px 0 0} }
+.scroll{overflow-x:auto; margin:0 0 12px; border:1px solid var(--rule); border-radius:8px}
+table{border-collapse:collapse; width:100%; min-width:max-content; font-size:13px}
+th,td{padding:7px 10px; text-align:left; border-bottom:1px solid var(--rule); white-space:nowrap}
+thead th{background:var(--page); font-weight:600; font-size:11.5px; letter-spacing:.04em;
+  text-transform:uppercase; color:var(--ink2); position:sticky; top:0}
+tbody tr:last-child td{border-bottom:0}
+td.n,th.n{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-variant-numeric:tabular-nums; text-align:right}
+tr.hi td{background:var(--accent-soft)}
+.v{display:inline-block; font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  padding:4px 6px; border-radius:4px; border:1px solid currentColor; white-space:nowrap}
+.v-ok{color:var(--good)} .v-warn{color:var(--serious)} .v-abstain{color:var(--accent)}
+.v-fail{color:var(--crit)}
+.tag{font:600 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--muted);
+  letter-spacing:.02em; white-space:nowrap}
+.t-diukur{color:var(--good)} .t-disimpulkan{color:var(--accent)}
+.t-diasumsikan{color:var(--serious)} .t-unverified{color:var(--crit)}
+pre.eq{background:var(--page); border:1px solid var(--rule); border-radius:8px; padding:12px 14px;
+  overflow-x:auto; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:12.5px; line-height:1.5; margin:0 0 12px}
+.fig{width:100%; height:auto; display:block; margin:4px 0 10px}
+.fig .axis{stroke:var(--axis); stroke-width:1}
+.fig .grid{stroke:var(--grid); stroke-width:1}
+.fig .tick{stroke:var(--axis); stroke-width:1}
+.fig .axis-lab{fill:var(--muted); font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+.fig .axis-cap{fill:var(--ink2); font:12px system-ui,sans-serif}
+.fig .band{fill:var(--band); stroke:var(--accent); stroke-width:2}
+.fig .band-lab{fill:var(--ink2); font:11px system-ui,sans-serif}
+.fig .truth{stroke:var(--ink); stroke-width:2}
+.fig .edge{stroke:var(--accent); stroke-width:2; stroke-dasharray:4 3}
+.fig .mark-lab{font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+.fig .truth-lab{fill:var(--ink)}
+.fig .edge-lab{fill:var(--accent)}
+.fig .path{fill:none; stroke:var(--accent); stroke-width:2; stroke-linejoin:round}
+.fig .dot{fill:var(--accent); stroke:var(--surface); stroke-width:2}
+.fig .hit{fill:transparent; stroke:none}
+.fig .target{stroke:var(--ink2); stroke-width:1; stroke-dasharray:5 4}
+.fig .target-lab{fill:var(--ink2); font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+.fig .pt-lab{fill:var(--ink); font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+.note{font-size:12.5px; color:var(--muted); margin:0 0 10px}
+.legend{display:flex; flex-wrap:wrap; gap:14px; font-size:12px; color:var(--ink2); margin:10px 0 0}
+footer{border-top:1px solid var(--rule); margin-top:34px; padding-top:20px; font-size:13.5px;
+  color:var(--ink2)}
+footer h2{font-size:16px; color:var(--ink)}
+footer ul{margin:0 0 12px; padding-left:20px}
+footer li{margin:0 0 6px}
+.stack{display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(230px,1fr))}
+.kv{border:1px solid var(--rule); border-radius:8px; padding:12px 14px; background:var(--page)}
+.kv .k{font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--muted)}
+.kv .val{font:600 19px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-variant-numeric:tabular-nums; margin:4px 0 2px}
+.kv .cap{font-size:12px; color:var(--ink2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="topbar">
+  <div>
+    <h1>Microstructure estimators, checked against planted truth</h1>
+    <p class="sub"><code>btcquant/hasbrouck.py</code> &middot; six panels, six simulated worlds
+    &middot; generated by <code>scripts/hasbrouck_demo.py</code></p>
+  </div>
+  <div class="themer" role="group" aria-label="colour theme">
+    <button type="button" data-set-theme="auto" aria-pressed="true">auto</button>
+    <button type="button" data-set-theme="light" aria-pressed="false">light</button>
+    <button type="button" data-set-theme="dark" aria-pressed="false">dark</button>
+  </div>
+</div>
+
+<div class="banner">
+  <p><strong>EVERY SERIES ON THIS PAGE IS SIMULATED.</strong> No real market data was read to
+  build it: no <code>data/</code>, no <code>hf://</code>, no tick store, no LockBox. Each panel
+  states the truth that was planted before the estimator ran, so agreement can be judged rather
+  than taken. This page adds <strong>zero</strong> to the look counter.</p>
+  <p class="note" style="margin:0">Model, in log price (1e-4 = 1 bps), t in trade time:</p>
+  <pre class="eq">m_t  = m_&#123;t-1&#125; + w_t          efficient price, a random walk
+w_t  = lambda*q_t + u_t       trades carry information
+p_t  = m_t + c*q_t            observed transaction price
+dp_t = -c*q_&#123;t-1&#125; + (c+lambda)*q_t + u_t
+
+gamma_0 = c^2 + s^2 + su^2,  gamma_1 = -c*s,  gamma_k = 0 (k &gt;= 2),  s := c + lambda
+sigma2_w = lambda^2 + su^2 = gamma_0 + 2*gamma_1     &lt;- identified; c, lambda, su^2 are NOT</pre>
+  <p style="margin:0">Planted for panels A, B and F: c = 4.0000e-04 (4.000 bps),
+  lambda = 3.0000e-04, sigma_u = 2.0000e-04, n = 400,000, seed 20260806
+  <span class="tag t-diasumsikan">[DIASUMSIKAN]</span>. Deterministic: same seed, same sample sizes, no clock in the output, so
+  re-running the generator reproduces this file byte for byte.</p>
+  <div class="legend">
+    <span><span class="tag t-diukur">[DIUKUR]</span> measured on the simulated series</span>
+    <span><span class="tag t-disimpulkan">[DISIMPULKAN]</span> derived from the planted parameters</span>
+    <span><span class="tag t-diasumsikan">[DIASUMSIKAN]</span> chosen by the script</span>
+    <span><span class="tag t-unverified">[UNVERIFIED]</span> claimed, no checker on this machine</span>
+  </div>
+</div>
+
+<section class="panel">
+  <h2><span class="pid">&#8226;</span>What is on the bench</h2>
+  <div class="scroll"><table class=""><thead><tr><th class="">id</th><th class="">estimator</th><th class="">function</th><th class="">status</th></tr></thead><tbody><tr><td class="">E1</td><td class="">Roll spread estimator</td><td class=""><code>roll</code></td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">E2</td><td class="">gamma_0 + 2*gamma_1, gated</td><td class=""><code>sigma2_w_ma1</code></td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">E3</td><td class="">Wold theta(1)^2 sigma2_eps</td><td class=""><code>sigma2_w_wold</code></td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">E4</td><td class="">long-horizon variance ratio</td><td class=""><code>sigma2_w_variance_ratio</code></td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">E5</td><td class="">pricing-error lower bound</td><td class=""><code>pricing_error_lower_bound</code></td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">E8</td><td class="">GMM / MA(q) moment estimator</td><td class="">&mdash;</td><td class=""><span class="tag t-diasumsikan">deliberately not written</span></td></tr><tr><td class="">E9</td><td class="">sigma2_eps / phi(1)^2, AR(K)</td><td class=""><code>sigma2_w_ar</code></td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">E10</td><td class="">cumulative impulse response</td><td class=""><code>cumulative_impulse_response</code></td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">E11</td><td class="">subsampling standard error</td><td class=""><code>subsample_estimate</code></td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">&mdash;</td><td class="">MA(1) order gate</td><td class=""><code>ma1_order_gate</code></td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">&mdash;</td><td class="">identified interval for c</td><td class=""><code>identified_interval_c</code></td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">E6</td><td class="">price-trade VAR, lambda, R^2_w</td><td class="">&mdash;</td><td class=""><span class="v v-fail">NOT IMPLEMENTED</span></td></tr><tr><td class="">E7</td><td class="">VECM / information share</td><td class="">&mdash;</td><td class=""><span class="v v-fail">NOT IMPLEMENTED</span></td></tr></tbody></table></div>
+  <p class="note">Every function in the module's <code>__all__</code> is exercised on this page.
+  E6 and E7 are not implemented at all; E8 is deliberately not written — a hand-rolled MA(q) root
+  finder has 2^q admissible parameter sets and only one invertible, and the AR route (E9) reaches
+  the same quantity without needing the MA order.</p>
+</section>
+
+
+<section class="panel" id="a">
+  <h2><span class="pid">A</span>Four estimators, three independent routes</h2>
+  <p class="planted"><strong>Planted truth.</strong> One generalized-Roll series, n = 400,000. The planted sigma2_w = lambda^2 + sigma_u^2 = 1.3000e-07 <span class="tag t-disimpulkan">[DISIMPULKAN]</span>. No estimator is told any of it.</p>
+  <div class="body">
+    <div class="figure"><div class="scroll"><table class=""><thead><tr><th class="">route</th><th class="">function</th><th class="">expression</th><th class="n">sigma2_w</th><th class="n">rel. error</th><th class="">verdict</th></tr></thead><tbody><tr><td class=""><strong>E2</strong></td><td class=""><code>sigma2_w_ma1</code></td><td class="">gamma_0 + 2*gamma_1<br><span class="tag">gated on the MA(1) order test</span></td><td class="n">1.2971e-07</td><td class="n">-0.22%</td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class=""><strong>E3</strong></td><td class=""><code>sigma2_w_wold</code></td><td class="">theta(1)^2 * sigma2_eps<br><span class="tag">invertible Wold root</span></td><td class="n">1.2971e-07</td><td class="n">-0.22%</td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class=""><strong>E4</strong></td><td class=""><code>sigma2_w_variance_ratio</code></td><td class="">intercept of Var(dp_k)/k on 1/k<br><span class="tag">intercept only, never the slope</span></td><td class="n">1.2928e-07</td><td class="n">-0.56%</td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class=""><strong>E9</strong></td><td class=""><code>sigma2_w_ar</code></td><td class="">sigma2_eps / phi(1)^2<br><span class="tag">AR(30) truncation, Yule-Walker</span></td><td class="n">1.2986e-07</td><td class="n">-0.11%</td><td class=""><span class="v v-ok">OK</span></td></tr></tbody></table></div>
+<div class="stack">
+  <div class="kv"><div class="k">planted sigma2_w</div><div class="val">1.3000e-07</div>
+    <div class="cap">lambda^2 + sigma_u^2 <span class="tag t-disimpulkan">[DISIMPULKAN]</span></div></div>
+  <div class="kv"><div class="k">spread across routes</div><div class="val">5.8582e-10</div>
+    <div class="cap">0.45% of the planted value <span class="tag t-diukur">[DIUKUR]</span></div></div>
+  <div class="kv"><div class="k">E11 subsampling SE</div><div class="val">1.832e-09</div>
+    <div class="cap">1.41% of the mean, 20 blocks,
+    0 skipped <span class="tag t-diukur">[DIUKUR]</span></div></div>
+</div>
+<p class="note">E11 <code>subsample_estimate</code> over 20 blocks of the same series, E9 per block:
+mean 1.2979e-07 against the planted 1.3000e-07. The whole spread across the four
+routes is smaller than one SE of any single one of them, which is what "they agree" has to mean
+before it means anything.</p>
+<p class="note">Order gate on this series: <span class="v v-ok">OK</span>
+Q = 6.18 against the chi2(9) 95% point 19.50 <span class="tag t-diukur">[DIUKUR]</span>.
+E2 is only allowed to speak because that test passed.</p></div>
+    <aside class="rail">
+<h4>Reading</h4>
+<p class="concl">Three independent routes and one algebraic duplicate land within
+0.56% of a value none of them was told.</p>
+<p>That is the evidence for the implementation. Each route uses a different part of the series:
+E2/E3 the first two autocovariances, E4 the variance of long-horizon differences, E9 a
+30-lag autoregression. A coding error would have to be shared by all three to survive this.</p>
+<p><strong>The honest correction to the headline:</strong> E2 and E3 are not independent. They
+differ by 0.00e+00 here, and over 20,000 random admissible moment pairs the worst
+relative gap is 2.0e-12 <span class="tag t-diukur">[DIUKUR]</span> — a machine-precision identity, not
+an agreement. For an MA(1) the two Wold roots satisfy s2_a + s2_b = gamma_0 and s2_a*s2_b =
+gamma_1^2, so theta(1)^2*sigma2_eps collapses to gamma_0 + 2*gamma_1 exactly.</p>
+<p>So this panel shows <strong>three</strong> independent routes, not four. E3 earns its place by
+carrying the invertibility choice and by abstaining where E2's gate would not fire, not by being
+a second opinion.</p></aside>
+  </div>
+</section>
+
+
+<section class="panel" id="b">
+  <h2><span class="pid">B</span>The identified interval</h2>
+  <p class="planted"><strong>Planted truth.</strong> Same series. Planted c = 4.0000e-04, lambda = 3.0000e-04, so c+lambda = 7.0000e-04 and the geometric mean sqrt(c*(c+lambda)) = 5.2915e-04 <span class="tag t-disimpulkan">[DISIMPULKAN]</span>.</p>
+  <div class="body">
+    <div class="figure"><svg class="fig" viewBox="0 0 760 200" role="img"
+     aria-labelledby="ivt ivd" preserveAspectRatio="xMidYMid meet">
+  <title id="ivt">The identified set for the half-spread c</title>
+  <desc id="ivd">A horizontal bar from the E5 bound at 3.7963 bps to the Roll estimate at
+  5.2995 bps. The planted c of 4.000 bps lies inside it; the planted c+lambda of
+  7.000 bps lies outside to the right.</desc>
+  <line class="axis" x1="78.0" y1="112" x2="720.0" y2="112"/>
+  <line class="tick" x1="93.3" y1="112" x2="93.3" y2="118"/><text class="axis-lab" x="93.3" y="132" text-anchor="middle">3.5</text><line class="tick" x1="169.7" y1="112" x2="169.7" y2="118"/><text class="axis-lab" x="169.7" y="132" text-anchor="middle">4.0</text><line class="tick" x1="246.1" y1="112" x2="246.1" y2="118"/><text class="axis-lab" x="246.1" y="132" text-anchor="middle">4.5</text><line class="tick" x1="322.6" y1="112" x2="322.6" y2="118"/><text class="axis-lab" x="322.6" y="132" text-anchor="middle">5.0</text><line class="tick" x1="399.0" y1="112" x2="399.0" y2="118"/><text class="axis-lab" x="399.0" y="132" text-anchor="middle">5.5</text><line class="tick" x1="475.4" y1="112" x2="475.4" y2="118"/><text class="axis-lab" x="475.4" y="132" text-anchor="middle">6.0</text><line class="tick" x1="551.9" y1="112" x2="551.9" y2="118"/><text class="axis-lab" x="551.9" y="132" text-anchor="middle">6.5</text><line class="tick" x1="628.3" y1="112" x2="628.3" y2="118"/><text class="axis-lab" x="628.3" y="132" text-anchor="middle">7.0</text><line class="tick" x1="704.7" y1="112" x2="704.7" y2="118"/><text class="axis-lab" x="704.7" y="132" text-anchor="middle">7.5</text>
+  <text class="axis-cap" x="399" y="172" text-anchor="middle">half-spread, bps of log price (1e-4 = 1 bps)</text>
+  <rect class="band" x="138.6" y="62" width="229.8" height="34" rx="4"><title>identified set for c: 3.7963 to 5.2995 bps</title></rect>
+  <text class="band-lab" x="253.5" y="84" text-anchor="middle">identified set for c</text>
+  <line class="truth" x1="169.7" y1="48" x2="169.7" y2="100"/><text class="mark-lab truth-lab" x="169.7" y="40" text-anchor="middle">planted c = 4.000</text><circle class="hit" cx="169.7" cy="79" r="12"><title>planted c = 4.000</title></circle>
+  <line class="truth" x1="628.3" y1="48" x2="628.3" y2="100"/><text class="mark-lab truth-lab" x="628.3" y="40" text-anchor="middle">planted c+lambda = 7.000</text><circle class="hit" cx="628.3" cy="79" r="12"><title>planted c+lambda = 7.000</title></circle>
+  <line class="edge" x1="138.6" y1="58" x2="138.6" y2="124"/><text class="mark-lab edge-lab" x="138.6" y="148" text-anchor="middle">E5 bound = 3.7963</text><circle class="hit" cx="138.6" cy="79" r="12"><title>E5 bound = 3.7963</title></circle>
+  <line class="edge" x1="368.4" y1="58" x2="368.4" y2="124"/><text class="mark-lab edge-lab" x="368.4" y="148" text-anchor="middle">Roll = 5.2995</text><circle class="hit" cx="368.4" cy="79" r="12"><title>Roll = 5.2995</title></circle>
+</svg><div class="scroll"><table class=""><thead><tr><th class="">quantity</th><th class="">function</th><th class="n">value (variance)</th><th class="n">as bps</th><th class="">verdict</th></tr></thead><tbody><tr><td class="">E5 lower bound on sigma2_s</td><td class=""><code>pricing_error_lower_bound</code></td><td class="n">1.4412e-07</td><td class="n">3.796</td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">c^2 lower end of the identified set</td><td class=""><code>identified_interval_c</code></td><td class="n">1.4412e-07</td><td class="n">3.796</td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">c^2 upper end (= -gamma_1, Roll)</td><td class=""><code>identified_interval_c</code></td><td class="n">2.8085e-07</td><td class="n">5.300</td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">Roll half-spread estimate</td><td class=""><code>roll</code></td><td class="n">2.8085e-07</td><td class="n">5.300</td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">planted c</td><td class="">&mdash;</td><td class="n">1.6000e-07</td><td class="n">4.000</td><td class=""><span class="tag t-diasumsikan">[DIASUMSIKAN]</span></td></tr><tr><td class="">planted c + lambda</td><td class="">&mdash;</td><td class="n">4.9000e-07</td><td class="n">7.000</td><td class=""><span class="tag t-diasumsikan">[DIASUMSIKAN]</span></td></tr><tr><td class="">geometric mean sqrt(c*(c+lambda))</td><td class="">&mdash;</td><td class="n">2.8000e-07</td><td class="n">5.292</td><td class=""><span class="tag t-disimpulkan">[DISIMPULKAN]</span></td></tr></tbody></table></div><h3>E5 has to bite in two directions, and it does</h3><div class="scroll"><table class=""><thead><tr><th class="">control series</th><th class="n">c^2</th><th class="n">bound / c^2</th><th class="n">measured</th><th class="">must be</th><th class="">verdict</th></tr></thead><tbody><tr><td class="">private information only (sigma_u = 0)</td><td class="n">1.6000e-07</td><td class="n">1.0000x<br><span class="tag">closed form</span></td><td class="n">0.9778x<br><span class="tag">n = 300,000</span></td><td class="">exactly c^2</td><td class=""><span class="v v-ok">OK</span></td></tr><tr><td class="">public information only (lambda = 0)</td><td class="n">1.6000e-07</td><td class="n">0.6096x<br><span class="tag">closed form</span></td><td class="n">0.5975x<br><span class="tag">n = 300,000</span></td><td class="">strictly below c^2</td><td class=""><span class="v v-ok">OK</span></td></tr></tbody></table></div><p class="note">The population bound is exactly c^2 when sigma_u = 0 — gamma_0^2 - 4*gamma_1^2 collapses to (s^2 - c^2)^2 there, so the square root is exact and the two terms cancel <span class="tag t-disimpulkan">[DISIMPULKAN]</span>. The measured column carries ordinary sampling error; what the control establishes is the SEPARATION between the two cases (0.978x against 0.597x), which no implementation that confuses them could produce.</p></div>
+    <aside class="rail">
+<h4>Reading</h4>
+<p class="concl">c is identified only up to [3.7963, 5.2995] bps.
+The planted 4.000 bps is inside: yes <span class="tag t-diukur">[DIUKUR]</span>.</p>
+<p>A point estimate of c is a point chosen by an assumption. The Roll number is the point the
+assumption lambda = 0 picks out; the E5 bound is the point sigma2_u = 0 picks out. Nothing in
+(gamma_0, gamma_1) can choose between them, because both ends generate the same two moments.</p>
+<p><strong>Roll is the geometric mean of c and c+lambda.</strong> gamma_1 = -c*(c+lambda), so
+sqrt(-gamma_1) = sqrt(c*(c+lambda)) = 5.2915 bps against the measured
+5.2995 bps <span class="tag t-diukur">[DIUKUR]</span>. By AM-GM it sits between its two terms, so it
+overstates the half-spread and understates the full spread — one number wrong in two directions
+at once.</p>
+<p>The interval costs nothing: both ends come from gamma_0 and gamma_1, which were computed
+anyway. Reporting the point instead of the interval buys precision that is not there.</p>
+<p><strong>Not calibrated to BTCUSDT.</strong> These planted values are the VERIFY §4 fixtures.
+This repo's own measurement puts the median perp spread at one tick, 0.0157 bps <span class="tag t-diukur">[DIUKUR]</span> —
+around 400x tighter, and a regime where discretisation binds for the whole Roll family
+(VERIFY §6). The interval shown here is a property of the estimator, not a claim about the
+instrument.</p></aside>
+  </div>
+</section>
+
+
+<section class="panel" id="c">
+  <h2><span class="pid">C</span>Why the gate exists</h2>
+  <p class="planted"><strong>Planted truth.</strong> Four true MA(3) processes, sigma_eps = 1.0000e-04, n = 300,000 each. sigma2_w = theta(1)^2*sigma2_eps is known exactly for all four <span class="tag t-disimpulkan">[DISIMPULKAN]</span>; the MA(1) premise E2 rests on is false for all four by construction.</p>
+  <div class="body">
+    <div class="figure"><div class="scroll"><table class=""><thead><tr><th class="">MA(3) theta</th><th class="n">sigma2_w true<br>closed form</th><th class="n">correct order<br>g0+2*(g1+g2+g3)</th><th class="n">E2 anyway<br>g0+2*g1, forced</th><th class="n">ratio to truth<br>closed form</th><th class="">verdict</th></tr></thead><tbody><tr><td class=""><code>[0.6, -0.3, 0.15]</code><br><span class="tag">the s9-s12 fixture</span></td><td class="n">2.1025e-08</td><td class="n">2.1129e-08</td><td class="n">2.2269e-08</td><td class="n">1.057x<br><span class="tag">measured 1.059x</span></td><td class=""><span class="v v-ok">OK</span> <span class="tag">forced</span><br><span class="v v-abstain">ABSTAIN</span> <span class="tag">gate on</span></td></tr><tr><td class=""><code>[0.6, 0.3, 0.15]</code><br><span class="tag">all positive</span></td><td class="n">4.2025e-08</td><td class="n">4.2081e-08</td><td class="n">3.1329e-08</td><td class="n">0.743x<br><span class="tag">measured 0.745x</span></td><td class=""><span class="v v-ok">OK</span> <span class="tag">forced</span><br><span class="v v-abstain">ABSTAIN</span> <span class="tag">gate on</span></td></tr><tr><td class=""><code>[-0.6, -0.3, -0.15]</code><br><span class="tag">theta(1) ~ 0, silent</span></td><td class="n">2.5000e-11</td><td class="n">2.0328e-11<br><span class="tag t-unverified">below noise floor</span></td><td class="n">7.2100e-09</td><td class="n">289.0x<br><span class="tag">measured 288.4x</span></td><td class=""><span class="v v-ok">OK</span> <span class="tag">forced</span><br><span class="v v-abstain">ABSTAIN</span> <span class="tag">gate on</span></td></tr><tr><td class=""><code>[-0.6, 0.3, -0.15]</code><br><span class="tag">alternating, negative</span></td><td class="n">3.0250e-09</td><td class="n">3.0453e-09</td><td class="n">-1.7242e-09</td><td class="n">-0.587x<br><span class="tag">measured -0.570x</span></td><td class=""><span class="v v-fail">FAIL</span> <span class="tag">forced</span><br><span class="v v-abstain">ABSTAIN</span> <span class="tag">gate on</span></td></tr></tbody></table></div>
+<p class="note">Closed form is the authority here: gamma_h for an MA(3) is exact, so the ratio
+column labelled "closed form" has no sampling error at all. The measured column confirms it on
+300,000 draws per pattern <span class="tag t-diukur">[DIUKUR]</span>. Row 3's correct-order estimate is honestly useless —
+with theta(1) = -0.05 the true sigma2_w is 2.5000e-11, which sits below the
+sampling noise of any estimator at this n. That is the point of the row: the wrong formula returns
+a confident 7.2100e-09 there.</p>
+<h3>What the gate costs — the control this repo's rules require</h3>
+<p class="note">A verifier has to be tested on cases known to PASS, not only on cases known to
+fail (blindness class I). 400 independent draws of a <em>genuinely</em> MA(1) series,
+the same generalized-Roll process as panel A, n = 100,000 each.</p>
+<div class="stack">
+  <div class="kv"><div class="k">gate refuses a true MA(1)</div>
+    <div class="val">4.0%</div>
+    <div class="cap">16/400 seeds, against a nominal
+    5% +/- 1.1% <span class="tag t-diukur">[DIUKUR]</span></div></div>
+  <div class="kv"><div class="k">mean of Q</div>
+    <div class="val">8.69 &plusmn; 0.26</div>
+    <div class="cap">chi2(9) mean is 9.00 — the centring is right <span class="tag t-diukur">[DIUKUR]</span></div></div>
+  <div class="kv"><div class="k">variance of Q</div>
+    <div class="val">26.1 &plusmn; 2.4</div>
+    <div class="cap">chi2(9) variance is 18.0; Bartlett predicts
+    30.4 <span class="tag t-disimpulkan">[DISIMPULKAN]</span></div></div>
+</div>
+<p class="note">The mechanism, in closed form: under an MA(1) the sample autocorrelations at
+lags 2..10 are <em>correlated</em> — Bartlett gives adjacent correlation
+2*rho_1/(1+2*rho_1^2) = -0.611 at rho_1 = -0.4058, and
+0.124 two lags apart. Summing their squares as if they were independent
+keeps the mean (tr(R) = 9) but inflates the variance to 2*tr(R^2) = 30.4.
+Measured: 26.1 &plusmn; 2.4 <span class="tag t-diukur">[DIUKUR]</span> — within
+1.8 SE of the prediction and
+3.4
+SE from chi2(9)'s 18.0. The rejection rate is the blunter and more direct measurement, and it is
+-0.9 SE above nominal: the chi2(9) 95% point
+16.90 sits too low, so the gate refuses about 4% of the series it
+should accept.</p></div>
+    <aside class="rail">
+<h4>Reading</h4>
+<p class="concl">On a true MA(3), gamma_0 + 2*gamma_1 is out by
+1.06x, 0.74x,
+289.0x and -0.59x — the last
+one a negative variance.</p>
+<p>The refusal is what makes that legible. Every one of these four returns ABSTAIN when the gate
+is left on; the numbers above exist only because <code>force=True</code> switched it off, which
+is a test affordance and never a production path.</p>
+<p>Two failure modes, and only one of them is loud. The alternating pattern returns
+-1.7242e-09, a negative variance, which cannot be missed. The all-negative
+pattern returns a small, positive, plausible 7.2100e-09 that is wrong by a
+factor of 289.0x. Nothing about that number looks wrong.</p>
+<p class="concl">The gate's own error rate is 4.0%, not the 5% it advertises.</p>
+<p>The direction is safe — it refuses work it could have done, rather than passing work it
+should not — and E4 and E9 need no gate at all, so nothing is stranded. But a 5% label on an
+4% test is a claim without a checker, and it now has one.</p></aside>
+  </div>
+</section>
+
+
+<section class="panel" id="d">
+  <h2><span class="pid">D</span>The AR formula failure map</h2>
+  <p class="planted"><strong>Planted truth.</strong> MA(1) processes across theta, sigma_eps = 1.0000e-04, n = 300,000, 5 seeds per point. Planted sigma2_w = (1+theta)^2*sigma2_eps <span class="tag t-disimpulkan">[DISIMPULKAN]</span>.</p>
+  <div class="body">
+    <div class="figure"><div class="scroll"><table><thead><tr><th>theta</th><th class='n'>sigma2_w true</th><th class='n'>s2e / phi(1)^2<br><span class='tag t-diukur'>CORRECT</span></th><th class='n'>s2e / phi(1)<br><span class='tag'>square dropped</span></th><th class='n'>s2e / sum(phi)<br><span class='tag'>both wrong</span></th><th class='n'>s2e / sum(phi)^2<br><span class='tag'>phi(1) misread</span></th></tr></thead><tbody><tr><td class=""><code>-0.8000</code></td><td class="n">4.0000e-10</td><td class="n">0.986x<br><span class="tag">cf 1.000x</span></td><td class="n">4.966x<br><span class="tag">cf 5.000x</span></td><td class="n">-6.196x<br><span class="tag">cf -6.250x</span></td><td class="n">1.536x<br><span class="tag">cf 1.562x</span></td></tr><tr><td class=""><code>-0.4000</code></td><td class="n">3.6000e-09</td><td class="n">1.001x<br><span class="tag">cf 1.000x</span></td><td class="n">1.666x<br><span class="tag">cf 1.667x</span></td><td class="n">-4.178x<br><span class="tag">cf -4.167x</span></td><td class="n">6.304x<br><span class="tag">cf 6.250x</span></td></tr><tr><td class=""><code>-0.1000</code></td><td class="n">8.1000e-09</td><td class="n">0.991x<br><span class="tag">cf 1.000x</span></td><td class="n">1.106x<br><span class="tag">cf 1.111x</span></td><td class="n">-10.667x<br><span class="tag">cf -11.111x</span></td><td class="n">92.753x<br><span class="tag">cf 100.000x</span></td></tr><tr><td class=""><code>+0.1000</code></td><td class="n">1.2100e-08</td><td class="n">0.999x<br><span class="tag">cf 1.000x</span></td><td class="n">0.909x<br><span class="tag">cf 0.909x</span></td><td class="n">9.380x<br><span class="tag">cf 9.091x</span></td><td class="n">108.8x<br><span class="tag">cf 100.000x</span></td></tr><tr><td class=""><code>+0.4000</code></td><td class="n">1.9600e-08</td><td class="n">1.008x<br><span class="tag">cf 1.000x</span></td><td class="n">0.717x<br><span class="tag">cf 0.714x</span></td><td class="n">1.772x<br><span class="tag">cf 1.786x</span></td><td class="n">6.149x<br><span class="tag">cf 6.250x</span></td></tr><tr class="hi"><td class=""><code>+0.6180</code> <strong>&larr; golden</strong></td><td class="n">2.6180e-08</td><td class="n">1.001x<br><span class="tag">cf 1.000x</span></td><td class="n">0.618x<br><span class="tag">cf 0.618x</span></td><td class="n">0.996x<br><span class="tag">cf 1.000x</span></td><td class="n">2.603x<br><span class="tag">cf 2.618x</span></td></tr><tr><td class=""><code>+0.8000</code></td><td class="n">3.2400e-08</td><td class="n">1.008x<br><span class="tag">cf 1.000x</span></td><td class="n">0.557x<br><span class="tag">cf 0.556x</span></td><td class="n">0.690x<br><span class="tag">cf 0.694x</span></td><td class="n">1.544x<br><span class="tag">cf 1.562x</span></td></tr></tbody></table></div>
+<p class="note">Each cell is the ratio to the planted sigma2_w: measured on top (mean of
+5 seeds, n = 300,000, AR(30)) <span class="tag t-diukur">[DIUKUR]</span>, closed form below <span class="tag t-disimpulkan">[DISIMPULKAN]</span>.
+<code>s2e</code> is the AR innovation variance sigma2_eps, and every column divides the same
+<code>s2e</code> by a different reading of the same fitted coefficients — only the divisor changes.
+The closed forms are 1, 1/(1+theta), 1/(theta*(1+theta)) and 1/theta^2 — they hold for any MA(1)
+and are what the measurement is being checked against.</p>
+<div class="stack">
+  <div class="kv"><div class="k">the correct formula, across the sweep</div>
+    <div class="val">0.986&ndash;1.008x</div>
+    <div class="cap">AR(30) at n = 300,000; per-seed sd is about 1.7% <span class="tag t-diukur">[DIUKUR]</span></div></div>
+  <div class="kv"><div class="k">square dropped</div>
+    <div class="val">0.556&ndash;5.000x</div>
+    <div class="cap">crosses 1.0 near theta = 0, so no calibration can rescue it <span class="tag t-disimpulkan">[DISIMPULKAN]</span></div></div>
+  <div class="kv"><div class="k">at theta = (sqrt(5)-1)/2</div>
+    <div class="val">1.0000x</div>
+    <div class="cap">the doubly-wrong reading is EXACTLY right; measured
+    0.996x <span class="tag t-diukur">[DIUKUR]</span></div></div>
+</div></div>
+    <aside class="rail">
+<h4>Reading</h4>
+<p class="concl">A formula that is wrong twice returns the right number at
+theta = 0.618034.</p>
+<p>1/(theta*(1+theta)) equals 1 when theta^2 + theta - 1 = 0, whose invertible root is the
+golden-ratio conjugate. At that point sigma2_eps/sum(phi) — which drops the square
+<em>and</em> reads phi(1) as sum(phi) instead of 1 - sum(phi) — agrees with the truth to within
+the sampling error of the correct formula.</p>
+<p>This has no practical use. It has a rhetorical one, and it is the whole argument for positive
+controls: <strong>"the number came out plausible" is evidence about nothing.</strong> A single-point
+check at the wrong theta would have certified this implementation.</p>
+<p>The rest of the map matters for a different reason. sigma2_eps/sum(phi) is negative for every
+theta &lt; 0 here, which is the bounce-driven case, so the bug looks like it announces itself. It
+does not reliably: VERIFY §5 measures it staying positive on 27.5% of seeds at theta = -0.01.
+That is why <code>sigma2_w_ar</code> checks phi(1) &gt; 0 explicitly instead of waiting for a
+negative number to appear.</p></aside>
+  </div>
+</section>
+
+
+<section class="panel" id="e">
+  <h2><span class="pid">E</span>Negative controls</h2>
+  <p class="planted"><strong>Planted truth.</strong> A pure random walk (c = 0, lambda = 0, sigma_u = 2.0000e-04) and a momentum series (dp_t = 0.35*dp_&#123;t-1&#125; + e_t). Neither contains a spread. The correct output is a refusal <span class="tag t-diasumsikan">[DIASUMSIKAN]</span>.</p>
+  <div class="body">
+    <div class="figure"><div class="scroll"><table class=""><thead><tr><th class="">negative control</th><th class="">sample</th><th class="n">ABSTAIN rate</th><th class="n">expected</th><th class="">verdict</th></tr></thead><tbody><tr><td class="">pure random walk, sqrt(-gamma_1)</td><td class="">200 seeds &times; n = 50,000</td><td class="n">51.0%</td><td class="n">50% &plusmn; 3.5%</td><td class=""><span class="v v-abstain">ABSTAIN</span></td></tr><tr><td class="">momentum AR(1), rho = 0.35</td><td class="">1 series &times; n = 200,000</td><td class="n">100%</td><td class="n">100%</td><td class=""><span class="v v-abstain">ABSTAIN</span></td></tr></tbody></table></div>
+<div class="stack">
+  <div class="kv"><div class="k">what the silent alternative would have printed</div>
+    <div class="val">0.223 bps</div>
+    <div class="cap">median 2*sqrt(|gamma_1|) on the abstaining seeds; worst
+    0.417 bps. The true spread is zero <span class="tag t-diukur">[DIUKUR]</span></div></div>
+  <div class="kv"><div class="k">momentum gamma_1</div>
+    <div class="val">1.605e-08</div>
+    <div class="cap">positive, so sqrt(-gamma_1) has no real solution <span class="tag t-diukur">[DIUKUR]</span></div></div>
+  <div class="kv"><div class="k">E4 slope on a random walk</div>
+    <div class="val">0.18</div>
+    <div class="cap">|mean|/sd over 20 seeds; the true slope is 0 <span class="tag t-diukur">[DIUKUR]</span></div></div>
+</div>
+<p class="note"><strong>The alternative to ABSTAIN is not a missing number, it is a wrong one.</strong>
+Setting c = 0 on the abstaining seeds would report "no spread" on a series that has none — right
+by accident, since the same reflex reports "no spread" whenever gamma_1 happens to come out
+positive on a series that <em>does</em> have one. Taking sqrt(|gamma_1|) instead fabricates a
+median spread of 0.223 bps out of a series with no spread at
+all. Both are silent; neither would fail a test that only checks the output is a number.</p>
+<p class="note">The estimators that do not need a sign stay honest on the same random walk:
+E3 returns theta = +0.00449 and sigma2_w/sigma2_eps =
+1.00899 against a true 1.0 <span class="tag t-diukur">[DIUKUR]</span>, and
+E4's intercept is 4.0208e-08 against the planted 4.0000e-08. E4's slope
+averages -1.69e-09 with sd 9.42e-09 across
+20 seeds — indistinguishable from zero, and a reminder of why the module labels
+it <code>slope_DIAGNOSTIC_ONLY</code> and refuses to derive c from it.</p>
+<p class="note"><code>identified_interval_c</code> refuses the momentum series for the same reason
+Roll does — <span class="v v-abstain">ABSTAIN</span> <em>gamma_1 &gt;= 0 — no spread to bound</em>. E5 does not:
+<code>pricing_error_lower_bound</code> returns <span class="v v-ok">OK</span>
+6.6131e-09 there. That is defensible arithmetic — the bound is on the Wold
+pricing error, which exists for any covariance-stationary series and does not need a spread to be
+defined — but on a trending series the number is not a half-spread and nothing should read it as
+one. Three functions over the same two moments, two refusing and one answering, is worth knowing
+before any of them is pointed at a tape.</p>
+<p class="note">E5's own negative control passes cleanly: on the pure random walk the bound is
+8.032e-13, which is 2.0e-05
+of sigma_u^2 — zero to five decimal places, as it must be when there is no pricing error to
+bound <span class="tag t-diukur">[DIUKUR]</span>.</p></div>
+    <aside class="rail">
+<h4>Reading</h4>
+<p class="concl">On a series with no spread, the Roll estimator refuses
+51.0% of the time and never reports a spread of zero.</p>
+<p>Roughly half is the correct answer, not a shortfall: with c = 0 the sample gamma_1 is a
+coin flip about zero, so half the seeds have no real sqrt(-gamma_1). RULE-EXTRACT-2 makes that
+half a refusal with a reason attached.</p>
+<p>The momentum control is the sharper one. Positive first-order autocovariance is a momentum
+signature, and an estimator that returned sqrt(|gamma_1|) there would report a spread with the
+wrong sign of evidence entirely — reading trend as friction.</p>
+<p><strong>An abstention is a result.</strong> It is the only output here that separates "nothing
+is there" from "nothing was measurable", which is blindness class B and the thing a silent zero
+destroys.</p></aside>
+  </div>
+</section>
+
+
+<section class="panel" id="f">
+  <h2><span class="pid">F</span>Impulse response</h2>
+  <p class="planted"><strong>Planted truth.</strong> The panel-A series again. Planted long-run level response theta(1) = 1 + theta = 0.487702, from the population (gamma_0, gamma_1) of the planted parameters <span class="tag t-disimpulkan">[DISIMPULKAN]</span>.</p>
+  <div class="body">
+    <div class="figure"><svg class="fig" viewBox="0 0 760 272" role="img"
+     aria-labelledby="irt ird" preserveAspectRatio="xMidYMid meet">
+  <title id="irt">Cumulative impulse response of the price level</title>
+  <desc id="ird">The cumulative response starts at 1.00 on impact and settles at about
+  0.4877 by horizon 20, against a planted long run of 0.4877.</desc>
+  <line class="grid" x1="78.0" y1="210.0" x2="720.0" y2="210.0"/><text class="axis-lab" x="68" y="214.0" text-anchor="end">0.00</text><line class="grid" x1="78.0" y1="170.6" x2="720.0" y2="170.6"/><text class="axis-lab" x="68" y="174.6" text-anchor="end">0.25</text><line class="grid" x1="78.0" y1="131.3" x2="720.0" y2="131.3"/><text class="axis-lab" x="68" y="135.3" text-anchor="end">0.50</text><line class="grid" x1="78.0" y1="91.9" x2="720.0" y2="91.9"/><text class="axis-lab" x="68" y="95.9" text-anchor="end">0.75</text><line class="grid" x1="78.0" y1="52.6" x2="720.0" y2="52.6"/><text class="axis-lab" x="68" y="56.6" text-anchor="end">1.00</text>
+  <line class="tick" x1="78.0" y1="210" x2="78.0" y2="216"/><text class="axis-lab" x="78.0" y="232" text-anchor="middle">0</text><line class="tick" x1="206.4" y1="210" x2="206.4" y2="216"/><text class="axis-lab" x="206.4" y="232" text-anchor="middle">4</text><line class="tick" x1="334.8" y1="210" x2="334.8" y2="216"/><text class="axis-lab" x="334.8" y="232" text-anchor="middle">8</text><line class="tick" x1="463.2" y1="210" x2="463.2" y2="216"/><text class="axis-lab" x="463.2" y="232" text-anchor="middle">12</text><line class="tick" x1="591.6" y1="210" x2="591.6" y2="216"/><text class="axis-lab" x="591.6" y="232" text-anchor="middle">16</text><line class="tick" x1="720.0" y1="210" x2="720.0" y2="216"/><text class="axis-lab" x="720.0" y="232" text-anchor="middle">20</text>
+  <line class="axis" x1="78.0" y1="210" x2="720.0" y2="210"/>
+  <line class="target" x1="78.0" y1="133.2" x2="720.0" y2="133.2"/>
+  <text class="target-lab" x="716" y="125.2" text-anchor="end">planted long run theta(1) = 0.4877</text>
+  <polyline class="path" points="78.0,52.6 110.1,133.3 142.2,133.2 174.3,133.3 206.4,133.1 238.5,132.9 270.6,132.9 302.7,133.2 334.8,132.9 366.9,133.1 399.0,133.5 431.1,133.2 463.2,133.5 495.3,133.5 527.4,133.6 559.5,133.1 591.6,133.2 623.7,133.5 655.8,133.5 687.9,133.9 720.0,133.2"/>
+  <circle class="dot" cx="78.0" cy="52.6" r="3"/><circle class="hit" cx="78.0" cy="52.6" r="11"><title>k = 0: cumulative 1.00000</title></circle><circle class="dot" cx="110.1" cy="133.3" r="3"/><circle class="hit" cx="110.1" cy="133.3" r="11"><title>k = 1: cumulative 0.48747</title></circle><circle class="dot" cx="142.2" cy="133.2" r="3"/><circle class="hit" cx="142.2" cy="133.2" r="11"><title>k = 2: cumulative 0.48821</title></circle><circle class="dot" cx="174.3" cy="133.3" r="3"/><circle class="hit" cx="174.3" cy="133.3" r="11"><title>k = 3: cumulative 0.48719</title></circle><circle class="dot" cx="206.4" cy="133.1" r="3"/><circle class="hit" cx="206.4" cy="133.1" r="11"><title>k = 4: cumulative 0.48843</title></circle><circle class="dot" cx="238.5" cy="132.9" r="3"/><circle class="hit" cx="238.5" cy="132.9" r="11"><title>k = 5: cumulative 0.49002</title></circle><circle class="dot" cx="270.6" cy="132.9" r="3"/><circle class="hit" cx="270.6" cy="132.9" r="11"><title>k = 6: cumulative 0.48965</title></circle><circle class="dot" cx="302.7" cy="133.2" r="3"/><circle class="hit" cx="302.7" cy="133.2" r="11"><title>k = 7: cumulative 0.48799</title></circle><circle class="dot" cx="334.8" cy="132.9" r="3"/><circle class="hit" cx="334.8" cy="132.9" r="11"><title>k = 8: cumulative 0.48997</title></circle><circle class="dot" cx="366.9" cy="133.1" r="3"/><circle class="hit" cx="366.9" cy="133.1" r="11"><title>k = 9: cumulative 0.48825</title></circle><circle class="dot" cx="399.0" cy="133.5" r="3"/><circle class="hit" cx="399.0" cy="133.5" r="11"><title>k = 10: cumulative 0.48603</title></circle><circle class="dot" cx="431.1" cy="133.2" r="3"/><circle class="hit" cx="431.1" cy="133.2" r="11"><title>k = 11: cumulative 0.48764</title></circle><circle class="dot" cx="463.2" cy="133.5" r="3"/><circle class="hit" cx="463.2" cy="133.5" r="11"><title>k = 12: cumulative 0.48596</title></circle><circle class="dot" cx="495.3" cy="133.5" r="3"/><circle class="hit" cx="495.3" cy="133.5" r="11"><title>k = 13: cumulative 0.48581</title></circle><circle class="dot" cx="527.4" cy="133.6" r="3"/><circle class="hit" cx="527.4" cy="133.6" r="11"><title>k = 14: cumulative 0.48533</title></circle><circle class="dot" cx="559.5" cy="133.1" r="3"/><circle class="hit" cx="559.5" cy="133.1" r="11"><title>k = 15: cumulative 0.48868</title></circle><circle class="dot" cx="591.6" cy="133.2" r="3"/><circle class="hit" cx="591.6" cy="133.2" r="11"><title>k = 16: cumulative 0.48766</title></circle><circle class="dot" cx="623.7" cy="133.5" r="3"/><circle class="hit" cx="623.7" cy="133.5" r="11"><title>k = 17: cumulative 0.48619</title></circle><circle class="dot" cx="655.8" cy="133.5" r="3"/><circle class="hit" cx="655.8" cy="133.5" r="11"><title>k = 18: cumulative 0.48594</title></circle><circle class="dot" cx="687.9" cy="133.9" r="3"/><circle class="hit" cx="687.9" cy="133.9" r="11"><title>k = 19: cumulative 0.48350</title></circle><circle class="dot" cx="720.0" cy="133.2" r="3"/><circle class="hit" cx="720.0" cy="133.2" r="11"><title>k = 20: cumulative 0.48770</title></circle>
+  <text class="pt-lab" x="86.0" y="42.6">impact 1.0000</text>
+  <text class="pt-lab" x="720.0" y="159.2" text-anchor="end">k=20: 0.4877</text>
+  <text class="axis-cap" x="399" y="254" text-anchor="middle">horizon k, in trades after the shock</text>
+</svg><div class="scroll"><table class=""><thead><tr><th class="n">horizon k</th><th class="n">MA coefficient theta_k</th><th class="n">cumulative response</th><th class="n">vs planted long run</th></tr></thead><tbody><tr><td class="n">0</td><td class="n">+1.000000</td><td class="n">1.000000</td><td class="n">+105.04%</td></tr><tr><td class="n">1</td><td class="n">-0.512527</td><td class="n">0.487473</td><td class="n">-0.05%</td></tr><tr><td class="n">2</td><td class="n">+0.000737</td><td class="n">0.488210</td><td class="n">+0.10%</td></tr><tr><td class="n">3</td><td class="n">-0.001021</td><td class="n">0.487190</td><td class="n">-0.10%</td></tr><tr><td class="n">4</td><td class="n">+0.001236</td><td class="n">0.488426</td><td class="n">+0.15%</td></tr><tr><td class="n">5</td><td class="n">+0.001596</td><td class="n">0.490022</td><td class="n">+0.48%</td></tr><tr><td class="n">10</td><td class="n">-0.002216</td><td class="n">0.486032</td><td class="n">-0.34%</td></tr><tr><td class="n">20</td><td class="n">+0.004194</td><td class="n">0.487697</td><td class="n">-0.00%</td></tr></tbody></table></div>
+<div class="stack">
+  <div class="kv"><div class="k">planted long run theta(1)</div>
+    <div class="val">0.487702</div>
+    <div class="cap">1 + theta from the population moments <span class="tag t-disimpulkan">[DISIMPULKAN]</span></div></div>
+  <div class="kv"><div class="k">cumulative at k = 20</div>
+    <div class="val">0.487697</div>
+    <div class="cap">-0.00% vs planted <span class="tag t-diukur">[DIUKUR]</span></div></div>
+  <div class="kv"><div class="k">1 / phi(1), the AR limit</div>
+    <div class="val">0.487010</div>
+    <div class="cap">-0.14% vs planted <span class="tag t-diukur">[DIUKUR]</span></div></div>
+</div>
+<p class="note">Two routes to the same limit, from the same fit: summing the MA coefficients to
+k = 20 gives 0.487697, and 1/phi(1) — the limit of that sum — gives
+0.487010. They differ by +0.14%, which is the
+truncation left in a 20-step sum, not disagreement.</p></div>
+    <aside class="rail">
+<h4>Reading</h4>
+<p class="concl">The price level moves 2.05x its permanent displacement on
+impact, then gives most of it back.</p>
+<p>This is the LEVEL response, not the response of the price change: the cumulative sum
+of the MA coefficients, which is the object RULE-EXTRACT-3 points at. It starts at 1.00 by
+construction and settles at theta(1) = 0.4877 <span class="tag t-disimpulkan">[DISIMPULKAN]</span>. The gap
+between the two is the transient part — the half-spread paid and then reversed.</p>
+<p><strong>The whole transient is one step, and that is a property of the fixture, not a finding.</strong>
+The planted process is MA(1), so all of the reversal lands at k = 1 and the path is flat afterwards
+— which is exactly why the flat part is a useful check: the AR(30) fit recovers coefficients that
+are near zero past lag 1 without being told the order. Real order flow is autocorrelated, so a
+real path would decay over many trades instead.</p>
+<p><strong>What this is not.</strong> The AR here is univariate, fitted on Delta p alone, so
+the response is to a Wold innovation and not to a trade. Attributing any part of it to order flow
+needs the price-trade VAR (E6), which is not implemented — see the footer. Reading a single
+coefficient of any such VAR as lambda is forbidden by RULE-EXTRACT-3 in the first place; the
+cumulative path is what the rule points to instead.</p></aside>
+  </div>
+</section>
+
+<footer id="g">
+  <h2>G. What this page is, and what it is not</h2>
+  <p><strong>Everything above is simulated.</strong> Every series was generated in-process from a
+  seeded RNG with known parameters. No real market data was touched: this script has no data
+  access, reads no partition, opens no database, and makes no network call. It adds
+  <strong>zero</strong> to the look counter, because a look is a specification evaluated against
+  real data and nothing here has seen any.</p>
+  <p><strong>RULE-EXTRACT-5 stands.</strong> No estimator in this module may touch a real
+  partition before a pre-registration declares the whole specification set with an explicit
+  <code>N_trials</code> cap. The choices that would need declaring are already known and are not
+  cosmetic: the AR truncation order K, the horizon grid and k_min for E4, the time basis (event
+  vs calendar), the treatment of funding windows at 00:00/08:00/16:00 UTC, the subsample unit,
+  the handling of days carrying a <code>recorded-damage</code> entry, and the sample window.
+  Choosing any of them after seeing a result is an unrecorded look.</p>
+  <h3>Not implemented</h3>
+  <ul>
+    <li><strong>E6 — the price-trade VAR</strong> (lambda from the cumulative impulse response,
+      the variance decomposition, R^2_w). Nothing on this page estimates lambda. Panel F's
+      response is univariate, to a Wold innovation, and cannot attribute anything to order flow.</li>
+    <li><strong>E7 — VECM and information share.</strong> No cointegration, no error correction,
+      no information-share bounds. The perp-vs-spot question this repo cares about is not touched.</li>
+    <li><strong>E8 — the GMM / MA(q) moment estimator</strong>, deliberately: 2^q parameter sets
+      share the same autocovariances and only one is invertible, and E9 reaches sigma2_w without
+      knowing the MA order.</li>
+    <li><strong>RULE-EXTRACT-9's required test</strong> — that sum_j theta_j*Omega*theta_j' and
+      theta(1)*Omega*theta(1)' are different numbers — cannot exist until E6 does, because both
+      sides need a VAR.</li>
+    <li><strong>The book sections never extracted at all:</strong> §5–§6 (sequential and strategic
+      trade models, Glosten-Milgrom and Kyle), §8.e–§8.h (smoothing and filtering approaches to
+      sigma2_s), §10–§11 (inventory control; invertibility and Wold revisited), §14 (structural
+      models: Glosten-Harris, MRR, Huang-Stoll), §15 (PIN), §16 (what the asymmetric-information
+      measures actually measure), §18–§21 (limit orders, uncertain execution, dynamic equilibrium),
+      §22 (asset pricing with transaction costs, Amihud-style liquidity measures), and the 2003
+      US-equity market-structure appendix.</li>
+  </ul>
+  <h3>Two caveats that outlive this page</h3>
+  <ul>
+    <li><strong>Attribution is unverified.</strong> The source PDF is not on this machine, so every
+    section-number citation carried by the extraction documents is <span class="tag t-unverified">[UNVERIFIED]</span>. The
+    mathematics on this page stands on its own derivations and these simulations; the attribution
+    does not stand at all until the source can be read.</li>
+    <li><strong>Simulation proves the formula, not its application.</strong> Every series here has
+    iid trade direction and homoskedastic Gaussian innovations. Real order flow has neither —
+    direction is autocorrelated (order splitting) and volatility varies within the day. What these
+    panels establish is that the algebra and the implementation are right. Whether the assumptions
+    hold on any real tape is a separate question, and answering it costs a look.</li>
+  </ul>
+  <p class="note">Regenerate: <code>make hasbrouck-demo</code>. Sources:
+  <code>btcquant/hasbrouck.py</code>, <code>docs/VERIFY-hasbrouck-extraction.md</code> (authoritative
+  where it disagrees with the extraction documents), <code>docs/EXTRACT-hasbrouck-001.md</code>,
+  <code>docs/EXTRACT-hasbrouck-s9-s12.md</code>.</p>
+</footer>
+
+</div>
+<script>
+(function(){
+  var root=document.documentElement;
+  document.querySelectorAll('[data-set-theme]').forEach(function(b){
+    b.addEventListener('click',function(){
+      var v=b.getAttribute('data-set-theme');
+      if(v==='auto'){ root.removeAttribute('data-theme'); } else { root.setAttribute('data-theme',v); }
+      document.querySelectorAll('[data-set-theme]').forEach(function(o){
+        o.setAttribute('aria-pressed', String(o===b));
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

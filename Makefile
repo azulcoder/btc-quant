@@ -7,6 +7,7 @@
 #   make dash                     -> serve dashboard at :8787 (Ctrl-C to stop)
 #   make collector                -> O-0 tick collector daemon (Ctrl-C flushes + exits)
 #   make collector-api            -> same, plus the BYOD replay API at :8788
+#   make hasbrouck-demo           -> microstructure estimators vs planted truth (SIMULATED, 0 looks)
 
 STRAT  ?= ma_trend_filter
 START  ?= 2018-01-01
@@ -15,11 +16,12 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare dsr-ab scan test gate fetch dash local collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision churn-threshold coverage-census lockbox-integrity doc-freshness handoff orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
+.PHONY: help install backtest compare dsr-ab scan test gate fetch dash local collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision churn-threshold coverage-census lockbox-integrity doc-freshness handoff orderflow-smoke hasbrouck-demo econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
 	@echo "research: orderflow-smoke (M1 end-to-end: recorded ticks -> bars -> deflation harness; expect INSUFFICIENT HISTORY)"
+	@echo "          hasbrouck-demo (btcquant/hasbrouck.py vs planted truth on SIMULATED series -> dashboard/hasbrouck.html; 0 looks)"
 	@echo "gate:    gate (fail-fast, CI order then local: pytest -> check_parity -> check_terminal -> churn-threshold -> lockbox-integrity)"
 	@echo "verify:  verify-browser (L1 fixture-replay in headless Chromium) | verify-census (L1b layout census) | verify-focus (L1c hierarchy + focus mode) | verify-wire (L2 live invariants, ~45s) | check-ticks (L3 tick-store QA + MinBTL readiness meter)"
 	@echo "bench:   bench-render (where the frame budget actually goes: store cost, Worker-boundary cost, Canvas2D churn vs raster — STRATEGY §ARCHITECTURE)"
@@ -254,3 +256,13 @@ check-vision:
 # the first run costs a few minutes; the result is cached under data/orderflow/.
 orderflow-smoke:
 	python3 scripts/orderflow_smoke.py $(ARGS)
+
+# Every estimator in btcquant/hasbrouck.py run against PLANTED truth on simulated
+# series, written as one self-contained page (dashboard/hasbrouck.html — open it
+# with `make dash`). Deterministic: one seed, no clock in the output, so two runs
+# produce byte-identical HTML. RULE-EXTRACT-5: simulation only — it reads no
+# partition, opens no database, makes no network call, and adds ZERO to the look
+# counter. No estimator here may touch a real partition before a PREREG declares
+# the specification set with an N_trials cap.
+hasbrouck-demo:
+	python3 scripts/hasbrouck_demo.py

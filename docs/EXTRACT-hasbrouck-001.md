@@ -591,7 +591,44 @@ Langkah 1–3 saling memvalidasi tanpa satu pun butuh arah trade. Itu fondasi ya
 
 ---
 
-## 7. Yang BELUM diekstraksi
+## 7. Peta cakupan — apa yang diekstraksi, apa yang diimplementasikan
+
+Tiga status yang berbeda dan sering dikira satu: **diekstraksi** (persamaannya dibaca dan
+dinyatakan ulang), **diverifikasi** (aljabarnya direplikasi mandiri), **diimplementasikan** (ada
+kode yang jalan dengan kontrolnya). Buku sumbernya ~22 seksi.
+
+| seksi buku | isi | diekstraksi | diverifikasi | diimplementasikan |
+|---|---|---|---|---|
+| §3 | Roll | ya | ya | **ya** — `roll` (E1) |
+| §4 | seasonality, MA(1) dasar | sebagian | sebagian | tidak berlaku |
+| §5, §6 | Glosten-Milgrom, Kyle | **tidak** | — | tidak |
+| §7 | generalized Roll, identifikasi | ya | ya | **ya** — E2, E4, E5, interval |
+| §8.a–d | Wold, `θ(1)²σ²_ε` | ya | ya | **ya** — `sigma2_w_wold` (E3) |
+| §8.e–h | smoothing, filtering | **tidak** | — | tidak |
+| §9 | GMM, AR terpotong, IRF, SE | ya | ya | **sebagian** — E9/E10/E11 ada, GMM (E8) tidak |
+| §10, §11 | inventory control, invertibilitas | **tidak** | — | tidak |
+| §12 | VMA/VAR, IRF, Cholesky, dekomposisi | ya (M1–M4) | ya | **tidak** |
+| §13 | VAR harga-trade, λ, `R²_w` | ya (E6) | sebagian | **tidak** |
+| §14 | Glosten-Harris, MRR, Huang-Stoll | **tidak** | — | tidak |
+| §15 | PIN | **tidak** | — | tidak — asumsi hitungan trade bentrok dengan aggTrades |
+| §16 | apa yang diukur ukuran asimetri informasi | **tidak** | — | tidak |
+| §17.b–c | kointegrasi, information share | ya (E7) | tidak | **tidak** |
+| §18–§21 | limit order, eksekusi tak pasti, ekuilibrium | **tidak** | — | tidak — butuh data depth |
+| §22 | asset pricing dengan biaya, likuiditas | **tidak** | — | tidak |
+| appendix | struktur pasar ekuitas AS 2003 | dilewati sengaja | — | tidak berlaku |
+
+**Ringkasnya: 4 dari ~22 seksi punya kode yang jalan** (§3, §7, §8.a–d, §9 sebagian). Tiga seksi
+lagi sudah diekstraksi tapi belum berkode (§12, §13, §17). Sebelas seksi belum dibaca sama sekali.
+
+Yang **paling mahal** dari yang belum ada: **E6** (§13, VAR harga-trade) karena di situlah λ dan
+`R²_w` hidup dan di situlah keunggulan `isBuyerMaker` terbayar; dan **E7** (§17, information share
+perp vs spot) karena itu pertanyaan yang paling bernilai dan paling belum terjawab. Keduanya butuh
+§12 lebih dulu, karena tanpa mesin IRF/Cholesky-nya implementasinya akan menebak.
+
+Dan tak satu pun dari yang sudah berkode boleh menyentuh data nyata sebelum ada PREREG
+(RULE-EXTRACT-5). Yang jalan sekarang hanya simulasi dengan kontrol — nol look.
+
+## 7b. Yang BELUM diekstraksi
 
 Dokumen ini mencakup §3, §4 (sebagian), §7, §8 (§8.a–8.d), §13, §17.b–17.c. Belum:
 

@@ -165,6 +165,34 @@ nothing the gate reports. That converts C from "these tests can skip" into a mea
 **The pre-emptive `2026-08-05` damage entry rides on this.** Its verification is exactly the six
 tests that skip, and it can only run once the archive publishes that day. Nothing schedules it.
 
+### 5c-bis. That window opened, and the gate fired — 2026-08-06T08:30Z [DIUKUR]
+
+The archive published `2026-08-05` and the six tests stopped skipping. Nobody scheduled it; the
+suite happened to be run for another reason. Three results, in order of what they cost:
+
+**1. The pre-emptive count is confirmed EXACTLY.** `archive \ recorded = 1,744`,
+`recorded \ archive = 0` — the number written before the archive existed, derived from in-day
+DISTINCT-id holes, matches the venue's own set difference to the print. `missing_rows` in
+`reports/recorded-damage.json` is now **`[DIUKUR]`**, not `[DISIMPULKAN]`, and the entry carries
+`verified: true`. On the joined rows: `ts_mismatch 0`, `max|Δprice| 0.0`, `side_mismatch 0`.
+
+**2. NEW — 979 duplicate rows on the recorded side.** `887,614` recorded rows but only `886,635`
+distinct `(exchange, symbol, trade_id)`. The `trades` table has **no unique constraint** and the
+aggTrades dedup guard is in-memory only, so a reconnect that replays ids writes them again. This
+is a RECORDED defect, distinct from tape loss: nothing is missing, something is counted twice.
+Any per-trade statistic over this day is inflated by 979 prints until it is deduped.
+
+**3. NEW — at least one print's qty disagrees with the venue by ~0.01.** `max|Δqty| = 0.0099999…`
+while price, timestamp and side all match exactly. Float noise would be ~1e-15, so this is a real
+quantity difference, not representation. **Not investigated further** — see the boundary note.
+
+**A boundary question that is azul's, not mine.** `2026-08-05` is inside the LockBox
+(`01:00Z` onward). The declared gate reading it is one thing — it is a fidelity check against the
+venue, it reports row counts and field mismatches, and it extracts nothing about returns. Writing
+a fresh ad-hoc query to chase the Δqty would be a second, undeclared read of that slice, so it
+has not been done. The `Δqty` cause is therefore **UNKNOWN and stays UNKNOWN** until that call
+is made.
+
 ## 6. Doc map (what lives where)
 
 | doc | holds |

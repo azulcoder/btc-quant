@@ -118,7 +118,10 @@
       "fixed_by": "425877d \u2014 sidecar persists the cursor across PROCESS restarts (atomic write on every advance). Active since 2026-08-06 ~02:56Z. A reboot now resumes from the sidecar and recovers the backlog up to the 50,000-id seek-back ceiling.",
       "recoverable_from": "Binance Vision daily archive for 2026-08-05 (publishes ~07:00Z 2026-08-06). NOT backfilled \u2014 gaps stay gaps.",
       "measured_on": "2026-08-06",
-      "measured_how": "PRE-EMPTIVE: in-day DISTINCT-id holes in the closed local day file (data/ticks/2026-08-05.duckdb byte copy), block boundaries from recorded neighbor rows. Equality with archive-minus-recorded is [DISIMPULKAN] until the archive publishes and tests/test_vision_overlap.py checks the exact set \u2014 published days carry zero in-day holes, so the sets should coincide as they did for 2026-08-04 (exact). The day also carries 979 duplicate ids \u2014 the separate, known recorded defect (no unique constraint), handled by the gate via DISTINCT and printed, never absorbed."
+      "measured_how": "VERIFIED 2026-08-06T08:30:49Z against the venue archive by tests/test_vision_overlap.py once data.binance.vision published the day. The pre-emptive count was derived from in-day DISTINCT-id holes in the closed local day file; the archive set difference now confirms it EXACTLY: archive\\\\recorded = 1744, recorded\\\\archive = 0. The number is [DIUKUR], no longer [DISIMPULKAN]. Same run also found two defects on the RECORDED side that this entry does not cover and that are not tape loss: 979 duplicate (exchange,symbol,trade_id) rows, and at least one print whose qty differs from the venue by ~0.01. See docs/STATUS.md and AUDIT_LOG.md 2026-08-06.",
+      "verified": true,
+      "verified_how": "archive set difference, tests/test_vision_overlap.py test_COMPLETENESS_is_zero_or_exactly_the_documented_damage",
+      "verified_on": "2026-08-06T08:30:49Z"
     }
   ]
 }

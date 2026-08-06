@@ -1105,3 +1105,45 @@ That upgrades C from "these tests can skip" to a measured fact: **a total loss o
 archive is invisible to `make gate`.** The natural experiment cost nothing and was not designed —
 which is also the reason it is worth recording, since no one would have authorised deleting the
 archive to test the gate.
+
+---
+
+## 2026-08-06 — the one-shot verification window opened, and it found more than it was aimed at
+
+`data.binance.vision` published `2026-08-05`, so `tests/test_vision_overlap.py` stopped skipping.
+Nothing scheduled this; the suite was being run for an unrelated reason and the window happened
+to be open. That is worth stating plainly, because the previous entry recorded that nothing
+schedules it and the gap was real — this was luck, not process.
+
+**The pre-emptive damage entry is confirmed exactly.** `archive \ recorded = 1,744` and
+`recorded \ archive = 0`. The count was written before the archive existed, derived from in-day
+DISTINCT-id holes in the closed local day file, and the venue's own set difference agrees to the
+print. On the joined rows `ts_mismatch 0`, `max|Δprice| 0.0`, `side_mismatch 0`. The entry in
+`reports/recorded-damage.json` now carries `verified: true` and its count is `[DIUKUR]`.
+
+That is the strongest result the damage instrument has produced: a number predicted from one
+source and confirmed from an independent one, with no adjustment in between.
+
+**Two defects it was not looking for.**
+
+*979 duplicate rows.* 887,614 recorded rows against 886,635 distinct `(exchange, symbol, trade_id)`.
+The `trades` table has no unique constraint and the aggTrades dedup guard is in-memory only, so a
+reconnect that replays ids writes them a second time. Nothing is missing; something is counted
+twice, which is a different failure from tape loss and needs a different fix. Any per-trade
+statistic over this day is inflated until it is deduped. Recorded, not fixed.
+
+*One or more prints whose qty differs from the venue by ~0.01.* Price, timestamp and aggressor
+side all match exactly on the same rows, and float representation error would be ~1e-15, so this
+is a real quantity difference rather than noise. Cause UNKNOWN.
+
+**Why the cause stays UNKNOWN.** `2026-08-05` is inside the LockBox. The declared gate reading it
+is defensible — it is a fidelity check against the venue that reports counts and field mismatches
+and extracts nothing about returns — but writing a fresh query to chase the Δqty would be a
+second, undeclared read of an evaluate-once slice. That is azul's call, not mine, so the
+investigation stops here with the finding recorded rather than resolved.
+
+**Rails this touched.** A prediction was made, written down, and then checked against an
+independent source — which is the whole point of recording damage pre-emptively rather than
+waiting. Absence stayed distinguishable from "nothing looked": the gate reports 0 for the three
+fields that matched, not silence. And the boundary held: the finding is written down at the exact
+point where continuing would have cost something that cannot be bought back.
