@@ -1068,3 +1068,31 @@ schedules that verification. Until it runs, those 1,744 prints remain `[DISIMPUL
 (one skip message for three causes; and my own containment test that cannot see what it was
 aimed at) · class H (the `err` vs `error` key) · class G (a green gate is a claim whose checker
 never ran). Gaps stay gaps: nothing here was backfilled or relabelled.
+
+---
+
+## 2026-08-06 — Vision→HF migration complete
+
+Closed at `06:57:44Z`. Final batch **713/713 deleted, 0 failures, 0 throttle events, exit 0**,
+lock released cleanly. Across the whole migration: **2,084 verified deletes, 0 of them missing
+any of the three verifications**, 0 local partitions still holding a `trades.parquet`, 2,085
+manifests retained as the local content proof, and 0 torn lines in a 2,239-line append-only
+ledger that survived a two-writer window.
+
+Terminal states read `deleted 2,079 / upload_failed 5`, and `2,079 + 5 = 2,084` closes the
+identity exactly — the five are the mislabelled race casualties of the entry above, not
+failures. Full record and the throughput caveat: `docs/DESIGN-vision-remote-first.md` §26.
+
+**Housekeeping found in the same pass.** `docs/STATUS.md` §5 was listing six already-completed
+items as open, and `make handoff` copies that list verbatim into the brief a web session reads —
+so the staleness was being exported off-machine. Each closure was re-verified against its
+artifact (the plist path, the sidecar in `collector.py`, `reports/pbo-null-result.json`, the
+`.claude/` files) rather than against memory. **`doc_freshness.py` cannot see this class:** a
+finished item still listed as open is not a wrong number, so no assert fires. That is a real gap
+in the anti-rot gate, recorded here rather than patched — widening the checker to parse intent
+is exactly the class-I move the rails forbid.
+
+**Rails this touched.** Gaps stay gaps: the 296-day hole is unchanged by the migration — the tape
+moved, the hole did not close. Conclusions beside their numbers: the throughput section prints
+both the raw seconds and the size-normalised MB/s, because they fall in opposite directions and
+only the second is admissible as a throttle signal.

@@ -581,3 +581,49 @@ stale-lock path while appearing to test refusal. Re-run against a genuinely live
 its LAST stage, so `python … | grep …` returned 0 while the python had been killed at partition
 800 of 1,524. Migration runs now redirect to a file and record the real exit code separately.
 
+
+---
+
+# §26 — MIGRATION COMPLETE [DIUKUR] (2026-08-06T06:57:44Z)
+
+The archive is remote-first. The final batch ran **713 of 713 partitions to `deleted`, zero
+failures, zero throttle events**, exit code 0, and the lock released cleanly — the first batch in
+this series to end with every terminal condition clean at once.
+
+**Totals across the whole migration:**
+
+| quantity | value |
+|---|---|
+| partitions deleted locally, all verified | **2,084** |
+| deletes missing any of the three verifications | **0** |
+| local partitions still holding `trades.parquet` | **0** |
+| local manifests retained (the local content proof) | 2,085 |
+| ledger lines, all parseable | 2,239 (0 torn, despite a two-writer window) |
+| terminal states | `deleted` 2,079 · `upload_failed` 5 |
+| final batch throughput | 6.1 s/partition, peak disk used 698.6 MB |
+
+**The five `upload_failed` are the race casualties of §25, and nothing else.** `2,079 + 5 = 2,084`
+closes the identity exactly: every partition that ever existed locally reached a verified delete,
+and precisely the five contested dates carry a later record that mislabels them. Their `deleted`
+records are intact with all three verifications, and the hub holds their content. The correction
+is an appended record, not a rewrite — still open, and azul's call.
+
+**What the design got right, stated as measurements rather than intent.** No delete ever ran
+without a same-run verified read-back, and the count of exceptions to that rule across 2,084
+deletes is zero. The append-only ledger survived two concurrent writers without a single torn
+line. The PID lock, added partway through, made the second half single-writer by construction
+rather than by discipline.
+
+**What it cost to learn:** one concurrency race, five mislabelled records, two runs killed by a
+masked shell exit code, and a reboot that wiped `/tmp`. None of it lost a byte, and each one is
+recorded above rather than smoothed away.
+
+**Throughput note.** Raw seconds per partition fall through a batch (first-10 mean 0.9 s vs
+last-10 mean 0.7 s) while size-normalised throughput also falls (8.16 → 1.98 MB/s). Those point
+in opposite directions because the partitions get smaller as the run walks back in time — the raw
+figure confounds the size trend, so **only the MB/s series is admissible as a throttle signal**,
+and it showed no 429 in the final batch.
+
+**What this unblocks.** The 296-day hole backfill (`docs/STATUS.md` §5) — with `2025-10-08` still
+needing its `trades.parquet.bad` partial artifact cleared. **What it does not change:** the hole
+itself. Migrating the tape moved it; it did not fill it, and gaps stay gaps.
