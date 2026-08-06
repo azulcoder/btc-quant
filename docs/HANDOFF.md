@@ -1,26 +1,26 @@
 # HANDOFF — generated, do not hand-edit
 
-**Generated 2026-08-06T12:40:31Z by `make handoff`.** Every field below is read from a source; an
+**Generated 2026-08-06T23:54:01Z by `make handoff`.** Every field below is read from a source; an
 unreadable source says `UNKNOWN` rather than carrying a stale value forward. Hand-editing
 this file defeats its purpose — regenerate it instead (`make gate` does so automatically).
 
 ## Commit
 
-- `e432b14` — Implement the verified Hasbrouck estimators; verify the 2026-08-05 damage entry
-- authored 2026-08-06T15:32:45+07:00 · working tree **dirty** · unpushed commits: 4
+- `9d7930e` — Declare PREREG-microstructure-001 before any number exists
+- authored 2026-08-07T06:29:26+07:00 · working tree **dirty** · unpushed commits: 6
 - public repo: <https://github.com/azulcoder/btc-quant> — a web session can fetch it directly
 
 ## State [all values generated this run]
 
 | field | value |
 |---|---|
-| collector `/health` | legs 16/16 · writer running · rows_dropped_error 0 · uptime 9.7 h |
+| collector `/health` | legs 16/16 · writer running · rows_dropped_error 0 · uptime 21.0 h |
 | last GREEN gate | GREEN at 2026-08-06T04:26:13Z on cf77e9e (an EARLIER commit) · UNKNOWN |
-| look counter (owner: `docs/EDA-microstructure-001.md`) | 557 diagnostic / 81 predictive |
+| look counter (owner: `docs/EDA-microstructure-001.md`) | 558 diagnostic / 81 predictive |
 | vision partitions still local | 0 |
 | migration states | {'readback_ok': 128, 'upload_failed': 9, 'deleted': 2084} |
 | migration last record | 2019-12-31 -> deleted @ 2026-08-06T06:57:33.556Z |
-| disk free | 23.5 GB |
+| disk free | 22.6 GB |
 | recorded damage (date, prints) | 2026-08-03 28,428 · 2026-08-04 21,706 · 2026-08-05 1,744 |
 
 **Who may raise the look counter:** only a session that actually ran the look, in the same
@@ -37,7 +37,8 @@ wrong and every DSR deflated against it inherits the error.
 5. **`2026-08-06` bootout damage entry**: a ~4 min hole (~02:52–02:56Z, log-relocation restart) is expected; measure and record it once the day closes.
 6. **disablesleep experiment**: locked behind the 36 h churn threshold; needs a fresh baseline.
 7. **`make check-vision` is locally infeasible at full scale** (audit-measured: dedup over 2.83 B rows needs ~160 GB of aggregate state — needs a per-month window flag and an explicit `temp_directory`). Now more pressing, since the local copies it used to read ar
-8. **Hasbrouck estimators — the plan is now written**: `docs/PLAN-microstructure-001.md`. Headline finding, measured: the Roll family needs **~147 days** of aggTrades before `sd(gamma_1)` falls to 20 % of the signal; at half a day the noise is 3.6x the signal. Th
+8. **Three MA(1)-dependent estimators do not call their own order gate** — `roll`, `pricing_error_lower_bound` and `identified_interval_c`. Only `sigma2_w_ma1` and `sigma2_w_wold` gate. The adversarial review found one instance and it was fixed; the pattern turne
+9. **Hasbrouck estimators — the plan is now written**: `docs/PLAN-microstructure-001.md`. Headline finding, measured: the Roll family needs **~147 days** of aggTrades before `sd(gamma_1)` falls to 20 % of the signal; at half a day the noise is 3.6x the signal. Th
 
 ## Binding rules for ANY agent, in any surface
 

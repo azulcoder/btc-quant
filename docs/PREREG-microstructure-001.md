@@ -1,6 +1,7 @@
 # PREREG-microstructure-001 — kontrol positif: effective spread dari trade saja
 
-**Status:** DIDEKLARASIKAN, belum dijalankan. Ditulis sebelum satu angka pun ada.
+**Status:** DIJALANKAN dan DITUTUP. Vonis **INDETERMINATE**, premis MA(1) ditolak datanya —
+lihat RESULT di bawah. Deklarasi di §0–§8 ditulis dan di-commit sebelum satu angka pun ada (`9d7930e`).
 **Ditulis:** 2026-08-06. **`N_trials` cap: 1.** **Look accounting: 1 diagnostic look.**
 **Prasyarat:** `btcquant/hasbrouck.py`; rencana di `docs/PLAN-microstructure-001.md` §4 Langkah 1.
 
@@ -111,3 +112,89 @@ Track microstructure **berhenti** kalau salah satu terjadi:
 - Bukan model fee. Fee venue adalah tarif terpublikasi, terpisah dari spread.
 - Bukan pernyataan tentang periode di luar exploration slice. Slice-nya beku dan sempit; arsip
   6,587 tahun belum disentuh dan butuh PREREG-nya sendiri.
+
+---
+
+# RESULT — dijalankan 2026-08-07, vonis **INDETERMINATE**, premis MA(1) **DITOLAK DATANYA**
+
+`scripts/prereg_microstructure_001.py`, dijalankan sebagaimana dideklarasikan.
+Hasil mesin: `reports/prereg-microstructure-001-result.json`. **1 diagnostic look**, dicatat di
+`docs/EDA-microstructure-001.md` pada commit yang sama.
+
+## Yang terjadi
+
+Kontrol atas kode pooling-nya sendiri lewat lebih dulu: jalur momen yang ditulis untuk
+menggabungkan lintas hari cocok dengan `hasbrouck.identified_interval_c` sampai `1e-15` pada
+seri simulasi. Jadi kalau hasilnya aneh, bukan kode penggabungnya.
+
+Dari 30 tanggal di slice, 2 dikecualikan sesuai deklarasi (`2026-07-13` gagal baca ZSTD,
+`2026-08-03` punya entri recorded-damage), 5 tidak punya satu pun trade di jendela jam
+(`2026-07-17`, `-20`, `-23`, `-24`, `-25`), menyisakan **23 tanggal** dan **13.418.171** `Δp`
+dengan **13.417.910** pasangan lag-1.
+
+```
+gamma_0 =  9.860485e-10
+gamma_1 = -7.027543e-10
+sigma2_w = gamma_0 + 2*gamma_1 = -4.194601e-10      <- NEGATIF
+rho_1   = gamma_1 / gamma_0    = -0.7127
+```
+
+## Vonis, dan mengapa ia lebih keras dari sekadar "kurang data"
+
+**Autokorelasi lag-1 sebuah MA(1) dibatasi di `[-0,5, +0,5]` secara matematis** — nilainya
+`θ/(1+θ²)`, yang mencapai ekstremnya di `θ = ∓1`. Nilai terukur `ρ₁ = -0,7127` **berada di luar
+rentang yang bisa dihasilkan MA(1) mana pun**. Ini bukan estimasi berisik dari model yang benar;
+ini model yang salah.
+
+`σ²_w` gabungan keluar **negatif**, dan varians tidak bisa negatif. Modulnya tidak meng-clip-nya
+(RULE-EXTRACT-6), jadi kesalahannya terlihat alih-alih menyamar sebagai angka kecil yang wajar.
+
+Diperiksa per hari pada satu jam penuh (UTC 14), tiga tanggal, dengan gerbang orde:
+
+| tanggal | n | `ρ₁` | `ρ₂` | `ρ₃` | `ρ₄` | gerbang |
+|---|---:|---:|---:|---:|---:|---|
+| 2026-07-06 | 166.412 | −0,434 | **+0,306** | −0,190 | +0,194 | REJECT |
+| 2026-07-14 | 98.621 | −0,706 | **+0,466** | −0,332 | +0,196 | REJECT |
+| 2026-07-29 | 111.443 | −0,106 | **+0,519** | −0,014 | +0,479 | REJECT |
+
+**`ρ₂` besar dan positif adalah pembunuhnya.** MA(1) mensyaratkan `ρ_k = 0` untuk `k ≥ 2`. Yang
+terukur adalah ACF berosilasi yang meluruh lambat — tanda tangan struktur berorde tinggi, bukan
+bid-ask bounce. Gerbang menolak ketiga hari.
+
+Dan besarannya sendiri menutup pintu: `sd(Δp) = 0,121 bps ≈ 7,5 tick`, sementara spread satu tick
+berarti `c ≈ 0,5 tick`. Bounce murni akan memberi `ρ₁ ≈ −0,0045`. Yang terukur 100× lebih besar,
+jadi autokorelasi negatif ini **bukan** bid-ask bounce.
+
+> **Vonis: INDETERMINATE** menurut §5 — tapi lewat cabang yang tidak dideklarasikan. §5 hanya
+> menyebut `γ̂₁ ≥ 0` sebagai jalan ke INDETERMINATE; diskriminan negatif tidak diantisipasi.
+> Itu lubang di deklarasiku, dicatat di sini alih-alih ditambal diam-diam.
+
+## Konsekuensi: kill criterion §7.2 aktif
+
+§7.2 menyatakan track berhenti kalau gerbang orde menolak data secara sistematis, karena
+E2/E3/E5 dan intervalnya gugur dan yang tersisa tidak memberi `c`. **Kondisi itu terpenuhi.**
+
+Yang **tidak** boleh disimpulkan dari sini: bahwa spread tidak bisa diukur dari trade, atau bahwa
+angka buku 0,0156 bps salah. Yang terbukti hanya bahwa **keluarga Roll tidak berlaku pada seri
+ini**, dan sebabnya belum diketahui. Dua kandidat yang tidak bisa dipisahkan tanpa penyelidikan
+terdeklarasi tersendiri:
+
+1. **Struktur pasar nyata** — order splitting dan sweep multi-level menghasilkan ACF berosilasi
+   yang tidak dimuat model Roll.
+2. **Artefak data** — sesuatu pada store terekam (urutan, agregasi, interleaving leg) yang membuat
+   `Δp` berosilasi. `sd(Δp) = 7,5 tick` per trade layak dicurigai.
+
+Membedakan keduanya adalah PREREG baru dengan look-nya sendiri. **Sampai itu dijawab, tidak ada
+model biaya yang boleh dibangun dari keluarga Roll pada instrumen ini.**
+
+## Cacat instrumen yang ditemukan oleh run ini
+
+Tiga dari lima estimator yang bertumpu pada premis MA(1) **tidak memanggil gerbangnya**:
+`roll`, `pricing_error_lower_bound`, dan `identified_interval_c`. Hanya `sigma2_w_ma1` dan
+`sigma2_w_wold` yang bergerbang. Review adversarial menemukan satu instance dan diperbaiki;
+polanya ternyata tiga, dan run ini yang menyingkapnya.
+
+Run ini selamat hanya karena diskriminannya kebetulan negatif. Pada momen yang sedikit berbeda,
+`identified_interval_c` akan mengembalikan interval yang percaya diri atas seri yang bukan MA(1).
+**Vonisnya tidak berubah** — gerbang menolak ketiga hari yang diuji, jadi jalur bergerbang memberi
+ABSTAIN dan jalur tak-bergerbang memberi INDETERMINATE — tapi itu keberuntungan, bukan desain.

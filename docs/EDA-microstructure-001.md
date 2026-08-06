@@ -2261,7 +2261,8 @@ column (81), which is what enters DSR deflation, was never affected.
 | §23-24 upload-only control (review workflow verdicts, 100-partition series, resume test, 429 bound, churn-instrument bug caught by its own control) | 8 | 0 |
 | C2 feasibility map (6 grid cells x 2 signal-series metrics, declaration-first; 1 pagination control) | 13 | 0 |
 | PBO null run (3 controls + 4 arms x B=2,000; PREREG amendment for the ephemeral-bar anchor) | 9 | 0 |
-| **running total** | **557** | **81** |
+| PREREG-microstructure-001 positive control (1 declared spec, 23 dates pooled, UTC 12-23; verdict INDETERMINATE — MA(1) premise refuted by the data) | 1 | 0 |
+| **running total** | **558** | **81** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 

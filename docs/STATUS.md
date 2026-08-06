@@ -39,6 +39,7 @@ Last update: **2026-08-06, post-buildout + anti-rot gate** (19-agent adversarial
 | C2 basis / C3 funding | **C2 feasibility map DONE**: structural point (z=2.0/0.5, W=60) **passes both gates** (breadth 18.6 %, drag 0.61× anchor) inside a contiguous window — graduates to a pre-registration draft (no returns scored). C3 conditioning-only | `PLAN-derivative-001.md` C2 RESULT |
 | C4 OI quadrants | **FROZEN PERMANENTLY** (endpoint serves 30 rolling days, probed) | same |
 | options orthogonality | **CANNOT DECIDE** (N=30 frozen, CI ±0.36) — DEFERRED, no date; route = check for a keyless historical chain | EDA §19 |
+| microstructure PREREG-001 (trades-only spread vs book) | **CLOSED 2026-08-07 — INDETERMINATE, and the MA(1) premise is REFUTED by the data.** Pooled over 23 dates / 13.4 M lag-1 pairs: `rho_1 = -0.7127`, outside the `[-0.5, +0.5]` any MA(1) can produce, and `sigma2_w` came out NEGATIVE. Per-day `rho_2` is +0.31 to +0.52 where MA(1) needs 0; the order gate rejects every day tested. Kill criterion §7.2 is met: no cost model may be built from the Roll family on this instrument until the cause is known | `docs/PREREG-microstructure-001.md` RESULT; `reports/prereg-microstructure-001-result.json` |
 | scalping PREREG (1–30 s, 1:1) | **WRITTEN** (`docs/PREREG-scalp-001.md`, 315 lines): premise fails arithmetically in all three execution models (p* 118–222 % at 30 s); rejection registered as the deliverable; one reformulation declared-not-activated (5-min bars, R=3, p* 51.1 %, N_trials cap 3) | `docs/PREREG-scalp-001.md` |
 
 **Look counter — the value lives in `docs/EDA-microstructure-001.md` and nowhere else** (a second
@@ -83,7 +84,13 @@ classes in `CLAUDE.md` (15 lines), ledger in `STRATEGY.md`.
 7. **`make check-vision` is locally infeasible at full scale** (audit-measured: dedup over 2.83 B
    rows needs ~160 GB of aggregate state — needs a per-month window flag and an explicit
    `temp_directory`). Now more pressing, since the local copies it used to read are gone.
-8. **Hasbrouck estimators — the plan is now written**: `docs/PLAN-microstructure-001.md`.
+8. **Three MA(1)-dependent estimators do not call their own order gate** — `roll`,
+   `pricing_error_lower_bound` and `identified_interval_c`. Only `sigma2_w_ma1` and
+   `sigma2_w_wold` gate. The adversarial review found one instance and it was fixed; the
+   pattern turned out to be three, and PREREG-001 is what surfaced it. That run survived only
+   because its discriminant happened to go negative. Adding the gate makes those functions
+   stricter, so it changes what the instrument reports — **your call.**
+9. **Hasbrouck estimators — the plan is now written**: `docs/PLAN-microstructure-001.md`.
    Headline finding, measured: the Roll family needs **~147 days** of aggTrades before
    `sd(gamma_1)` falls to 20 % of the signal; at half a day the noise is 3.6x the signal.
    The archive has 16x that, so it is feasible pooled — and daily subsampling, which the
