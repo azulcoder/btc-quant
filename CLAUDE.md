@@ -104,8 +104,9 @@ but unchecked. A number without a label is a claim without a checker (class G).
 - `data/ticks/YYYY-MM-DD.duckdb` — **today + yesterday only, by design**; older days live on HF
   `azulcoder/btc-quant-ticks`, hive `data/date=…` (local access answers 410 with a hint).
 - `data/vision/binancef/BTCUSDT/aggTrades/` — Binance's published aggTrades archive (M7);
-  mirrored to HF under the **`vision/` prefix**. Migration is MID-FLIGHT, dry-run only — local
-  copies intact, 0 deletes (`docs/STATUS.md` §2).
+  mirrored to HF under the **`vision/` prefix**. Migration state changes hourly and is
+  DELIBERATELY not duplicated here — read `docs/STATUS.md` §2 (class G: fast-moving facts get
+  one home).
 - **Gaps stay gaps** — no backfill, no smoothing, no interpolation (rail above).
 
 **LockBox: `2026-08-05 01:00 UTC` onward. Not touched, not read, not peeked.** The boundary was

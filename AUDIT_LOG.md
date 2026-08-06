@@ -958,3 +958,23 @@ liquidation stream can be legitimately silent for hours (07-25 had none all day,
 **Standing consequence.** `Restart=always` in the GCP unit would NOT have caught this —
 the process never died. Leg-level supervision is therefore a prerequisite of N4, not a
 companion to it.
+
+---
+
+## 2026-08-04 … 2026-08-06 — the instrument-integrity arc (index entry; full records in docs/)
+
+Sixteen consecutive items of instrument integrity, then the buildout. This entry is an INDEX —
+the session's records live in `docs/STATUS.md` (current-state index), `docs/EDA-microstructure-001.md`
+§8–§19 + look counter, `docs/DESIGN-vision-remote-first.md`, `docs/PREREG-pbo-null-001.md` (run,
+verdict ABSTAINS), `docs/PREREG-scalp-001.md` (premise rejected arithmetically),
+`docs/PLAN-derivative-001.md` (cost-drag gate; C2 passes its feasibility map), and
+`reports/{recorded-damage.json, lockbox-manifest.json, vision-migration.jsonl, pbo-null-result.json}`.
+
+Headlines, each measured not asserted: aggTrades cursor bug fixed at leg level (`dc9857b`) then
+process level (sidecar, `425877d`), verified byte-exact against the venue's own archive; three
+recorded-damage entries (28,428 / 21,706 / 1,744 prints) with exact id ranges; LockBox boundary
+moved once (00:00→01:00Z) for a documented defect before any byte was read; PBO clause of the
+promotion bar resolved by its declared calibrated-null test (ABSTAINS, 4 arms unanimous);
+instrument-blindness taxonomy (9 classes, 14 instances) + two rails that write themselves;
+Vision→HF migration real-run in flight with same-run-verified deletes; `make gate` green on its
+first run. Commits `dc9857b..425877d`+, all pushed, no AI attribution.

@@ -96,6 +96,29 @@
       "recoverable_from": "Binance Vision daily archive for 2026-08-04 (published; not yet ingested). NOT backfilled into `trades` \u2014 gaps stay gaps.",
       "measured_on": "2026-08-06",
       "measured_how": "Flagged by tests/test_vision_overlap.py completeness gate (21,706 undocumented ids, exact). Block boundaries measured from recorded neighbor rows in data/ticks/2026-08-04.duckdb (max ts below id_min, min ts above id_max, TRY_CAST + symbol filter \u2014 the trades table holds non-numeric trade_ids for other venues). Sum of id ranges = 21,706, matching the gate to the digit; cross-referenced against gaps.jsonl restart events."
+    },
+    {
+      "date": "2026-08-05",
+      "venue": "binancef",
+      "symbol": "BTCUSDT",
+      "missing_rows": 1744,
+      "id_ranges": [
+        [
+          3403153251,
+          3403154994
+        ]
+      ],
+      "utc_blocks": [
+        "22:23:10-22:29:52Z  1,744 prints  6.7 min"
+      ],
+      "utc_hour_profile": "One block, the host-reboot window. 6.7 min = 0.47% of the day. INSIDE the LockBox slice (starts 01:00Z), so this entry is also cross-referenced from reports/lockbox-manifest.json context: tape loss there is recoverable from the public archive, unlike the depth row.",
+      "cause": "HOST REBOOT at 22:23:38Z (ordered shutdown; kern.boottime). The aggTrades cursor was module-scope (in-memory) only \u2014 the cross-process sidecar (data/ticks/aggtrades-cursor.json) was created ~4.5 h AFTER this window \u2014 so the relaunched process seeded from the live edge. Outages under ~90 s lose nothing (the bare seed poll returns the last 1,000 rows and dedup drops re-served ids \u2014 measured: the 00:05:28Z kickstart restart on this same day left ZERO hole); this 6.7 min outage exceeded that page depth.",
+      "introduced_by": "process-lifetime cursor (residual of 57ad311, leg-level fix dc9857b); closed forward by the sidecar in 425877d",
+      "condition": "Machine reboot 2026-08-06 05:23:38 local. Collector relaunched by launchd KeepAlive.",
+      "fixed_by": "425877d \u2014 sidecar persists the cursor across PROCESS restarts (atomic write on every advance). Active since 2026-08-06 ~02:56Z. A reboot now resumes from the sidecar and recovers the backlog up to the 50,000-id seek-back ceiling.",
+      "recoverable_from": "Binance Vision daily archive for 2026-08-05 (publishes ~07:00Z 2026-08-06). NOT backfilled \u2014 gaps stay gaps.",
+      "measured_on": "2026-08-06",
+      "measured_how": "PRE-EMPTIVE: in-day DISTINCT-id holes in the closed local day file (data/ticks/2026-08-05.duckdb byte copy), block boundaries from recorded neighbor rows. Equality with archive-minus-recorded is [DISIMPULKAN] until the archive publishes and tests/test_vision_overlap.py checks the exact set \u2014 published days carry zero in-day holes, so the sets should coincide as they did for 2026-08-04 (exact). The day also carries 979 duplicate ids \u2014 the separate, known recorded defect (no unique constraint), handled by the gate via DISTINCT and printed, never absorbed."
     }
   ]
 }

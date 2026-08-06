@@ -21,7 +21,7 @@ Last update: **2026-08-06, post-buildout** (19-agent adversarial audit: 12 findi
 | store | state |
 |---|---|
 | `data/ticks/` | today + yesterday only, by design; older days on HF `azulcoder/btc-quant-ticks/data/date=*` |
-| recorded damage | **2 entries**: `2026-08-03` 28,428 prints (4 blocks) · `2026-08-04` 21,706 prints (2 blocks, 02:37–03:35Z, pre-fix cursor bug — flagged by the completeness gate, boundaries measured, entry written 2026-08-06) |
+| recorded damage | **3 entries**: `2026-08-03` 28,428 (4 blocks) · `2026-08-04` 21,706 (2 blocks, pre-fix) · `2026-08-05` **1,744 (reboot window 22:23–22:29Z, PRE-EMPTIVE — archive publishes ~07:00Z and the gate will verify the exact set)**. PENDING: `2026-08-06` will carry a ~4 min bootout hole (~02:52–02:56Z, log-relocation restart) — measure and record once the day closes. Outages <~90 s lose nothing (seed poll covers the last 1,000 ids — measured) |
 | `data/vision/` (archive tape) | **2,084 local partitions** `2019-12-31..2026-08-01`, **296-day hole [count corrected by audit 2026-08-06]** `2025-10-08..2026-07-30` (ENOSPC casualty), `2026-07-30` migrated & deleted locally |
 | Vision→HF migration | **REAL RUN IN FLIGHT**: batch 1 done **140/140 deleted after same-run verified read-back** (0 throttle, 5.4 s/partition, peak 4.9 MB); full run over the remaining ~1,944 launched (chunked ~25/commit, ~2.9 h est). Checkpoint `reports/vision-migration.jsonl` | 
 | **LockBox** | **`2026-08-05 01:00Z` onward — NOT read, NOT queried, ever.** Boundary moved once (00:00→01:00) for a documented defect, before any byte was read. Quarantines: `2026-08-04`, `2026-08-05 00:00–01:00` |
