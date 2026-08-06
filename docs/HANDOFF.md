@@ -1,20 +1,20 @@
 # HANDOFF — generated, do not hand-edit
 
-**Generated 2026-08-06T08:31:57Z by `make handoff`.** Every field below is read from a source; an
+**Generated 2026-08-06T12:40:31Z by `make handoff`.** Every field below is read from a source; an
 unreadable source says `UNKNOWN` rather than carrying a stale value forward. Hand-editing
 this file defeats its purpose — regenerate it instead (`make gate` does so automatically).
 
 ## Commit
 
-- `311f126` — Land the Hasbrouck extractions, verified independently — and correct my own two errors
-- authored 2026-08-06T14:20:27+07:00 · working tree **dirty** · unpushed commits: 3
+- `e432b14` — Implement the verified Hasbrouck estimators; verify the 2026-08-05 damage entry
+- authored 2026-08-06T15:32:45+07:00 · working tree **dirty** · unpushed commits: 4
 - public repo: <https://github.com/azulcoder/btc-quant> — a web session can fetch it directly
 
 ## State [all values generated this run]
 
 | field | value |
 |---|---|
-| collector `/health` | legs 16/16 · writer running · rows_dropped_error 0 · uptime 5.6 h |
+| collector `/health` | legs 16/16 · writer running · rows_dropped_error 0 · uptime 9.7 h |
 | last GREEN gate | GREEN at 2026-08-06T04:26:13Z on cf77e9e (an EARLIER commit) · UNKNOWN |
 | look counter (owner: `docs/EDA-microstructure-001.md`) | 557 diagnostic / 81 predictive |
 | vision partitions still local | 0 |
@@ -31,13 +31,13 @@ wrong and every DSR deflated against it inherits the error.
 ## Open decisions (generated from `docs/STATUS.md`)
 
 1. **`pytest -q` hides skips in the gate and in CI** — add `-rs` (and consider failing on an unexpected skip count). §5c C measured six silent skips covering the whole venue fidelity + completeness gate. One flag; highest value per character in the repo.
-2. **The pre-emptive `2026-08-05` damage entry has an unscheduled, one-shot verification window.** It is verified by exactly the six tests that skip, and only once the archive publishes that day. Nothing schedules it. Until it runs, those 1,744 prints stay `[DISI
+2. **979 duplicate rows in `trades`, found 2026-08-06 (§5c-bis).** No unique constraint on `(exchange, symbol, trade_id)` and the aggTrades dedup guard is in-memory only, so a reconnect that replays ids writes them twice. Per-trade statistics over an affected day
 3. **Five ledger entries carry a wrong terminal state** (`upload_failed` on partitions that migrated successfully — §5c B). The ledger is append-only, so the correction is an appended corrective record, never a rewrite. Shape of that record is azul's call.
 4. **296-day backfill** via the `--date` path — **now unblocked** (the local migration is done). `2025-10-08` still holds a `trades.parquet.bad` partial artifact that must be cleared as part of that day's re-ingest. Do it chunked, not as a naive `--date` loop.
 5. **`2026-08-06` bootout damage entry**: a ~4 min hole (~02:52–02:56Z, log-relocation restart) is expected; measure and record it once the day closes.
 6. **disablesleep experiment**: locked behind the 36 h churn threshold; needs a fresh baseline.
 7. **`make check-vision` is locally infeasible at full scale** (audit-measured: dedup over 2.83 B rows needs ~160 GB of aggregate state — needs a per-month window flag and an explicit `temp_directory`). Now more pressing, since the local copies it used to read ar
-8. **Hasbrouck estimators**: nothing may touch real data before a PREREG declares the whole specification set with an `N_trials` cap (RULE-EXTRACT-5). The maths is verified; `docs/VERIFY-hasbrouck-extraction.md` §11 lists what that PREREG must settle first. **Clo
+8. **Hasbrouck estimators — the plan is now written**: `docs/PLAN-microstructure-001.md`. Headline finding, measured: the Roll family needs **~147 days** of aggTrades before `sd(gamma_1)` falls to 20 % of the signal; at half a day the noise is 3.6x the signal. Th
 
 ## Binding rules for ANY agent, in any surface
 

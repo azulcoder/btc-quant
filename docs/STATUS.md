@@ -10,7 +10,7 @@ Last update: **2026-08-06, post-buildout + anti-rot gate** (19-agent adversarial
 
 | system | state | check with | record |
 |---|---|---|---|
-| collector (16 legs, launchd `com.btcquant.collector`) | **healthy**; `_stamped` + aggTrades cursor fix active. **Host rebooted 2026-08-06 05:23 local; launchd restarted the collector cleanly.** KNOWN RESIDUAL: the cursor dict is per-process, so the ~10 min reboot window's aggTrades backlog is lost (will surface in tomorrow's overlap gate on `2026-08-05`) — cross-process seeding from the day file's max id is the open fix | `curl 127.0.0.1:8788/health` | `dc9857b` |
+| collector (16 legs, launchd `com.btcquant.collector`) | **healthy**; `_stamped` + aggTrades cursor fix active. **Host rebooted 2026-08-06 05:23 local; launchd restarted the collector cleanly.** RESIDUAL CLOSED: the ~10 min reboot window's aggTrades backlog was lost and the overlap gate has now measured it exactly — 1,744 prints, matching the pre-emptive count to the print. Cross-process seeding via the cursor sidecar is live (`425877d`) | `curl 127.0.0.1:8788/health` | `dc9857b` |
 | tick lifecycle (HF sync, 07:20 WIB) | bounded 2-day local store, ~490 MB steady state | `ls data/ticks/` | `scripts/upload_hf.py` |
 | LockBox integrity | **PASS** — 1 recorded defect (depth row, ENOSPC). The reboot wiped `/tmp` (the stamped log), so the gate now distinguishes entry-predates-log (manifest = surviving record) from phantom. **`/tmp` log location is a standing risk — relocation recommended** | `make lockbox-integrity` | `reports/lockbox-manifest.json` |
 | churn vs §14b pre-registration | **clock reset** — churn returned `2026-08-05 18:21:40Z`; ambiguous band | `make churn-threshold` | EDA §14b |
@@ -21,7 +21,7 @@ Last update: **2026-08-06, post-buildout + anti-rot gate** (19-agent adversarial
 | store | state |
 |---|---|
 | `data/ticks/` | today + yesterday only, by design; older days on HF `azulcoder/btc-quant-ticks/data/date=*` |
-| recorded damage | **3 entries**: `2026-08-03` 28,428 (4 blocks) · `2026-08-04` 21,706 (2 blocks, pre-fix) · `2026-08-05` **1,744 (reboot window 22:23–22:29Z, PRE-EMPTIVE — archive publishes ~07:00Z and the gate will verify the exact set)**. PENDING: `2026-08-06` will carry a ~4 min bootout hole (~02:52–02:56Z, log-relocation restart) — measure and record once the day closes. Outages <~90 s lose nothing (seed poll covers the last 1,000 ids — measured) |
+| recorded damage | **3 entries**: `2026-08-03` 28,428 (4 blocks) · `2026-08-04` 21,706 (2 blocks, pre-fix) · `2026-08-05` **1,744 (reboot window 22:23–22:29Z) — VERIFIED 2026-08-06T08:30Z against the venue archive: `archive \\ recorded = 1,744`, `recorded \\ archive = 0`, exact. `[DIUKUR]`, entry carries `verified: true`**. PENDING: `2026-08-06` will carry a ~4 min bootout hole (~02:52–02:56Z, log-relocation restart) — measure and record once the day closes. Outages <~90 s lose nothing (seed poll covers the last 1,000 ids — measured) |
 | `data/vision/` (archive tape) | **remote-first as of 2026-08-06**: 0 partitions hold a local `trades.parquet`; every one lives on HF under the `vision/` prefix, with **2,085 local manifests retained** as the local proof of content. Span `2019-12-31..2026-08-01` with a **296-day hole [count corrected by audit 2026-08-06]** `2025-10-08..2026-07-30` (ENOSPC casualty) — the hole is unchanged by the migration and is still open |
 | Vision→HF migration | **COMPLETE 2026-08-06T06:57Z**. Final batch 713/713, 0 throttle events, exit 0, lock released cleanly. Totals: **2,084 deletes, every one carrying `transport_ok` + `content_ok` + `manifest_ok`**; 0 of 2,239 ledger lines unparseable despite a two-writer window. Terminal states read `deleted 2,079 / upload_failed 5` — those 5 are the mislabelled race casualties (§5c B), not failures; their `deleted` records are intact and verified. Checkpoint `reports/vision-migration.jsonl` |
 | **LockBox** | **`2026-08-05 01:00Z` onward — NOT read, NOT queried, ever.** Boundary moved once (00:00→01:00) for a documented defect, before any byte was read. Quarantines: `2026-08-04`, `2026-08-05 00:00–01:00` |
@@ -65,9 +65,12 @@ classes in `CLAUDE.md` (15 lines), ledger in `STRATEGY.md`.
 1. **`pytest -q` hides skips in the gate and in CI** — add `-rs` (and consider failing on an
    unexpected skip count). §5c C measured six silent skips covering the whole venue
    fidelity + completeness gate. One flag; highest value per character in the repo.
-2. **The pre-emptive `2026-08-05` damage entry has an unscheduled, one-shot verification window.**
-   It is verified by exactly the six tests that skip, and only once the archive publishes that
-   day. Nothing schedules it. Until it runs, those 1,744 prints stay `[DISIMPULKAN]`.
+2. **979 duplicate rows in `trades`, found 2026-08-06 (§5c-bis).** No unique constraint on
+   `(exchange, symbol, trade_id)` and the aggTrades dedup guard is in-memory only, so a reconnect
+   that replays ids writes them twice. Per-trade statistics over an affected day are inflated
+   until deduped. Decide: unique index, or a dedup pass at read time, or both.
+2b. **One or more prints whose qty differs from the venue by ~0.01**, price/timestamp/side exact.
+   Chasing it means a second, undeclared read of the LockBox slice — **your call, not mine.**
 3. **Five ledger entries carry a wrong terminal state** (`upload_failed` on partitions that
    migrated successfully — §5c B). The ledger is append-only, so the correction is an appended
    corrective record, never a rewrite. Shape of that record is azul's call.
@@ -80,9 +83,13 @@ classes in `CLAUDE.md` (15 lines), ledger in `STRATEGY.md`.
 7. **`make check-vision` is locally infeasible at full scale** (audit-measured: dedup over 2.83 B
    rows needs ~160 GB of aggregate state — needs a per-month window flag and an explicit
    `temp_directory`). Now more pressing, since the local copies it used to read are gone.
-8. **Hasbrouck estimators**: nothing may touch real data before a PREREG declares the whole
-   specification set with an `N_trials` cap (RULE-EXTRACT-5). The maths is verified;
-   `docs/VERIFY-hasbrouck-extraction.md` §11 lists what that PREREG must settle first.
+8. **Hasbrouck estimators — the plan is now written**: `docs/PLAN-microstructure-001.md`.
+   Headline finding, measured: the Roll family needs **~147 days** of aggTrades before
+   `sd(gamma_1)` falls to 20 % of the signal; at half a day the noise is 3.6x the signal.
+   The archive has 16x that, so it is feasible pooled — and daily subsampling, which the
+   extraction docs recommend, is the WRONG unit here. Next step is a PREREG, then a
+   positive control against the book-measured 0.0156 bps. **Not on the terminal** — the
+   terminal already has the book, and at intraday n the estimator would cry wolf.
 
 **Closed since this list was last edited** (each re-verified 2026-08-06, not assumed):
 Vision migration real run — complete, 2,084 verified deletes ·
@@ -204,6 +211,7 @@ is made.
 | `docs/PREREG-pbo-null-001.md` | declared-not-run PBO replacement |
 | `docs/EXTRACT-hasbrouck-001.md` | microstructure estimators E1–E7 extracted from a copyrighted source (equations restated, section-number citations, PDF never committed) |
 | `docs/EXTRACT-hasbrouck-s9-s12.md` | inference (§9) + the VAR/IRF/Cholesky machinery (§12), and its own amendments to the above |
+| `docs/PLAN-microstructure-001.md` | what the estimators are FOR, the sample size they need, why they stay off the terminal, and the order to build in |
 | `docs/VERIFY-hasbrouck-extraction.md` | independent replication of both — what held, what was corrected, and what has no checker on this machine |
 | `docs/DESIGN-vision-remote-first.md` | migration design §17–§25: nondeterminism claims table, checkpoint/caffeinate rules, batch results, the concurrency race and the lock that closes it |
 | `docs/STATUS.md` | this file |
