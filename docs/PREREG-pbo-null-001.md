@@ -1,8 +1,8 @@
 # PREREG-pbo-null-001 — replacing `PBO < threshold` with a calibrated-null test
 
-**Status: DECLARATION ONLY. Nothing in this document has been run.** Written 2026-08-04, before
-any number it specifies exists. Written in a separate turn from the run, which is the only thing
-that makes it worth anything.
+**Status: RUN 2026-08-06, as declared (see RESULT at the bottom; amendment above §3 records the
+one pre-run anchor re-base).** Declared 2026-08-04, run two days later by `scripts/pbo_null_test.py`,
+seed 20260806, results in `reports/pbo-null-result.json`.
 
 ---
 
@@ -145,6 +145,29 @@ promotion, say so and I will invert it — the machinery is identical either way
 
 ---
 
+## AMENDMENT 2026-08-06 — PC1's anchor embedded an ephemeral bar; re-based BEFORE any null ran
+
+**What happened, in order.** The runner executed PC1 and ABORTED twice, exactly as designed:
+
+1. First abort: the matrix came out `(2617, 8)` — the OHLCV cache had grown two days since the
+   documented run. Fixed by pinning `--end 2026-08-04` (the declaration's every number is
+   conditional on T = 2,615). **The pin is faithfulness, not tuning.**
+2. Second abort: T = 2,615 matched but PBO = **0.5429** (38/70) against the anchor **0.5286**
+   (37/70) — one CSCV combination. **Cause [DISIMPULKAN]:** the documented run happened mid-day
+   on `2026-08-04`, so its final bar was the LIVE, PARTIAL bar as of ~13:26Z — a snapshot that
+   no longer exists anywhere. Today's cache holds the closed `2026-08-04` bar. The instrument is
+   identical; one input bar changed from partial to final, and one IS-best pick flips one split.
+
+**Amendment: PC1's anchor is re-based to `0.5429`, the value on the REPRODUCIBLE sample**
+(closed bars through `2026-08-04`, T = 2,615). Legitimacy rests on three facts: the change was
+made **before any null replication was computed** (both aborts happened ahead of the null loop);
+the anchor is not a verdict input (the verdict compares observed vs null percentiles — both use
+whichever sample is pinned, so the switch cannot move the verdict's direction); and the original
+`0.5286` stays on the record here, struck rather than replaced, with its cause named.
+
+**The lesson, and it generalizes:** an anchor measured against a live, partially-formed bar is
+not an anchor — future controls must pin to CLOSED data only.
+
 ## 3. Positive controls — binding, and they run BEFORE the verdict
 
 Per the standing positive-control rule. **Any failure discards the instrument rather than
@@ -187,3 +210,36 @@ document before the run, and that the disagreement and sensitivity rules both fa
   by the block bootstrap and wholly absent from the Gaussian arm; neither represents it faithfully.
 - **Anything about `T > 2,615`.** Every number here is conditional on the current daily history.
   A longer sample changes the null's dispersion and could revive a fixed threshold.
+
+---
+
+# RESULT [DIUKUR] — run 2026-08-06, `scripts/pbo_null_test.py`, seed 20260806, B = 2,000/arm
+
+**All three controls passed before the verdict was computed:**
+
+| control | outcome |
+|---|---|
+| PC1 — reproduce the board PBO on the pinned sample | **0.5429 = 0.5429, MATCH** (anchor re-based per the amendment; T = 2,615 asserted) |
+| PC2 — dominant-column board must be SATISFIED | PBO 0.0000 vs null P5 0.1143 → **SATISFIED** — the test has power on an obvious winner |
+| PC3 — duplicate zero-edge board must NOT be SATISFIED | PBO 0.5571 → ABSTAINS — correctly not-satisfied |
+
+**The declared test — unanimous across all four arms:**
+
+| arm | null P5 | median | P95 | observed | verdict |
+|---|---:|---:|---:|---:|---|
+| bootstrap L=5 | 0.0286 | 0.4857 | 0.9143 | 0.5429 | ABSTAINS |
+| bootstrap L=21 | 0.0286 | 0.4857 | 0.9286 | 0.5429 | ABSTAINS |
+| bootstrap L=63 | 0.0143 | 0.4714 | 0.9143 | 0.5429 | ABSTAINS |
+| Gaussian | 0.0714 | 0.5143 | 0.9143 | 0.5429 | ABSTAINS |
+
+> **FINAL: the clause ABSTAINS.** The board's PBO sits mid-null in every arm — indistinguishable
+> from a board with no true differences, in either direction. This is the outcome §1 predicted as
+> likely ("for most real boards the honest output will be 'cannot tell'"), now measured rather
+> than predicted.
+
+**Consequences, per the declared semantics (§2.4–2.5):** the PBO clause is not evidence for or
+against any candidate at this sample; candidates may still be CLEARED on `DSR` and `MinBTL`, and
+every registry entry must carry **`pbo: INDETERMINATE`** visibly. `tsmom` remains NOT CLEARED —
+its block was never PBO; it is the N_eff tie-break (L7 LockBox queue). The clause becomes a
+calibrated, rarely-firing alarm exactly as §1 said, and the upper-tail alarm (P95 ≈ 0.91) stays
+armed: a future board past it fails hard.

@@ -239,6 +239,43 @@ _WS_SEND_TIMEOUT_S = 10.0
 # The cursor now lives at MODULE scope, keyed by symbol, because the supervisor   #
 # recreates the coroutine but never the module. Restart therefore resumes.        #
 _AGGTRADES_CURSOR: dict[str, int] = {}
+# Cross-PROCESS resume (the 2026-08-06 reboot lesson): the dict above survives LEG
+# restarts but dies with the process, so a reboot's down-window backlog was lost and
+# surfaced in the overlap gate. A sidecar beside the store closes the class: loaded
+# at startup, persisted on every cursor advance (atomic tmp+rename; a persist failure
+# is absorbed by the poll loop's own error path and never kills the leg).
+_AGGTRADES_CURSOR_SIDECAR: Optional[Path] = None
+
+
+def _load_aggtrades_cursors(path) -> str:
+    """Arm the sidecar and seed the cursor dict from it. Returns a line to log."""
+    global _AGGTRADES_CURSOR_SIDECAR
+    _AGGTRADES_CURSOR_SIDECAR = Path(path)
+    try:
+        raw = Path(path).read_text()
+    except FileNotFoundError:
+        return f"aggTrades cursor sidecar: none at {path} — starting fresh"
+    try:
+        data = json.loads(raw)
+        loaded = 0
+        for k, v in data.items():
+            _AGGTRADES_CURSOR.setdefault(k, int(v))   # in-memory (fresher) wins
+            loaded += 1
+        vals = ", ".join(f"{k}={v}" for k, v in _AGGTRADES_CURSOR.items())
+        return f"aggTrades cursor sidecar: loaded {loaded} cursor(s) ({vals})"
+    except Exception as exc:  # noqa: BLE001 — a torn sidecar must not kill startup
+        return (f"aggTrades cursor sidecar: unreadable ({exc!r}) — starting fresh; "
+                "the seek-back ceiling bounds the cost")
+
+
+def _persist_aggtrades_cursors() -> None:
+    """Atomic write of the cursor dict. No-op until _load_aggtrades_cursors armed it."""
+    p = _AGGTRADES_CURSOR_SIDECAR
+    if p is None:
+        return
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(_AGGTRADES_CURSOR))
+    tmp.replace(p)
 # Seek-back ceiling. Derived, not picked: `aggTrades` serves 1000 rows per request
 # at weight 20, the poll runs every 5 s (12 polls/min = 240 weight/min, 10 % of the
 # 2400/min futures budget), and BTCUSDT prints ~11.6 aggTrades/s (~696/min). Net
@@ -2820,6 +2857,7 @@ async def _aggtrades_loop(
                 )
                 cursor = edge
                 _AGGTRADES_CURSOR[symbol] = cursor
+                _persist_aggtrades_cursors()
             else:
                 _safe_log(
                     log,
@@ -2861,6 +2899,7 @@ async def _aggtrades_loop(
             if next_from_id is not None and (cursor is None or next_from_id > cursor):
                 cursor = next_from_id  # advance ONLY on success — never skip ahead
                 _AGGTRADES_CURSOR[symbol] = cursor   # survive a leg restart
+                _persist_aggtrades_cursors()      # survive a PROCESS restart
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — a failed poll must not kill the leg
@@ -3882,6 +3921,8 @@ async def _run_async(
         f"Ctrl-C flushes and exits cleanly)"
         + (f" [venue ids: {leg_note}]" if leg_note else "")
     )
+    log("[collector] " + _load_aggtrades_cursors(Path(db) / "aggtrades-cursor.json"
+        if rotation else Path(db).parent / "aggtrades-cursor.json"))
     log(
         f"[collector] per-leg watchdog: {len(sup.legs)} legs supervised, tick "
         f"{SUPERVISOR_TICK_S:.0f}s"

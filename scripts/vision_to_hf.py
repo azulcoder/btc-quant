@@ -162,21 +162,31 @@ def load_states() -> dict[str, str]:
     return out
 
 
-def retry_hf(fn, what: str, throttle_log: list, tries: int = 3):
-    """Retry on rate-limit signatures with recorded backoff. Anything else raises."""
+def retry_hf(fn, what: str, throttle_log: list, tries: int = 4):
+    """Retry on rate limits (long backoff) AND transient network timeouts (short).
+
+    The first dry-run batch measured a 4 % loss rate purely to home-network blips
+    (`Errno 60` / read timeouts) that the 429-only retry let through; they all
+    cleared in 2-3 s on retry, so a short backoff absorbs them cheaply. Anything
+    that matches neither signature still raises immediately.
+    """
     for i in range(tries):
         try:
             return fn()
-        except Exception as e:  # noqa: BLE001 — inspect, re-raise if not a throttle
+        except Exception as e:  # noqa: BLE001 — inspect, re-raise if unrecognised
             s = str(e)
-            if "429" in s or "rate" in s.lower() or "quota" in s.lower():
-                evt = {"ts": now_iso(), "what": what, "try": i + 1, "err": s[:160]}
+            throttled = "429" in s or "rate" in s.lower() or "quota" in s.lower()
+            timeout = ("timed out" in s.lower() or "timeout" in s.lower()
+                       or "errno 60" in s.lower() or "connection reset" in s.lower())
+            if not (throttled or timeout):
+                raise
+            evt = {"ts": now_iso(), "what": what, "try": i + 1,
+                   "kind": "throttle" if throttled else "net_timeout", "err": s[:160]}
+            if throttled:
                 throttle_log.append(evt)
-                append_state({"event": "throttle", **evt})
-                time.sleep(60 * (i + 1))
-                continue
-            raise
-    raise RuntimeError(f"rate limit persisted after {tries} tries on {what}")
+            append_state({"event": "retry", **evt})
+            time.sleep((60 * (i + 1)) if throttled else (5 * (i + 1)))
+    raise RuntimeError(f"retries exhausted after {tries} tries on {what}")
 
 
 def _stage_link(src: Path, dest: Path) -> None:
@@ -211,9 +221,12 @@ def run_content_control(uh, tmp: Path) -> bool:
 
 
 def migrate_one_local(date: str, uh, dry_run: bool, skip_upload: bool,
-                      throttle_log: list) -> dict:
-    """Upload-only path for one already-local partition. Returns the state record."""
-    rec: dict = {"ts": now_iso(), "date": date, "mode": "upload-only", "dry_run": dry_run}
+                      throttle_log: list, chunk_up_s: float = 0.0,
+                      chunk_size: int = 1) -> dict:
+    """Verify-and-delete for one already-local partition (upload happens per CHUNK
+    in run_batch). Returns the state record."""
+    rec: dict = {"ts": now_iso(), "date": date, "mode": "upload-only", "dry_run": dry_run,
+                 "chunk_up_s": round(chunk_up_s, 2), "chunk_size": chunk_size}
     pq = LOCAL_ROOT / f"date={date}" / "trades.parquet"
     mf = LOCAL_ROOT / "manifests" / f"MANIFEST-{date}.json"
     if not mf.exists():
@@ -235,16 +248,11 @@ def migrate_one_local(date: str, uh, dry_run: bool, skip_upload: bool,
     part_tmp = STAGE_ROOT / f"p-{date}"
     shutil.rmtree(part_tmp, ignore_errors=True)
     try:
-        # -- upload: one commit per partition (parquet + manifest via one folder) --
+        # -- upload: handled by the CHUNK stage in run_batch (N partitions per commit,
+        # HF throttles at ~125-130 commits/window — measured). This function only
+        # verifies and deletes; rec carries the chunk's shared timing for the series.
         if not skip_upload:
-            stage = part_tmp / "stage"
-            _stage_link(pq, stage / f"date={date}" / "trades.parquet")
-            _stage_link(mf, stage / "manifests" / f"MANIFEST-{date}.json")
-            t = time.time()
-            retry_hf(lambda: uh.hf_upload_folder(HF_REPO, stage, VISION_PREFIX,
-                                                 f"vision aggTrades {date} (upload-only)"),
-                     f"upload {date}", throttle_log)
-            rec["up_s"] = round(time.time() - t, 2)
+            rec["up_s"] = rec.get("chunk_up_s", 0.0)
         else:
             rec["up_s"] = 0.0
             rec["upload_skipped"] = True
@@ -333,25 +341,76 @@ def run_batch(a, uh) -> int:
 
         t0 = time.time()
         recs, consec_fail = [], 0
-        for i, d in enumerate(todo, 1):
-            try:
-                rec = migrate_one_local(d, uh, a.dry_run, skip_upload=(d in prior_ok),
-                                        throttle_log=throttle_log)
-            except Exception as e:  # noqa: BLE001 — one partition must not kill the batch
-                rec = {"ts": now_iso(), "date": d, "state": "upload_failed",
-                       "err": str(e)[:200]}
-            append_state(rec)
-            recs.append(rec)
-            ok = rec["state"] in ("readback_ok", "deleted")
-            consec_fail = 0 if ok else consec_fail + 1
-            rate = rec.get("mb", 0) / rec["up_s"] if rec.get("up_s") else 0
-            print(f"  [{i:>3}/{len(todo)}] {d}  {rec['state']:<22} "
-                  f"up {rec.get('up_s', 0):>5.1f}s  rb {rec.get('rb_s', 0):>5.1f}s  "
-                  f"{rate:>5.2f} MB/s")
-            if consec_fail >= 5:
-                print("  >=5 consecutive failures — systemic, aborting batch.")
-                append_state({"event": "batch_abort", "ts": now_iso(),
-                              "reason": "5_consecutive_failures"})
+        COMMIT_BATCH = 25          # HF throttles at ~125-130 commits/window (measured);
+                                   # 25/commit puts the full 2,084 at ~84 commits total
+        i = 0
+        aborted = False
+        for c0 in range(0, len(todo), COMMIT_BATCH):
+            chunk = todo[c0:c0 + COMMIT_BATCH]
+            need_upload = [d for d in chunk if d not in prior_ok]
+            chunk_up_s = 0.0
+            if need_upload:
+                stage = STAGE_ROOT / f"chunk-{c0}"
+                shutil.rmtree(stage, ignore_errors=True)
+                staged = []
+                for d in need_upload:
+                    pq = LOCAL_ROOT / f"date={d}" / "trades.parquet"
+                    mf = LOCAL_ROOT / "manifests" / f"MANIFEST-{d}.json"
+                    if pq.exists() and mf.exists():
+                        _stage_link(pq, stage / f"date={d}" / "trades.parquet")
+                        _stage_link(mf, stage / "manifests" / f"MANIFEST-{d}.json")
+                        staged.append(d)
+                if staged:
+                    t = time.time()
+                    try:
+                        retry_hf(lambda: uh.hf_upload_folder(
+                            HF_REPO, stage, VISION_PREFIX,
+                            f"vision aggTrades {staged[0]}..{staged[-1]} "
+                            f"({len(staged)} partitions, upload-only)"),
+                            f"upload chunk {staged[0]}..{staged[-1]}", throttle_log)
+                        chunk_up_s = time.time() - t
+                    except Exception as e:  # noqa: BLE001 — chunk fails, partitions retained
+                        for d in chunk:
+                            rec = {"ts": now_iso(), "date": d, "state": "upload_failed",
+                                   "err": str(e)[:200]}
+                            append_state(rec)
+                            recs.append(rec)
+                        consec_fail += len(chunk)
+                        shutil.rmtree(stage, ignore_errors=True)
+                        if consec_fail >= 2 * COMMIT_BATCH:
+                            print("  two consecutive chunk failures — systemic, aborting.")
+                            append_state({"event": "batch_abort", "ts": now_iso(),
+                                          "reason": "2_consecutive_chunk_failures"})
+                            aborted = True
+                            break
+                        continue
+                shutil.rmtree(stage, ignore_errors=True)
+            per_part_up = chunk_up_s / max(len(need_upload), 1)
+            for d in chunk:
+                i += 1
+                try:
+                    rec = migrate_one_local(d, uh, a.dry_run, skip_upload=(d in prior_ok),
+                                            throttle_log=throttle_log,
+                                            chunk_up_s=per_part_up,
+                                            chunk_size=len(need_upload))
+                except Exception as e:  # noqa: BLE001 — one partition must not kill the batch
+                    rec = {"ts": now_iso(), "date": d, "state": "upload_failed",
+                           "err": str(e)[:200]}
+                append_state(rec)
+                recs.append(rec)
+                ok = rec["state"] in ("readback_ok", "deleted")
+                consec_fail = 0 if ok else consec_fail + 1
+                rate = rec.get("mb", 0) / rec["up_s"] if rec.get("up_s") else 0
+                print(f"  [{i:>4}/{len(todo)}] {d}  {rec['state']:<22} "
+                      f"up {rec.get('up_s', 0):>5.1f}s  rb {rec.get('rb_s', 0):>5.1f}s  "
+                      f"{rate:>5.2f} MB/s")
+                if consec_fail >= 5:
+                    print("  >=5 consecutive failures — systemic, aborting batch.")
+                    append_state({"event": "batch_abort", "ts": now_iso(),
+                                  "reason": "5_consecutive_failures"})
+                    aborted = True
+                    break
+            if aborted:
                 break
         total = time.time() - t0
 

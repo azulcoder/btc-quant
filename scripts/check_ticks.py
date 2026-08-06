@@ -33,12 +33,30 @@ Exit codes
 * 2 — store locked by the running collector (stop it, or copy the file and point
       ``--db`` at the copy).
 
+Scale limit (vision mode)
+-------------------------
+Full-archive dedup is NOT feasible on this machine, and pretending otherwise
+would just be a query that dies on disk space hours in. The duplicate-trade_id
+check is a GROUP BY over every archive row at once; at the audited scale —
+2.83 B rows, ~2,052 ``date=`` partitions (``ls`` count 2026-08-06) — DuckDB
+needs ~160 GB of aggregate/spill state against ~14 GB free on the only volume
+this machine has (audit: docs/STATUS.md, "locally infeasible at full scale").
+So grade the archive in month windows: ``--month YYYY-MM`` (repeatable)
+restricts the partition scan, ``--temp-dir`` points DuckDB's spill somewhere
+explicit (default ``.tmp`` — same volume, because there is no other volume),
+and the memory limit is pinned to 4 GB so the spill is predictable instead of
+an OOM. A month-window report says so in its output: it grades that month,
+never the whole archive. No check's logic or threshold changes under these
+flags — only how much data is in scope and where the working state lives.
+
 Usage
 -----
     python3 scripts/check_ticks.py                       # data/ticks.duckdb, 24 h
     python3 scripts/check_ticks.py --db /path/copy.duckdb --hours 6
     python3 scripts/check_ticks.py --db data/ticks       # DIRECTORY of day files (§3c
                                                          # rotation) — read-only union
+    python3 scripts/check_ticks.py --vision data/vision/binancef/BTCUSDT/aggTrades \
+        --month 2026-07                                  # archive QA, one month window
     python3 scripts/check_ticks.py --json | jq .overall  # machine output
 
 Requires the opt-in collector deps:  pip install -r requirements-collector.txt
@@ -214,11 +232,41 @@ _VISION_TRADES_COLUMNS = (
 #: Hive partition dir under an archive family root.
 _VISION_PART_RE = re.compile(r"date=(\d{4}-\d{2}-\d{2})$")
 
+#: Vision-mode memory ceiling. WHY 4GB: the full-archive dedup GROUP BY needs
+#: ~160 GB of aggregate state (docs/STATUS.md, "locally infeasible at full
+#: scale") — no in-RAM budget survives that, so the cap's job is to make the
+#: spill to --temp-dir start early and predictably instead of ending in an OOM.
+#: It changes WHERE the working state lives, never what any check computes.
+_VISION_MEMORY_LIMIT = "4GB"
+
+
+def _apply_vision_resource_caps(con: "duckdb.DuckDBPyConnection", temp_dir: str) -> None:
+    """SET an explicit temp_directory + memory_limit on the archive connection.
+
+    An in-memory DuckDB has no database file to spill next to, so without an
+    explicit ``temp_directory`` a big aggregate either balloons RSS or fails
+    outright. The default ``.tmp`` is repo-local ON PURPOSE: this machine has a
+    single volume, so "point the spill at a bigger disk" is not an option — the
+    honest fix is month windows (``--month``), and these caps just make the
+    within-window work bounded and observable.
+    """
+    tmp = Path(temp_dir)
+    tmp.mkdir(parents=True, exist_ok=True)
+    q = str(tmp.resolve()).replace(chr(39), chr(39) * 2)
+    con.execute(f"SET temp_directory = '{q}'")
+    con.execute(f"SET memory_limit = '{_VISION_MEMORY_LIMIT}'")
+
 
 def connect_vision_readonly(
     root: Path,
+    months: Optional[list[str]] = None,
 ) -> tuple["duckdb.DuckDBPyConnection", list[Path], list[str]]:
     """Read-only view over ``<root>/date=*/trades.parquet`` (DESIGN §3d tree).
+
+    ``months`` (each ``YYYY-MM``) restricts the scan to ``date=`` partitions in
+    those calendar months — the scale valve for the full-archive dedup that
+    does not fit this machine (module docstring, "Scale limit"). ``None`` keeps
+    the historical behaviour: every partition under the root.
 
     Returns ``(con, parquet_files, dates)``. Built as an explicit file list with
     an explicit column projection rather than a glob-with-``SELECT *``: the hive
@@ -237,6 +285,9 @@ def connect_vision_readonly(
         m = _VISION_PART_RE.search(d.name)
         pq = d / "trades.parquet"
         if m and pq.exists():
+            # date is YYYY-MM-DD, so [:7] is its calendar month.
+            if months is not None and m.group(1)[:7] not in months:
+                continue
             parts.append((m.group(1), pq))
     con = duckdb.connect()
     if not parts:
@@ -1131,6 +1182,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "to print a MinBTL readiness number (archive days never count toward it).",
     )
     parser.add_argument(
+        "--month",
+        action="append",
+        default=None,
+        metavar="YYYY-MM",
+        help="Vision mode only; repeatable. Restrict the partition scan to date= "
+        "dirs in this calendar month. Full-archive dedup does not fit this "
+        "machine (module docstring 'Scale limit': ~2.83 B rows need ~160 GB of "
+        "aggregate state vs ~14 GB free, docs/STATUS.md) — month windows do.",
+    )
+    parser.add_argument(
+        "--temp-dir",
+        default=".tmp",
+        help="Vision mode only: DuckDB temp_directory for aggregate spill "
+        "(created if missing; memory_limit is pinned to "
+        f"{_VISION_MEMORY_LIMIT}). Default is repo-local on purpose — this "
+        "machine has a single volume, so there is no bigger disk to point at.",
+    )
+    parser.add_argument(
         "--hours",
         type=float,
         default=24.0,
@@ -1235,7 +1304,19 @@ def print_report(report: dict) -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    # --month is a vision-mode valve (module docstring "Scale limit"); accepting
+    # it silently on the recorded store would be a flag that does nothing.
+    months: Optional[list[str]] = None
+    if args.month:
+        if not args.vision:
+            parser.error("--month restricts the --vision partition scan; pass --vision too")
+        for m in args.month:
+            if not re.fullmatch(r"\d{4}-\d{2}", m):
+                parser.error(f"--month expects YYYY-MM, got {m!r}")
+        months = sorted(set(args.month))
 
     if duckdb is None:  # guarded import — actionable hint, run_collector.py idiom
         print(f"ERROR: duckdb missing — {_INSTALL_HINT}", file=sys.stderr)
@@ -1250,19 +1331,36 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"no archive partition yet at {root} — run `make vision-sync` "
                   "to ingest one. (exit 0)")
             return 0
-        con, parts, dates = connect_vision_readonly(root)
+        con, parts, dates = connect_vision_readonly(root, months)
         if not parts:
             con.close()
-            print(f"no date=*/trades.parquet partitions under {root} — nothing to grade. "
-                  "(exit 0)")
+            if months is not None:
+                # Distinct message on purpose: "no partition matches the window
+                # you asked for" and "no partitions at all" are different facts.
+                print(f"no date=*/trades.parquet partitions under {root} match "
+                      f"--month {', '.join(months)} — nothing to grade. (exit 0)")
+            else:
+                print(f"no date=*/trades.parquet partitions under {root} — nothing to grade. "
+                      "(exit 0)")
             return 0
+        # Explicit spill dir + memory cap (module docstring "Scale limit"):
+        # bounded, observable out-of-core work instead of an OOM or a full disk.
+        _apply_vision_resource_caps(con, args.temp_dir)
         try:
             report = build_report(con, root, args.hours, parts, [], mode="vision")
         finally:
             con.close()
+        if months is not None:
+            # A month-window report must SAY it is one — a screenshot of a
+            # restricted pass must not be readable as a full-archive pass.
+            report["month_filter"] = {"months": months, "partitions": len(parts)}
         if args.json:
             print(json.dumps(_json_safe(report), indent=2))
         else:
+            if months is not None:
+                print(f"note: partition scan RESTRICTED to month(s) "
+                      f"{', '.join(months)} ({len(parts)} partition(s)) — this "
+                      "report grades that window, not the full archive")
             print_report(report)
         return report["exit_code"]
 

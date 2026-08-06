@@ -2,7 +2,7 @@
 
 **Maintained, not archival: this file says where everything stands NOW and where its full
 record lives.** Superseded facts get struck through with a pointer, never silently removed.
-Last update: **2026-08-06, post-audit** (19-agent adversarial audit: 12 findings confirmed, all fixed; machine rebooted 05:23 local — collector self-recovered via launchd).
+Last update: **2026-08-06, post-buildout** (19-agent adversarial audit: 12 findings confirmed, all fixed; machine rebooted 05:23 local — collector self-recovered via launchd).
 
 ---
 
@@ -14,7 +14,7 @@ Last update: **2026-08-06, post-audit** (19-agent adversarial audit: 12 findings
 | tick lifecycle (HF sync, 07:20 WIB) | bounded 2-day local store, ~490 MB steady state | `ls data/ticks/` | `scripts/upload_hf.py` |
 | LockBox integrity | **PASS** — 1 recorded defect (depth row, ENOSPC). The reboot wiped `/tmp` (the stamped log), so the gate now distinguishes entry-predates-log (manifest = surviving record) from phantom. **`/tmp` log location is a standing risk — relocation recommended** | `make lockbox-integrity` | `reports/lockbox-manifest.json` |
 | churn vs §14b pre-registration | **clock reset** — churn returned `2026-08-05 18:21:40Z`; ambiguous band | `make churn-threshold` | EDA §14b |
-| cursor-fix production evidence (b-ii/b-iii) | **0 events** — needs a natural `binancef-aggTrades` leg restart | `grep -E "resuming at id\|exceeds the\|id GAP" /tmp/btcquant-collector.log` | EDA §10 |
+| cursor-fix production evidence (b-ii/b-iii) | **0 events** — needs a natural `binancef-aggTrades` leg restart | `grep -E "resuming at id\|exceeds the\|id GAP" ~/Library/Logs/btcquant-collector.log` | EDA §10 |
 
 ## 2. Data
 
@@ -23,7 +23,7 @@ Last update: **2026-08-06, post-audit** (19-agent adversarial audit: 12 findings
 | `data/ticks/` | today + yesterday only, by design; older days on HF `azulcoder/btc-quant-ticks/data/date=*` |
 | recorded damage | **2 entries**: `2026-08-03` 28,428 prints (4 blocks) · `2026-08-04` 21,706 prints (2 blocks, 02:37–03:35Z, pre-fix cursor bug — flagged by the completeness gate, boundaries measured, entry written 2026-08-06) |
 | `data/vision/` (archive tape) | **2,084 local partitions** `2019-12-31..2026-08-01`, **296-day hole [count corrected by audit 2026-08-06]** `2025-10-08..2026-07-30` (ENOSPC casualty), `2026-07-30` migrated & deleted locally |
-| Vision→HF migration | **MID-FLIGHT, dry-run only**: ~128 partitions verified on HF under `vision/…`, **local copies intact, 0 deletes**. Checkpoint `reports/vision-migration.jsonl` | 
+| Vision→HF migration | **REAL RUN IN FLIGHT**: batch 1 done **140/140 deleted after same-run verified read-back** (0 throttle, 5.4 s/partition, peak 4.9 MB); full run over the remaining ~1,944 launched (chunked ~25/commit, ~2.9 h est). Checkpoint `reports/vision-migration.jsonl` | 
 | **LockBox** | **`2026-08-05 01:00Z` onward — NOT read, NOT queried, ever.** Boundary moved once (00:00→01:00) for a documented defect, before any byte was read. Quarantines: `2026-08-04`, `2026-08-05 00:00–01:00` |
 | exploration slice | **FROZEN**: `2026-07-05..2026-08-03`. New collection goes to the LockBox, so every 30-day table (funding/OI/options/crowding/dvol) is stuck at N=30 for exploration |
 
@@ -32,14 +32,14 @@ Last update: **2026-08-06, post-audit** (19-agent adversarial audit: 12 findings
 | item | verdict | where |
 |---|---|---|
 | swing board (14 candidates) | nothing clears DSR 0.95; `tsmom` 0.93 **NOT CLEARED** (N_eff estimators straddle the bar → LockBox queue L7) | EDA §4bis-B, §7; STRATEGY L7 |
-| PBO clause of the promotion bar | **UNMEASURABLE** at T=2,615 (noise band [0.13, 0.91]) — replacement declared but **not run, undecided** | EDA §8; `PREREG-pbo-null-001.md` |
+| PBO clause of the promotion bar | **RESOLVED 2026-08-06**: replaced by the calibrated-null test, run as declared (3 controls passed, incl. power control PC2). Verdict **ABSTAINS, unanimous 4 arms** — `pbo: INDETERMINATE` on registry entries; P95≈0.91 upper-tail alarm armed | `PREREG-pbo-null-001.md` RESULT; `reports/pbo-null-result.json` |
 | maker viability (standalone MM) | **NO, arithmetically** (−3.98 bps/RT at VIP 0; queue ~$445k on a 1-tick book) | `EDA-execution-001.md` §E0 |
 | execution overlay | alive — economics = 6 bps/RT fee differential, not spread capture; §E1–E4 awaiting approval | same doc |
 | C1 daily CVD | **AMBIGUOUS** (8.66× binary anchor after correction) — not proposed | `PRECHECK-cvd-turnover.md` + PLAN |
-| C2 basis / C3 funding | **UNBLOCKED** (keyless history probed to 2019-09) — C2 needs the breadth×drag feasibility map with pre-declared structural criteria; C3 conditioning-only | `PLAN-derivative-001.md` |
+| C2 basis / C3 funding | **C2 feasibility map DONE**: structural point (z=2.0/0.5, W=60) **passes both gates** (breadth 18.6 %, drag 0.61× anchor) inside a contiguous window — graduates to a pre-registration draft (no returns scored). C3 conditioning-only | `PLAN-derivative-001.md` C2 RESULT |
 | C4 OI quadrants | **FROZEN PERMANENTLY** (endpoint serves 30 rolling days, probed) | same |
 | options orthogonality | **CANNOT DECIDE** (N=30 frozen, CI ±0.36) — DEFERRED, no date; route = check for a keyless historical chain | EDA §19 |
-| scalping PREREG (1–30 s, 1:1) | §E0 answered the maker premise; full PREREG doc still open | request backlog |
+| scalping PREREG (1–30 s, 1:1) | **WRITTEN** (`docs/PREREG-scalp-001.md`, 315 lines): premise fails arithmetically in all three execution models (p* 118–222 % at 30 s); rejection registered as the deliverable; one reformulation declared-not-activated (5-min bars, R=3, p* 51.1 %, N_trials cap 3) | `docs/PREREG-scalp-001.md` |
 
 **Look counter: 535 diagnostic / 81 predictive.** Audit 2026-08-06 found the row sum was 492 —
 a constant +43 offset predating the visible (squashed) git history; reconciled with an explicit

@@ -29,7 +29,10 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-LOG = Path("/tmp/btcquant-collector.log")
+# Relocated out of /tmp 2026-08-06 (macOS wipes /tmp on reboot — it happened, and took
+# the recorded defect's log line with it). Falls back to the old path for old eras.
+LOG = Path.home() / "Library" / "Logs" / "btcquant-collector.log"
+_OLD_LOG = Path("/tmp/btcquant-collector.log")
 MANIFEST = REPO / "reports" / "lockbox-manifest.json"
 
 # A stamped drop line. Unstamped lines predate the _stamped fix and cannot be placed in
@@ -62,6 +65,9 @@ def main() -> int:
     print(f"  LockBox starts {man['lockbox_start_utc']}")
     print(f"  manifest: {len(man['defects'])} defect(s) recorded\n")
 
+    if not a.log.exists() and _OLD_LOG.exists():
+        a.log = _OLD_LOG
+        print(f"  new log path missing; falling back to {a.log}")
     if not a.log.exists():
         print(f"  NO LOG at {a.log} — cannot verify. This is not a pass.")
         return 1

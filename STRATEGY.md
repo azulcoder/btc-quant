@@ -416,7 +416,7 @@ sequence to the calendar, not to enthusiasm.
 - [ ] **M2. Promote the gate from prose to a machine-checkable registry.** Per-candidate
       artifact `{hypothesis_id, feature, N_trials, MinBTL_target, kill DSR/PBO thresholds,
       LockBox slice}`. A signal is `status=CLEARED` iff OOS `DSR>0.95` net-of-cost AND
-      `PBO<threshold` AND recorded history ≥ `MinBTL(N)`. **[PBO clause currently unmeasurable — see `docs/PREREG-pbo-null-001.md`, undecided.]** Wire the `LockBox`
+      `PBO<threshold` AND recorded history ≥ `MinBTL(N)`. **[PBO clause resolved 2026-08-06: replaced by the calibrated-null test — verdict ABSTAINS; see `docs/PREREG-pbo-null-001.md` RESULT.]** Wire the `LockBox`
       (`backtest.py:772-831`, currently opt-in and unused). *Accept:* the registry object
       exists, is read by a (future) terminal panel, and refusing an un-cleared signal is a
       mechanical property, not a discipline.
@@ -905,7 +905,11 @@ instrument that cannot report its own blindness.
   category; pursuing it burns years in an arena lost by construction.
 - Refuse showing any signal before `status=CLEARED` via the registry (M2). Until OOS
   `DSR>0.95` net-of-cost AND `PBO<threshold` AND history ≥ `MinBTL(N)` — show a countdown,
-  **[CAVEAT 2026-08-06: the PBO clause is currently UNMEASURABLE at this sample — sd≈0.25, noise band [0.13,0.91]. Replacement declared in `docs/PREREG-pbo-null-001.md`, NOT run, undecided. The other two clauses stand.]**
+  **[RESOLVED 2026-08-06: the `PBO<threshold` clause is replaced by the calibrated-null test of
+  `docs/PREREG-pbo-null-001.md` (run as declared, all controls passed). Current verdict:
+  ABSTAINS, unanimous across 4 arms — PBO is not evidence either way at T=2,615; registry
+  entries carry `pbo: INDETERMINATE`; the P95≈0.91 upper-tail alarm stays armed and a board
+  past it FAILS hard. DSR and MinBTL clauses stand unchanged.]**
   not a prediction. This refusal is the product.
 - **Refuse to promote a candidate whose verdict flips with a free methodological choice.**
   If two equally defensible settings of a parameter that is *not part of the strategy* — the

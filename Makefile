@@ -15,11 +15,12 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare dsr-ab scan test fetch dash local collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision churn-threshold coverage-census lockbox-integrity orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
+.PHONY: help install backtest compare dsr-ab scan test gate fetch dash local collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision churn-threshold coverage-census lockbox-integrity orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
 	@echo "research: orderflow-smoke (M1 end-to-end: recorded ticks -> bars -> deflation harness; expect INSUFFICIENT HISTORY)"
+	@echo "gate:    gate (fail-fast, CI order then local: pytest -> check_parity -> check_terminal -> churn-threshold -> lockbox-integrity)"
 	@echo "verify:  verify-browser (L1 fixture-replay in headless Chromium) | verify-census (L1b layout census) | verify-focus (L1c hierarchy + focus mode) | verify-wire (L2 live invariants, ~45s) | check-ticks (L3 tick-store QA + MinBTL readiness meter)"
 	@echo "bench:   bench-render (where the frame budget actually goes: store cost, Worker-boundary cost, Canvas2D churn vs raster — STRATEGY §ARCHITECTURE)"
 	@echo "archive: archive-dry (export closed months to local parquet ONLY) | archive (export + upload to GitHub Releases + prune) | archive-list (what is offsite)"
@@ -51,6 +52,21 @@ scan:
 
 test:
 	python3 -m pytest -q
+
+# Fail-fast local gate: the CI steps runnable here, in the SAME order as
+# .github/workflows/ci.yml (pytest -> JS<->Python parity -> terminal fixture
+# smoke), then the local-only integrity gates CI has no data for. Make stops at
+# the first failing line, so a red run names its gate. CI's node --check and
+# ppy() self-check steps are not repeated here. verify_terminal_browser.py is
+# excluded on purpose, same as CI ("deliberately NOT run here", ci.yml): it
+# needs playwright + a Chromium download — run it separately as
+# `make verify-browser`.
+gate:
+	python3 -m pytest -q
+	python3 scripts/check_parity.py
+	node scripts/check_terminal.cjs
+	python3 scripts/churn_threshold.py
+	python3 scripts/lockbox_integrity.py
 
 fetch:
 	python3 scripts/fetch_data.py --symbol BTC-USD --granularity 1d --start $(START)
@@ -206,6 +222,11 @@ vision-list:
 # same duplicate-trade_id FAIL and the same report-never-fill gap census, plus an
 # ID-continuity census the recorded store cannot have. It REFUSES to print a
 # MinBTL readiness number: archive days never count toward it.
+# NOTE: the bare target below is the FULL archive, which does not fit this
+# machine (docs/STATUS.md "locally infeasible at full scale": dedup over
+# ~2.83 B rows needs ~160 GB of aggregate state vs ~14 GB free). Grade month
+# windows instead, e.g.:
+#   python3 scripts/check_ticks.py --vision data/vision/binancef/BTCUSDT/aggTrades --month 2026-07
 check-vision:
 	python3 scripts/check_ticks.py --vision data/vision/binancef/BTCUSDT/aggTrades
 

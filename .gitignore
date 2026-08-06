@@ -53,3 +53,4 @@ deploy/gcp/env
 # Collector stdout (make collector-api > data/collector.log). Machine-local
 # operational log: the WATCHDOG lines that a terminal-only run throws away.
 data/*.log
+.tmp/

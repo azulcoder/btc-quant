@@ -247,6 +247,74 @@ spot-close are three different prices; comparing across them without saying whic
 
 ---
 
+## C2 FEASIBILITY MAP — declarations, written BEFORE the map was computed
+
+**No returns are scored anywhere below. Breadth and cost drag are properties of the position
+series alone, so this spends 0 predictive trials.** The two gates pull in opposite directions
+and C2 must pass BOTH at one threshold: wide thresholds → rare positions → the `pairs_coint`
+breadth failure (2.2 % of bars); tight thresholds → constant flipping → the `sign(ΔCVD)` drag
+failure (22.5× anchor).
+
+**Declared structure (conventions named, not tuned):**
+- series: `perp_close / spot_close − 1`, Binance daily klines both legs, `2019-09-08 …
+  2026-08-03` (capped at the exploration boundary; klines are external to the recorded store but
+  the cap costs nothing and avoids the argument).
+- signal: z-score against a rolling mean/std, **window W = 60 d** — the repo's own
+  `pairs_coint` convention. W is a free parameter; under the tie-break rail any verdict that
+  flips with W is no verdict.
+- position: mean reversion, `pos = −sign(z)` while `|z| > z_entry`, flat once `|z| < z_exit`;
+  **`z_exit = 0.5` fixed** (RESEARCH.md convention "z_exit 0-0.5" and `pairs_coint`'s default).
+- **the structural point, chosen NOW: `z_entry = 2.0`** — the literature convention
+  (RESEARCH.md "z_entry 1.5-2.5") and `pairs_coint`'s own default. The map reports the full
+  `z_entry ∈ {0.5, 1.0, 1.5, 2.0, 2.5, 3.0}` grid, but the point that counts was fixed here,
+  before any cell existed.
+- gates: **breadth ≥ 10 % of bars in position** [DECLARED ARBITRARY — a convention like the
+  gate's 2×/10×; stated so because no calibration exists; `pairs_coint`'s measured failure was
+  2.2 %] AND **cost drag ≤ 2× the 188 bps/yr anchor** (the standard gate's pass band; 2–10× =
+  ambiguous).
+
+**Interpretation, fixed in advance:** the structural point passes both → C2 graduates to a
+pre-registration draft (still no scoring). It fails either → C2 is blocked at that gate and the
+full map is reported so the failure's shape is visible; picking a different cell BECAUSE it
+passes is exactly the fitting the tie-break rail forbids.
+
+## C2 FEASIBILITY MAP — RESULT [DIUKUR]
+
+**Instrument note first: the first run was WRONG and was caught by placement.** The spot klines
+API caps pages at 1,000 rows (futures: 1,500); a `len(page) < 1500` pagination guard therefore
+truncated the SPOT leg after one page, and the joined sample silently became 1,000 bars ending
+`2022-06-03`. The bar count printing BESIDE the date range exposed it immediately (class-G rail);
+the rerun asserts `len(df) > 2,400` before reporting. **Class H, fourth instance of a silent
+API default** — added to the pattern list.
+
+Correct sample: **2,522 joined daily bars, `2019-09-08 … 2026-08-03` (6.9 years)**. Basis:
+mean −1.53 bps, sd 6.52 bps.
+
+| z_entry | breadth | flips/yr | drag bps/yr | vs anchor | gates (≥10 % AND ≤2×) |
+|---:|---:|---:|---:|---:|---|
+| 0.5 | 63.3 % | 89.5 | 896 | 4.77× | drag AMBIGUOUS |
+| 1.0 | 48.7 % | 49.5 | 496 | 2.64× | drag AMBIGUOUS |
+| 1.5 | 30.9 % | 23.4 | 234 | 1.25× | **passes both** |
+| **2.0 ← structural point** | **18.6 %** | **11.4** | **115** | **0.61×** | **PASSES BOTH** |
+| 2.5 | 12.8 % | 5.5 | 55 | 0.29× | **passes both** |
+| 3.0 | 7.0 % | 2.2 | 22 | 0.12× | breadth FAILS |
+
+**The pre-declared structural point (z_entry 2.0, z_exit 0.5, W 60) passes both gates**, and it
+sits inside a **contiguous feasibility window (z ∈ {1.5, 2.0, 2.5})** rather than on a knife
+edge — the tie-break rail has nothing to object to, since neighbouring defensible choices give
+the same verdict. Contrast both failure modes visible at the map's ends: the `sign(ΔCVD)` drag
+death at tight thresholds, the `pairs_coint` breadth death at wide ones.
+
+**Per the declared interpretation: C2 GRADUATES TO A PRE-REGISTRATION DRAFT.** Still no return
+has been scored; the draft must declare N_trials (1), the kill criteria, and the LockBox
+handling before any scoring happens, and scoring is a separate authorization.
+
+**What this map cannot say:** anything about whether the strategy MAKES money — breadth and
+drag are necessary-condition gates, not evidence of edge. W = 60 remains a free parameter
+[convention]; a pre-registration should state the W-sensitivity rule (verdict must hold for
+W ∈ {40, 60, 90} or abstain). Funding accrual on held perp positions is a real carry term the
+basis series does not capture [not modelled here].
+
 ## C3 — Extreme funding as crowding
 
 **Mechanism:** persistently positive funding means longs are paying to stay long, i.e. crowded

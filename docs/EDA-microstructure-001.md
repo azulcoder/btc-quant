@@ -2259,7 +2259,9 @@ column (81), which is what enters DSR deflation, was never affected.
 | §21 LockBox defect (stamped-log scan, 3 negative controls on the new gate) | 4 | 0 |
 | §22 vision pipeline control (1 partition x 7 states x2 runs, 3 ZSTD retests, HF repo census, 3-way sha256 comparison) | 9 | 0 |
 | §23-24 upload-only control (review workflow verdicts, 100-partition series, resume test, 429 bound, churn-instrument bug caught by its own control) | 8 | 0 |
-| **running total** | **535** | **81** |
+| C2 feasibility map (6 grid cells x 2 signal-series metrics, declaration-first; 1 pagination control) | 13 | 0 |
+| PBO null run (3 controls + 4 arms x B=2,000; PREREG amendment for the ephemeral-bar anchor) | 9 | 0 |
+| **running total** | **557** | **81** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 

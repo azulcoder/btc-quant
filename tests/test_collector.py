@@ -3023,3 +3023,60 @@ def test_watchdog_end_to_end_kills_a_real_leg(tmp_path, monkeypatch, capsys):
         print(f"H SIGTERM flush  : {obs['H_trades_live']} live -> "
               f"{obs['H_trades_final']} on disk; liquidations={liqs} (sparse, honest)")
         print("===================================================================")
+
+
+def test_aggtrades_cursor_survives_a_PROCESS_restart(tmp_path):
+    """U12 — the reboot lesson (2026-08-06 05:23 local). The cursor dict is module
+    scope, so it survives LEG restarts but dies with the process: the ~10 min reboot
+    window's backlog was lost and surfaced in the overlap gate. A sidecar file beside
+    the store closes the class: load at startup, persist on every advance."""
+    side = tmp_path / "aggtrades-cursor.json"
+    side.write_text('{"BTCUSDT": 4242}')
+    collector._AGGTRADES_CURSOR.clear()
+    note = collector._load_aggtrades_cursors(side)
+    assert collector._AGGTRADES_CURSOR.get("BTCUSDT") == 4242
+    assert "4242" in note or "1 cursor" in note
+
+
+def test_aggtrades_cursor_sidecar_written_on_advance(tmp_path, monkeypatch):
+    """U12b — persistence is on the ADVANCE path, not on shutdown: a kill -9 or
+    ENOSPC death must lose at most one poll's worth (5 s), not the whole day."""
+    side = tmp_path / "aggtrades-cursor.json"
+    collector._AGGTRADES_CURSOR.clear()
+    collector._load_aggtrades_cursors(side)          # missing file: fine, arms the path
+
+    def fake_fetch(symbol, from_id):  # noqa: ARG001
+        base = 7000 if from_id is None else int(from_id)
+        return [{"a": base + i, "p": "63000.0", "q": "0.001",
+                 "T": 1_785_000_000_000 + i, "m": False} for i in range(3)]
+
+    monkeypatch.setattr(collector, "_fetch_binance_aggtrades", fake_fetch)
+    monkeypatch.setattr(collector, "_AGGTRADES_POLL_S", 0.01)
+
+    class _W:
+        def add(self, table, rows): pass
+
+    async def one_pass():
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            collector._aggtrades_loop("BTCUSDT", _W(), stop, log=lambda _m: None))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(one_pass())
+    import json as _json
+    on_disk = _json.loads(side.read_text())
+    assert on_disk.get("BTCUSDT") == collector._AGGTRADES_CURSOR["BTCUSDT"]
+    assert on_disk["BTCUSDT"] > 7000
+
+
+def test_aggtrades_sidecar_loader_tolerates_garbage(tmp_path):
+    """U12c — a torn/corrupt sidecar (crash mid-rename, ENOSPC) must not kill startup
+    and must not seed a bogus cursor; it reports and starts fresh."""
+    side = tmp_path / "aggtrades-cursor.json"
+    side.write_text('{"BTCUSDT": 12')     # torn write
+    collector._AGGTRADES_CURSOR.clear()
+    note = collector._load_aggtrades_cursors(side)
+    assert collector._AGGTRADES_CURSOR == {}
+    assert "unreadable" in note.lower() or "fresh" in note.lower()
