@@ -978,3 +978,93 @@ promotion bar resolved by its declared calibrated-null test (ABSTAINS, 4 arms un
 instrument-blindness taxonomy (9 classes, 14 instances) + two rails that write themselves;
 Vision→HF migration real-run in flight with same-run-verified deletes; `make gate` green on its
 first run. Commits `dc9857b..425877d`+, all pushed, no AI attribution.
+
+---
+
+## 2026-08-06 — the concurrency race, and what a green gate was not checking
+
+Three questions were asked as a read-only mapping exercise: why five partitions recorded
+`upload_failed`, whether the append-only checkpoint survived two concurrent writers, and how
+`make gate` could be green while roughly a thousand local vision partitions had already been
+deleted. All three were answered by measurement. **No code was changed; every repair named here
+is a decision, not an action taken.**
+
+Measured `2026-08-06T05:56Z–06:21Z` with the migration still running under its new PID lock, so
+every count names its instant and drift is expected rather than suspicious.
+
+**The third run was not an orphan.** The `04:50:19Z` `batch_start` (n=1107) was a manual launch
+from Terminal.app that azul directed. Three facts pin it:
+`~/Library/Logs/btcquant-migration-20260806T045019Z.log` is stamped equal to the record's
+timestamp (`04:50:19.504Z`) to the second; it opens with `n=1107 order=newest dry_run=False`;
+and its five `upload_failed` lines are the same five dates the ledger holds. The path is itself
+the discriminator — `vision_to_hf.py` never writes to `~/Library/Logs`, so a stamped file there
+can only come from a redirect the launcher chose, and it is the only one in that directory.
+The cause was a `pgrep` guard written in the same shell block as the command it was meant to
+protect: a check that runs beside its action reports, it does not gate. Class C, in its plainest
+form. This is why the fix is a lock the program takes for itself.
+
+**A — `upload_failed` is two different things wearing one name.** Four records (2026-08-05
+19:20–19:34Z) are real network timeouts (`[Errno 60]`, `The read operation timed out`) and all
+four later retried through to `deleted`. Five (04:50:57Z) are `[Errno 2] No such file or
+directory`: the concurrent run had already deleted the local parquet, so the exception fired
+before any network call — hence `up 0.0s rb 0.0s` and `throttle events: 0`. Not a commit
+conflict, not a rate limit, not auth, not a retry bug. It cannot recur under a single writer.
+
+Byte accounting settles which partition vanished at which instant. The chunk was
+`2023-01-11..2023-02-04` (25 days) and the commit carried 24 files / 121 MB; the ledger's `mb`
+for those 24 dates sums to 121.07 MB, and including `2023-02-04` (2.10 MB) would have read
+123 MB. Staging began at `04:50:22.544Z` (`batch_end` minus `total_s`, cross-checked to ±12 ms
+against the next record's timestamp over eight consecutive partitions) — 0.64 s after the
+incumbent deleted `2023-02-04`, 2.00 s before it deleted `2023-02-03`. Positive control: the
+lock-protected `05:44` batch reports `(N / 25)` on all 1,371 samples and never 24, so the
+deficit is real and not a display artefact.
+
+**A method error worth keeping.** The first query read the ledger's `error` key and got `None`
+for all nine failures, which briefly made the `[Errno 2]` quotation in §25 look like a claim with
+no source. The script writes `err`. Reading the writer instead of trusting the query is what
+caught it — the same class-H shape as the DuckDB and `get_ohlcv` traps already on the list.
+
+**B — the checkpoint held, by design rather than luck.** At `06:21:34Z`: zero unparseable lines
+across the whole ledger (a single-line `O_APPEND` write is atomic, so interleaved appends cannot
+tear), zero contradictory orderings, and every `deleted` record carrying `transport_ok`,
+`content_ok` and `manifest_ok`. 133 dates hold more than one record, in exactly three shapes:
+124 `readback_ok → deleted`, 4 `upload_failed → readback_ok → deleted`, 5 `deleted →
+upload_failed`. Only the last is anomalous, and its ordering is causally correct.
+
+The residual defect is naming, not integrity: `load_states` is last-line-wins, so five fully
+verified migrations now read as failures permanently. An independent hub probe confirms all five
+are intact remotely with content matching their local manifests exactly, and absent locally —
+the residue of a successful migration. The correction must be an appended record; rewriting an
+append-only ledger to make it look tidier would destroy the property that made this analysis
+possible.
+
+**A limit of my own instrument, recorded because absence is ambiguous.** A test for records
+falling outside the active batch's date range returned zero anomalies — but that test is blind
+to same-range concurrency by construction, and does not even detect the 04:50 overlap that is
+known to have happened. It rules out gross ordering corruption and nothing more.
+
+**C — the gate was green because its load-bearing tests skipped.** `pytest -q -rs` reports
+367 passed, 6 skipped, and all six are `test_vision_overlap.py`: the whole fidelity and
+completeness gate against the venue archive. `make gate` and CI both run `pytest -q` without
+`-rs`, so the evidence reaching a human is `......ssss.ss` and a bare count — no test name, no
+reason, and no baseline for how many skips are normal. A gate whose strongest claim can go
+unchecked while still printing green is worse than one that goes red.
+
+The skip message compounds it: one string covers three different worlds — the archive has not
+published the day yet, the local day file is gone, or the network dropped mid-loop. Measured
+live, the cause is the benign one (`data.binance.vision` answers 404 for `2026-08-05` and 200 for
+`2026-08-04`), but the operator cannot tell that from the message. Class B.
+
+The gate is not, however, blind to `data/vision`: `make handoff`, its final step, reads the local
+partition count into `docs/HANDOFF.md` — measured moving 439 → 427 in 92 seconds as deletes ran.
+It reports that number; it never gates on it. An earlier framing that the gate never touches
+`data/vision` was refuted on this evidence and is not recorded as a finding.
+
+**Standing consequence.** The pre-emptive `2026-08-05` damage entry is verified by exactly the
+six tests that skip, and only during the window after the archive publishes that day. Nothing
+schedules that verification. Until it runs, those 1,744 prints remain `[DISIMPULKAN]`.
+
+**Rails this touched.** Class C (a guard beside its action reports without gating) · class B
+(one skip message for three causes; and my own containment test that cannot see what it was
+aimed at) · class H (the `err` vs `error` key) · class G (a green gate is a claim whose checker
+never ran). Gaps stay gaps: nothing here was backfilled or relabelled.

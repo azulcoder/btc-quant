@@ -1,26 +1,26 @@
 # HANDOFF — generated, do not hand-edit
 
-**Generated 2026-08-06T04:26:14Z by `make handoff`.** Every field below is read from a source; an
+**Generated 2026-08-06T06:23:31Z by `make handoff`.** Every field below is read from a source; an
 unreadable source says `UNKNOWN` rather than carrying a stale value forward. Hand-editing
 this file defeats its purpose — regenerate it instead (`make gate` does so automatically).
 
 ## Commit
 
-- `cf77e9e` — Handoff readiness: pre-emptive damage entry for the reboot window, CLAUDE.md de-staled, prereg-resea
-- authored 2026-08-06T10:31:00+07:00 · working tree **dirty** · unpushed commits: 0
+- `d114fe0` — Single-run lock for the migration, after a measured concurrency race the design survived
+- authored 2026-08-06T12:45:22+07:00 · working tree **dirty** · unpushed commits: 0
 - public repo: <https://github.com/azulcoder/btc-quant> — a web session can fetch it directly
 
 ## State [all values generated this run]
 
 | field | value |
 |---|---|
-| collector `/health` | legs 16/16 · writer running · rows_dropped_error 0 · uptime 1.5 h |
-| last GREEN gate | GREEN at 2026-08-06T04:26:13Z on cf77e9e (this commit) · UNKNOWN |
+| collector `/health` | legs 16/16 · writer running · rows_dropped_error 0 · uptime 3.4 h |
+| last GREEN gate | GREEN at 2026-08-06T04:26:13Z on cf77e9e (an EARLIER commit) · UNKNOWN |
 | look counter (owner: `docs/EDA-microstructure-001.md`) | 557 diagnostic / 81 predictive |
-| vision partitions still local | 1,340 |
-| migration states | {'readback_ok': 128, 'upload_failed': 4, 'deleted': 744} |
-| migration last record | 2023-09-27 -> deleted @ 2026-08-06T04:26:09.346Z |
-| disk free | 18.3 GB |
+| vision partitions still local | 390 |
+| migration states | {'readback_ok': 128, 'upload_failed': 9, 'deleted': 1694} |
+| migration last record | 2021-02-08 -> deleted @ 2026-08-06T06:23:25.915Z |
+| disk free | 24.0 GB |
 | recorded damage (date, prints) | 2026-08-03 28,428 · 2026-08-04 21,706 · 2026-08-05 1,744 |
 
 **Who may raise the look counter:** only a session that actually ran the look, in the same

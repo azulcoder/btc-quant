@@ -94,6 +94,52 @@ in their target file, the rest marked `[UNVERIFIED]` rather than given an invent
 date stamp for A3, archival files, generated artifacts) — an exemption that stops being true
 shows up as a number that stops matching, not as silence.
 
+## 5c. Migration forensics A/B/C — READ-ONLY mapping, no code changed (2026-08-06)
+
+Three questions, mapped and not fixed; every repair below is azul's call. Measured
+`2026-08-06T05:56Z–06:21Z` **while the migration was running**, so counts drift by construction
+and each one names its instant. Full record: `AUDIT_LOG.md` 2026-08-06 entry and
+`DESIGN-vision-remote-first.md` §25.
+
+**A — why `upload_failed`: two unrelated populations, and merging them was the reading error.**
+Four records (2026-08-05 19:20–19:34Z) are genuine network timeouts (`[Errno 60]` /
+`The read operation timed out`); all four were retried and reached `deleted`. Five records
+(04:50:57Z) are `[Errno 2] No such file or directory` — the local parquet was deleted by the
+concurrent run before this one reached it, so the exception fired **before any network call**,
+which is why the log shows `up 0.0s rb 0.0s` and `throttle events: 0`. It is not a commit
+conflict, not a rate limit, not auth, not a retry bug. **It cannot recur on a single-writer
+relaunch**: the PID lock refuses a second writer, and `FileNotFoundError` is now a distinct
+non-fatal state. The error strings live in the ledger's `err` key — reading `error` instead
+returns `None` for all nine and nearly produced a false "the quote has no source" finding.
+
+**B — the checkpoint survived two writers; the design, not luck.** At `06:21:34Z`: 1,679 raw
+`deleted`, 128 `readback_ok`, 9 `upload_failed`; **zero unparseable lines** (a single-line
+`O_APPEND` write is atomic), zero torn records, and **every one of the deletes carries all three
+verifications**. 133 dates hold more than one record in exactly three patterns: 124
+`readback_ok → deleted` (the two-phase flow), 4 `upload_failed → readback_ok → deleted` (timeouts
+that retried), and 5 `deleted → upload_failed` — causally ordered, not corruption. Terminal state
+is nevertheless **wrong for those five**: `load_states` is last-line-wins, so five fully-verified
+migrations read as failures. Verified independently against the hub: all five present as parquet
+and manifest, content matching the local manifest exactly, absent locally. Fix = an appended
+corrective record (append-only ledger, never a rewrite) — **not done, azul's call**.
+
+**C — the gate was green because its load-bearing tests SKIPPED, not because they passed.**
+`pytest -q -rs` at `05:56Z`: **367 passed, 6 skipped**, and all six are `test_vision_overlap.py` —
+the entire fidelity + completeness gate against the venue (never-invents-a-print, every-field-
+matches-the-venue, completeness-is-zero-or-exactly-the-documented-damage, seam, L3 QA, archive-side
+soundness). `make gate` and CI both run `pytest -q` **without `-rs`**, so the run prints
+`......ssss.ss` and a bare count: no test name, no reason, no baseline for how many skips are
+normal. The answer to "(a) or (b)" is **(b)**. Separately, the skip message is one string covering
+three different worlds (archive not published yet · local day file gone · network dropped
+mid-loop) — class B, absence is ambiguous. Measured live: `_pick_day()` returns `''` because the
+archive still answers 404 for `2026-08-05` (`2026-08-04` answers 200), i.e. the benign cause —
+but the message cannot say so. Note the gate is **not** blind to `data/vision`: `make handoff`,
+its last step, reads the partition count into `docs/HANDOFF.md` (measured 439 → 427 in 92 s as
+deletes ran). It *reports* that number; it never *gates* on it.
+
+**The pre-emptive `2026-08-05` damage entry rides on this.** Its verification is exactly the six
+tests that skip, and it can only run once the archive publishes that day. Nothing schedules it.
+
 ## 6. Doc map (what lives where)
 
 | doc | holds |
@@ -103,7 +149,7 @@ shows up as a number that stops matching, not as silence.
 | `docs/PLAN-derivative-001.md` | derivative candidates + the cost-drag gate procedure |
 | `docs/PRECHECK-cvd-turnover.md` | C1 precheck + anchor correction |
 | `docs/PREREG-pbo-null-001.md` | declared-not-run PBO replacement |
-| `docs/DESIGN-vision-remote-first.md` | migration design §17–§24: nondeterminism claims table, checkpoint/caffeinate rules, batch results |
+| `docs/DESIGN-vision-remote-first.md` | migration design §17–§25: nondeterminism claims table, checkpoint/caffeinate rules, batch results, the concurrency race and the lock that closes it |
 | `docs/STATUS.md` | this file |
 | `docs/HANDOFF.md` | GENERATED — the self-contained brief for a session without this machine |
 | `reports/recorded-damage.json` / `lockbox-manifest.json` / `vision-migration.jsonl` | machine-checked damage, LockBox defects, migration checkpoint |

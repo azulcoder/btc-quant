@@ -507,6 +507,39 @@ uploaded and removed **seconds earlier**: five consecutive `[Errno 2] No such fi
 then the systemic-abort rule fired and the batch ended having done nothing. Measured overlap on
 `2023-02-04`: deleted at `04:50:18.278Z`, re-attempted at `04:50:57.143Z` — a 39-second gap.
 
+**Where the third run came from is measured, not unknown** [DIUKUR]. It was a manual launch from
+Terminal.app, and three independent facts pin it: `~/Library/Logs/btcquant-migration-20260806T045019Z.log`
+carries a stamp equal to the third `batch_start` timestamp (`04:50:19.504Z`) to the second; it
+opens with `n=1107 order=newest dry_run=False`, matching that record exactly; and its five
+`upload_failed` lines are the same five dates the ledger holds. The path itself identifies the
+launcher — `vision_to_hf.py` never writes to `~/Library/Logs` (grep: no occurrence), so a stamped
+file there can only come from a redirect the launcher chose, and it is the only such file in that
+directory.
+
+**The cause was a guard written beside its action, not a mystery.** The launch was preceded by a
+`pgrep` check placed in the same shell block as the command it was meant to protect. A check that
+runs alongside its action *reports*; it does not *gate* — the `pgrep` output printed and the
+migration started regardless. That is class C (a guard that cannot suppress its own trigger) in
+its plainest form, and it is exactly why the fix below is a lock the program takes for itself
+rather than a check the launcher performs.
+
+**Why 24 of 25 partitions staged** [DIUKUR]. The chunk was `2023-01-11..2023-02-04`, 25 calendar
+days, and the commit uploaded 24 files / 121 MB. Byte accounting identifies the missing one
+without ambiguity: the ledger's `mb` for those 24 dates sums to 121.07 MB (the log's
+`Processing Files (24 / 24) : 121MB / 121MB`), and adding `2023-02-04` (2.10 MB) would have made
+123.17 MB. The staging loop began at `04:50:22.544Z` (derived as `batch_end` minus `total_s` 34.6 s,
+cross-checked to ±12 ms against the following record's timestamp across eight consecutive
+partitions), which falls 0.64 s **after** the incumbent deleted `2023-02-04` and 2.00 s **before**
+it deleted `2023-02-03`. A two-second window explains the whole deficit. Positive control: in the
+lock-protected `05:44` batch the same instrument reports `(N / 25)` on all 1,371 samples and never
+24, so the deficit is real rather than a display artefact.
+
+The per-partition verification loop then iterates `for d in chunk` — all 25 — not `staged`, so the
+five already-deleted dates raised in sequence and tripped the five-consecutive-failure abort. That
+loop still reads `chunk` at HEAD; it is now harmless, because a partition that fails to stage ends
+as `vanished_before_processing` or `manifest_missing`, both of which RETAIN the local copy, and no
+delete path bypasses the same-run read-back.
+
 **No data was lost, and the reason is the design rather than luck.** Every delete is gated on a
 same-run verified read-back, and the ledger confirms **1,371 of 1,371 deletes carry all three
 verifications** (`transport_ok`, `content_ok`, `manifest_ok`). All five contested dates were
@@ -517,6 +550,18 @@ loser of the race deletes nothing; it can only fail to find a file.
 **What it did cost** was honesty of the record: `upload_failed` is the wrong name for "the file
 was already gone", and five of those inflate the failure count with something that is not a
 failure of uploading at all.
+
+**And the wrong name is still the terminal one** [DIUKUR]. `load_states` takes the last line per
+date, so those five dates read as `upload_failed` even though their `deleted` record — written
+39 seconds earlier by the run that legitimately owned them — carries `transport_ok`, `content_ok`
+and `manifest_ok` all true. An independent probe of the hub confirms all five are intact remotely
+(e.g. `2023-02-04`: 501,684 rows, id `1590707518..1591209201`, 501,684 distinct, matching the
+local manifest exactly, sha equal), present as both parquet and manifest, and absent locally —
+precisely the residue of a *successful* migration. Nothing operational depends on this today: the
+dates cannot re-enter a `todo` because their local file is gone. What it corrupts is any future
+census of terminal state, which will report five migrations as failures forever. The ledger is
+append-only by design, so the fix is an appended corrective record, never a rewrite. **Not done —
+that is a code/record change, and it is azul's call.**
 
 **Two fixes, both narrow:**
 
