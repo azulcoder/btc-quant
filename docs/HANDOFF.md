@@ -1,26 +1,26 @@
 # HANDOFF — generated, do not hand-edit
 
-**Generated 2026-08-06T06:23:31Z by `make handoff`.** Every field below is read from a source; an
+**Generated 2026-08-06T07:20:06Z by `make handoff`.** Every field below is read from a source; an
 unreadable source says `UNKNOWN` rather than carrying a stale value forward. Hand-editing
 this file defeats its purpose — regenerate it instead (`make gate` does so automatically).
 
 ## Commit
 
-- `d114fe0` — Single-run lock for the migration, after a measured concurrency race the design survived
-- authored 2026-08-06T12:45:22+07:00 · working tree **dirty** · unpushed commits: 0
+- `2c5f143` — Vision archive is remote-first: 2,084 verified deletes, migration closed
+- authored 2026-08-06T14:01:37+07:00 · working tree **dirty** · unpushed commits: 2
 - public repo: <https://github.com/azulcoder/btc-quant> — a web session can fetch it directly
 
 ## State [all values generated this run]
 
 | field | value |
 |---|---|
-| collector `/health` | legs 16/16 · writer running · rows_dropped_error 0 · uptime 3.4 h |
+| collector `/health` | legs 16/16 · writer running · rows_dropped_error 0 · uptime 4.4 h |
 | last GREEN gate | GREEN at 2026-08-06T04:26:13Z on cf77e9e (an EARLIER commit) · UNKNOWN |
 | look counter (owner: `docs/EDA-microstructure-001.md`) | 557 diagnostic / 81 predictive |
-| vision partitions still local | 390 |
-| migration states | {'readback_ok': 128, 'upload_failed': 9, 'deleted': 1694} |
-| migration last record | 2021-02-08 -> deleted @ 2026-08-06T06:23:25.915Z |
-| disk free | 24.0 GB |
+| vision partitions still local | 0 |
+| migration states | {'readback_ok': 128, 'upload_failed': 9, 'deleted': 2084} |
+| migration last record | 2019-12-31 -> deleted @ 2026-08-06T06:57:33.556Z |
+| disk free | 23.9 GB |
 | recorded damage (date, prints) | 2026-08-03 28,428 · 2026-08-04 21,706 · 2026-08-05 1,744 |
 
 **Who may raise the look counter:** only a session that actually ran the look, in the same
@@ -30,15 +30,14 @@ wrong and every DSR deflated against it inherits the error.
 
 ## Open decisions (generated from `docs/STATUS.md`)
 
-1. **Vision migration real run**: approve ~25 partitions/commit (HF throttles at ~125–130 commits/window, measured) + network-timeout retry; then delete-only over the verified 128 as the delete-path proof. Design: `DESIGN-vision-remote-first.md` §24.
-2. **Collector log out of `/tmp`** (wiped on every reboot — it just happened): change `StandardOutPath`/`StandardErrorPath` in `com.btcquant.collector.plist` to a repo path and kickstart once. Cheap; protects the forensic record the LockBox gate depends on.
-3. **Cross-process aggTrades cursor**: seed from `max(trade_id)` in the day file at startup, so process restarts (reboots) stop losing the down-window backlog. Same class as `dc9857b`.
-4. **PBO bar**: (c) calibrated-null as declared vs (a) drop the clause; ABSTAIN semantics.
-5. **296-day backfill** via `--date` path (after local migration; `2025-10-08` needs its `trades.parquet.bad` partial artifact cleared as part of that day's re-ingest).
-6. **C2 feasibility map** (breadth × drag, criteria declared before looking).
-7. **disablesleep experiment**: locked behind the 36 h churn threshold; needs a fresh baseline.
-8. **`make check-vision` is locally infeasible at full scale** (audit-measured: dedup over 2.83 B rows needs ~160 GB of aggregate state vs 14 GB free — needs a per-month window flag and an explicit `temp_directory`).
-9. Older infra items: combined `make gate`, rail-review agent, `.claude/settings.json`, full CLAUDE.md (current one is a stub), `PREREG-scalp-001.md`.
+1. **`pytest -q` hides skips in the gate and in CI** — add `-rs` (and consider failing on an unexpected skip count). §5c C measured six silent skips covering the whole venue fidelity + completeness gate. One flag; highest value per character in the repo.
+2. **The pre-emptive `2026-08-05` damage entry has an unscheduled, one-shot verification window.** It is verified by exactly the six tests that skip, and only once the archive publishes that day. Nothing schedules it. Until it runs, those 1,744 prints stay `[DISI
+3. **Five ledger entries carry a wrong terminal state** (`upload_failed` on partitions that migrated successfully — §5c B). The ledger is append-only, so the correction is an appended corrective record, never a rewrite. Shape of that record is azul's call.
+4. **296-day backfill** via the `--date` path — **now unblocked** (the local migration is done). `2025-10-08` still holds a `trades.parquet.bad` partial artifact that must be cleared as part of that day's re-ingest. Do it chunked, not as a naive `--date` loop.
+5. **`2026-08-06` bootout damage entry**: a ~4 min hole (~02:52–02:56Z, log-relocation restart) is expected; measure and record it once the day closes.
+6. **disablesleep experiment**: locked behind the 36 h churn threshold; needs a fresh baseline.
+7. **`make check-vision` is locally infeasible at full scale** (audit-measured: dedup over 2.83 B rows needs ~160 GB of aggregate state — needs a per-month window flag and an explicit `temp_directory`). Now more pressing, since the local copies it used to read ar
+8. **Hasbrouck estimators**: nothing may touch real data before a PREREG declares the whole specification set with an `N_trials` cap (RULE-EXTRACT-5). The maths is verified; `docs/VERIFY-hasbrouck-extraction.md` §11 lists what that PREREG must settle first. **Clo
 
 ## Binding rules for ANY agent, in any surface
 

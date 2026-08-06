@@ -1096,3 +1096,12 @@ is exactly the class-I move the rails forbid.
 moved, the hole did not close. Conclusions beside their numbers: the throughput section prints
 both the raw seconds and the size-normalised MB/s, because they fall in opposite directions and
 only the second is admissible as a throttle signal.
+
+**The migration also ran finding C's extreme case, unplanned.** With the local archive at zero
+partitions — down from ~2,084 — the suite was re-run immediately: 367 passed, 6 skipped, the same
+six `test_vision_overlap` tests with the same reason, byte-identical to the run taken while ~975
+partitions were still local. Losing the entire local archive changed nothing the gate reports.
+That upgrades C from "these tests can skip" to a measured fact: **a total loss of the local
+archive is invisible to `make gate`.** The natural experiment cost nothing and was not designed —
+which is also the reason it is worth recording, since no one would have authorised deleting the
+archive to test the gate.

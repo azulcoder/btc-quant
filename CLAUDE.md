@@ -14,6 +14,11 @@ Research only. No orders, no API keys, no authenticated endpoints.
 - `DEVELOPMENT.md` — engineering rules; its §6 (grep `## 6. Roadmap / deferred`) is
   pre-registered work: **do NOT start it without an explicit greenlight**.
 - `RESEARCH-*.md` run-logs and `docs/EDA-*` / `docs/PREREG-*` / `docs/PLAN-*` hold the records.
+- `docs/EXTRACT-*.md` — estimators extracted from **copyrighted** sources. Binding: the source
+  file never enters this public repo (`.gitignore`, grep `Copyrighted reference material`); only
+  equations restated in this repo's notation, cited by **section number**. Their maths is
+  replicated in `docs/VERIFY-hasbrouck-extraction.md`; **their citations are not verifiable**
+  without the source on this machine, so treat every attribution as `[UNVERIFIED]`.
 
 ## No AI attribution (repo rule, `DEVELOPMENT.md` (grep `2. Honesty rails (non-negotiable — these ARE the product)`))
 

@@ -54,3 +54,13 @@ deploy/gcp/env
 # operational log: the WATCHDOG lines that a terminal-only run throws away.
 data/*.log
 .tmp/
+
+# Copyrighted reference material (docs/EXTRACT-*.md, grep `Aturan hak cipta`).
+# This repo is PUBLIC. Source texts are read locally and NEVER committed — the
+# extraction documents carry only equations restated in this repo's notation plus
+# own-words prose, with section-number citations. A blanket rule, not a per-file
+# one, so a new source cannot arrive uncovered.
+refs/
+*.pdf
+*.djvu
+*.epub

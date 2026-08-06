@@ -22,8 +22,8 @@ Last update: **2026-08-06, post-buildout + anti-rot gate** (19-agent adversarial
 |---|---|
 | `data/ticks/` | today + yesterday only, by design; older days on HF `azulcoder/btc-quant-ticks/data/date=*` |
 | recorded damage | **3 entries**: `2026-08-03` 28,428 (4 blocks) · `2026-08-04` 21,706 (2 blocks, pre-fix) · `2026-08-05` **1,744 (reboot window 22:23–22:29Z, PRE-EMPTIVE — archive publishes ~07:00Z and the gate will verify the exact set)**. PENDING: `2026-08-06` will carry a ~4 min bootout hole (~02:52–02:56Z, log-relocation restart) — measure and record once the day closes. Outages <~90 s lose nothing (seed poll covers the last 1,000 ids — measured) |
-| `data/vision/` (archive tape) | **2,084 local partitions** `2019-12-31..2026-08-01`, **296-day hole [count corrected by audit 2026-08-06]** `2025-10-08..2026-07-30` (ENOSPC casualty), `2026-07-30` migrated & deleted locally |
-| Vision→HF migration | **REAL RUN IN FLIGHT**, single-run PID-locked after a measured concurrency race (`DESIGN-vision-remote-first.md` §25 — no data lost; every delete carries all three verifications). Live counts: run `make handoff`. Checkpoint `reports/vision-migration.jsonl` |
+| `data/vision/` (archive tape) | **remote-first as of 2026-08-06**: 0 partitions hold a local `trades.parquet`; every one lives on HF under the `vision/` prefix, with **2,085 local manifests retained** as the local proof of content. Span `2019-12-31..2026-08-01` with a **296-day hole [count corrected by audit 2026-08-06]** `2025-10-08..2026-07-30` (ENOSPC casualty) — the hole is unchanged by the migration and is still open |
+| Vision→HF migration | **COMPLETE 2026-08-06T06:57Z**. Final batch 713/713, 0 throttle events, exit 0, lock released cleanly. Totals: **2,084 deletes, every one carrying `transport_ok` + `content_ok` + `manifest_ok`**; 0 of 2,239 ledger lines unparseable despite a two-writer window. Terminal states read `deleted 2,079 / upload_failed 5` — those 5 are the mislabelled race casualties (§5c B), not failures; their `deleted` records are intact and verified. Checkpoint `reports/vision-migration.jsonl` |
 | **LockBox** | **`2026-08-05 01:00Z` onward — NOT read, NOT queried, ever.** Boundary moved once (00:00→01:00) for a documented defect, before any byte was read. Quarantines: `2026-08-04`, `2026-08-05 00:00–01:00` |
 | exploration slice | **FROZEN**: `2026-07-05..2026-08-03`. New collection goes to the LockBox, so every 30-day table (funding/OI/options/crowding/dvol) is stuck at N=30 for exploration |
 
@@ -56,24 +56,42 @@ classes in `CLAUDE.md` (15 lines), ledger in `STRATEGY.md`.
 
 ## 5. Open decisions (azul's, in rough priority)
 
-1. **Vision migration real run**: approve ~25 partitions/commit (HF throttles at ~125–130
-   commits/window, measured) + network-timeout retry; then delete-only over the verified 128
-   as the delete-path proof. Design: `DESIGN-vision-remote-first.md` §24.
-2. **Collector log out of `/tmp`** (wiped on every reboot — it just happened): change
-   `StandardOutPath`/`StandardErrorPath` in `com.btcquant.collector.plist` to a repo path and
-   kickstart once. Cheap; protects the forensic record the LockBox gate depends on.
-3. **Cross-process aggTrades cursor**: seed from `max(trade_id)` in the day file at startup, so
-   process restarts (reboots) stop losing the down-window backlog. Same class as `dc9857b`.
-4. **PBO bar**: (c) calibrated-null as declared vs (a) drop the clause; ABSTAIN semantics.
-5. **296-day backfill** via `--date` path (after local migration; `2025-10-08` needs its
-   `trades.parquet.bad` partial artifact cleared as part of that day's re-ingest).
-6. **C2 feasibility map** (breadth × drag, criteria declared before looking).
-7. **disablesleep experiment**: locked behind the 36 h churn threshold; needs a fresh baseline.
-8. **`make check-vision` is locally infeasible at full scale** (audit-measured: dedup over 2.83 B
-   rows needs ~160 GB of aggregate state vs 14 GB free — needs a per-month window flag and an
-   explicit `temp_directory`).
-9. Older infra items: combined `make gate`, rail-review agent, `.claude/settings.json`, full
-   CLAUDE.md (current one is a stub), `PREREG-scalp-001.md`.
+> **Housekeeping note, 2026-08-06.** Six of the nine items previously listed here were already
+> done and were still being reported as open — and `make handoff` copies this list verbatim into
+> the brief a web session reads, so the staleness propagated off-machine. `doc_freshness.py`
+> cannot see this class: a finished item listed as open is not a wrong *number*, so no assert
+> fires. Each closure below was re-verified against the artifact, not against memory.
+
+1. **`pytest -q` hides skips in the gate and in CI** — add `-rs` (and consider failing on an
+   unexpected skip count). §5c C measured six silent skips covering the whole venue
+   fidelity + completeness gate. One flag; highest value per character in the repo.
+2. **The pre-emptive `2026-08-05` damage entry has an unscheduled, one-shot verification window.**
+   It is verified by exactly the six tests that skip, and only once the archive publishes that
+   day. Nothing schedules it. Until it runs, those 1,744 prints stay `[DISIMPULKAN]`.
+3. **Five ledger entries carry a wrong terminal state** (`upload_failed` on partitions that
+   migrated successfully — §5c B). The ledger is append-only, so the correction is an appended
+   corrective record, never a rewrite. Shape of that record is azul's call.
+4. **296-day backfill** via the `--date` path — **now unblocked** (the local migration is done).
+   `2025-10-08` still holds a `trades.parquet.bad` partial artifact that must be cleared as part
+   of that day's re-ingest. Do it chunked, not as a naive `--date` loop.
+5. **`2026-08-06` bootout damage entry**: a ~4 min hole (~02:52–02:56Z, log-relocation restart)
+   is expected; measure and record it once the day closes.
+6. **disablesleep experiment**: locked behind the 36 h churn threshold; needs a fresh baseline.
+7. **`make check-vision` is locally infeasible at full scale** (audit-measured: dedup over 2.83 B
+   rows needs ~160 GB of aggregate state — needs a per-month window flag and an explicit
+   `temp_directory`). Now more pressing, since the local copies it used to read are gone.
+8. **Hasbrouck estimators**: nothing may touch real data before a PREREG declares the whole
+   specification set with an `N_trials` cap (RULE-EXTRACT-5). The maths is verified;
+   `docs/VERIFY-hasbrouck-extraction.md` §11 lists what that PREREG must settle first.
+
+**Closed since this list was last edited** (each re-verified 2026-08-06, not assumed):
+Vision migration real run — complete, 2,084 verified deletes ·
+collector log out of `/tmp` — `StandardOutPath` now `~/Library/Logs/btcquant-collector.log` ·
+cross-process aggTrades cursor — sidecar live in `collector.py` (`425877d`) ·
+PBO bar — calibrated-null test run as declared, **ABSTAINS** unanimous across 4 arms ·
+C2 feasibility map — done, structural point passes both gates ·
+infra batch — `make gate`, rail-review agent, `.claude/settings.json`, a real `CLAUDE.md`
+(no longer a stub), and `PREREG-scalp-001.md` all exist.
 
 ## 5b. Structural anti-rot (added 2026-08-06, after the audit found rot 12 ways)
 
@@ -137,6 +155,13 @@ but the message cannot say so. Note the gate is **not** blind to `data/vision`: 
 its last step, reads the partition count into `docs/HANDOFF.md` (measured 439 → 427 in 92 s as
 deletes ran). It *reports* that number; it never *gates* on it.
 
+**The extreme case then ran itself, unplanned.** The migration finished at `06:57Z` leaving
+**zero** local partitions holding a `trades.parquet` — down from ~2,084. The suite was re-run
+immediately after: **367 passed, 6 skipped**, the same six tests with the same reason, byte-identical
+to the run taken while ~975 partitions were still local. Losing the entire local archive changed
+nothing the gate reports. That converts C from "these tests can skip" into a measured fact:
+**a total loss of the local archive is invisible to `make gate`.**
+
 **The pre-emptive `2026-08-05` damage entry rides on this.** Its verification is exactly the six
 tests that skip, and it can only run once the archive publishes that day. Nothing schedules it.
 
@@ -149,6 +174,9 @@ tests that skip, and it can only run once the archive publishes that day. Nothin
 | `docs/PLAN-derivative-001.md` | derivative candidates + the cost-drag gate procedure |
 | `docs/PRECHECK-cvd-turnover.md` | C1 precheck + anchor correction |
 | `docs/PREREG-pbo-null-001.md` | declared-not-run PBO replacement |
+| `docs/EXTRACT-hasbrouck-001.md` | microstructure estimators E1–E7 extracted from a copyrighted source (equations restated, section-number citations, PDF never committed) |
+| `docs/EXTRACT-hasbrouck-s9-s12.md` | inference (§9) + the VAR/IRF/Cholesky machinery (§12), and its own amendments to the above |
+| `docs/VERIFY-hasbrouck-extraction.md` | independent replication of both — what held, what was corrected, and what has no checker on this machine |
 | `docs/DESIGN-vision-remote-first.md` | migration design §17–§25: nondeterminism claims table, checkpoint/caffeinate rules, batch results, the concurrency race and the lock that closes it |
 | `docs/STATUS.md` | this file |
 | `docs/HANDOFF.md` | GENERATED — the self-contained brief for a session without this machine |
