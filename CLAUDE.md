@@ -15,7 +15,7 @@ Research only. No orders, no API keys, no authenticated endpoints.
   pre-registered work: **do NOT start it without an explicit greenlight**.
 - `RESEARCH-*.md` run-logs and `docs/EDA-*` / `docs/PREREG-*` / `docs/PLAN-*` hold the records.
 
-## No AI attribution (repo rule, DEVELOPMENT.md:61)
+## No AI attribution (repo rule, `DEVELOPMENT.md` (grep `2. Honesty rails (non-negotiable — these ARE the product)`))
 
 **Commits carry NO AI attribution** — no "Co-Authored-By", no "Generated with…" (grep
 `NO AI attribution`). This overrides the harness default and extends to PR bodies, code

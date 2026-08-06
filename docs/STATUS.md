@@ -2,7 +2,7 @@
 
 **Maintained, not archival: this file says where everything stands NOW and where its full
 record lives.** Superseded facts get struck through with a pointer, never silently removed.
-Last update: **2026-08-06, post-buildout** (19-agent adversarial audit: 12 findings confirmed, all fixed; machine rebooted 05:23 local — collector self-recovered via launchd).
+Last update: **2026-08-06, post-buildout + anti-rot gate** (19-agent adversarial audit: 12 findings confirmed, all fixed; machine rebooted 05:23 local — collector self-recovered via launchd).
 
 ---
 
@@ -41,9 +41,9 @@ Last update: **2026-08-06, post-buildout** (19-agent adversarial audit: 12 findi
 | options orthogonality | **CANNOT DECIDE** (N=30 frozen, CI ±0.36) — DEFERRED, no date; route = check for a keyless historical chain | EDA §19 |
 | scalping PREREG (1–30 s, 1:1) | **WRITTEN** (`docs/PREREG-scalp-001.md`, 315 lines): premise fails arithmetically in all three execution models (p* 118–222 % at 30 s); rejection registered as the deliverable; one reformulation declared-not-activated (5-min bars, R=3, p* 51.1 %, N_trials cap 3) | `docs/PREREG-scalp-001.md` |
 
-**Look counter: 535 diagnostic / 81 predictive.** Audit 2026-08-06 found the row sum was 492 —
-a constant +43 offset predating the visible (squashed) git history; reconciled with an explicit
-offset row rather than by reducing the total. The predictive column (81) was never affected.
+**Look counter — the value lives in `docs/EDA-microstructure-001.md` and nowhere else** (a second
+copy went stale here once; `scripts/doc_freshness.py` A2 now enforces single ownership). That
+table also carries the audit's reconciliation row for the pre-squash offset.
 
 ## 4. Standing rails added this session (all in `STRATEGY.md` §6 + ledger)
 
@@ -75,6 +75,25 @@ classes in `CLAUDE.md` (15 lines), ledger in `STRATEGY.md`.
 9. Older infra items: combined `make gate`, rail-review agent, `.claude/settings.json`, full
    CLAUDE.md (current one is a stub), `PREREG-scalp-001.md`.
 
+## 5b. Structural anti-rot (added 2026-08-06, after the audit found rot 12 ways)
+
+Rot here was never a vigilance failure, so the mitigation is not vigilance:
+
+| gate | asserts | negative controls |
+|---|---|---|
+| `make doc-freshness` | **A1** no `file:line` pointers in living docs · **A2** the look counter's value lives in exactly one file · **A3** fast-moving facts live only in this file | 3 violating fixtures + 2 must-PASS fixtures (`tests/test_doc_freshness.py`) |
+| `make handoff` | regenerates `docs/HANDOFF.md` from sources; an unreadable source says `UNKNOWN`, never a stale value | runs as the last step of `make gate`, so a green gate implies a fresh handoff |
+
+**First run measured** [2026-08-06]: 69 `file:line` pointers in living docs, of which at least
+4 already pointed at blank lines and 5 more had drifted onto braces or comment markers; 2 stale
+look-counter copies (this file said 535 while the owner said 557); 10 fast-moving facts outside
+this file. All fixed; 59 pointers were converted automatically to symbol anchors verified unique
+in their target file, the rest marked `[UNVERIFIED]` rather than given an invented anchor.
+
+**Escapes are explicit and printed on every run** (`[HISTORICAL]`, strikethrough, a same-line
+date stamp for A3, archival files, generated artifacts) — an exemption that stops being true
+shows up as a number that stops matching, not as silence.
+
 ## 6. Doc map (what lives where)
 
 | doc | holds |
@@ -86,6 +105,7 @@ classes in `CLAUDE.md` (15 lines), ledger in `STRATEGY.md`.
 | `docs/PREREG-pbo-null-001.md` | declared-not-run PBO replacement |
 | `docs/DESIGN-vision-remote-first.md` | migration design §17–§24: nondeterminism claims table, checkpoint/caffeinate rules, batch results |
 | `docs/STATUS.md` | this file |
+| `docs/HANDOFF.md` | GENERATED — the self-contained brief for a session without this machine |
 | `reports/recorded-damage.json` / `lockbox-manifest.json` / `vision-migration.jsonl` | machine-checked damage, LockBox defects, migration checkpoint |
 | `CLAUDE.md` (repo root, STUB) | 9 blindness classes, class-H trap checklist, labels, LockBox pointer |
 | `STRATEGY.md` §6 | refusals + ledger + taxonomy; the promotion bar (grep `` `DSR>0.95` net-of-cost AND `PBO<threshold` ``) |

@@ -52,9 +52,10 @@ At the time of writing the volume was **100 % full, 593 MiB free**, and `/health
 slice. 2.1 GB of my own session scratchpad was cleared, taking free space to 2.3 GB, which is
 breathing room and not a fix.
 
-**`data/vision` is 12 GB and is NOT on HF** — checked, three candidate paths, none exist. **It is
-the only copy of 2,086 day-partitions.** Deleting it now would be a permanent loss, so the
-migration has to happen before the space can be reclaimed, not after.
+**`data/vision` was 12 GB and NOT on HF when this was written** — checked, three candidate paths,
+none existed, so it was then the only copy of the archive. That is why the migration had to
+precede any reclaim. **Current partition counts and migration state: `docs/STATUS.md` §2** — this
+file records the design and its measurements, never the live state.
 
 ## 17a — the per-partition pipeline
 
@@ -122,7 +123,8 @@ interruption, including another ENOSPC.
   ~30, and October 2025 – July 2026 volumes are not known.
 - **Whether HF upload throughput makes 295 daily round trips practical.** Not tested; no upload
   has been attempted.
-- **Whether the HF dataset has a size or file-count limit** that 2,086 partitions would hit.
+- **Whether the HF dataset has a size or file-count limit** that the full archive would hit
+  (~2,086 partitions as measured 2026-08-06).
 - **Whether the two known ZSTD failures are corruption at rest or a transient read error.** Never
   re-tested since they were first seen.
 - ~~**Whether `rows_dropped_error: 1` cost a real row.**~~ **ANSWERED in §21** — the stamped log
@@ -263,7 +265,7 @@ an arbitrary `path_in_repo`; only the prefix differs. Its discipline was reused 
 | # | question | answer |
 |---|---|---|
 | **c** | is 295 round trips practical at HF upload throughput? | **Yes.** 0.41–0.50 MB/s, 12.3 s/partition end to end |
-| **d** | will 2,086 partitions hit an HF limit? | **No.** The repo holds **278 files** now; +4,172 for full migration = **~4,450**, against HF's ~100,000-file guidance |
+| **d** | will the full archive (~2,086 partitions, measured 2026-08-06) hit an HF limit? | **No.** The repo holds **278 files** now; +4,172 for full migration = **~4,450**, against HF's ~100,000-file guidance |
 | **f** | were the ZSTD failures corruption or a transient read? | **TRANSIENT.** `2026-07-05` (150,174 rows) and `2026-07-13` (240,728 rows) both read **first try**. HF scans need **retry, not re-upload** |
 
 The uploaded partition is queryable through `hf://`: 834,335 rows, `id` span 3397437001–3398271335,
@@ -287,7 +289,7 @@ compares the bytes just uploaded against the bytes read back, and that is exactl
 needed to license a delete. But a sha256 cannot be used to check that a re-ingest reproduced an
 earlier partition.
 
-**Consequence, and it makes the migration cheaper:** the 2,085 partitions that are already local
+**Consequence, and it makes the migration cheaper:** the [2026-08-06] locally-held partitions
 must be **uploaded as they are**, never re-fetched. Re-fetching would produce bytes that disagree
 with their own recorded manifests, which would look like corruption and is not. Upload-only also
 skips states 1–4 entirely.
@@ -390,7 +392,7 @@ partitions = ~100 commits — a real probe of commit-rate limits, which two §22
 **Size 100.** (1) ~100 commits at a ~400/hr instantaneous pace is where anecdotal HF hourly
 commit quotas would surface if they exist — large enough to trip a real limit, which is the
 point; (2) a 100-point timing series gives the first/last-decile comparison some power;
-(3) bounded: ~15–20 min, ~400 MB transferred, **0 deletes** (dry-run); (4) ~5 % of the
+(3) bounded: ~15–20 min, ~400 MB transferred, **no deletes in that dry run [2026-08-06]**; (4) ~5 % of the
 population checks the 8.9 s/partition extrapolation before it is trusted ×2,084.
 
 **Order NEWEST first.** The "oldest first — longest without backup" argument conflates age with
@@ -472,9 +474,9 @@ control, not a result.
 
 ## Standing after this batch
 
-- **128 partitions now live on HF, verified, local copies intact** (96 + 4 retried + 28 from the
-  overrun before the kill). On the real run they skip upload and go straight to
-  read-back → delete.
+- **[2026-08-06] 128 partitions verified on HF at the end of this batch**, local copies then
+  intact (96 + 4 retried + 28 from the overrun before the kill); on the real run they skip upload
+  and go straight to read-back → delete. Live counts: `docs/STATUS.md` §2.
 - Checkpoint: `reports/vision-migration.jsonl` — 2 `batch_start` (both `caffeinated: true`,
   windows recorded for §14b), 128 `readback_ok`, 4 `upload_failed` (all later cleared),
   3 `throttle` events.

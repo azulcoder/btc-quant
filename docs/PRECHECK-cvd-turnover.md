@@ -28,7 +28,8 @@ persisted within the day — a specific and unlikely shape, and exactly what thi
 ## Declared sample
 
 - **4 contiguous blocks of 30 days**, start dates at fractions **0.00, 0.33, 0.66, 0.97** of the
-  **sorted list of available partitions** (2,086 of them), computed rather than chosen.
+  **sorted list of available partitions** (2,086 of them as measured 2026-08-06), computed rather
+  than chosen.
 
   **AMENDED before any block's numbers existed.** The rule first said "fractions of the calendar
   span". The archive is not uniformly covered — it is dense 2020-01-01 … 2025-10-07, then a
@@ -82,7 +83,7 @@ predictive trial; a pass buys one candidate worth pre-registering, not a result.
 **Positive control passed first:** 120 partitions read, every one matched its
 `MANIFEST-<date>.json` `normalized.rows`, 0 mismatches. 122,659,658 tape rows.
 
-Blocks (fractions 0.00/0.33/0.66/0.97 of the 2,086 available partitions):
+Blocks (fractions 0.00/0.33/0.66/0.97 of the 2,086 partitions available on 2026-08-06):
 `2019-12-31`, `2021-12-03`, `2023-11-02`, `2025-08-10`, 30 contiguous days each.
 
 | horizon | bars | flips | flips/bar | flips/day | **cost drag** |
@@ -129,7 +130,8 @@ still leaves it **22× above a strategy that survives its own costs**.
 
 ## What this could not measure
 
-- **Whether the 4 blocks represent the other 1,966 partitions.** 120 days of 2,406; the blocks
+- **Whether the 4 blocks represent the rest of the archive** (~1,966 other partitions, 2026-08-06).
+  120 days of 2,406; the blocks
   are structurally spaced but no dispersion across blocks is reported.
 - **Whether `tsmom` is the right anchor.** It is vol-scaled and continuous; `sign(ΔCVD)` is
   binary, and binary positions turn over more by construction. The anchor was declared in

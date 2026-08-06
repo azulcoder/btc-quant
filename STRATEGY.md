@@ -23,14 +23,14 @@ yet close.
 - **Language / runtime — the right choice, on track.** Vanilla JS + 2D canvas for the
   UI, Python + asyncio + batched DuckDB for the collector/research. The full-book
   engines meet an O(1)-per-event contract with sorting deferred to a 10 Hz flush
-  (`dashboard/terminal-books.js`, `dashboard/terminal.js:1433` `flushBookLegs`); one rAF
+  (`dashboard/terminal-books.js`, `dashboard/terminal.js` (grep `if (!isBybit) domNote.textContent = 'source: ' + (LEG_LABEL[`) `flushBookLegs`); one rAF
   loop with per-view dirty flags + `IntersectionObserver` offscreen gating that gates
-  paint but never ingest (`terminal.js:3660/3825`). Two efficiency traps remain, both
+  paint but never ingest (`dashboard/terminal.js` [UNVERIFIED pointer — the original line drifted onto a brace; the referenced code was not re-located/3825`). Two efficiency traps remain, both
   inside our control: `setData(map(...))` full-rebuild instead of `series.update()`
-  incremental (throttled to ~600 ms, `terminal-views.js:279/468`), and a single main
+  incremental (throttled to ~600 ms, `terminal-views.js` (grep `if (!panel || !panel.classList) return false;`)/468`), and a single main
   thread with no Worker/OffscreenCanvas.
 - **Design — solid, genuinely well-layered.** The store/view/adapter separation holds
-  under inspection: stores are pure (zero DOM, `terminal-state.js:3650`), views reach
+  under inspection: stores are pure (zero DOM, `dashboard/terminal-state.js` [UNVERIFIED pointer — drifted onto a comment marker]), views reach
   zero globals, adapters quarantine each venue quirk. Visual craft (token-only colour,
   numerically-validated diverging delta ramp, badge taxonomy, colour-blind cues) is at
   or above Exocharts/aggr; provenance-labeling is best-in-class. The debt is
@@ -53,11 +53,11 @@ and not an execution engine.
    the IC-honesty sentences are asserted VERBATIM via `assert.strictEqual` in the build
    gate (`scripts/check_terminal.cjs`, 77 assertion groups). Dropping or rewording a
    label fails the build. The confluence board states its own forward-IC ≈ 0 as a
-   permanent label (`terminal-state.js:1595`, `RESEARCH-ic-runlog.md`). A competitor
+   permanent label (`terminal-state.js` (grep `════════ O-4 (§4d) — intelligence builders: descriptive r`), `RESEARCH-ic-runlog.md`). A competitor
    that smooths or fabricates fails this gate by construction.
 2. **Counted-honest-resync.** A book with a known hole is fabricated data if it stays on
    screen: seq gap / broken `pu`-chain / checksum miss → book cleared and resync counted
-   to the UI, never silent-patched (`terminal-books.js:234/361`).
+   to the UI, never silent-patched (`terminal-books.js` (grep `function enterDesync(keep) {`)/361`).
 3. **Spec checked against real data, then superseded.** The OKX `books` channel carries
    `checksum: 0` on every keyless frame (measured 300+); the CRC32 plan was degenerate,
    so the rail moved to `seqId/prevSeqId` with a `[SUPERSEDED 2026-07-24]` audit trail.
@@ -129,38 +129,38 @@ feature list.
   A bar frame that mixes both families is only as long as its shortest family. Book
   history is still bought only with collector uptime (**N4**).
 - **Gap 2 — [blocking deploy] paint loop has zero error isolation.** `frame()`
-  (`terminal.js:3825-4099`) has no try/catch around its 32 `view.render()` calls, and
+  (`terminal.js` (grep `const monday = dateStr(day0 - ((new Date(day0).getUTCDay() +`)) has no try/catch around its 32 `view.render()` calls, and
   `scheduleFrame()` is the last statement. One render throw (a NaN into a canvas path,
   an undefined field) freezes the entire terminal, all panels, with no recovery. Ingest
-  is hardened (`livewire.js:76`); paint is not.
+  is hardened (`dashboard/livewire.js` [UNVERIFIED pointer — drifted]); paint is not.
 - **Gap 3 — [uptime, but re-justified] the moat rests on a fragile single-laptop
   collector.** Correct justification: continuity gates (a) feature integrity — an
   event-time/volume-clock bar (VPIN/CVD) cannot be honestly computed across a multi-hour
   hole — and (b) the irreplaceability of un-refetchable public tick data. It does NOT
   gate the MinBTL clock: `check_ticks.sec_readiness` counts `span_days` as calendar-
-  inclusive and states "span is calendar time, not uptime" (`check_ticks.py:658-730`).
+  inclusive and states "span is calendar time, not uptime" (`check_ticks.py` (grep `def sec_coverage`)).
 - **Gap 4 — [maintainability, scales linearly] panel-addition is shotgun surgery.**
   Adding one panel touches ~9-11 parallel string-keyed tables kept in sync by hand
   (`dirty{}`, `MIN_MS{}`, `lastAt{}`, `SEC_OF{}`, `VIEW_ANCHOR{}`, a `V.XxxView()`, a
   `.mount()`, a `frame()` `if(due())` block, plus HTML + CSS) — the exact opposite of
-  the single-source `LegRegistry` (`terminal-state.js:3086`). The larger god-file is
+  the single-source `LegRegistry` (`terminal-state.js` (grep `let curV = posOr(bucketVol, 50); // base-asset units; caller`)). The larger god-file is
   `terminal-views.js` (5465 lines) > `terminal.js` (4138).
 - **Gap 5 — [UX category gap] no dockable/resizable/pop-out workspace.** Fixed CSS grid,
   single-scroll ~4982 px. Bookmap/Sierra/Exocharts are workspace applications (drag,
   resize, multi-monitor, pop-out). This is the "monitoring page vs workspace
   application" difference. Measured sub-gap, and the more binding half: **zero viewport** —
   no `wheel` handler in any of the eight `terminal*.js` modules and a fixed 120-bar
-  footprint ring (`terminal-state.js:295`), so no hand-drawn canvas zooms or pans at all
+  footprint ring (`terminal-state.js` (grep `const RING = 120;    // finished-bar ring (§4: last 120 bars`)), so no hand-drawn canvas zooms or pans at all
   (L5a).
 - **Gap 6 — [efficiency, in our control]** `setData` full-rebuild + single-thread
   ceiling (see §1).
 - **Gap 7 — [a11y regression, cheap, pre-deploy]** the CVD-safe (Okabe-Ito) and density
-  toggles exist on the analytics page (`app.js:1897-1907`) but are absent on the
+  toggles exist on the analytics page (`app.js` (grep `Strict CVD-safe (Okabe-Ito) palette — toggles body.cvd-st`)) but are absent on the
   terminal; a colour-blind user lands on red/green footprint/heatmap with no escape. The
-  draw-time engine already supports it (`terminal-views.js:18/130`); only the control is
+  draw-time engine already supports it (`terminal-views.js` (grep `CVD-safe Okabe-Ito toggle because pal() re-reads the prop`)/130`); only the control is
   missing.
 - **Gap 8 — [minor]** no orchestrator unit test (`terminal.js` glue is only covered
-  e2e); silent catches with no telemetry (`livewire.js:76`); pure-util duplication
+  e2e); silent catches with no telemetry (`dashboard/livewire.js` [UNVERIFIED pointer — drifted]); pure-util duplication
   ~~(`finiteOr/posOr/makeRing` byte-identical in two modules)~~ *(pure-util duplication is
   still open — M5)*; the control-row / column-header CSS duplication is **closed (T-4)**: 6
   bespoke `*-controls` and 7 identical column-header rules now share two definitions,
@@ -349,7 +349,7 @@ sequence to the calendar, not to enthusiasm.
       **Shipped 2026-07-26** (`btcquant/orderflow.py`, `tests/test_orderflow.py` 52 tests,
       `scripts/orderflow_smoke.py` / `make orderflow-smoke`, `RESEARCH-orderflow-runlog.md`).
       Zero harness change is *executed*, not argued: `features.atr` + `walk_forward`
-      (the `compare.py:533` idiom verbatim) **and** `cpcv` all run on real bars in the
+      (the `compare.py` (grep `def _pbo_over`) idiom verbatim) **and** `cpcv` all run on real bars in the
       smoke. `cpcv`'s signature is *not* identical to `walk_forward`'s (`n_blocks`/
       `k_test`/`embargo_pct` vs `n_splits`/`min_train`) — only the leading
       `(make_positions, prices)` contract is shared, which is the load-bearing part;
@@ -417,7 +417,7 @@ sequence to the calendar, not to enthusiasm.
       artifact `{hypothesis_id, feature, N_trials, MinBTL_target, kill DSR/PBO thresholds,
       LockBox slice}`. A signal is `status=CLEARED` iff OOS `DSR>0.95` net-of-cost AND
       `PBO<threshold` AND recorded history ≥ `MinBTL(N)`. **[PBO clause resolved 2026-08-06: replaced by the calibrated-null test — verdict ABSTAINS; see `docs/PREREG-pbo-null-001.md` RESULT.]** Wire the `LockBox`
-      (`backtest.py:772-831`, currently opt-in and unused). *Accept:* the registry object
+      (`backtest.py` (grep `class LockBox`), currently opt-in and unused). *Accept:* the registry object
       exists, is read by a (future) terminal panel, and refusing an un-cleared signal is a
       mechanical property, not a discipline.
 - [~] **M3. Collapse the ~9 panel tables into one descriptor registry**
@@ -472,7 +472,7 @@ sequence to the calendar, not to enthusiasm.
       same stream from the same venue: `binancef-aggTrades` via REST `/fapi/v1/aggTrades`
       with a gapless `fromId` cursor, normalized into
       `trades(exchange,symbol,trade_id,ts_ms,price,qty,aggressor_buy)` with `trade_id=str(a)`
-      and `aggressor_buy = not m` (`collector.py:702`). Archive rows and recorded rows
+      and `aggressor_buy = not m` (`collector.py` (grep `class BybitBook`)). Archive rows and recorded rows
       therefore live in the **same aggTradeId space**, so overlap resolves by exact key match
       on `(exchange,symbol,trade_id)` and missing history is found by **ID continuity**, not
       by a timestamp guess. That identity is the only reason this is admissible under DESIGN
@@ -543,7 +543,7 @@ sequence to the calendar, not to enthusiasm.
 - [ ] **L1. Web Worker + OffscreenCanvas split — partial by construction.** Move ingest +
       normalize + book engines + stores + the custom 2D-canvas panels (footprint/heatmap/
       DOM ladder) to a Worker; render via OffscreenCanvas. The ~5 lightweight-charts panels
-      are DOM-attached (`LC.createChart(...)`, `terminal-views.js:352` et al.) and cannot
+      are DOM-attached (`LC.createChart(...)`, `dashboard/terminal-views.js` [UNVERIFIED pointer — drifted onto a closing brace] et al.) and cannot
       move — so this does NOT subsume the `setData` cost (M4 stays complementary). The
       DOM-free stores make the movable half cheap (wiring, not rewrite). *Accept:* main
       thread frees measurably; the chart panels remain on the main thread by design, noted.
@@ -560,7 +560,7 @@ sequence to the calendar, not to enthusiasm.
 - [ ] **L5a. Viewport — zoom / pan / ruler on the order-flow canvases.** Deliberately
       placed **before** the docking half of L5. Measured, not assumed: **zero `wheel`
       handlers across all eight `dashboard/terminal*.js` modules** (grep, 0 hits) and the
-      footprint keeps a fixed **120-bar ring** (`terminal-state.js:295`), so there is not
+      footprint keeps a fixed **120-bar ring** (`terminal-state.js` (grep `const RING = 120;    // finished-bar ring (§4: last 120 bars`)), so there is not
       merely weak zoom — there is none, and no pan either. What you see is the last 120 bars
       at one scale. `HistChartView` zooms only because lightweight-charts brings it for
       free; every hand-drawn canvas (footprint, both heatmaps, DOM ladder, profiles) has
@@ -571,7 +571,7 @@ sequence to the calendar, not to enthusiasm.
       Shape: pointer-drag pan and `wheel` zoom on the time axis with a modifier for the price
       axis, a ruler/measure drag reading Δprice / Δtime / Σvolume inside the selection, and
       **one shared viewport object** threaded through the seam every canvas already uses
-      (`fitCanvas`, `terminal-views.js:218`, 16 call sites) so it is written once rather than
+      (`fitCanvas`, `terminal-views.js` (grep `bybit: 'c2', binancef: 'c1', coinbase: 'c4', okx: 'c3',`), 16 call sites) so it is written once rather than
       sixteen times. The real work is on the store side: the 120-bar ring must become a
       **windowed store** able to serve a range wider than the live window, with lazy backfill
       when the viewport is dragged past the loaded edge.
@@ -579,8 +579,8 @@ sequence to the calendar, not to enthusiasm.
       pans over emptiness; history with no viewport is unreachable from the UI. L5a builds
       the window, M7 gives it something to scroll into — in that order.
       Related and cheaper, worth folding in while the store is open: `BARS = [60000, 300000]`
-      (`terminal.js:69`) — 1m and 5m only, both on the time clock, even though
-      `VpinStore` (`terminal-state.js:2870`) already runs a volume clock in the same
+      (`terminal.js` (grep `const BARS = [60000, 300000];            // footprint bar in`)) — 1m and 5m only, both on the time clock, even though
+      `VpinStore` (`dashboard/terminal-state.js` (grep `convention.`) [UNVERIFIED — anchor is weak]) already runs a volume clock in the same
       terminal. Tick-basis and sub-second bars are a store-level addition, not a renderer
       one.
       *Accept:* wheel-zoom and drag-pan on footprint and both heatmaps; a ruler read-out;
@@ -632,7 +632,7 @@ Grounding, from reading the two reference terminals rather than their pitch:
   `terminal-state.js` is a *comment asserting its own absence*, because replay determinism
   demanded event time as the only clock. That makes them Worker-ready as a side effect.
   Views are pure `{mount, render(slice)}` factories and every hand-drawn canvas takes its
-  context from one helper (`fitCanvas`, `terminal-views.js:218`), so a view can change
+  context from one helper (`fitCanvas`, `terminal-views.js` (grep `bybit: 'c2', binancef: 'c1', coinbase: 'c4', okx: 'c3',`)), so a view can change
   renderer without a store ever knowing.
 - **A rewrite would spend the moat to buy something reachable without spending it.** Moving
   to Rust/WASM or C++/ImGui discards 276 pytest tests, the verbatim-assert build gate, the
@@ -673,7 +673,7 @@ changed the plan:
    `structuredClone` of the heatmap slice (3600 samples × 80 levels = 288k `Map` entries) is
    **17.3 ms**; the plain-array form is **33.1 ms** plus **4.6 ms** to build; the footprint
    slice is **6.0 ms**. The stores hand views live references *precisely because* copying
-   them is prohibitive (`DepthHistoryStore.samples()`, terminal-state.js:661) — a thread
+   them is prohibitive (`DepthHistoryStore.samples()`, `terminal-state.js` (grep `Oldest→newest LIVE references — treat as read-only. Copy`)) — a thread
    boundary forces exactly the copy the design refuses. Only a packed `Float64Array`
    transfer (1.3 ms build, 4.45 MiB, zero-copy) is viable, and `SharedArrayBuffer` is not
    available at all: it needs COOP/COEP, which GitHub Pages cannot send and
@@ -713,7 +713,7 @@ The zoom case does eventually favour the GPU, but far less than assumed, and onl
 LOD-decimated to ≥1 px columns; at 10,000 bars it is 330.8 ms naive versus **10.1 ms** LOD —
 i.e. LOD makes 2D O(pixels), flat in bar count. WebGL2 at 800k instances is 7.3 ms. So the
 honest gap at post-L5a scale is ~1.4×, not the order of magnitude the plan implied — and the
-heatmap **already ships that LOD** (`stride` decimation, terminal-views.js:1880). The
+heatmap **already ships that LOD** (`stride` decimation, `dashboard/terminal-views.js` (grep `const p = pal();`) [UNVERIFIED — anchor is not unique]). The
 footprint does not yet; giving it the same decimation is the fix, in 2D.
 
 `[SUPERSEDED]` — "Sequenced before any GPU work on purpose: the working hypothesis is that
@@ -762,7 +762,7 @@ Sequencing (revised). These items *use* the existing L1/M4 entries rather than d
       whether it changed so the canvas re-measures — a synchronous draw↔layout feedback loop
       that becomes a frame-late async round-trip across a thread, in the same machinery that
       already documented a `.fp-wrap` 620 px → ~3000 px size runaway. And `safePanel()`'s
-      isolation unit is deliberately *slice-build + render together* (terminal.js:652) — a
+      isolation unit is deliberately *slice-build + render together* (`terminal.js` (grep `session whose opening auction this page never saw.`)) — a
       throw inside a Worker draw does not propagate to the breaker, so N1 quarantine and the
       N5 non-latching counter need an async fault channel plus a liveness timeout, and the
       `?fault=`/`?flap=` proofs need Worker-side equivalents.
@@ -885,12 +885,12 @@ of unrelated bugs.
 | 5 | silent library defaults | `data.get_ohlcv` returned 300 bars, not the full history, with no warning; DuckDB `strftime` rendered in the session zone and `CAST(x AS BIGINT)` rounded instead of truncating — each silently corrupted a number that was about to be published | §10a method note |
 | 6 | sparse liquidation stream | cannot witness its own liveness; 58.2 % of hours are zero and 57.3 % of those are permanently undecidable | §12 |
 | 7 | coverage ON/OFF thresholds | applied against each table's own cadence, so `%ON` was not comparable across tables and a threshold artefact read as better coverage | §11, normalised in §11-N |
-| 8 | empirical claims in prose | no test, so they rot silently; 3 proven wrong in one session (`collector.py:344`, §11 `%ON` ranking, the Binance `forceOrder` recommendation) | §15, railed above |
+| 8 | empirical claims in prose | no test, so they rot silently; 3 proven wrong in one session (`collector.py` (grep `def _persist_aggtrades_cursors`), §11 `%ON` ranking, the Binance `forceOrder` recommendation) | §15, railed above |
 | 9 | the classifier built to measure instance 8 | reported 38/17/21 with no error bars; a seeded audit put its recall at **0 %**. **DELETED** — see the tombstone in §16 | §15b, §16 |
 | 10 | **azul** — Poisson applied to a process already shown bimodal | §0a had established the on/off structure; the model was used anyway and returned 1e-13 for an event empirically 29.7 % likely. The evidence that the model was misspecified was already in hand | §14a |
 | 11 | **azul** — "starting to be hard to call coincidence" | an empirical claim with no checker: the exact class instance 8 rails against, asserted while that rail was being written | §14 |
 | 12 | **Claude** — hard-coded conclusion contradicted by its own script | a script printed "never happened in 89 hours of history" three lines below its own output showing 29.7 %. Recorded as EVIDENCE THE RAIL TOUCHES SOMETHING REAL: it was caught only because the number was printed beside the claim | §14a |
-| 13 | **Claude** — `file:line` citation into a file I was editing | `CLAUDE.md` cited `STRATEGY.md:804` for the promotion bar; ~77 lines added to that file the same session moved it to :881. Written into the very file that rails against class G, and caught by spot-checking every citation immediately after writing them | §17 |
+| 13 | **Claude** — `file:line` citation into a file I was editing | `CLAUDE.md` cited `STRATEGY.md` (grep `ARCHITECTURE — the render layer (decision 2026-08-02)`) for the promotion bar; ~77 lines added to that file the same session moved it to :881. Written into the very file that rails against class G, and caught by spot-checking every citation immediately after writing them | §17 |
 | 14 | **Claude** — the no-AI-attribution check fired on a FILENAME | the post-commit guard grepped the commit body for `claude`, and matched the two mentions of the file `CLAUDE.md`. The commit was clean; the checker was not. **Class I, on the checker enforcing the rule, in the same turn class I was being written** | §18 |
 
 **Instance 5 replaces a withdrawn candidate.** The Binance `forceOrder` throttle was proposed as
@@ -937,7 +937,7 @@ instrument that cannot report its own blindness.
   less. **The size of this surface is NOT MEASURED.** The instrument that produced 38/17/21 scored
   recall 0 % against a seeded audit and was deleted; no replacement number is offered, because a
   second unverified count would repeat the error (`docs/EDA-microstructure-001.md` §15b, §16). Citing a *date* is not enough —
-  the one claim proven false (`collector.py:344`, 2026-07-25 "ZERO all day") carried a date and
+  the one claim proven false (`collector.py` (grep `def _persist_aggtrades_cursors`), 2026-07-25 "ZERO all day") carried a date and
   the word "measured", and was still wrong, because nothing in it could be re-run.
 - Refuse mixed-history backfill / book-gap smoothing / tick interpolation. Gaps stay gaps.
 - Refuse loosening the CI verbatim-assert gate for speed. That gate is what makes the moat

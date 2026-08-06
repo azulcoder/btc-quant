@@ -40,7 +40,7 @@ each entry in the instrument-blindness ledger (STRATEGY.md §6) happened.
 9. Write the mandatory "what I could not measure" section.
 10. End with plus / minus / recommendation. Update docs/STATUS.md if any standing state
     changed. Superseded claims get struck through with a pointer, never rewritten.
-11. Commit with NO AI attribution (DEVELOPMENT.md:61), push, and update the repo-scope
+11. Commit with NO AI attribution (`DEVELOPMENT.md` (grep `2. Honesty rails (non-negotiable — these ARE the product)`)), push, and update the repo-scope
     memory if operational state changed.
 
 ## Where records live

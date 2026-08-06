@@ -15,7 +15,7 @@ PORT   ?= 8787
 SYMBOL   ?= BTCUSDT
 API_PORT ?= 8788
 
-.PHONY: help install backtest compare dsr-ab scan test gate fetch dash local collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision churn-threshold coverage-census lockbox-integrity orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
+.PHONY: help install backtest compare dsr-ab scan test gate fetch dash local collector collector-api verify-browser verify-census verify-focus verify-wire bench-render check-ticks check-vision churn-threshold coverage-census lockbox-integrity doc-freshness handoff orderflow-smoke econ archive archive-dry archive-list hf-sync backfill-levels vision-sync vision-list
 
 help:
 	@echo "targets: install | backtest [STRAT=.. START=..] | compare | scan | test | fetch | dash [PORT=..] | collector [SYMBOL=..] | collector-api [SYMBOL=.. API_PORT=..]"
@@ -65,8 +65,25 @@ gate:
 	python3 -m pytest -q
 	python3 scripts/check_parity.py
 	node scripts/check_terminal.cjs
+	python3 scripts/doc_freshness.py --quiet-exempt
 	python3 scripts/churn_threshold.py
 	python3 scripts/lockbox_integrity.py
+	@python3 -c "import json,subprocess,datetime as dt,pathlib; \
+	sha=subprocess.run(['git','rev-parse','--short','HEAD'],capture_output=True,text=True).stdout.strip(); \
+	pathlib.Path('reports/gate-last.json').write_text(json.dumps({'result':'green','sha':sha,\
+	'utc':dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),\
+	'chain':'pytest -> parity -> terminal -> doc-freshness -> churn -> lockbox'},indent=2)+chr(10))"
+	@$(MAKE) --no-print-directory handoff
+
+# Documentation rot gate: no file:line pointers, single-owner look counter, fast-moving
+# facts only in docs/STATUS.md. Negative controls in tests/test_doc_freshness.py.
+doc-freshness:
+	python3 scripts/doc_freshness.py
+
+# Regenerate docs/HANDOFF.md — the one self-contained file a session without this machine
+# needs. Every field is read from a source; an unreadable source says UNKNOWN.
+handoff:
+	python3 scripts/make_handoff.py
 
 fetch:
 	python3 scripts/fetch_data.py --symbol BTC-USD --granularity 1d --start $(START)

@@ -43,7 +43,7 @@ level-1 ask alone is ≥ $5,000 in 99.7 % of snapshots, so the clip never leaves
 grep `Slippage for a retail clip is half the spread`).
 
 **Fees [DIASUMSIKAN — published tariff, never measured].** USDT-M perp **taker 5.0 / maker
-2.0 bps per side** (§2d, sourced to `RESEARCH.md:216`). No fee table exists in code; actual
+2.0 bps per side** (§2d, sourced to `RESEARCH.md` (grep `2.12 Volatility targeting / vol scaling — `vol_target``)). No fee table exists in code; actual
 tier is an account fact this repo cannot observe.
 
 **Round-trip totals** (§2, grep `cost table ready to replace`):
@@ -147,7 +147,7 @@ What could actually score a hypothesis at each horizon [all DIUKUR unless marked
   archive spans 2,406 days = **244 % of MinBTL(5)** (`STRATEGY.md`, grep
   `244 % of MinBTL(5)`). On disk: **2,086 of 2,406 partitions**, dense 2020-01-01…2025-10-07,
   then a **296-day hole** (2025-10-08…2026-07-30, the ENOSPC that killed the ingest), then 3
-  days (`docs/PRECHECK-cvd-turnover.md`, grep `296-day hole`). EDA §2c's earlier "3
+  days (`docs/PRECHECK-cvd-turnover.md`, grep `day hole` — the count itself lives in `docs/STATUS.md`). EDA §2c's earlier "3
   day-partitions on disk" predates that ingest and is superseded by the PRECHECK count.
 - **Book-derived families** (OFI, microprice, queue imbalance — the natural seconds-horizon
   predictors): **1.8 % of MinBTL(5)** (`STRATEGY.md`, grep `1.8 % of MinBTL(5)`). The archive

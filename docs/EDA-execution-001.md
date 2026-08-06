@@ -154,7 +154,7 @@ Condition 3 means **latency-competitive infrastructure**. This repo's founding c
 keyless, retail, non-colocated. **The answer is no, and it is not close: at VIP 0 the gap is
 −3.98 bps per round trip, which is 254× the entire spread revenue.**
 
-This also confirms `RESEARCH.md:180`, which the repo already recorded before any of this was
+This also confirms `RESEARCH.md` (grep `2.12 Volatility targeting / vol scaling — `vol_target``), which the repo already recorded before any of this was
 measured: *predictability at this horizon is "only an execution/order-placement overlay for
 latency-competitive makers… For anyone paying taker fees or non-colocated, costs dominate
 entirely."* §E0 supplies the arithmetic that statement was asserting.
@@ -201,8 +201,7 @@ value in §E4, so it is fixed here before that section is written.
 
 ## Look counter — §E0 contribution
 
-Continues the running total in `docs/EDA-microstructure-001.md`. **That document stands at 391
-diagnostic / 81 predictive**, not 386 — the last request quoted 386, which was the total before
+
 §10a (the UTC attribution of the 28,428 missing prints) added 5. Recording the difference rather
 than silently adopting either number.
 
@@ -210,8 +209,8 @@ than silently adopting either number.
 |---|---:|---:|
 | §E0 (spread quantiles ×2 windows, tick-width distribution, tick anchor, touch-queue quantiles) | 5 | **0** |
 
-The master running total lives in `docs/EDA-microstructure-001.md` and stands at **418 / 81**
-with §E0 and §11 included.
+The master running total lives in `docs/EDA-microstructure-001.md` — that file owns the value;
+this one does not repeat it (a second copy is what went stale before).
 
 **0 predictive trials, argued rather than assumed.** §E0 examines **no forward returns**. It
 compares a measured contemporaneous spread against published fee schedules — arithmetic on

@@ -10,7 +10,7 @@
 | **B** book, binancef single-venue | UTC 12–23, ON hours | §2 (cost) and execution-overlay characterisation **only** — never a signal candidate |
 | **C** book cross-venue | — | **CLOSED.** bybit reaches ON in at most **10 of 30 days at its best hour** and 0–4 days across UTC 00–11 (§0c). Recorded here so it is not re-proposed. |
 
-Descriptive research under `DESIGN-orderflow-terminal.md:29-32` (§0.1, live-descriptive). **No
+Descriptive research under `DESIGN-orderflow-terminal.md` (grep `0. Honesty rails (non-negotiable, inherited + extended)`) (§0.1, live-descriptive). **No
 finding in this document may become a trading rule** without passing through a PREREG with a
 counted `N_trials`. Nothing here is a signal, a recommendation, or a backtest.
 
@@ -18,8 +18,8 @@ counted `N_trials`. Nothing here is a signal, a recommendation, or a backtest.
 
 ## Slice declaration — exploration vs LockBox
 
-Declared **before** any number below was produced, per `backtest.py:772-831` (`LockBox`,
-AFML §11.6) and `STRATEGY.md:843-846`.
+Declared **before** any number below was produced, per `backtest.py` (grep `class LockBox`) (`LockBox`,
+AFML §11.6) and `STRATEGY.md` (grep `The taxonomy — nine classes behind the fourteen instances`).
 
 | slice | span | status |
 |---|---|---|
@@ -287,7 +287,7 @@ the walk versus mid.
 touch. p50 slippage of **0.0079 bps is exactly half the 0.0157 bps spread** — the walk is
 crossing the spread and stopping.
 
-**`backtest.py:84` assumes `slippage_bps=2.0`. Measured is 0.0079. That is a 250× overstatement**
+**`backtest.py` (grep `def _assert_no_lookahead`) assumes `slippage_bps=2.0`. Measured is 0.0079. That is a 250× overstatement**
 for this instrument at this size [DIUKUR vs DIASUMSIKAN].
 
 ## 2b — Price-only estimators FAIL at this scale
@@ -339,7 +339,7 @@ download, which is a write operation and out of scope for a read-only task.
 
 ## 2d — Fees, published rates, not measured
 
-**[DIASUMSIKAN — published tariff, never measured from data.]** Source `RESEARCH.md:216`:
+**[DIASUMSIKAN — published tariff, never measured from data.]** Source `RESEARCH.md` (grep `2.12 Volatility targeting / vol scaling — `vol_target``):
 "USDT-M perp ~0.02 % maker / 0.05 % taker standard".
 
 | | bps per side |
@@ -365,7 +365,7 @@ Round-trip, BTCUSDT perp, clip $1–5k. Fees [DIASUMSIKAN]; spread and slippage 
 ᵃ maker/maker pays no spread but bears queue risk and adverse selection, **neither of which is
 modelled here**. Treat 4.00 as a floor that a real maker will not achieve.
 
-**Versus what the repo assumes today:** `backtest.py:84` charges `cost_bps=10 + slippage_bps=2`
+**Versus what the repo assumes today:** `backtest.py` (grep `def _assert_no_lookahead`) charges `cost_bps=10 + slippage_bps=2`
 = 12 bps per side = **24 bps round-trip**. The measured taker/taker figure is **10.02 bps**, so
 **the standing assumption is 2.4× conservative** [DIUKUR vs DIASUMSIKAN]. Conservative is the
 right direction, but every EV conclusion in this repo inherits that factor and should be read
@@ -375,10 +375,10 @@ knowing it.
 **10 bps** — fees are **625×** the entire microstructure cost. The cost model for this instrument
 at this size is a **fee model**. Measuring the book refined a term that does not matter.
 
-**`backtest.py:106-111` is now partly stale** [DIUKUR]: it argues a data-derived spread would be
+**`backtest.py` (grep `def _assert_no_lookahead`) is now partly stale** [DIUKUR]: it argues a data-derived spread would be
 look-ahead *and* that "btc-quant stores no historical quote/tick series to bound it". The second
 clause has been false since M1 — `depth_snapshots` exists and `spread_bps_{b}` is computed at
-`orderflow.py:791`. The look-ahead argument still stands and is respected here: every figure
+`orderflow.py` (grep `class FeatureNote`). The look-ahead argument still stands and is respected here: every figure
 above is a **distribution quantile over a historical window**, never a contemporaneous fill
 spread.
 
@@ -615,7 +615,7 @@ Written **before** any result depends on it. That is what makes it usable later.
 conservative direction is the one that cannot be argued into after the fact.
 
 **CONTRA.** The Bailey–López de Prado construction that `deflated_sharpe_ratio`
-(`risk.py:592`) implements counts a trial as a **selection among strategy candidates**. §4
+(`risk.py` (grep `def deflated_sharpe_ratio`)) implements counts a trial as a **selection among strategy candidates**. §4
 selected nothing — it computed a bound and reported the **entire map, dead cells included**.
 Reporting a full map is the opposite of selection; it is what prevents selection.
 
@@ -649,13 +649,13 @@ settled the record shows it was not settled to suit an outcome.
 
 # §4bis — Auditing old verdicts against the corrected cost
 
-`backtest.py:84` charges 24 bps round-trip; §2 measures 10.02. A verdict reached with the wrong
+`backtest.py` (grep `def _assert_no_lookahead`) charges 24 bps round-trip; §2 measures 10.02. A verdict reached with the wrong
 cost is as untrustworthy as an acceptance reached with the wrong cost. **This is not an attempt
 to revive anything** — it is a check for verdicts standing on a wrong number.
 
 **First, a correction to the premise** [DIUKUR]: not every rejection used 24 bps. The
 order-flow runlog scored `sign(ΔCVD)` at **12 bps round-turn**
-(`RESEARCH-orderflow-runlog.md:235-236, :386`), which is only **1.20×** the measured 10.02 — not
+(`RESEARCH-orderflow-runlog.md` (grep `6. Honest verdict`), :386`), which is only **1.20×** the measured 10.02 — not
 2.4×. The 2.4× factor applies to the daily strategies that went through the standard harness.
 
 ## Method — an upper bound, so no predictive trial is spent
@@ -693,7 +693,7 @@ points of drag.
 
 `donchian_breakout` and `ma_trend + fixed_r_exit` are **not excluded by this bound**. Their
 actual turnover is certainly far below the ceiling — `ma_trend_filter` is reported at **8 trades**
-over the whole window (`RESEARCH-tharp-runlog.md:37`), which would make ΔSharpe ≈ 0.004 —
+over the whole window (`RESEARCH-tharp-runlog.md` (grep `P1 — Expectancy / R-multiple report`)), which would make ΔSharpe ≈ 0.004 —
 but that figure is for the base signal, not for these two overlays, and **no stored artifact
 carries their trade counts** (`reports/`, `data/*.json` checked: only `ma_trend_filter` and
 `tsmom` are stored) [DIUKUR].
@@ -860,7 +860,7 @@ board has never had, on a span that clears the bar, at a horizon where the EV ga
 That is the one combination in this whole document where all three constraints are simultaneously
 satisfied.
 
-**Cost to unlock: ~41 GiB / ~2.7 h of download** (`DEVELOPMENT.md:166-171`), landing as ~13 GB of
+**Cost to unlock: ~41 GiB / ~2.7 h of download** (`DEVELOPMENT.md` (grep `CSS brace balance:`)), landing as ~13 GB of
 parquet. Currently **3 of 2,406 days are on disk** [DIUKUR].
 
 **BLOCKED, by dependency, not by choice.** The ingest saturates the machine, and a busy machine
@@ -900,12 +900,12 @@ The working hypothesis was that `tsmom`'s PBO 0.53 might be explained by sweepin
 configurations. **It cannot be, because nothing is swept.**
 
 - Board strategies take their parameters **straight from CLI defaults** — `--ma-n 200`,
-  `--ma-fast 50`, `--lookback 20`, `--target-vol 0.15` (`scripts/compare.py:149-155`, used
+  `--ma-fast 50`, `--lookback 20`, `--target-vol 0.15` (`scripts/compare.py` (grep `def main`), used
   verbatim at `:99-119`). One configuration per strategy, per run.
 - **No strategy performs internal parameter search.** Every loop in `strategies.py` is a bar
   loop, not a configuration loop (grep for `argmax|best_|optimi[sz]`: zero hits).
 - `probability_of_backtest_overfitting` is fed the **OOS-returns matrix across strategies**
-  (`compare.py:280`), and the code says so in its own comment: *"PBO across the OOS-returns
+  (`compare.py` (grep `def _pairs_hedge_return`)), and the code says so in its own comment: *"PBO across the OOS-returns
   matrix (**cross-strategy selection overfit**)"*. `n_blocks=8` → **C(8,4) = 70 CSCV splits**,
   matching the printed "CSCV 70 splits".
 
@@ -954,7 +954,7 @@ recomputed through `walk_forward` at the corrected cost (5.0 + 0.008 bps/side).
    the distance corresponding to **ρ = 0.5**. `N_eff` = number of clusters. The threshold is a
    fixed, pre-stated value — **not tuned**, and not chosen by inspecting a dendrogram.
 2. **Spectral.** The eigenvalue participation ratio `(Σλ)² / Σλ²`, via the repo's own
-   `risk.effective_number_of_trials` (`risk.py:759`) — already implemented and parity-pinned, so
+   `risk.effective_number_of_trials` (`risk.py` (grep `def effective_number_of_trials`)) — already implemented and parity-pinned, so
    no new estimator is being introduced.
 
 **If the two disagree by more than 2×, that disagreement is itself reported as the finding**, and
@@ -1227,7 +1227,7 @@ touches either. The pruning was never applied to the board, and no candidate's s
 # §9 — where the default parameters came from [DIUKUR]
 
 The concern: `--ma-n 200`, `--ma-fast 50`, `--lookback 20`, `--target-vol 0.15`
-(`scripts/compare.py:152-155`) have no recorded selection history, so they could be **uncounted
+(`scripts/compare.py` (grep `def main`)) have no recorded selection history, so they could be **uncounted
 trials** — and if they were chosen by looking at results, the whole board would rest on selection
 that was never deflated. That is the right worry. It does not survive the archaeology.
 
@@ -1240,10 +1240,10 @@ convention text:
 
 | default | cited convention, present at the root commit | where it sits |
 |---|---|---|
-| `ma_n = 200` | `RESEARCH.md:45` — "`n = 200 days` (or 10 months)" | **exactly** the stated value |
-| `ma_fast = 50` | `RESEARCH.md:45` — "dual cross `50/200d` (\"golden cross\")" | **exactly** the stated value |
-| `lookback = 20` | `RESEARCH.md:33` — "`L = 1 day … 4 weeks` (crypto sweet spot)" | 20 trading days ≈ 4 weeks, top of the band |
-| `target_vol = 0.15` | `RESEARCH.md:33` "vol target 10-15%" ∩ `:156` "target vol 15-50% for BTC" | the **only value in both** cited ranges |
+| `ma_n = 200` | `RESEARCH.md` (grep `2.2 Moving-average / trend filter on BTC — `ma_trend_filter``) — "`n = 200 days` (or 10 months)" | **exactly** the stated value |
+| `ma_fast = 50` | `RESEARCH.md` (grep `2.2 Moving-average / trend filter on BTC — `ma_trend_filter``) — "dual cross `50/200d` (\"golden cross\")" | **exactly** the stated value |
+| `lookback = 20` | `RESEARCH.md` (grep `2.1 Time-series (absolute) momentum on BTC — `tsmom``) — "`L = 1 day … 4 weeks` (crypto sweet spot)" | 20 trading days ≈ 4 weeks, top of the band |
+| `target_vol = 0.15` | `RESEARCH.md` (grep `2.1 Time-series (absolute) momentum on BTC — `tsmom``) "vol target 10-15%" ∩ `:156` "target vol 15-50% for BTC" | the **only value in both** cited ranges |
 
 `RESEARCH.md` cites external work — Harvey et al. (2018), Shen-Urquhart-Wang (2022), Grayscale
 (2024) — that is independent of this repo's data and predates it.
@@ -1315,7 +1315,7 @@ introduced by the fix; it is the measurement that justifies it.
 
 **No backfill.** The 28,428 prints exist in `data/vision/` under their own hive partition with
 their own source label. They are **not** merged into `trades`. Gaps stay gaps
-(`scripts/check_ticks.py:12-16`); the archive is a second labelled source, not a repair.
+(`scripts/check_ticks.py` (grep `would be fabricating history`)); the archive is a second labelled source, not a repair.
 
 ## §10a — WHERE the loss falls, and it decides the consequence [DIUKUR]
 
@@ -1369,7 +1369,7 @@ were also missing from the list.
 **`liquidations` IS already being collected** [DIUKUR: 388 rows on 2026-08-03; `/health` reports
 697 rows written this process]. But **not from Binance `forceOrder`** — from **Bybit
 `allLiquidation.<SYM>`** (`collector.py`, grep `def normalize_bybit_liq` — was :571, drifts with edits), riding the `bybit-ws` leg. The collector already
-documents its sparsity honestly at `collector.py:344-347`: *"bybit prints 3-2000/day and
+documents its sparsity honestly at `collector.py` (grep `def _persist_aggtrades_cursors`): *"bybit prints 3-2000/day and
 2026-07-25 had ZERO all day"*. This materially changes the premise of the liquidations proposal
 and is flagged here rather than absorbed.
 
@@ -1500,7 +1500,7 @@ because there is no cursor. What makes them survivable is Claim 2, not recoverab
 
 # §12 — LIVENESS WITNESS for sparse streams (instance six)
 
-`collector.py:344-347` already states the principle — *"a sparse stream cannot witness its own
+`collector.py` (grep `def _persist_aggtrades_cursors`) already states the principle — *"a sparse stream cannot witness its own
 liveness"* — but the research consequence was never drawn: **every zero in the liquidation series
 is [UNVERIFIED]**. Zero liquidations and a dead leg are byte-identical in the store, and for
 cascade research that is fatal, because the zero days are exactly the ones a baseline most needs
@@ -1562,7 +1562,7 @@ recorded history"* — or it is overstating what the store knows.
 
 ### The codebase's own example is wrong, and that is the point [DIUKUR]
 
-`collector.py:344-347` cites *"2026-07-25 had ZERO all day, honestly"* as evidence the collector
+`collector.py` (grep `def _persist_aggtrades_cursors`) cites *"2026-07-25 had ZERO all day, honestly"* as evidence the collector
 reports sparsity truthfully. **It was not an honest zero.** On 2026-07-25 the bybit carrier wrote
 **0 rows in 0 of 24 hours** — the leg was dark the entire day. The same holds for 2026-07-24.
 2026-08-01 is mixed: the carrier was alive for 3 of 24 hours (4,688 rows), so **those three hours
@@ -1921,7 +1921,7 @@ Three written claims were proven wrong by measurement in a single session:
 
 | claim | where | what measurement showed |
 |---|---|---|
-| "2026-07-25 had ZERO all day, honestly" | `collector.py:344` | the bybit carrier wrote 0 rows in 0 of 24 hours — the leg was dark, not the market silent (§12) |
+| "2026-07-25 had ZERO all day, honestly" | `collector.py` (grep `def _persist_aggtrades_cursors`) | the bybit carrier wrote 0 rows in 0 of 24 hours — the leg was dark, not the market silent (§12) |
 | `options_chain` is the best-covered table at 59.0 % `%ON` | §11 | 7.1 % under a cadence-neutral threshold — best to worst, 51.9 points (§11-N) |
 | add a Binance `forceOrder` leg | my own recommendation | Bybit `allLiquidation` is not throttled the Binance way; the addition would be strictly worse (§13) |
 
@@ -1940,12 +1940,12 @@ claims about **observed data behaviour** rather than design constants:
 | — with provenance (a date, "measured", or a named probe) | 17 |
 | — **with no provenance at all** | **21** |
 
-**Provenance in the weak sense is not enough.** The one claim proven false — `collector.py:344` —
+**Provenance in the weak sense is not enough.** The one claim proven false — `collector.py` (grep `def _persist_aggtrades_cursors`) —
 sits in the *with-provenance* group: it named a date and used the word "measured", and was still
 wrong. What it lacked was a **re-runnable** reference. That is why the rail requires naming the
 query, not the date.
 
-**Not fixed wholesale, deliberately.** Only `collector.py:344` is corrected (§15c). The other 20
+**Not fixed wholesale, deliberately.** Only `collector.py` (grep `def _persist_aggtrades_cursors`) is corrected (§15c). The other 20
 unprovenanced claims are listed so the size of the problem is visible; retro-fitting citations to
 all of them would be a large edit with no measurement behind it, and several may be true.
 
@@ -1996,7 +1996,7 @@ to measure. It is entered in the ledger rather than quietly patched.
 
 ## 15c — the correction, kept as a correction [DIUKUR]
 
-`collector.py:344` now cites the measurement (median 309 rows/day, 58.2 % of cells zero, range
+`collector.py` (grep `def _persist_aggtrades_cursors`) now cites the measurement (median 309 rows/day, 58.2 % of cells zero, range
 3–1,219, query named as §12) **and keeps the wrong example on the record** with the note that it
 was itself an instance of the blindness the comment was describing. Swapping it out quietly would
 have destroyed the only part worth keeping.
@@ -2033,10 +2033,10 @@ even to check it.
 1. **A bare date matches nothing.** The pattern required one of
    `measured|observed|probes|recorded|caught|carries|prints|p50|p95|p99|max`, or `~digit`. A claim
    of the form *"On 2026-08-02, X happened"* contains none of them, so **every dated incident
-   claim was invisible** — `collector.py:215` was missed this way.
+   claim was invisible** — `collector.py` (grep `Every await inside a leg must be BOUNDED. On 2026-08-02 by`) was missed this way.
 2. **Numbers spelled as words are unreachable.** The pattern opened with `re.search(r"\d", text)`
    as a cheap prefilter. Any claim using *one, two, six, dozens, several* can therefore never be
-   seen at all — `collector.py:452` ("six legs died exactly this way") was missed this way.
+   seen at all — `collector.py` (grep `def _persist_aggtrades_cursors`) ("six legs died exactly this way") was missed this way.
 
 **A rebuild must also fix what the audit could not see:** the sample contained only 2 positives,
 so precision was never tested at all. A replacement needs a sample stratified to contain enough
@@ -2062,10 +2062,10 @@ spot-checked immediately, and one was already wrong.**
 
 | citation | verdict |
 |---|---|
-| `DEVELOPMENT.md:61` — no AI attribution | **correct** |
-| `scripts/check_ticks.py:12-16` — gaps stay gaps | **correct** (text at :14-15) |
-| `DESIGN-orderflow-terminal.md:27-121` — the §0.x rails | **correct** (section runs :27–:122) |
-| **`STRATEGY.md:804` — the promotion bar** | **WRONG — now :881** |
+| `DEVELOPMENT.md` (grep `2. Honesty rails (non-negotiable — these ARE the product)`) — no AI attribution | **correct** |
+| `scripts/check_ticks.py` (grep `would be fabricating history`) — gaps stay gaps | **correct** (text at :14-15) |
+| `DESIGN-orderflow-terminal.md` (grep `0. Honesty rails (non-negotiable, inherited + extended)`) — the §0.x rails | **correct** (section runs :27–:122) |
+| **`STRATEGY.md:804` [HISTORICAL] — the promotion bar** | **WRONG — now :881** |
 
 **Cause:** ~77 lines were added to `STRATEGY.md` **in the same session** — the taxonomy, the
 ledger rows, and two new rails — so the bar moved 77 lines down while a file citing it was being
@@ -2268,7 +2268,7 @@ column (81), which is what enters DSR deflation, was never affected.
 An argument exists that it should be 0: every §4 look is an **unconditional marginal**
 distribution of `|return|`. No signal is involved, nothing is conditioned on, and no strategy
 configuration is tested — which is what a "trial" means in the Bailey–López de Prado
-construction that `deflated_sharpe_ratio(risk.py:592)` implements. Measuring how much BTC moves
+construction that `deflated_sharpe_ratio(`risk.py` (grep `def deflated_sharpe_ratio`))` implements. Measuring how much BTC moves
 in 30 seconds is a property of the asset, not a search over strategies.
 
 **It is carried at 45 anyway.** The rule was fixed in advance, forward returns were examined, and
