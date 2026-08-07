@@ -237,3 +237,58 @@ besaran, ditumpuk di atas regime tenang yang `Δp`-nya justru berautokorelasi **
 Roll gagal di sini bukan karena datanya kotor, melainkan karena **asumsi `c` konstannya salah
 secara ekstrem** pada instrumen ini, dan karena estimatornya kuadratik dalam `c` sehingga dikuasai
 ekor. Itu batas pemakaian yang bisa dinyatakan, bukan misteri.
+
+---
+
+# ANOTASI 2026-08-07 — pencabutan dan penyempitan, atas dasar `docs/DIAG-venue-filter-audit.md`
+
+Ditulis sebagai anotasi bertanggal. **Tidak satu pun kalimat di atas diubah**; yang di bawah ini
+mencabut atau mempersempitnya, dan teks aslinya tetap berdiri supaya jejaknya utuh.
+
+## A1. Hipotesis kontaminasi venue: **DICABUT**
+
+Sepanjang dokumen ini, "campuran dua instrumen" diperlakukan sebagai kandidat artefak yang hidup,
+dan trigger A1 pada aturan keputusan menyala atas dasar 4 pasangan `(exchange, symbol)` yang
+ditemukan tanpa filter. Hipotesis itu **mati**, dan bukan karena penalaran:
+
+1. `scripts/prereg_microstructure_001.py` memuat **tepat satu** klausa `WHERE` di seluruh
+   berkas (grep `WHERE exchange = 'binancef'`), dan itulah filternya.
+2. **434 dari 434** pasangan hasil-kali teratas punya `binancef`/`BTCUSDT` di **kedua** barisnya
+   `[DIUKUR]`.
+3. Kontrafaktual tanpa filter **tidak bisa dijalankan**: `bybit` memakai UUID sebagai `trade_id`,
+   jadi `CAST(trade_id AS BIGINT)` melempar `ConversionException`. Pencampuran tidak bisa terjadi
+   diam-diam pada jalur ini — ia berhenti dengan error.
+4. Baris **`ALL MIXED`** di `DIAG-venue-filter-audit.md` §5c adalah **kontrol negatif terukurnya**:
+   mencampur seluruh venue memberi `ρ₂` = **−0,042 / −0,030 / −0,012** — yaitu ≈ 0, kebalikan dari
+   tanda tangan `ρ₂ > 0` yang dicari. Pencampuran **menghancurkan** pola itu, tidak menciptakannya.
+
+## A2. "Keluarga Roll mati" **DIPERSEMPIT ke `binancef`**
+
+Vonis di bagian HASIL ditulis tanpa kualifikasi venue. Itu terlalu luas. Per-venue, tanpa pooling
+`[DIUKUR]`:
+
+| date | exchange | `ρ₁` | `ρ₂` |
+|---|---|---:|---:|
+| 2026-07-30 | **bybit** | −0,482 | **−0,003** |
+| 2026-07-31 | **bybit** | −0,464 | **−0,003** |
+| 2026-07-30 | binancef | −0,466 | +0,337 |
+| 2026-07-31 | binancef | −0,752 | +0,502 |
+
+`bybit`/`BTCUSDT` menunjukkan `ρ₁ ≈ −0,47` dengan `ρ₂ ≈ −0,003` — **MA(1) sebagaimana Roll
+mengasumsikannya**. Pernyataan yang bertahan karena itu adalah: keluarga Roll gagal **pada
+`binancef`/`BTCUSDT` pada hari-hari ini**, bukan pada instrumen BTC secara umum. Apakah ia
+berlaku pada `bybit` belum diuji dan **tidak diuji di sini**.
+
+## A3. Setiap klaim yang bergantung pada `0,0078 bps`: **[UNVERIFIED]**
+
+`DIAG-venue-filter-audit.md` §2 menemukan bahwa klausa `WHERE` di balik angka buku
+`0,0156 bps` **tidak ada di repo** — tidak ada skrip yang menghitungnya, tidak ada SQL yang
+mengutipnya. Ia dipakai sebagai jangkar tanpa kueri yang bisa dijalankan ulang.
+
+Sampai `BOOK-001` selesai, klaim berikut berstatus **`[UNVERIFIED]`**, bukan `[DIUKUR]`:
+
+- **rasio `c_Roll` terhadap `c_book` sebesar 8×–30×** di bagian HASIL dokumen ini
+  (`0,0619 / 0,2330 / 0,2058 bps` versus `0,0078`). Pembilangnya terukur; **penyebutnya tidak**.
+- **"koreksi skala ketiga"** di bagian yang sama menyimpulkan bahwa selisihnya adalah jarak antara
+  median dan akar momen kedua. Aritmetikanya berdiri sendiri, tapi **besaran** selisihnya mewarisi
+  penyebut yang tak terverifikasi.

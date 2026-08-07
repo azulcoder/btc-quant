@@ -238,3 +238,25 @@ Argumen §4 sendiri karena itu berlaku untuk batas milidetik, dan tidak diterapk
 segmentasi milidetik akan mengubah angka**, jadi ia bukan amandemen administratif melainkan
 spesifikasi baru yang butuh PREREG-nya sendiri dengan look-nya sendiri. Dicatat di sini sebagai
 utang, bukan diperbaiki diam-diam.
+
+---
+
+# ANOTASI 2026-08-07 — penyebutnya belum terverifikasi
+
+§2 mengunci target `c_book = 0,0156 / 2 = 0,0078 bps` dan menyebut sumbernya
+`docs/EDA-microstructure-001.md` §2a. `docs/DIAG-venue-filter-audit.md` §2 kemudian mencari
+klausa `WHERE` di balik angka itu dan **tidak menemukannya di repo** — tidak ada skrip yang
+menghitungnya, tidak ada blok SQL yang mengutipnya; yang tersimpan hanya caption dan tabel
+per-venue-nya.
+
+**Konsekuensinya untuk dokumen ini:** kriteria PASS di §5 ("interval memuat 0,0078 bps") dan
+setiap rasio yang memakai angka itu sebagai penyebut berstatus **`[UNVERIFIED]`** sampai
+`scripts/measure_book_spread_001.py` (BOOK-001) menghasilkan penyebut yang bisa dijalankan ulang.
+
+Vonis INDETERMINATE **tidak bergantung** pada penyebut itu — ia dicapai karena `|ρ₁| > 0,5` membuat
+diskriminan negatif, yang tidak menyentuh target sama sekali. Vonisnya berdiri; **rasio-rasionya
+tidak**.
+
+Penyempitan venue (ANOTASI A2 di `docs/DIAG-provenance-001.md`) juga berlaku di sini: apa pun yang
+dokumen ini simpulkan tentang keluarga Roll berlaku untuk `binancef`/`BTCUSDT`, bukan untuk BTC
+secara umum.
