@@ -2265,7 +2265,8 @@ column (81), which is what enters DSR deflation, was never affected.
 | DIAG-provenance-001 (tape integrity: 4 blocks, 28 partitions, 3-day A/B vs the venue archive; classified PROVENANCE, no returns touched) | 1 | 0 |
 | DIAG-venue-filter-audit (code-quote audit + per-venue ACF on 3 days, no pooling; classified PROVENANCE) | 1 | 0 |
 | BOOK-001 quoted spread (3 venues x 30 days of depth_snapshots, 3 weightings, bootstrap; classified PROVENANCE) | 1 | 0 |
-| **running total** | **561** | **81** |
+| DIAG-book-resolution-001 (ASOF staleness, degeneracy fraction, cadence and unobserved trade intervals; classified PROVENANCE) | 1 | 0 |
+| **running total** | **562** | **81** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 

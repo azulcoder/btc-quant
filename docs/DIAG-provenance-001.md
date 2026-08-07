@@ -292,3 +292,45 @@ Sampai `BOOK-001` selesai, klaim berikut berstatus **`[UNVERIFIED]`**, bukan `[D
 - **"koreksi skala ketiga"** di bagian yang sama menyimpulkan bahwa selisihnya adalah jarak antara
   median dan akar momen kedua. Aritmetikanya berdiri sendiri, tapi **besaran** selisihnya mewarisi
   penyebut yang tak terverifikasi.
+
+---
+
+# ANOTASI 2026-08-07 (kedua) — hipotesis pembobotan DIBANTAH oleh BOOK-001
+
+Anotasi bertanggal, seperti yang pertama. **Tidak satu pun kalimat lama diubah.**
+
+Bagian HASIL dokumen ini menulis bahwa selisih 8×–30× antara `c_Roll` dan angka buku adalah
+**jarak antara median dan akar momen kedua** dari besaran yang ekornya populasi tersendiri —
+yaitu bahwa pembobotan/momen menjelaskannya. `docs/BOOK-001-quoted-spread.md` sekarang mengukur
+kedua sisi itu, dan **penjelasan itu tidak cukup.**
+
+## Yang diukur
+
+`√(E[c²])` binancef, dan rasio pembobotannya `[DIUKUR, BOOK-001]`:
+
+| jalur | `√(E[c²])` |
+|---|---:|
+| (i) per snapshot | 0,01189 bps |
+| (iii) tertimbang trade | 0,02460 bps |
+| **rasio (iii)/(i)** | **2,068** |
+
+## Yang tersisa setelah pembobotan diperhitungkan
+
+| hari | `c_Roll` | ÷ jangkar median 0,0078 | ÷ `√(E[c²])` per snapshot | ÷ `√(E[c²])` tertimbang trade |
+|---|---:|---:|---:|---:|
+| 2026-07-30 | 0,0619 bps | 7,9× | 5,2× | **2,5×** |
+| 2026-07-31 | 0,2330 bps | 29,9× | 19,6× | **9,5×** |
+| 2026-08-01 | 0,2058 bps | 26,4× | 17,3× | **8,4×** |
+
+**Pembobotan menyumbang faktor 2,068×, bukan 8–30×.** Pindah dari median ke `√(E[c²])` yang
+tepat — besaran yang Roll targetkan, pada pembobotan yang benar untuk estimator berbasis trade —
+memperkecil selisihnya tapi tidak menutupnya. **Sisa yang belum terjelaskan: 2,5× sampai 9,5×.**
+
+Kalimat lama di HASIL karena itu **dibantah sebagai penjelasan yang memadai**. Ia menyebut
+mekanisme yang nyata dan terukur; ia salah tentang **besarannya**. Sisa 2,5×–9,5× belum punya
+mekanisme, dan tidak dicarikan satu pun di sini.
+
+**Catatan ketergantungan:** penyebut `0,02460 bps` sendiri bertumpu pada ASOF match yang
+staleness-nya belum diuji ketika angka ini pertama dipakai. Uji itu ada di
+`docs/DIAG-book-resolution-001.md` item 1; kalau angkanya bergerak di bawah pembatasan
+staleness, kolom terakhir tabel di atas ikut bergerak.

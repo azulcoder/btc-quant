@@ -1,0 +1,167 @@
+{
+  "slice": [
+    "2026-07-05",
+    "2026-08-03"
+  ],
+  "heavy_days": [
+    "2026-07-30",
+    "2026-07-31",
+    "2026-08-01",
+    "2026-08-03"
+  ],
+  "staleness_ms": {
+    "binancef/BTCUSDT": {
+      "n": 3340826,
+      "p50": 923.0,
+      "p90": 3719531.0,
+      "p99": 9872211.0,
+      "max": 14275826.0
+    },
+    "bybit/BTCUSDT": {
+      "n": 2496336,
+      "p50": 508.0,
+      "p90": 908.0,
+      "p99": 997.0,
+      "max": 1686.0
+    },
+    "okx/BTC-USDT-SWAP": {
+      "n": 1524719,
+      "p50": 486.0,
+      "p90": 899.0,
+      "p99": 990.0,
+      "max": 14146473.0
+    }
+  },
+  "rms_by_staleness": {
+    "binancef/BTCUSDT": {
+      "none": {
+        "n": 3340826,
+        "frac_kept": 1.0,
+        "rms_tick": 1.5761949789867067,
+        "rms_bps": 0.024628046546667292,
+        "ratio_to_unbounded": 1.0
+      },
+      "<= 100 ms": {
+        "n": 185305,
+        "frac_kept": 0.05546682167823167,
+        "rms_tick": 3.615503837835453,
+        "rms_bps": 0.05649224746617895,
+        "ratio_to_unbounded": 2.2938176342623318
+      },
+      "<= 10 ms": {
+        "n": 20989,
+        "frac_kept": 0.006282578021124117,
+        "rms_tick": 3.620329007697566,
+        "rms_bps": 0.05656764074527447,
+        "ratio_to_unbounded": 2.296878911532238
+      }
+    },
+    "bybit/BTCUSDT": {
+      "none": {
+        "n": 2496336,
+        "frac_kept": 1.0,
+        "rms_tick": 0.6619990850676771,
+        "rms_bps": 0.010343735704182455,
+        "ratio_to_unbounded": 1.0
+      },
+      "<= 100 ms": {
+        "n": 262209,
+        "frac_kept": 0.10503754302305458,
+        "rms_tick": 1.225836201670938,
+        "rms_bps": 0.019153690651108408,
+        "ratio_to_unbounded": 1.8517188759341248
+      },
+      "<= 10 ms": {
+        "n": 31430,
+        "frac_kept": 0.01259045256728261,
+        "rms_tick": 2.7122880603706117,
+        "rms_bps": 0.04237950094329081,
+        "ratio_to_unbounded": 4.097117536187124
+      }
+    },
+    "okx/BTC-USDT-SWAP": {
+      "none": {
+        "n": 1524719,
+        "frac_kept": 1.0,
+        "rms_tick": 0.737673418139609,
+        "rms_bps": 0.01152614715843139,
+        "ratio_to_unbounded": 1.0
+      },
+      "<= 100 ms": {
+        "n": 160187,
+        "frac_kept": 0.105060014337068,
+        "rms_tick": 1.34966283454748,
+        "rms_bps": 0.021088481789804374,
+        "ratio_to_unbounded": 1.8296210780527928
+      },
+      "<= 10 ms": {
+        "n": 17410,
+        "frac_kept": 0.011418497441167848,
+        "rms_tick": 3.582932690247312,
+        "rms_bps": 0.05598332328511425,
+        "ratio_to_unbounded": 4.857071709705041
+      }
+    }
+  },
+  "exact_half_tick": {
+    "binancef/BTCUSDT": {
+      "n_exact": 1440606,
+      "n_total": 1442013,
+      "fraction": 0.9990242806410206
+    },
+    "bybit/BTCUSDT": {
+      "n_exact": 1035605,
+      "n_total": 1036632,
+      "fraction": 0.9990092916290448
+    },
+    "okx/BTC-USDT-SWAP": {
+      "n_exact": 1162433,
+      "n_total": 1162817,
+      "fraction": 0.9996697674698598
+    }
+  },
+  "quantiles_are_constant": true,
+  "gap_ms": {
+    "binancef/BTCUSDT": {
+      "n": 1441983,
+      "p50": 1034.0,
+      "p90": 1087.0,
+      "p99": 1215.0,
+      "max": 54015519.0,
+      "frac_over_5s": 0.0004986189157569819
+    },
+    "bybit/BTCUSDT": {
+      "n": 1036604,
+      "p50": 1001.0,
+      "p90": 1060.0,
+      "p99": 1240.0,
+      "max": 53983820.0,
+      "frac_over_5s": 0.0024985433203036068
+    },
+    "okx/BTC-USDT-SWAP": {
+      "n": 1162789,
+      "p50": 1000.0,
+      "p90": 1000.0,
+      "p99": 1000.0,
+      "max": 53976596.0,
+      "frac_over_5s": 0.00045580066546897156
+    }
+  },
+  "trades_sharing_interval": {
+    "binancef/BTCUSDT": {
+      "pairs": 3340882,
+      "no_snapshot_between": 3156190,
+      "fraction": 0.944717592539934
+    },
+    "bybit/BTCUSDT": {
+      "pairs": 2496447,
+      "no_snapshot_between": 2406888,
+      "fraction": 0.9641254150398546
+    },
+    "okx/BTC-USDT-SWAP": {
+      "pairs": 1524715,
+      "no_snapshot_between": 1406093,
+      "fraction": 0.9222005423964479
+    }
+  }
+}
