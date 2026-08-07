@@ -63,10 +63,16 @@ classes in `CLAUDE.md` (15 lines), ledger in `STRATEGY.md`.
 > cannot see this class: a finished item listed as open is not a wrong *number*, so no assert
 > fires. Each closure below was re-verified against the artifact, not against memory.
 
-1. **`pytest -q` hides skips in the gate and in CI** — add `-rs` (and consider failing on an
-   unexpected skip count). §5c C measured six silent skips covering the whole venue
-   fidelity + completeness gate. One flag; highest value per character in the repo.
-2. **Duplicate rows in `trades` — scope now measured.** Not one day: **10,248 duplicate
+1. ~~`pytest -q` hides skips in the gate and in CI.~~ **CLOSED 2026-08-07** — `-rs` added to
+   both Makefile invocations and to CI. Failing on an unexpected skip count was deliberately
+   NOT added; that changes the standard and is a separate decision.
+2. ~~Duplicate rows in `trades`.~~ **FIXED 2026-08-08, NOT YET IN EFFECT** —
+   `UNIQUE (exchange, symbol, trade_id)` on the `trades` DDL, with a conflict-skipping insert
+   because a bare constraint loses the WHOLE BATCH on one duplicate (measured: 3 offered, 1
+   stored) and `INSERT OR IGNORE` raises on a table without one. Would reject **11,746 of
+   13,887,539** rows (0.0846 %) across six audited days. **Activation needs a collector restart**
+   — the process has been up since before the commit, so no live day file carries the constraint
+   yet (§5a-bis). Original scope, kept for the record: Not one day: **10,248 duplicate
    `(exchange, symbol, trade_id)` rows across 27 partitions = 0.041 %**, with a peak of
    **1.0016 % on `2026-08-02`** whose duplicates sit in five hours ALL INSIDE the UTC 12–23
    window a PREREG would use (`2026-08-01`'s 971 sit in hour 05 and fall outside it by luck).
@@ -94,6 +100,10 @@ classes in `CLAUDE.md` (15 lines), ledger in `STRATEGY.md`.
 7. **`make check-vision` is locally infeasible at full scale** (audit-measured: dedup over 2.83 B
    rows needs ~160 GB of aggregate state — needs a per-month window flag and an explicit
    `temp_directory`). Now more pressing, since the local copies it used to read are gone.
+7b. **Two microstructure findings CLOSED as not-pursued, 2026-08-08.** The 2.5x-9.5x gap is
+   RECORDED, NOT PURSUED — it lives inside a term worth 0.16 % of the taker round trip and its
+   own denominator moves 2.3x. Block B is UNANSWERED, NOT PURSUED — its loader put `ORDER BY`
+   inside the dedup subquery, so it tested one ordering three times. Neither is "resolved".
 8. ~~Three MA(1)-dependent estimators do not call their own order gate.~~ **CLOSED
    2026-08-07** — all five now gate, and `tests/test_hasbrouck_gates.py` makes a sixth
    estimator impossible to add ungated: every name in `__all__` must be classified as
@@ -118,6 +128,25 @@ PBO bar — calibrated-null test run as declared, **ABSTAINS** unanimous across 
 C2 feasibility map — done, structural point passes both gates ·
 infra batch — `make gate`, rail-review agent, `.claude/settings.json`, a real `CLAUDE.md`
 (no longer a stub), and `PREREG-scalp-001.md` all exist.
+
+## 5a-bis. Ratifications and corrections (dated; approval order stated explicitly)
+
+**2026-08-08 — `insert_sql_for()` RATIFIED, RETROACTIVELY.** The `trades` UNIQUE constraint was
+approved in advance; the write-path change that shipped with it was **not**. It was committed
+first (`ff3514e`) and approved afterwards, and that order is recorded rather than smoothed over.
+
+The reason it was approved is the measurement that forced it, not the intent behind it:
+a plain `executemany` INSERT on a constrained table **loses the whole batch** on one duplicate —
+3 rows offered, 1 stored — and the collector's flush path then does
+`rows_dropped_error += len(buf)` and evicts the connection. A bare constraint would have turned a
+byte-identical duplicate into real data loss. And `INSERT OR IGNORE` raises a Binder Error on a
+table without a constraint, while the store keeps **today and yesterday**, so both schemas are
+live at once. Hence detection per connection rather than a remembered rule.
+
+**Not yet in effect.** The collector process started `2026-08-06 09:56:38` and the commit landed
+`2026-08-08 04:18:28`; a Python process does not reload modules, so every day file this process
+opens still lacks the constraint. Confirmed on `2026-08-06.duckdb`: constraint **NO**, 758
+duplicates. Activation requires a restart, which costs a real gap and is not taken here.
 
 ## 5b. Structural anti-rot (added 2026-08-06, after the audit found rot 12 ways)
 

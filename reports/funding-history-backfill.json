@@ -1,0 +1,17 @@
+{
+  "binancef": {
+    "pulled": 7571,
+    "appended": 7071,
+    "file": "binancef.jsonl"
+  },
+  "bybit": {
+    "pulled": 6979,
+    "appended": 6979,
+    "file": "bybit.jsonl"
+  },
+  "okx": {
+    "pulled": 286,
+    "appended": 286,
+    "file": "okx.jsonl"
+  }
+}

@@ -190,3 +190,24 @@ Setiap pasangan duplikat yang pernah diukur byte-identical di `ts_ms`, `price`, 
 **Yang TIDAK diperbaiki:** berkas hari yang sudah ada tetap memuat duplikatnya — `CREATE TABLE
 IF NOT EXISTS` tidak menambahkan constraint ke tabel yang sudah ada. Constraint ini mencegah
 duplikat **baru**; ia tidak membersihkan yang lama.
+
+---
+
+# ANOTASI 2026-08-08 — kolom "Δ SPOT" memakai fee venue yang salah
+
+Anotasi bertanggal. **Kalimat lama tidak diubah, dan angkanya tidak dihitung ulang.**
+
+Konstanta `NEW_PER_LEG = 5,008` di §2 disusun dari **fee taker Binance futures** (5,0 bps
+`[DIASUMSIKAN]`) + **half-spread `binancef`** (0,0078) + **impact `binancef`** (0,0000). Ketiganya
+adalah properti venue perp Binance.
+
+Kolom **Δ SPOT** menerapkan konstanta itu ke board yang di-backtest pada **coinbase spot**. Fee
+coinbase spot bukan fee Binance futures, dan `BOOK-001` tidak punya `depth_snapshots` coinbase
+sama sekali — jadi half-spread dan impact coinbase **tidak terukur di repo ini**.
+
+> **Seluruh kolom `Δ SPOT` di §2 karena itu `[UNVERIFIED — fee venue salah]`.** Termasuk
+> pernyataan "lima dari delapan melampaui 50 bps/tahun", yang mewarisi konstanta yang sama.
+>
+> Yang **tidak** terpengaruh: kolom `leg/thn`, `hold hari`, `hari/thn` — itu properti deret posisi
+> dan tidak menyentuh fee venue mana pun. Kolom `lama` juga berdiri, karena `12,0` adalah
+> konstanta `backtest.py` apa adanya.
