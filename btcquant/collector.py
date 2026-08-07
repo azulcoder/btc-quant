@@ -510,7 +510,8 @@ def log_drop_count() -> int:
 _SCHEMA_DDL = (
     """CREATE TABLE IF NOT EXISTS trades (
         exchange VARCHAR, symbol VARCHAR, trade_id VARCHAR, ts_ms BIGINT,
-        price DOUBLE, qty DOUBLE, aggressor_buy BOOLEAN)""",
+        price DOUBLE, qty DOUBLE, aggressor_buy BOOLEAN,
+        UNIQUE (exchange, symbol, trade_id))""",
     """CREATE TABLE IF NOT EXISTS liquidations (
         exchange VARCHAR, symbol VARCHAR, ts_ms BIGINT, side VARCHAR,
         price DOUBLE, qty DOUBLE, notional_usd DOUBLE)""",
@@ -560,6 +561,43 @@ _INSERT_SQL = {
     table: "INSERT INTO {t} VALUES ({q})".format(t=table, q=", ".join("?" * len(cols)))
     for table, cols in _TABLE_COLUMNS.items()
 }
+# `trades` carries UNIQUE (exchange, symbol, trade_id). A reconnect that replays ids used to
+# write them twice — measured at 10,248 rows across 27 partitions (0.041%, peak 1.0016% on
+# 2026-08-02) and again at 758 rows on 2026-08-06, so it recurs.
+#
+# The constraint alone would have made this WORSE, and that was measured before it was added:
+# a plain `executemany` INSERT on a constrained table raises on the first duplicate and loses
+# the ENTIRE BATCH — offered 3 rows with 1 duplicate, 1 row stored — and the flush path then
+# does `rows_dropped_error += len(buf)` and evicts the connection. A byte-identical duplicate
+# would have become real data loss. So the trades insert skips the conflict instead.
+_INSERT_SQL["trades"] = "INSERT OR IGNORE INTO trades VALUES ({q})".format(
+    q=", ".join("?" * len(_TABLE_COLUMNS["trades"])))
+
+# ...but `INSERT OR IGNORE` RAISES a Binder Error on a table that has no UNIQUE constraint,
+# and the store keeps TODAY AND YESTERDAY, so a day file created before this change is still
+# being written to. The writer therefore asks the connection which schema it is looking at.
+_PLAIN_INSERT_SQL = {
+    table: "INSERT INTO {t} VALUES ({q})".format(t=table, q=", ".join("?" * len(cols)))
+    for table, cols in _TABLE_COLUMNS.items()
+}
+
+
+def insert_sql_for(con, table: str) -> str:
+    """The INSERT this connection can actually run for `table`.
+
+    Returns the conflict-skipping form only where a UNIQUE constraint exists to conflict on.
+    Detection is by asking DuckDB, not by remembering which files are new — a rule that lives
+    in someone's memory is the failure mode this whole change exists to remove.
+    """
+    if table != "trades":
+        return _INSERT_SQL[table]
+    try:
+        n = con.execute(
+            "SELECT count(*) FROM duckdb_constraints() "
+            "WHERE table_name = 'trades' AND constraint_type = 'UNIQUE'").fetchone()[0]
+    except Exception:  # noqa: BLE001 — an older DuckDB without the view: assume no constraint
+        n = 0
+    return _INSERT_SQL["trades"] if n else _PLAIN_INSERT_SQL["trades"]
 
 # Rotation routing (§3c): the writer routes every row by the UTC day of the row's
 # OWN ts_ms — this maps each table to where that ts_ms sits in the row tuple.
@@ -1296,7 +1334,7 @@ class BatchWriter:
             for table, buf in self._buffers.items():
                 if not buf:
                     continue
-                self._con.executemany(_INSERT_SQL[table], buf)
+                self._con.executemany(insert_sql_for(self._con, table), buf)
                 self.rows_written[table] += len(buf)
                 written += len(buf)
                 buf.clear()
@@ -1814,7 +1852,7 @@ class RotatingWriter:
                         )
                         continue
                     try:
-                        con.executemany(_INSERT_SQL[table], buf)
+                        con.executemany(insert_sql_for(con, table), buf)
                     except Exception as exc:  # noqa: BLE001 — one bad day, not the batch
                         self.rows_dropped_error += len(buf)
                         self.last_error_drop_ms = now

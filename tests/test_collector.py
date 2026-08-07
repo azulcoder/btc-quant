@@ -366,7 +366,18 @@ def test_batchwriter_autoflushes_at_max_rows(tmp_path):
     try:
         writer = collector.BatchWriter(con, threading.Lock())
         row = collector.normalize_bybit_trade(_FIXTURES["bybit_publicTrade"][0])[0]
-        writer.add("trades", [row] * collector.FLUSH_MAX_ROWS)
+        # DISTINCT trade_ids. The original built the batch as `[row] * FLUSH_MAX_ROWS`, i.e.
+        # 500 copies of ONE id, which stopped working when `trades` gained
+        # UNIQUE (exchange, symbol, trade_id) — 499 of them are now skipped. That the test
+        # broke is the constraint doing its job; what it exposes is that this test was
+        # measuring the flush threshold on a batch that could never have been written as-is
+        # by a correct collector anyway.
+        # Suffix, do not increment: bybit trade_ids are UUIDs, so int() raises on them —
+        # the same fact the venue audit measured when CAST(trade_id AS BIGINT) failed on an
+        # unfiltered read.
+        rows = [row[:2] + (f"{row[2]}-{i}",) + row[3:]
+                for i in range(collector.FLUSH_MAX_ROWS)]
+        writer.add("trades", rows)
         # No explicit flush() call — the threshold already wrote everything out.
         assert (
             con.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
@@ -1309,6 +1320,15 @@ def test_duplicate_trade_ids_are_deduped_by_volume_readers(tmp_path):
     """
     con = collector.open_db(tmp_path / "d.duckdb")
     try:
+        # LEGACY SCHEMA ON PURPOSE. `trades` now carries
+        # UNIQUE (exchange, symbol, trade_id), so a duplicate can no longer be written into a
+        # NEW day file — the writer skips it. But every day file created before that change,
+        # and every partition already on the Hub, still contains the duplicates this test is
+        # about: 11,746 rows across the six days audited. Reader-side dedup therefore still
+        # has to work, and the only honest way to test it is on the schema those files have.
+        con.execute("DROP TABLE trades")
+        con.execute("CREATE TABLE trades (exchange VARCHAR, symbol VARCHAR, trade_id VARCHAR, "
+                    "ts_ms BIGINT, price DOUBLE, qty DOUBLE, aggressor_buy BOOLEAN)")
         dup = _mk_trade(_MIDNIGHT + 2_000, 61500.0, 2.0, True)
         rows = [
             _mk_trade(_MIDNIGHT + 1_000, 61500.0, 1.0, True),
@@ -1316,7 +1336,7 @@ def test_duplicate_trade_ids_are_deduped_by_volume_readers(tmp_path):
             _mk_trade(_MIDNIGHT + 3_000, 61510.0, 3.0, False),
             dup,                       # the replayed duplicate — identical tuple
         ]
-        con.executemany(collector._INSERT_SQL["trades"], rows)
+        con.executemany(collector.insert_sql_for(con, "trades"), rows)
         assert con.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 4
         assert con.execute("SELECT COUNT(DISTINCT trade_id) FROM trades").fetchone()[0] == 3
 

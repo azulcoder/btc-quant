@@ -1,0 +1,98 @@
+{
+  "end": "2026-08-04",
+  "bars": 4034,
+  "years": 11.052054794520547,
+  "old_per_leg": 12.0,
+  "new_per_leg": 5.008,
+  "funding_per_day": 1.8441,
+  "rows": [
+    {
+      "name": "buy_and_hold",
+      "legs_per_year": 0.09048091224590978,
+      "avg_hold_days": 8066.0,
+      "days_held_per_year": 364.9095190877541,
+      "cost_old_bps_yr": 1.0857709469509174,
+      "cost_new_spot_bps_yr": 0.4531284085275162,
+      "delta_spot_bps_yr": 0.6326425384234011,
+      "cost_new_perp_bps_yr": 673.3827725582549,
+      "delta_perp_bps_yr": -672.297001611304
+    },
+    {
+      "name": "ma_trend_filter",
+      "legs_per_year": 1.6286564204263758,
+      "avg_hold_days": 262.6666666666667,
+      "days_held_per_year": 213.8968765493307,
+      "cost_old_bps_yr": 19.54387704511651,
+      "cost_new_spot_bps_yr": 8.15631135349529,
+      "delta_spot_bps_yr": 11.38756569162122,
+      "cost_new_perp_bps_yr": 402.6035413981161,
+      "delta_perp_bps_yr": -383.05966435299956
+    },
+    {
+      "name": "tsmom",
+      "legs_per_year": 14.103325263271644,
+      "avg_hold_days": 28.882909478937393,
+      "days_held_per_year": 203.6725334655429,
+      "cost_old_bps_yr": 169.23990315925974,
+      "cost_new_spot_bps_yr": 70.6294529184644,
+      "delta_spot_bps_yr": 98.61045024079534,
+      "cost_new_perp_bps_yr": 446.22197188227204,
+      "delta_perp_bps_yr": -276.9820687230123
+    },
+    {
+      "name": "tsmom_ls",
+      "legs_per_year": 27.22130474937658,
+      "avg_hold_days": 26.677626527152533,
+      "days_held_per_year": 363.0999008428359,
+      "cost_old_bps_yr": 326.65565699251897,
+      "cost_new_spot_bps_yr": 136.3242941848779,
+      "delta_spot_bps_yr": 190.33136280764106,
+      "cost_new_perp_bps_yr": 805.9168213291516,
+      "delta_perp_bps_yr": -479.26116433663265
+    },
+    {
+      "name": "pairs_coint",
+      "legs_per_year": 3.619236489836391,
+      "avg_hold_days": 2.7,
+      "days_held_per_year": 4.8859692612791275,
+      "cost_old_bps_yr": 43.43083787803669,
+      "cost_new_spot_bps_yr": 18.125136341100646,
+      "delta_spot_bps_yr": 25.305701536936045,
+      "cost_new_perp_bps_yr": 27.135352255825484,
+      "delta_perp_bps_yr": 16.295485622211206
+    },
+    {
+      "name": "tsmom_dir",
+      "legs_per_year": 34.56370847793753,
+      "avg_hold_days": 11.785340314136125,
+      "days_held_per_year": 203.6725334655429,
+      "cost_old_bps_yr": 414.7645017352504,
+      "cost_new_spot_bps_yr": 173.09505205751117,
+      "delta_spot_bps_yr": 241.66944967773924,
+      "cost_new_perp_bps_yr": 548.6875710213188,
+      "delta_perp_bps_yr": -133.92306928606843
+    },
+    {
+      "name": "tsmom_voltarget",
+      "legs_per_year": 14.103325263271644,
+      "avg_hold_days": 28.882909478937393,
+      "days_held_per_year": 203.6725334655429,
+      "cost_old_bps_yr": 169.23990315925974,
+      "cost_new_spot_bps_yr": 70.6294529184644,
+      "delta_spot_bps_yr": 98.61045024079534,
+      "cost_new_perp_bps_yr": 446.22197188227204,
+      "delta_perp_bps_yr": -276.9820687230123
+    },
+    {
+      "name": "pairs_ou",
+      "legs_per_year": 16.286564204263758,
+      "avg_hold_days": 5.266666666666667,
+      "days_held_per_year": 42.88795240456123,
+      "cost_old_bps_yr": 195.4387704511651,
+      "cost_new_spot_bps_yr": 81.5631135349529,
+      "delta_spot_bps_yr": 113.87565691621221,
+      "cost_new_perp_bps_yr": 160.6527865642043,
+      "delta_perp_bps_yr": 34.78598388696082
+    }
+  ]
+}
