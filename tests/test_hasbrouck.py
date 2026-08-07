@@ -389,7 +389,13 @@ def test_roll_abstains_about_half_the_time_on_a_spreadless_random_walk():
             # A NaN here is the point: no number at all, not a zero and not |gamma_1|.
             if not (math.isnan(r["c_hat"]) and math.isnan(r["spread"])):
                 fabricated.append((seed, r["gamma_1"], r["c_hat"]))
-            assert "RULE-EXTRACT-2" in r["reason"]
+            # TWO legitimate refusal paths now, and the test must not pin one. A white-noise
+            # dp IS MA(1) (all gamma_k = 0 for k >= 2), so the order gate passes on ~95% of
+            # seeds and RULE-EXTRACT-2 fires on the coin flip; on the remaining ~5% the gate
+            # itself refuses, which is its nominal size and not a defect. Requiring
+            # RULE-EXTRACT-2 unconditionally would make the gate's own false-alarm rate look
+            # like a bug in roll().
+            assert ("RULE-EXTRACT-2" in r["reason"]) or ("not MA(1)" in r["reason"]), r["reason"]
         else:
             # When it does answer, the answer is sqrt(-gamma_1) exactly, never sqrt(|.|).
             assert r["gamma_1"] < 0
@@ -408,13 +414,31 @@ def test_roll_abstains_on_a_momentum_series():
     grows with the momentum. This one is decisive rather than probabilistic: rho_1 is
     +0.30 against a sampling SE of order `1/sqrt(n)` = 0.0045, so every seed must refuse.
     """
+    # An AR(1) is NOT MA(1) — rho_k = phi^k, so rho_2 = 0.09 is far from zero — and since
+    # the order gate was added it refuses this series BEFORE the sign of gamma_1 is ever
+    # consulted. That ordering is correct: on a non-MA(1) series gamma_1 is not -c*s, so
+    # reading its sign would be reasoning about a quantity the model does not describe.
     for seed in range(6):
         dp = ar1_series(50_000, phi=0.3, sigma=1e-4, seed=2000 + seed)
         r = hb.roll(dp)
         assert r["verdict"] == hb.ABSTAIN, f"seed {seed}: reported a spread on momentum"
-        assert r["gamma_1"] > 0                                  # [DIUKUR] rho_1 ~ +0.30
         assert math.isnan(r["c_hat"]) and math.isnan(r["spread"])
-        assert "momentum" in r["reason"]
+        assert not hb.ma1_order_gate(dp)["passed"], "the gate should reject an AR(1)"
+        assert "not MA(1)" in r["reason"], r["reason"]
+
+    # And RULE-EXTRACT-2 still has its own fixture, isolated: an MA(1) with theta > 0 passes
+    # the order gate (it really is MA(1)) and has gamma_1 > 0, so the sign path is the one
+    # that must fire. Without this, adding the gate would have silently retired the rule.
+    for seed in range(6):
+        rng = np.random.default_rng(3000 + seed)
+        e = rng.normal(0.0, 1e-4, size=200_001)
+        dp = e[1:] + 0.5 * e[:-1]                 # MA(1), theta = +0.5 -> rho_1 = +0.4
+        assert hb.ma1_order_gate(dp)["passed"], "fixture is not MA(1) — the gate rejected it"
+        r = hb.roll(dp)
+        assert r["verdict"] == hb.ABSTAIN
+        assert r["gamma_1"] > 0                              # [DIUKUR] rho_1 ~ +0.40
+        assert math.isnan(r["c_hat"]) and math.isnan(r["spread"])
+        assert "RULE-EXTRACT-2" in r["reason"], r["reason"]
 
     # Same refusal for an MA(1) with theta > 0, so it is the sign of gamma_1 that drives
     # it and not the AR shape.

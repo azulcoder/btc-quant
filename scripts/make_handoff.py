@@ -38,15 +38,21 @@ def sh(*args: str) -> str:
         return UNKNOWN
 
 
-def git_state() -> dict:
-    sha = sh("git", "rev-parse", "--short", "HEAD")
-    subj = sh("git", "log", "-1", "--format=%s")
-    when = sh("git", "log", "-1", "--format=%cI")
-    dirty = sh("git", "status", "--porcelain")
-    ahead = sh("git", "rev-list", "--count", "origin/main..HEAD")
-    return {"sha": sha, "subject": subj[:100] if subj != UNKNOWN else UNKNOWN, "when": when,
-            "dirty": UNKNOWN if dirty == UNKNOWN else ("dirty" if dirty else "clean"),
-            "unpushed": ahead}
+# NOTE — there is deliberately no git_state() here any more.
+#
+# This file used to report the commit sha, the working-tree state and the unpushed count.
+# Those three fields COULD NOT BE CORRECT, by construction: they are read with
+# `git rev-parse HEAD` at generation time and the file is then committed, so the sha it
+# carries is always the PARENT of the commit containing it. Measured 2026-08-06: the file
+# said `e432b14`, dirty, 4 unpushed, while HEAD was `f9d09df`, clean, 5 unpushed.
+#
+# Worse, `docs/STATUS.md` and the session startup order both say to read this file FIRST,
+# so the first thing a session read was a field that could never be right.
+#
+# git is the owner of git state. Copying an owner's value into a second file is exactly the
+# rot pattern `scripts/doc_freshness.py` exists to stop; the checker just cannot see this
+# instance because the value is not a number it knows how to match. So the fields are gone
+# and the file points at git instead.
 
 
 def counter() -> str:
@@ -114,8 +120,8 @@ def last_gate() -> str:
     f = REPO / "reports" / "gate-last.json"
     try:
         d = json.loads(f.read_text())
-        same = " (this commit)" if d.get("sha") == git_state()["sha"] else " (an EARLIER commit)"
-        return f"GREEN at {d.get('utc')} on {d.get('sha')}{same} · {d.get('suite', UNKNOWN)}"
+        return (f"GREEN at {d.get('utc')} on {d.get('sha')} · {d.get('suite', UNKNOWN)} — "
+                "compare that sha against `git log` yourself; this file does not")
     except Exception:  # noqa: BLE001
         return f"{UNKNOWN} — no green gate has been recorded"
 
@@ -141,7 +147,6 @@ def open_decisions() -> list[str]:
 
 
 def main() -> int:
-    g = git_state()
     mig = migration()
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     dec = open_decisions()
@@ -154,11 +159,17 @@ def main() -> int:
     A("unreadable source says `UNKNOWN` rather than carrying a stale value forward. Hand-editing")
     A("this file defeats its purpose — regenerate it instead (`make gate` does so automatically).")
     A("")
-    A("## Commit")
+    A("## Commit — NOT reported here, on purpose")
     A("")
-    A(f"- `{g['sha']}` — {g['subject']}")
-    A(f"- authored {g['when']} · working tree **{g['dirty']}** · unpushed commits: {g['unpushed']}")
-    A(f"- public repo: <https://github.com/azulcoder/btc-quant> — a web session can fetch it directly")
+    A("**git owns git state, and this file cannot report it correctly.** These fields are read")
+    A("at generation time and the file is then committed, so any sha printed here would always")
+    A("be the PARENT of the commit that contains it. Run the real thing:")
+    A("")
+    A("```")
+    A("git log --oneline -10 && git status --porcelain && git rev-list --count origin/main..HEAD")
+    A("```")
+    A("")
+    A("- public repo: <https://github.com/azulcoder/btc-quant> — a web session can fetch it directly")
     A("")
     A("## State [all values generated this run]")
     A("")

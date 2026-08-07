@@ -235,8 +235,16 @@ def _erf(x: float) -> float:
 # --------------------------------------------------------------------------- #
 # E1 — Roll                                                                    #
 # --------------------------------------------------------------------------- #
-def roll(dp) -> dict:
+def roll(dp, max_lag: int = 10, alpha: float = 0.05, force: bool = False) -> dict:
     """E1 — the Roll (1984) spread estimator, with its refusal honoured.
+
+    **Gated on the MA(1) order test.** `gamma_1 >= 0` is not the only way this estimator can be
+    meaningless: on a series that is not MA(1) at all, `gamma_1` is not `-c*s` and
+    `sqrt(-gamma_1)` is a number about something else. Measured on real BTCUSDT perp trades,
+    where `rho_2` runs +0.31 to +0.52 and the ACF oscillates, it returned 8x to 30x the
+    book-measured half-spread (`docs/DIAG-provenance-001.md`). Before the gate was added it
+    also returned verdict `OK` on a simulated MA(3) while reporting a NEGATIVE `sigma2_u`
+    inside the same dict.
 
     `c_hat = sqrt(-gamma_1)`; the spread is `2 * c_hat`.
 
@@ -252,6 +260,11 @@ def roll(dp) -> dict:
     roughly half the time by construction, and reporting 0 or `sqrt(|gamma_1|)` there
     would be a silent lie.
     """
+    gate = ma1_order_gate(dp, max_lag=max_lag, alpha=alpha)
+    if not gate["passed"] and not force:
+        return {"verdict": ABSTAIN, "reason": gate["reason"], "gate": gate,
+                "c_hat": float("nan"), "spread": float("nan"), "sigma2_u": float("nan"),
+                "gamma_0": float("nan"), "gamma_1": float("nan")}
     g = autocovariances(dp, 2)
     g0, g1 = float(g[0]), float(g[1])
     if g1 >= 0:
@@ -470,7 +483,8 @@ def sigma2_w_ar(dp, K: int = 30) -> dict:
 # --------------------------------------------------------------------------- #
 # E5 + the identified interval                                                 #
 # --------------------------------------------------------------------------- #
-def pricing_error_lower_bound(dp) -> dict:
+def pricing_error_lower_bound(dp, max_lag: int = 10, alpha: float = 0.05,
+                              force: bool = False) -> dict:
     """E5 — a LOWER BOUND on `sigma2_s = Var(p_t - m_t)`, never a point estimate.
 
         sigma2_s >= theta^2 * sigma2_eps = 0.5 * (gamma_0 - sqrt(gamma_0^2 - 4*gamma_1^2))
@@ -478,7 +492,14 @@ def pricing_error_lower_bound(dp) -> dict:
     Exact under exclusively private information (`sigma2_u = 0`), and it strictly
     understates under exclusively public information (`lambda = 0`). Reporting it as
     `sigma2_s` without the qualifier is an overstatement in a known direction.
+
+    **Gated on the MA(1) order test**: the bound is derived FROM the MA(1) Wold representation,
+    so on a series that has none there is nothing for it to bound.
     """
+    gate = ma1_order_gate(dp, max_lag=max_lag, alpha=alpha)
+    if not gate["passed"] and not force:
+        return {"verdict": ABSTAIN, "reason": gate["reason"], "gate": gate,
+                "lower_bound": float("nan")}
     g = autocovariances(dp, 2)
     g0, g1 = float(g[0]), float(g[1])
     disc = g0 * g0 - 4.0 * g1 * g1
@@ -491,7 +512,8 @@ def pricing_error_lower_bound(dp) -> dict:
             "reason": ""}
 
 
-def identified_interval_c(dp) -> dict:
+def identified_interval_c(dp, max_lag: int = 10, alpha: float = 0.05,
+                          force: bool = False) -> dict:
     """The honest object for `c`: an interval, not a point. [DIUKUR, this repo's proposition]
 
     `sigma2_u >= 0` confines `c^2` to `[0.5*(gamma_0 - D), 0.5*(gamma_0 + D)]` with
@@ -509,7 +531,17 @@ def identified_interval_c(dp) -> dict:
 
     This is a proposition owned by this repo, derived and verified in
     `docs/VERIFY-hasbrouck-extraction.md` §4 — it is NOT a Hasbrouck citation.
+
+    **Gated on the MA(1) order test.** Both endpoints are functions of `(gamma_0, gamma_1)`
+    under the generalized Roll model, which is MA(1) by construction. Running
+    PREREG-microstructure-001 is what forced this: on pooled real data with `rho_1 = -0.71`
+    the discriminant happened to go negative and produced INDETERMINATE by luck. On slightly
+    different moments this function would have returned a confident interval.
     """
+    gate = ma1_order_gate(dp, max_lag=max_lag, alpha=alpha)
+    if not gate["passed"] and not force:
+        return {"verdict": ABSTAIN, "reason": gate["reason"], "gate": gate,
+                "c_lo": float("nan"), "c_hi": float("nan")}
     g = autocovariances(dp, 2)
     g0, g1 = float(g[0]), float(g[1])
     if g1 >= 0:

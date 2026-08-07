@@ -14,14 +14,14 @@ Last update: **2026-08-06, post-buildout + anti-rot gate** (19-agent adversarial
 | tick lifecycle (HF sync, 07:20 WIB) | bounded 2-day local store, ~490 MB steady state | `ls data/ticks/` | `scripts/upload_hf.py` |
 | LockBox integrity | **PASS** — 1 recorded defect (depth row, ENOSPC). The reboot wiped `/tmp` (the stamped log), so the gate now distinguishes entry-predates-log (manifest = surviving record) from phantom. **`/tmp` log location is a standing risk — relocation recommended** | `make lockbox-integrity` | `reports/lockbox-manifest.json` |
 | churn vs §14b pre-registration | **clock reset** — churn returned `2026-08-05 18:21:40Z`; ambiguous band | `make churn-threshold` | EDA §14b |
-| cursor-fix production evidence (b-ii/b-iii) | **0 events** — needs a natural `binancef-aggTrades` leg restart | `grep -E "resuming at id\|exceeds the\|id GAP" ~/Library/Logs/btcquant-collector.log` | EDA §10 |
+| cursor-fix production evidence | **LEG-LEVEL: CONFIRMED 2026-08-06T01:21:29Z** — `binancef-aggTrades: resuming at id 3403202817 (5,031 id(s) of backlog to catch up)`. That is 5x beyond the 1,000-id seed-poll window, and the day it happened lost **zero** prints against the venue archive. **CROSS-PROCESS SIDECAR: still 0 events** — the file exists and is written, but there has been exactly one collector start since it was added, so it has never been exercised ACROSS a restart | `grep -E "resuming at id\|exceeds the\|id GAP" ~/Library/Logs/btcquant-collector.log` | EDA §10 |
 
 ## 2. Data
 
 | store | state |
 |---|---|
 | `data/ticks/` | today + yesterday only, by design; older days on HF `azulcoder/btc-quant-ticks/data/date=*` |
-| recorded damage | **3 entries**: `2026-08-03` 28,428 (4 blocks) · `2026-08-04` 21,706 (2 blocks, pre-fix) · `2026-08-05` **1,744 (reboot window 22:23–22:29Z) — VERIFIED 2026-08-06T08:30Z against the venue archive: `archive \\ recorded = 1,744`, `recorded \\ archive = 0`, exact. `[DIUKUR]`, entry carries `verified: true`**. PENDING: `2026-08-06` will carry a ~4 min bootout hole (~02:52–02:56Z, log-relocation restart) — measure and record once the day closes. Outages <~90 s lose nothing (seed poll covers the last 1,000 ids — measured) |
+| recorded damage | **3 entries**: `2026-08-03` 28,428 (4 blocks) · `2026-08-04` 21,706 (2 blocks, pre-fix) · `2026-08-05` **1,744 (reboot window 22:23–22:29Z) — VERIFIED 2026-08-06T08:30Z against the venue archive: `archive \\ recorded = 1,744`, `recorded \\ archive = 0`, exact. `[DIUKUR]`, entry carries `verified: true`**. **`2026-08-06`: NO ENTRY — the predicted hole did not happen.** A ~4 min bootout hole was expected; measured against the venue archive on 2026-08-07 the day lost **zero** trade prints (`archive \\ recorded = 0`, `recorded \\ archive = 0`, `ts_mismatch 0`, `max|Δprice| 0.0`, `max|Δqty| 0.0`, `side_mismatch 0`). The prediction was wrong and is recorded as wrong. **Not a clean bill for the day**: the same window cost `binancef` **928 s of `depth_snapshots`** and comparable spans on bybit/okx/coinbase — real loss on legs the trade-overlap gate does not cover, and there is no archive to measure those against. Outages <~90 s lose nothing (seed poll covers the last 1,000 ids — measured) |
 | `data/vision/` (archive tape) | **remote-first as of 2026-08-06**: 0 partitions hold a local `trades.parquet`; every one lives on HF under the `vision/` prefix, with **2,085 local manifests retained** as the local proof of content. Span `2019-12-31..2026-08-01` with a **296-day hole [count corrected by audit 2026-08-06]** `2025-10-08..2026-07-30` (ENOSPC casualty) — the hole is unchanged by the migration and is still open |
 | Vision→HF migration | **COMPLETE 2026-08-06T06:57Z**. Final batch 713/713, 0 throttle events, exit 0, lock released cleanly. Totals: **2,084 deletes, every one carrying `transport_ok` + `content_ok` + `manifest_ok`**; 0 of 2,239 ledger lines unparseable despite a two-writer window. Terminal states read `deleted 2,079 / upload_failed 5` — those 5 are the mislabelled race casualties (§5c B), not failures; their `deleted` records are intact and verified. Checkpoint `reports/vision-migration.jsonl` |
 | **LockBox** | **`2026-08-05 01:00Z` onward — NOT read, NOT queried, ever.** Boundary moved once (00:00→01:00) for a documented defect, before any byte was read. Quarantines: `2026-08-04`, `2026-08-05 00:00–01:00` |
@@ -66,12 +66,22 @@ classes in `CLAUDE.md` (15 lines), ledger in `STRATEGY.md`.
 1. **`pytest -q` hides skips in the gate and in CI** — add `-rs` (and consider failing on an
    unexpected skip count). §5c C measured six silent skips covering the whole venue
    fidelity + completeness gate. One flag; highest value per character in the repo.
-2. **979 duplicate rows in `trades`, found 2026-08-06 (§5c-bis).** No unique constraint on
-   `(exchange, symbol, trade_id)` and the aggTrades dedup guard is in-memory only, so a reconnect
-   that replays ids writes them twice. Per-trade statistics over an affected day are inflated
-   until deduped. Decide: unique index, or a dedup pass at read time, or both.
-2b. **One or more prints whose qty differs from the venue by ~0.01**, price/timestamp/side exact.
-   Chasing it means a second, undeclared read of the LockBox slice — **your call, not mine.**
+2. **Duplicate rows in `trades` — scope now measured.** Not one day: **10,248 duplicate
+   `(exchange, symbol, trade_id)` rows across 27 partitions = 0.041 %**, with a peak of
+   **1.0016 % on `2026-08-02`** whose duplicates sit in five hours ALL INSIDE the UTC 12–23
+   window a PREREG would use (`2026-08-01`'s 971 sit in hour 05 and fall outside it by luck).
+   **New and load-bearing:** every duplicate pair measured is **byte-identical** across
+   `ts_ms`, `price`, `qty` and `aggressor_buy` — 0 disagreeing. So which copy survives cannot
+   matter, and a read-time `DISTINCT` is sufficient; a unique index is a schema change and a
+   heavier answer to the same problem. Still yours to choose (`DIAG-provenance-001`).
+2b. **The ~0.01 qty disagreement — DID NOT RECUR on the second day.** `2026-08-05` aged out,
+   `_pick_day()` moved to `2026-08-06`, and the same gate measured **`max|Δqty| 0.0`** there.
+   Two observations now: one day with a ~0.01 disagreement, one day exact. So it is
+   **day-specific, not systemic** — which lowers its priority but does not close it, because a
+   single unexplained fidelity break is still a fidelity break. Chasing the cause still means
+   an ad-hoc read of a LockBox day, and that is still **your call, not mine.**
+   **The duplicate defect, by contrast, DID recur**: 758 of 688,524 rows on `2026-08-06`
+   (0.11 %). That one is systemic and is item 2.
 3. **Five ledger entries carry a wrong terminal state** (`upload_failed` on partitions that
    migrated successfully — §5c B). The ledger is append-only, so the correction is an appended
    corrective record, never a rewrite. Shape of that record is azul's call.
@@ -84,12 +94,14 @@ classes in `CLAUDE.md` (15 lines), ledger in `STRATEGY.md`.
 7. **`make check-vision` is locally infeasible at full scale** (audit-measured: dedup over 2.83 B
    rows needs ~160 GB of aggregate state — needs a per-month window flag and an explicit
    `temp_directory`). Now more pressing, since the local copies it used to read are gone.
-8. **Three MA(1)-dependent estimators do not call their own order gate** — `roll`,
-   `pricing_error_lower_bound` and `identified_interval_c`. Only `sigma2_w_ma1` and
-   `sigma2_w_wold` gate. The adversarial review found one instance and it was fixed; the
-   pattern turned out to be three, and PREREG-001 is what surfaced it. That run survived only
-   because its discriminant happened to go negative. Adding the gate makes those functions
-   stricter, so it changes what the instrument reports — **your call.**
+8. ~~Three MA(1)-dependent estimators do not call their own order gate.~~ **CLOSED
+   2026-08-07** — all five now gate, and `tests/test_hasbrouck_gates.py` makes a sixth
+   estimator impossible to add ungated: every name in `__all__` must be classified as
+   MA(1)-dependent or exempt, with a reason, or the suite fails. **This changes what the
+   instrument reports**: on a non-MA(1) series `roll`, `pricing_error_lower_bound` and
+   `identified_interval_c` now ABSTAIN where they used to answer. Before the fix, `roll`
+   returned verdict `OK` on a simulated MA(3) while reporting a NEGATIVE `sigma2_u` in the
+   same dict.
 9. **Hasbrouck estimators — the plan is now written**: `docs/PLAN-microstructure-001.md`.
    Headline finding, measured: the Roll family needs **~147 days** of aggTrades before
    `sd(gamma_1)` falls to 20 % of the signal; at half a day the noise is 3.6x the signal.

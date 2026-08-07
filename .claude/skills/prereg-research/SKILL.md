@@ -21,6 +21,18 @@ each entry in the instrument-blindness ledger (STRATEGY.md §6) happened.
    to CLOSED data only (a live partial bar broke PC1 once; PREREG-pbo-null-001 amendment).
 3. **Plan the negative control for any verifier** (class I): test it on a case known to
    PASS, not only on known failures — bad precision destroys correct work.
+3b. **Declare a CATCH-ALL branch.** The outcome table must map every possible result,
+   including ones nobody anticipated, and the fallback is:
+
+   > Any outcome not matched by a declared branch is **INDETERMINATE**, and reaching it
+   > obliges a written AMENDMENT naming the branch that was missing. It is never routed
+   > into the nearest declared verdict.
+
+   This exists because PREREG-microstructure-001 declared INDETERMINATE only for
+   `gamma_1 >= 0` and the run reached it through a negative discriminant instead — the
+   right verdict through an undeclared door, which is luck rather than pre-registration.
+   The verdict routing in the runner script must be exhaustive too, and
+   `tests/test_prereg_verdict_routing.py` asserts that mechanically.
 
 ## While running
 

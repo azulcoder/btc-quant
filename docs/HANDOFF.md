@@ -1,26 +1,32 @@
 # HANDOFF — generated, do not hand-edit
 
-**Generated 2026-08-07T00:52:52Z by `make handoff`.** Every field below is read from a source; an
+**Generated 2026-08-07T10:45:57Z by `make handoff`.** Every field below is read from a source; an
 unreadable source says `UNKNOWN` rather than carrying a stale value forward. Hand-editing
 this file defeats its purpose — regenerate it instead (`make gate` does so automatically).
 
-## Commit
+## Commit — NOT reported here, on purpose
 
-- `8196b5a` — Pre-register predictions for the provenance diagnostic, before the script exists
-- authored 2026-08-07T07:17:25+07:00 · working tree **dirty** · unpushed commits: 8
+**git owns git state, and this file cannot report it correctly.** These fields are read
+at generation time and the file is then committed, so any sha printed here would always
+be the PARENT of the commit that contains it. Run the real thing:
+
+```
+git log --oneline -10 && git status --porcelain && git rev-list --count origin/main..HEAD
+```
+
 - public repo: <https://github.com/azulcoder/btc-quant> — a web session can fetch it directly
 
 ## State [all values generated this run]
 
 | field | value |
 |---|---|
-| collector `/health` | legs 16/16 · writer running · rows_dropped_error 0 · uptime 21.9 h |
-| last GREEN gate | GREEN at 2026-08-06T04:26:13Z on cf77e9e (an EARLIER commit) · UNKNOWN |
+| collector `/health` | legs 16/16 · writer running · rows_dropped_error 0 · uptime 31.8 h |
+| last GREEN gate | GREEN at 2026-08-06T04:26:13Z on cf77e9e · UNKNOWN — compare that sha against `git log` yourself; this file does not |
 | look counter (owner: `docs/EDA-microstructure-001.md`) | 559 diagnostic / 81 predictive |
 | vision partitions still local | 0 |
 | migration states | {'readback_ok': 128, 'upload_failed': 9, 'deleted': 2084} |
 | migration last record | 2019-12-31 -> deleted @ 2026-08-06T06:57:33.556Z |
-| disk free | 22.7 GB |
+| disk free | 22.8 GB |
 | recorded damage (date, prints) | 2026-08-03 28,428 · 2026-08-04 21,706 · 2026-08-05 1,744 |
 
 **Who may raise the look counter:** only a session that actually ran the look, in the same
@@ -31,13 +37,13 @@ wrong and every DSR deflated against it inherits the error.
 ## Open decisions (generated from `docs/STATUS.md`)
 
 1. **`pytest -q` hides skips in the gate and in CI** — add `-rs` (and consider failing on an unexpected skip count). §5c C measured six silent skips covering the whole venue fidelity + completeness gate. One flag; highest value per character in the repo.
-2. **979 duplicate rows in `trades`, found 2026-08-06 (§5c-bis).** No unique constraint on `(exchange, symbol, trade_id)` and the aggTrades dedup guard is in-memory only, so a reconnect that replays ids writes them twice. Per-trade statistics over an affected day
+2. **Duplicate rows in `trades` — scope now measured.** Not one day: **10,248 duplicate `(exchange, symbol, trade_id)` rows across 27 partitions = 0.041 %**, with a peak of **1.0016 % on `2026-08-02`** whose duplicates sit in five hours ALL INSIDE the UTC 12–23 w
 3. **Five ledger entries carry a wrong terminal state** (`upload_failed` on partitions that migrated successfully — §5c B). The ledger is append-only, so the correction is an appended corrective record, never a rewrite. Shape of that record is azul's call.
 4. **296-day backfill** via the `--date` path — **now unblocked** (the local migration is done). `2025-10-08` still holds a `trades.parquet.bad` partial artifact that must be cleared as part of that day's re-ingest. Do it chunked, not as a naive `--date` loop.
 5. **`2026-08-06` bootout damage entry**: a ~4 min hole (~02:52–02:56Z, log-relocation restart) is expected; measure and record it once the day closes.
 6. **disablesleep experiment**: locked behind the 36 h churn threshold; needs a fresh baseline.
 7. **`make check-vision` is locally infeasible at full scale** (audit-measured: dedup over 2.83 B rows needs ~160 GB of aggregate state — needs a per-month window flag and an explicit `temp_directory`). Now more pressing, since the local copies it used to read ar
-8. **Three MA(1)-dependent estimators do not call their own order gate** — `roll`, `pricing_error_lower_bound` and `identified_interval_c`. Only `sigma2_w_ma1` and `sigma2_w_wold` gate. The adversarial review found one instance and it was fixed; the pattern turne
+8. ~~Three MA(1)-dependent estimators do not call their own order gate.~~ **CLOSED 2026-08-07** — all five now gate, and `tests/test_hasbrouck_gates.py` makes a sixth estimator impossible to add ungated: every name in `__all__` must be classified as MA(1)-depende
 9. **Hasbrouck estimators — the plan is now written**: `docs/PLAN-microstructure-001.md`. Headline finding, measured: the Roll family needs **~147 days** of aggTrades before `sd(gamma_1)` falls to 20 % of the signal; at half a day the noise is 3.6x the signal. Th
 
 ## Binding rules for ANY agent, in any surface

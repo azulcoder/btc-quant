@@ -53,7 +53,7 @@ scan:
 	python3 scripts/scan.py
 
 test:
-	python3 -m pytest -q
+	python3 -m pytest -q -rs
 
 # Fail-fast local gate: the CI steps runnable here, in the SAME order as
 # .github/workflows/ci.yml (pytest -> JS<->Python parity -> terminal fixture
@@ -64,7 +64,7 @@ test:
 # needs playwright + a Chromium download — run it separately as
 # `make verify-browser`.
 gate:
-	python3 -m pytest -q
+	python3 -m pytest -q -rs
 	python3 scripts/check_parity.py
 	node scripts/check_terminal.cjs
 	python3 scripts/doc_freshness.py --quiet-exempt

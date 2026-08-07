@@ -32,7 +32,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: pytest (engine + honesty-rail teeth)
-        run: python -m pytest -q
+        run: python -m pytest -q -rs
 
       - name: node --check (dashboard mirror + app + charts + terminal)
         run: |

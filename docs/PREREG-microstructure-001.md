@@ -198,3 +198,43 @@ Run ini selamat hanya karena diskriminannya kebetulan negatif. Pada momen yang s
 `identified_interval_c` akan mengembalikan interval yang percaya diri atas seri yang bukan MA(1).
 **Vonisnya tidak berubah** — gerbang menolak ketiga hari yang diuji, jadi jalur bergerbang memberi
 ABSTAIN dan jalur tak-bergerbang memberi INDETERMINATE — tapi itu keberuntungan, bukan desain.
+
+---
+
+# AMANDEMEN 1 — 2026-08-07: cabang yang tidak dideklarasikan
+
+**Vonis INDETERMINATE di RESULT tetap berdiri dan tidak diubah.** Amandemen ini mencatat
+bagaimana ia dicapai, karena caranya cacat.
+
+§5 memetakan INDETERMINATE ke **satu** kondisi: `γ̂₁` gabungan `≥ 0`. Run-nya sampai ke
+INDETERMINATE lewat kondisi lain — **diskriminan negatif** (`γ₀² − 4γ₁² < 0`), yang terjadi
+karena `|ρ₁| = 0,7127 > 0,5`. Vonisnya benar; **pintunya tidak pernah dideklarasikan.** Itu
+keberuntungan, bukan pra-registrasi, dan kalau momennya sedikit berbeda pintu yang sama bisa
+mengantar ke vonis yang salah tanpa ada yang menyadarinya.
+
+**Yang diubah, berlaku untuk PREREG mana pun setelah ini:**
+
+> Setiap keluaran yang **tidak** cocok dengan cabang yang dideklarasikan adalah
+> **INDETERMINATE**, dan mencapainya **mewajibkan amandemen tertulis** yang menyebut cabang
+> yang hilang. Ia tidak pernah dirutekan ke vonis terdeklarasi yang paling mirip.
+
+Klausa itu sekarang ada di `.claude/skills/prereg-research/SKILL.md` butir 3b, dan sisi
+mekanisnya dikunci oleh `tests/test_prereg_verdict_routing.py` — sebuah runner tidak boleh
+punya rantai `if/elif` yang mengikat vonis tanpa `else`.
+
+**Yang TIDAK diubah:** kriteria PASS / FAIL-HIGH / FAIL-LOW, targetnya, jendelanya, estimatornya,
+dan vonis yang sudah dicatat. Amandemen ini menambah pintu keluar yang hilang; ia tidak menyentuh
+satu pun ambang.
+
+## Lubang kedua, dicatat dan TIDAK ditambal di sini
+
+§4 men-segment deret pada diskontinuitas `trade_id` dan batas jam, dengan alasan yang ditulis
+sendiri: *"menyeberanginya adalah splice, dan `γ₁` adalah pernyataan tentang kebersebelahan."*
+`DIAG-provenance-001` kemudian mengukur bahwa **76–90 % dari `γ₁` datang dari pasangan yang
+"bersebelahan" hanya dalam arti dua aggTrade berbagi milidetik** — dan mengacak di dalam
+kelompok `ts` meruntuhkan `ρ₂..ρ₄` ke nol.
+
+Argumen §4 sendiri karena itu berlaku untuk batas milidetik, dan tidak diterapkan. **Menambahkan
+segmentasi milidetik akan mengubah angka**, jadi ia bukan amandemen administratif melainkan
+spesifikasi baru yang butuh PREREG-nya sendiri dengan look-nya sendiri. Dicatat di sini sebagai
+utang, bukan diperbaiki diam-diam.
