@@ -1,0 +1,124 @@
+{
+  "slice": [
+    "2026-07-05",
+    "2026-08-03"
+  ],
+  "heavy_days": [
+    "2026-07-30",
+    "2026-07-31",
+    "2026-08-01",
+    "2026-08-03"
+  ],
+  "funding": {
+    "binancef/BTCUSDT": {
+      "n_intervals": 77,
+      "p05_bps": 0.030780000000000002,
+      "p50_bps": 0.6147,
+      "p95_bps": 1.0,
+      "max_bps": 1.0,
+      "frac_negative": 0.025974025974025976,
+      "bps_per_day_held": 1.8441000000000003
+    },
+    "bybit/BTCUSDT": {
+      "n_intervals": 71,
+      "p05_bps": -0.20925,
+      "p50_bps": 0.4534,
+      "p95_bps": 1.0,
+      "max_bps": 1.0,
+      "frac_negative": 0.1267605633802817,
+      "bps_per_day_held": 1.3602
+    },
+    "okx/BTC-USDT-SWAP": {
+      "n_intervals": 85,
+      "p05_bps": -0.0869454360322,
+      "p50_bps": 0.445751491029,
+      "p95_bps": 0.996495857498,
+      "max_bps": 1.0,
+      "frac_negative": 0.09411764705882353,
+      "bps_per_day_held": 1.3372544730870002
+    }
+  },
+  "walk": {
+    "binancef/BTCUSDT|10000": {
+      "n": 393957,
+      "n_thin": 165,
+      "p50_bps_beyond_half": 0.0,
+      "p95_bps_beyond_half": 1.7125502405068715e-12
+    },
+    "binancef/BTCUSDT|100000": {
+      "n": 379387,
+      "n_thin": 14735,
+      "p50_bps_beyond_half": 0.0,
+      "p95_bps_beyond_half": 1.7305939667422443e-12
+    },
+    "binancef/BTCUSDT|1000000": {
+      "n": 125084,
+      "n_thin": 269038,
+      "p50_bps_beyond_half": 5.723893581333073e-13,
+      "p95_bps_beyond_half": 0.10125550878867118
+    },
+    "bybit/BTCUSDT|10000": {
+      "n": 263610,
+      "n_thin": 0,
+      "p50_bps_beyond_half": 0.0,
+      "p95_bps_beyond_half": 1.7330425289285856e-12
+    },
+    "bybit/BTCUSDT|100000": {
+      "n": 263336,
+      "n_thin": 274,
+      "p50_bps_beyond_half": 5.610746242612485e-13,
+      "p95_bps_beyond_half": 0.4468496277898776
+    },
+    "bybit/BTCUSDT|1000000": {
+      "n": 138722,
+      "n_thin": 124888,
+      "p50_bps_beyond_half": 0.3285516069437145,
+      "p95_bps_beyond_half": 0.7906072021696351
+    },
+    "okx/BTC-USDT-SWAP|10000": {
+      "n": 293467,
+      "n_thin": 3,
+      "p50_bps_beyond_half": 0.0,
+      "p95_bps_beyond_half": 1.7318507739005895e-12
+    },
+    "okx/BTC-USDT-SWAP|100000": {
+      "n": 292619,
+      "n_thin": 851,
+      "p50_bps_beyond_half": 5.595541391345549e-13,
+      "p95_bps_beyond_half": 0.32771514278174674
+    },
+    "okx/BTC-USDT-SWAP|1000000": {
+      "n": 201721,
+      "n_thin": 91749,
+      "p50_bps_beyond_half": 0.13940901384387627,
+      "p95_bps_beyond_half": 0.5842933736160196
+    }
+  },
+  "depth_stability": {
+    "binancef/BTCUSDT": {
+      "n": 196894,
+      "p50": 0.043886452182318986,
+      "p95": 0.7294604384031956
+    },
+    "bybit/BTCUSDT": {
+      "n": 131472,
+      "p50": 0.08905877075983509,
+      "p95": 0.8323066953348048
+    },
+    "okx/BTC-USDT-SWAP": {
+      "n": 146667,
+      "p50": 0.06804956232277161,
+      "p95": 0.6969926001646555
+    }
+  },
+  "cross_check": {
+    "0.0078 (as quoted in PREREG-microstructure-001)": {
+      "usd": 0.09984000000000001,
+      "vs_tick": -0.0015999999999999348
+    },
+    "0.007805 (half of BOOK-001's measured 0.01561)": {
+      "usd": 0.099904,
+      "vs_tick": -0.0009599999999999609
+    }
+  }
+}

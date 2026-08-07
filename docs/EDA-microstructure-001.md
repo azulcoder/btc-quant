@@ -2266,7 +2266,8 @@ column (81), which is what enters DSR deflation, was never affected.
 | DIAG-venue-filter-audit (code-quote audit + per-venue ACF on 3 days, no pooling; classified PROVENANCE) | 1 | 0 |
 | BOOK-001 quoted spread (3 venues x 30 days of depth_snapshots, 3 weightings, bootstrap; classified PROVENANCE) | 1 | 0 |
 | DIAG-book-resolution-001 (ASOF staleness, degeneracy fraction, cadence and unobserved trade intervals; classified PROVENANCE) | 1 | 0 |
-| **running total** | **562** | **81** |
+| DIAG-cost-ledger-001 (funding per 8h interval, book-walk impact at 3 notionals, depth stability, scale cross-check; classified PROVENANCE) | 1 | 0 |
+| **running total** | **563** | **81** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 
