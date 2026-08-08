@@ -214,8 +214,7 @@ gcloud compute instances create btcq-depth-rec-1 \
   --boot-disk-size=50GB --boot-disk-type=pd-balanced \
   --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
   --no-service-account --no-scopes \
-  --metadata=startup-script='#!/bin/bash
-curl -fsSL https://raw.githubusercontent.com/azulcoder/btc-quant/main/deploy/gcp/bootstrap-depth.sh | bash'
+  --metadata-from-file=startup-script=deploy/gcp/startup-depth-metadata.sh
 
 # Verify (IAP tunnel; first connect generates an SSH key):
 gcloud compute ssh btcq-depth-rec-1 --zone="$ZONE" --tunnel-through-iap -- \
@@ -230,6 +229,15 @@ Cost, order of magnitude [DIASUMSIKAN — verify in your console]: e2-small ≈ 
 50 GB pd-balanced ≈ $5/mo, ingress free, egress negligible until a sync decision is made.
 Well inside a $300 trial. Set a budget alert in the console (Billing → Budgets) at e.g. $50;
 the budgets API needs its own enablement and is easier clicked than scripted.
+
+**Boot path, learned the hard way [DIUKUR 2026-08-08]:** the first metadata script was a
+one-liner `curl raw.githubusercontent.com/... | bash`, and the raw CDN served a STALE
+bootstrap through four consecutive resets (~10 minutes past its nominal TTL), each failing
+`git pull` with exit 128 while the service kept running old code from the persistent unit.
+The startup script now lives in `deploy/gcp/startup-depth-metadata.sh` and is passed via
+`--metadata-from-file` — instance metadata has no CDN — pulling from the LOCAL checkout
+first and falling back to curl only on a fresh disk. Changing the bootstrap therefore
+deploys on the next boot with no cache in the path.
 
 What is deliberately NOT here: HF sync of the diff tape. That needs a write token on the VM,
 and the safe version (fine-grained token scoped to one dataset, rotated) is a separate
