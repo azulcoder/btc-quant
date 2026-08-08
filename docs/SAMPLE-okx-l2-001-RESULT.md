@@ -4,7 +4,16 @@
 `docs/SAMPLE-okx-l2-001.md`, yang di-commit sebelum satu byte pun diunduh. Tidak ada satu
 pun angka prediktif dihitung di sini (§6 deklarasi).
 
-> **[PENCABUTAN 2026-08-08 — baca ini lebih dulu]** Vonis GAGAL di bawah **DICABUT sebagai
+> **[PEMBALIKAN 2026-08-08 — baca ini lebih dulu]** Vonis GAGAL di bawah **DIBALIK menjadi
+> TIDAK BERDASAR**. Setelah kontrolnya dibangun ulang (`docs/DIAG-control-a-v2-001.md`),
+> arsip OKX mencapai **97,94 % agreement per level di top-20** — LEBIH TINGGI dari tape
+> Binance yang direkam sendiri (97,16 %), dengan pemisahan 7x dari kontrol negatifnya.
+> Penyebab v1: kriterianya menuntut kecocokan persis pada instan yang jatuh di tengah event
+> diff atomik — mustahil untuk implementasi mana pun (0 dari 27 pasangan jatuh di batas
+> event). Larangan menghitung di atas ukuran book OKX **DICABUT**; syarat yang tersisa ada
+> di dokumen itu §6.
+>
+> Riwayat pencabutan pertama, dipertahankan: vonis GAGAL semula **DICABUT sebagai
 > BELUM-TERBUKTI**. Kontrol A kemudian diuji pada kasus yang seharusnya lolos — tape Tokyo
 > binancef, yang rantainya diatestasi terpisah dengan 0 gap dan 0 resync — dan **mencetak
 > 29,3 % pada top-20 di sana, lebih buruk dari OKX di setiap kedalaman**. Instrumennya yang

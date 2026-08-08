@@ -257,7 +257,23 @@ by month 12 (published rates).
 > frames (measured 1.62x, not 3.78x), and it assumed the tape lives on the VM forever, which
 > stopped being true when local days began expiring 3 days after their manifest verifies.
 
-**Control A is BROKEN and the OKX verdict is RETRACTED** (`docs/DIAG-control-a-validation-001.md`):
+**Control A was BROKEN; rebuilt as v2, and the OKX verdict is now REVERSED**
+(`docs/DIAG-control-a-v2-001.md`): the fourth and root defect was that v1's criterion
+**cannot be satisfied by any implementation** — a REST snapshot is a point in time, a diff
+event is an atomic range aggregating thousands of updates, and in 0 of 27 clean pairs did
+the snapshot land on an event boundary. Counted per LEVEL instead of all-or-nothing per
+pair, v1's own data was already 97.8 % correct. Control A v2 (per-level agreement, gap-
+spanning pairs excluded, difference distribution reported, explicit H1 test, shuffled-update
+negative control, **no declared threshold**) gives, per level: **OKX top-20 97.94 %
+(shuffled 13.64 %) against Binance 97.16 % (shuffled 8.62 %) — OKX is better than our own
+recorded tape at every depth.** H1 (window boundary) is REFUTED at both venues: 0 % of
+mismatched levels were never-updated. H2 (comparison instant) is SUPPORTED: differences are
+symmetric (50.7 % positive) and concentrate on the fastest-changing levels. The ban on
+computing over OKX book sizes is LIFTED, with the measured ~2 % per-level uncertainty to be
+cited by anything that uses them.
+
+~~**Control A is BROKEN and the OKX verdict is RETRACTED**~~ [SUPERSEDED by the paragraph
+above; kept for the trail] (`docs/DIAG-control-a-validation-001.md`):
 run unchanged against the Tokyo tape — whose diff chain is separately attested at 0 sequence
 gaps and 0 resyncs — it scores **29.3 % at top-20, worse than OKX at every depth**. Two real
 defects inside the control were then found and measured (positional frame selection loses
