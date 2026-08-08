@@ -217,6 +217,45 @@ evidence, not a guess): current Bybit docs say a `Buy` liquidation update means 
 liquidated, which is the opposite of the collector's stored mapping; and the collector's
 "only depth20@100ms flows on this network" comment is too narrow — `bookTicker` flows too,
 measured twice with same-run zero controls on aggTrade/markPrice.
+
+## 5a-quinquies. Billing deadline defused; recorder at full cadence (2026-08-08)
+
+**Third link of the chain is live: VM --write-only--> GCS --pull--> Mac --token--> HF.** The
+VM's posture is UNCHANGED — it never sees a Hugging Face token and never talks to HF; the
+Mac does that hop with the token it already had. `scripts/tape_gcs_to_hf.py` verifies twice
+per object: the downloaded bytes against the md5 GCS recorded at creation, and a read-back
+from HF over a plain-HTTPS path that shares no library with the uploader. `data/archive/`
+(the last single-copy store on this machine) went up in the same run, 6 files, all
+round-trip verified. Ledger: `reports/tape-hf-ledger.jsonl`.
+
+**Mac uptime requirement, measured**: none, week to week. VM->GCS is a systemd timer every
+15 minutes and nothing in GCS ever deletes (`objectCreator` cannot, and lifecycle only
+changes storage class). A Mac down for a week loses **nothing** — the mirror is incremental
+by ledger and catches up. What a Mac outage costs is that the un-mirrored days sit in the
+billing-risk zone: at the measured rate that is ~2 GB per week of tape with two copies
+(VM-local for 3 days, GCS) instead of three.
+
+**Recorder now runs `depth@0ms`.** Measured over five heartbeat windows after the switch
+[DIUKUR 2026-08-08]: **36.7-37.3 fps** against 9.55 before = 3.85x the frames, but only
+**285-296 MB/day** against 178.3 = **1.62x the bytes** — @0ms frames each carry fewer changed
+levels, so conflation was costing information far more than it was saving space. Sequence
+gaps and resyncs stayed at **0** at the higher rate. GCS cost at the new volume is ~$0.96/mo
+by month 12 (published rates).
+
+> **[CORRECTION 2026-08-08]** The earlier "@0ms means 673 MB/day and a 71-day disk runway"
+> projection was **wrong twice** and is kept for the trail: it scaled bytes linearly with
+> frames (measured 1.62x, not 3.78x), and it assumed the tape lives on the VM forever, which
+> stopped being true when local days began expiring 3 days after their manifest verifies.
+
+**OKX L2 sample**: rule declared and committed before any download
+(`docs/SAMPLE-okx-l2-001.md`, 62 days = the 7th and 21st of each month 2024-01..2026-07,
+two named tranches). Result doc `docs/SAMPLE-okx-l2-001-RESULT.md`: schema measured (400
+levels/side, `[price, size, order_count]`, 0.1 tick, 10 ms median cadence, 60 s snapshots,
+**no seqId and no checksum** so lost updates leave no trace), and the declared reconstruction
+control **FAILED at 52.2 %** on top-20 exact. Best bid/ask **prices** match exactly in 90/90
+snapshot pairs; **sizes** diverge, worsening with depth (80 % exact at top-1, 16.7 % at
+top-100). **Nothing may be built on OKX book SIZES until that is explained**; touch prices
+are exact. Acquisition continues (raw archive is raw archive); research on it does not.
 - **Cloud safety notes** (not in any committed file by design): the deploy docs use placeholders
   only; no real project id or account identity enters this public repo.
 

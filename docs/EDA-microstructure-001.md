@@ -2276,7 +2276,10 @@ column (81), which is what enters DSR deflation, was never affected.
 | DIAG-data-ceiling-001 (venue census, read-only, NO forward returns: Vision 20 listing probes + 11 per-type earliest/size + 3 file downloads = 34; Binance WS gap 10; bybit 12; okx 14; coinbase 11; perp-DEX 15; storage map 4) | 100 | 0 |
 | DIAG-recorder-quality-001 (tape census + independent cross-machine reassembly control) | 2 | 0 |
 | GCP tape-backup posture verifications (bucket config, bucket IAM, project-IAM negative control, instance scope, live readback negative control, billing-permission control) | 6 | 0 |
-| **running total** | **682** | **113** |
+| GCS->HF tape chain (6 archive round-trips + 16 tape-object round-trips + 1 cross-machine reassembly control + 1 validation of HF's own receipt hash against a local file) | 24 | 0 |
+| SAMPLE-okx-l2-001 acquisition + controls (3 HEAD liveness probes, schema/tick/cadence measurement, control A at 4 depths, control B intact + shuffled, trades-archive read) | 13 | 0 |
+| Recorder cadence upgrade (2 pre-switch stream probes, 5 post-switch heartbeat rate windows, 1 QC census) | 8 | 0 |
+| **running total** | **727** | **113** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 
