@@ -228,6 +228,14 @@ from HF over a plain-HTTPS path that shares no library with the uploader. `data/
 (the last single-copy store on this machine) went up in the same run, 6 files, all
 round-trip verified. Ledger: `reports/tape-hf-ledger.jsonl`.
 
+**Per-object verification PASSED for all of it** (22 objects: 16 tape + 6 archive, each
+byte-exact on read-back against the md5 GCS recorded at creation). The **full
+reassemble-from-HF control has NOT passed yet** — `scripts/verify_tape_hf.py` exists and is
+runnable, but it did not complete while the OKX acquisition was saturating the same link and
+HF's CDN truncated the 26 MB object repeatedly under that contention. Recorded as NOT YET
+PASSED rather than waved through; the GCS-side equivalent of the same control did pass
+(131,569 frames, matching the heartbeat).
+
 **Mac uptime requirement, measured**: none, week to week. VM->GCS is a systemd timer every
 15 minutes and nothing in GCS ever deletes (`objectCreator` cannot, and lifecycle only
 changes storage class). A Mac down for a week loses **nothing** — the mirror is incremental

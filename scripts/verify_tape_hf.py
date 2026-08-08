@@ -43,7 +43,7 @@ def _walker():
     return mod
 
 
-def fetch(path_in_repo: str, want: int, tries: int = 5, timeout: int = 300) -> bytes:
+def fetch(path_in_repo: str, want: int, tries: int = 8, timeout: int = 45) -> bytes:
     url = (f"https://huggingface.co/datasets/{HF_REPO}/resolve/main/"
            f"{urllib.parse.quote(path_in_repo)}")
     last = None
@@ -62,7 +62,10 @@ def fetch(path_in_repo: str, want: int, tries: int = 5, timeout: int = 300) -> b
             return bytes(buf)
         except Exception as e:                      # noqa: BLE001 — retry any transport fault
             last = e
-            time.sleep(2 * (attempt + 1))
+            # Fail FAST and retry: a 300 s timeout meant one dead stream cost 25 minutes
+            # across the retry ladder while the CDN would have served a fresh request in
+            # seconds [DIUKUR 2026-08-08]. Slow failure is the enemy here, not failure.
+            time.sleep(min(2 * (attempt + 1), 8))
     raise RuntimeError(f"{path_in_repo}: {last}")
 
 
