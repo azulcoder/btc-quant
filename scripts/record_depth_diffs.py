@@ -46,6 +46,24 @@ The futures rule differs from spot and is encoded in ``classify_frame``: after a
 Any violation is a gap -> new snapshot. The classifier is a pure function so the tests can
 exercise every branch without a network.
 
+Cadence: `@0ms`, not `@100ms`
+----------------------------
+[2026-08-08] The recorder started on `@depth@100ms` and moved to `@depth@0ms`. `@100ms`
+CONFLATES every update inside a 100 ms bucket into one frame, and conflation cannot be
+undone later — while this repo has already measured, on its own tape, a 38-alternation
+bid-ask bounce run living entirely inside ONE millisecond. A cadence coarser than the
+phenomenon destroys the phenomenon at write time.
+
+Measured before the switch [DIUKUR 2026-08-08]: `@0ms` = 37.0 msg/s vs `@100ms` = 9.80 msg/s
+on the same probe, i.e. 3.78x the frames.
+
+[CORRECTION 2026-08-08] The "71-day disk runway at @0ms" concern recorded earlier is
+OBSOLETE and is kept here only so the reasoning trail survives: it assumed the tape stays
+on the VM forever. Local days are now deleted three days after their GCS manifest verifies
+(see `deploy/gcp/tape_sync.py`, grep `RETAIN_DAYS`), so steady-state disk use is a handful
+of days regardless of cadence. Disk stopped being the binding constraint; GCS volume is
+what the cadence actually buys.
+
 Keyless: the stream and the snapshot endpoint are public. No credentials exist in this
 process, which is also why it is safe to run on a disposable cloud VM.
 """
@@ -64,7 +82,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 OUT_ROOT = REPO / "data" / "depth_diffs" / "binancef" / "BTCUSDT"
-WS_URL = "wss://fstream.binance.com/stream?streams=btcusdt@depth@100ms"
+WS_URL = "wss://fstream.binance.com/stream?streams=btcusdt@depth@0ms"
 SNAP_URL = "https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT&limit=1000"
 SNAPSHOT_EVERY_S = 900
 FLUSH_EVERY = 200                 # frames per gzip append (one gzip member per flush)
