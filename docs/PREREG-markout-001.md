@@ -135,3 +135,25 @@ Kontrol dibatasi ke sel `h ∈ {15 s, 60 s, 300 s}` (terkondisi baik dalam satu 
    horizon dalam ±25 % dari +1,5 dan interval bebas dari nol.
 
 Ambang vonis §5, grid §3, proksi §4, dan kontrol negatif §6 **tidak berubah**.
+
+---
+
+# AMANDEMEN 2 — 2026-08-08: kontrol v2 gagal karena KEKUATAN, bukan aljabar; data nyata tetap tak tersentuh
+
+v2 mengukur +3,761 lawan plateau tangan +1,50 dan FAIL pada toleransi ±25 %. Diagnosis empiris
+`[DIUKUR]`: rantai AR-nya persis benar (`E[q_{a+j}q_a]` cocok `ρ^j` sampai 4 desimal), mean≈median,
+dan formula plateau-nya berdiri — tapi derau per-jendela dari walk-λ adalah
+`≈ λ·2j/√n` sehingga sinyal/SE `= 0,45·√n/j`: pada `h=60–300 s` (j=600–3.000) hanya **0,5–1 SE**.
+Nilai +3,761 itu **konsisten dengan 1,50 di dalam deraunya sendiri**. Kesalahan v2 adalah menuntut
+toleransi ±25 % dari pengukuran ber-SE ~50–100 % — presisi yang disiratkan tanpa error bar, kelas
+kesalahan yang repo ini sudah punya nama untuknya.
+
+**Kontrol v3 — kekuatan diperbaiki, dunia tanam tidak berubah:**
+- Sel kontrol: `h ∈ {5 s, 15 s}` saja (j = 50–150; sinyal/SE per hari ≈ 2–6).
+- **30 hari simulasi independen** × 200k trade, agregasi median-dari-median-harian — pipeline
+  agregasi yang sama dengan run nyata.
+- PASS sinyal-tanam: median gabungan dalam **±25 %** dari plateau +1,50 (SE gabungan kini ≈ 2 %
+  dari sinyal, jadi toleransinya bermakna). PASS nol-recovery: tak berubah (|median| < 0,3 bps).
+
+Grid §3, proksi §4, ambang §5, kontrol negatif — semuanya tak berubah. Data nyata belum tersentuh;
+urutan commit tetap buktinya.
