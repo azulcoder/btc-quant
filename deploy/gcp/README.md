@@ -176,3 +176,61 @@ not a config flip:
 When you want it: measure one added leg for 24 h, read the real bytes/day, size the
 disk and confirm the HF cost, then extend the collector recording scope behind the
 usual pre-registration/greenlight ritual. Say the word and it becomes its own phase.
+
+---
+
+## Phase 2b — raw depth-diff recorder (its own tiny VM, zero credentials)
+
+`DIAG-cost-ledger-001` §2a-2b established that queue position cannot be reconstructed from
+1 Hz snapshots at any cadence and that the diff stream cannot be backfilled — every
+unrecorded day is permanent loss. `scripts/record_depth_diffs.py` closes that forward, and it
+is deliberately **keyless**: it talks only to Binance public endpoints, so the VM that runs it
+carries **no service account, no scopes, no tokens, and no secrets of any kind**.
+
+Measured in a 45 s live smoke [DIUKUR]: ~8 frames/s, chain intact, ~164 MB/day compressed —
+a 50 GB disk holds roughly ten months before a retention decision is needed.
+
+All commands use placeholders. **Never commit a real project id, account, or email to this
+public repo.**
+
+```bash
+PROJECT=<YOUR_PROJECT_ID>          # the billing-enabled one
+ZONE=asia-northeast1-b             # Tokyo: same metro as the venue's matching engine
+
+gcloud config set project "$PROJECT"
+gcloud services enable compute.googleapis.com
+
+# SSH via IAP only — no port 22 from the open internet, and delete the default rule if
+# your VPC has one (fresh projects do):
+gcloud compute firewall-rules create allow-iap-ssh \
+  --direction=INGRESS --action=allow --rules=tcp:22 --source-ranges=35.235.240.0/20
+gcloud compute firewall-rules delete default-allow-ssh --quiet || true
+
+# The VM: e2-small, Debian 12, shielded boot, NO service account (nothing to steal),
+# bootstrap runs deploy/gcp/bootstrap-depth.sh from the public repo at first boot.
+gcloud compute instances create btcq-depth-rec-1 \
+  --zone="$ZONE" --machine-type=e2-small \
+  --image-family=debian-12 --image-project=debian-cloud \
+  --boot-disk-size=50GB --boot-disk-type=pd-balanced \
+  --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
+  --no-service-account --no-scopes \
+  --metadata=startup-script='#!/bin/bash
+curl -fsSL https://raw.githubusercontent.com/azulcoder/btc-quant/main/deploy/gcp/bootstrap-depth.sh | bash'
+
+# Verify (IAP tunnel; first connect generates an SSH key):
+gcloud compute ssh btcq-depth-rec-1 --zone="$ZONE" --tunnel-through-iap -- \
+  'systemctl --no-pager status btcquant-depth-recorder | head -12; \
+   sudo ls -la /opt/btc-quant/data/depth_diffs/binancef/BTCUSDT/ 2>/dev/null'
+
+# Teardown (reversible, this is the whole point of a disposable recorder):
+gcloud compute instances delete btcq-depth-rec-1 --zone="$ZONE" --quiet
+```
+
+Cost, order of magnitude [DIASUMSIKAN — verify in your console]: e2-small ≈ $13-17/mo,
+50 GB pd-balanced ≈ $5/mo, ingress free, egress negligible until a sync decision is made.
+Well inside a $300 trial. Set a budget alert in the console (Billing → Budgets) at e.g. $50;
+the budgets API needs its own enablement and is easier clicked than scripted.
+
+What is deliberately NOT here: HF sync of the diff tape. That needs a write token on the VM,
+and the safe version (fine-grained token scoped to one dataset, rotated) is a separate
+decision — the disk buys ~10 months to make it.

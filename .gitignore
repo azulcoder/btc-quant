@@ -68,3 +68,8 @@ refs/
 # Settled funding history, re-pullable from each venue public REST at any time by
 # scripts/backfill_funding_history.py. Append-only locally; not a source of truth.
 data/funding_history/
+
+# Raw L2 depth-diff tape (scripts/record_depth_diffs.py): bulky, machine-local,
+# and NOT regenerable — but a sync/retention decision has not been made, so it
+# stays out of git like every other data store.
+data/depth_diffs/

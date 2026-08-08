@@ -1,0 +1,36 @@
+# btcquant-depth-recorder — raw L2 diff tape, binancef BTCUSDT (Phase 2b of the GCP runbook).
+#
+# Keyless by design: the recorder talks only to Binance public endpoints. This unit therefore
+# needs NO environment file, NO tokens, and the VM it runs on is created with no service
+# account at all — there is nothing on the machine worth stealing.
+#
+# Install (bootstrap-depth.sh does all of this):
+#   cp deploy/gcp/depth-recorder.service /etc/systemd/system/btcquant-depth-recorder.service
+#   systemctl daemon-reload && systemctl enable --now btcquant-depth-recorder
+
+[Unit]
+Description=btc-quant raw depth-diff recorder (binancef BTCUSDT, keyless)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=btcq
+Group=btcq
+WorkingDirectory=/opt/btc-quant
+ExecStart=/opt/btcq-venv/bin/python3 scripts/record_depth_diffs.py
+Restart=always
+RestartSec=5
+# The tape is append-only JSONL.GZ; a SIGTERM loses at most the unflushed buffer (<=200
+# frames) and never corrupts the file — each flush is an independent gzip member.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+# Hygiene: this process needs the repo checkout and its data dir, nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/btc-quant/data
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

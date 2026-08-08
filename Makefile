@@ -264,5 +264,11 @@ orderflow-smoke:
 # partition, opens no database, makes no network call, and adds ZERO to the look
 # counter. No estimator here may touch a real partition before a PREREG declares
 # the specification set with an N_trials cap.
+# Raw L2 diff tape, foreground (Ctrl-C to stop). The permanent home is the GCP VM
+# (deploy/gcp/bootstrap-depth.sh); this target exists for local smoke and stopgap
+# recording — the laptop sleeps, and every unrecorded day is gone for good.
+record-depth:
+	python3 scripts/record_depth_diffs.py
+
 hasbrouck-demo:
 	python3 scripts/hasbrouck_demo.py
