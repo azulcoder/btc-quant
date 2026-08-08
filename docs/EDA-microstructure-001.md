@@ -2283,7 +2283,8 @@ column (81), which is what enters DSR deflation, was never affected.
 | HF reassembly control closed (1 quiet-link reassembly + 1 heartbeat bracket) | 2 | 0 |
 | DIAG-control-a-v2-001 (root-cause hunt: 4 defect isolations, boundary-alignment census, per-level recount, then v2 on 2 venues x 4 depths x intact/shuffled = 16, plus H1 test and difference distributions) | 26 | 0 |
 | DIAG-control-a-regime-001 (day-selection rule applied over 3 years of klines, 9 regime days x 4 depths, 1 negative control, Binance 8-hour within-day split, 9 correlation computations, 3 throughput measurements) | 33 | 0 |
-| **running total** | **806** | **113** |
+| DIAG-orderflow-terminal-census-001 + DIAG-orderflow-profile-001 (5-agent read-only census: 44 files enumerated, 5 data chains traced, 53 columns audited for test/control/independent-verification, 11 standard metrics checked for existence and data availability, mechanical tech-debt sweep; plus 2 end-to-end profiles, 1 memory measurement, 1 format conversion experiment, 3 network destinations x 3 samples, 26 derived VM-throughput observations) | 39 | 0 |
+| **running total** | **845** | **113** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 
