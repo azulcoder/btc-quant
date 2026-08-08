@@ -136,3 +136,18 @@ Aturan yang dikunci test (`tests/test_costs.py`, 12 lulus):
 **Cacat yang diperbaiki dan dicatat:** `scripts/diag_turnover_census_001.py` membebankan funding
 sebagai biaya murni ke long dan short sama saja. Itu menghitung ganda terhadap setiap leg short.
 `costs.cost_model` menandainya dengan `position_sign`.
+
+---
+
+# ANOTASI 2026-08-08 — §3c DITUTUP, dan §3d DIKOREKSI
+
+**§3c.** Uji berpasangan pada slot settlement yang sama menutupnya: `|d|` p50 adalah
+`0,0000 / 0,0034 / 0,0023` bps. Diskrepansi itu **SELEKSI**, bukan ketidaksepakatan nilai.
+**Settled adalah sumber yang benar; rute B pensiun sebagai estimator funding.** Detail, termasuk
+ekor bybit yang **tidak** ~0 (`p95 = 0,7697`), ada di `docs/BOOK-003-cost-sweep.md` §1.
+
+**§3d.** Tabel "tahun TANPA funding terukur" mencampur dua hal berbeda. Untuk `binancef`
+(kontrak listing 2019-09-08, settled paling awal 2019-09-10) dan `bybit` (2020-03-15 vs
+2020-03-25) itu **umur kontrak**, bukan lubang — jendela backtest perp memang mulai di sana.
+Hanya `okx` yang lubang: kontraknya listing 2019-11-12 tapi endpoint-nya hanya menerbitkan 286
+record, dan `limit=300` mengembalikan semuanya dalam satu halaman. Itu **CAP API**.

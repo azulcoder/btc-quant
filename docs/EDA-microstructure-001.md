@@ -2270,7 +2270,8 @@ column (81), which is what enters DSR deflation, was never affected.
 | DIAG-funding-settled-001 (predictive-vs-settled routes, distinct-value census; PROVENANCE) | 1 | 0 |
 | DIAG-turnover-census-001 (positions only, no returns computed; 8 board strategies on OHLCV) | 1 | 0 |
 | BOOK-002 settled funding history (3 venue REST backfills, per-calendar-year census, positive control vs route B — FAILED on bybit; PROVENANCE) | 1 | 0 |
-| **running total** | **566** | **81** |
+| BOOK-003 paired funding test + cost sweep (3,760 cells, variance decomposition; PROVENANCE, no returns) | 1 | 0 |
+| **running total** | **567** | **81** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 

@@ -1,0 +1,275 @@
+{
+  "perp_start": "2019-09-10",
+  "notional": 100000,
+  "profiles": {
+    "buy_and_hold": {
+      "spot": {
+        "years": 11.052054794520547,
+        "legs_per_year": 0.09048091224590978,
+        "signed_exposure_days_per_year": 364.9095190877541,
+        "abs_exposure_days_per_year": 364.9095190877541,
+        "bars": 4034
+      },
+      "perp": {
+        "years": 6.906849315068493,
+        "legs_per_year": 0.14478381594605316,
+        "signed_exposure_days_per_year": 365.0,
+        "abs_exposure_days_per_year": 365.0,
+        "bars": 2521
+      }
+    },
+    "ma_trend_filter": {
+      "spot": {
+        "years": 11.052054794520547,
+        "legs_per_year": 1.6286564204263758,
+        "signed_exposure_days_per_year": 213.8968765493307,
+        "abs_exposure_days_per_year": 213.8968765493307,
+        "bars": 4034
+      },
+      "perp": {
+        "years": 6.906849315068493,
+        "legs_per_year": 2.3165410551368506,
+        "signed_exposure_days_per_year": 208.48869496231654,
+        "abs_exposure_days_per_year": 208.48869496231654,
+        "bars": 2521
+      }
+    },
+    "tsmom": {
+      "spot": {
+        "years": 11.052054794520547,
+        "legs_per_year": 14.103325263271644,
+        "signed_exposure_days_per_year": 67.51282367981243,
+        "abs_exposure_days_per_year": 67.51282367981243,
+        "bars": 4034
+      },
+      "perp": {
+        "years": 6.906849315068493,
+        "legs_per_year": 15.293340971061363,
+        "signed_exposure_days_per_year": 63.45360772961844,
+        "abs_exposure_days_per_year": 63.45360772961844,
+        "bars": 2521
+      }
+    },
+    "tsmom_ls": {
+      "spot": {
+        "years": 11.052054794520547,
+        "legs_per_year": 27.22130474937658,
+        "signed_exposure_days_per_year": 19.85936997279214,
+        "abs_exposure_days_per_year": 115.16627738683272,
+        "bars": 4034
+      },
+      "perp": {
+        "years": 6.906849315068493,
+        "legs_per_year": 30.20467799512774,
+        "signed_exposure_days_per_year": 9.690235025722593,
+        "abs_exposure_days_per_year": 117.21698043351431,
+        "bars": 2521
+      }
+    },
+    "pairs_coint": {
+      "spot": {
+        "years": 11.052054794520547,
+        "legs_per_year": 3.619236489836391,
+        "signed_exposure_days_per_year": -0.5428854734754587,
+        "abs_exposure_days_per_year": 4.8859692612791275,
+        "bars": 4034
+      },
+      "perp": {
+        "years": 6.906849315068493,
+        "legs_per_year": 3.764379214597382,
+        "signed_exposure_days_per_year": -0.2895676318921063,
+        "abs_exposure_days_per_year": 4.343514478381595,
+        "bars": 2521
+      }
+    },
+    "tsmom_dir": {
+      "spot": {
+        "years": 11.052054794520547,
+        "legs_per_year": 34.56370847793753,
+        "signed_exposure_days_per_year": 203.6725334655429,
+        "abs_exposure_days_per_year": 203.6725334655429,
+        "bars": 4034
+      },
+      "perp": {
+        "years": 6.906849315068493,
+        "legs_per_year": 39.67076556921856,
+        "signed_exposure_days_per_year": 194.73423244744149,
+        "abs_exposure_days_per_year": 194.73423244744149,
+        "bars": 2521
+      }
+    },
+    "tsmom_voltarget": {
+      "spot": {
+        "years": 11.052054794520547,
+        "legs_per_year": 14.103325263271644,
+        "signed_exposure_days_per_year": 67.51282367981243,
+        "abs_exposure_days_per_year": 67.51282367981243,
+        "bars": 4034
+      },
+      "perp": {
+        "years": 6.906849315068493,
+        "legs_per_year": 15.293340971061363,
+        "signed_exposure_days_per_year": 63.45360772961844,
+        "abs_exposure_days_per_year": 63.45360772961844,
+        "bars": 2521
+      }
+    },
+    "pairs_ou": {
+      "spot": {
+        "years": 11.052054794520547,
+        "legs_per_year": 16.286564204263758,
+        "signed_exposure_days_per_year": -3.2573128408527516,
+        "abs_exposure_days_per_year": 42.88795240456123,
+        "bars": 4034
+      },
+      "perp": {
+        "years": 6.906849315068493,
+        "legs_per_year": 19.690598968663227,
+        "signed_exposure_days_per_year": 4.488298294327648,
+        "abs_exposure_days_per_year": 50.819119397064654,
+        "bars": 2521
+      }
+    }
+  },
+  "variance_decomposition": {
+    "buy_and_hold": {
+      "instrument": 0.006953227414442052,
+      "venue": 0.0030703251255314464,
+      "fee": 7.78687115024416e-08,
+      "order_type": 2.4581332371322578e-14,
+      "regime": 0.9670226559229463
+    },
+    "ma_trend_filter": {
+      "instrument": 0.007035462820207522,
+      "venue": 0.0030691369476334787,
+      "fee": 6.150209704689698e-05,
+      "order_type": 1.9414780122371465e-11,
+      "regime": 0.9669657834952516
+    },
+    "pairs_coint": {
+      "instrument": 2.0039377597210437e-07,
+      "venue": 3.662393580946585e-05,
+      "fee": 0.9885364319838953,
+      "order_type": 3.120582207720584e-07,
+      "regime": 0.011024514653193498
+    },
+    "pairs_ou": {
+      "instrument": 0.0038441850819051298,
+      "venue": 0.00026950087813864767,
+      "fee": 0.9025652591994642,
+      "order_type": 2.8491896398576666e-07,
+      "regime": 0.09324818100917072
+    },
+    "tsmom": {
+      "instrument": 0.007235017827931458,
+      "venue": 0.0029766495537473293,
+      "fee": 0.028632442004878744,
+      "order_type": 9.03860231404597e-09,
+      "regime": 0.9393435914603068
+    },
+    "tsmom_dir": {
+      "instrument": 0.0074946264180919386,
+      "venue": 0.0029991079227871245,
+      "fee": 0.0205327248829861,
+      "order_type": 6.481707059021597e-09,
+      "regime": 0.9471762783141113
+    },
+    "tsmom_ls": {
+      "instrument": 0.0029351644275951608,
+      "venue": 0.0005050622107442498,
+      "fee": 0.8294481302425594,
+      "order_type": 2.6183764686033815e-07,
+      "regime": 0.1646639271138385
+    },
+    "tsmom_voltarget": {
+      "instrument": 0.007235017827931458,
+      "venue": 0.0029766495537473293,
+      "fee": 0.028632442004878744,
+      "order_type": 9.03860231404597e-09,
+      "regime": 0.9393435914603068
+    }
+  },
+  "cheaper_instrument_p50": {
+    "buy_and_hold": {
+      "2019": "spot",
+      "2020": "spot",
+      "2021": "spot",
+      "2022": "spot",
+      "2023": "spot",
+      "2024": "spot",
+      "2025": "spot",
+      "2026": "spot"
+    },
+    "ma_trend_filter": {
+      "2019": "spot",
+      "2020": "spot",
+      "2021": "spot",
+      "2022": "spot",
+      "2023": "spot",
+      "2024": "spot",
+      "2025": "spot",
+      "2026": "spot"
+    },
+    "pairs_coint": {
+      "2019": "perp",
+      "2020": "perp",
+      "2021": "perp",
+      "2022": "spot",
+      "2023": "spot",
+      "2024": "perp",
+      "2025": "spot",
+      "2026": "spot"
+    },
+    "pairs_ou": {
+      "2019": "spot",
+      "2020": "spot",
+      "2021": "spot",
+      "2022": "spot",
+      "2023": "spot",
+      "2024": "spot",
+      "2025": "spot",
+      "2026": "spot"
+    },
+    "tsmom": {
+      "2019": "spot",
+      "2020": "spot",
+      "2021": "spot",
+      "2022": "spot",
+      "2023": "spot",
+      "2024": "spot",
+      "2025": "spot",
+      "2026": "spot"
+    },
+    "tsmom_dir": {
+      "2019": "spot",
+      "2020": "spot",
+      "2021": "spot",
+      "2022": "spot",
+      "2023": "spot",
+      "2024": "spot",
+      "2025": "spot",
+      "2026": "spot"
+    },
+    "tsmom_ls": {
+      "2019": "spot",
+      "2020": "spot",
+      "2021": "spot",
+      "2022": "spot",
+      "2023": "spot",
+      "2024": "spot",
+      "2025": "spot",
+      "2026": "spot"
+    },
+    "tsmom_voltarget": {
+      "2019": "spot",
+      "2020": "spot",
+      "2021": "spot",
+      "2022": "spot",
+      "2023": "spot",
+      "2024": "spot",
+      "2025": "spot",
+      "2026": "spot"
+    }
+  },
+  "n_cells": 3760
+}

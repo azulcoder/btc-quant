@@ -102,6 +102,16 @@ def cost_model(
 
     Returns ``{bps_per_leg, bps_carry, bps_tax}``.
 
+    **The two keys use OPPOSITE sign conventions, deliberately, and a caller that adds them
+    together will be wrong.** ``bps_per_leg`` and ``bps_tax`` are COSTS: positive means you pay.
+    ``bps_carry`` is a P&L contribution: NEGATIVE means you pay, because that is the only way a
+    short RECEIVING funding can be expressed without a second flag. To build a total COST, use
+    ``bps_per_leg * legs + bps_tax - bps_carry``.
+
+    This is not hypothetical: the first version of `scripts/diag_cost_sweep_001.py` summed them
+    and reported `buy_and_hold` as CHEAPER on a perp than on spot, because a long's 269 bps/yr of
+    funding was being subtracted from its cost instead of added.
+
     * ``bps_per_leg`` — charged per unit of turnover: fee + half-spread + impact. A maker
       crosses nothing, so the half-spread and impact terms are zero for ``order_type='maker'``.
     * ``bps_carry`` — charged once for the whole holding period, and **signed by the position**.

@@ -151,3 +151,20 @@ def test_it_is_not_wired_into_the_backtest():
     src = (pathlib.Path(__file__).resolve().parent.parent / "btcquant" / "backtest.py").read_text()
     assert "costs" not in src.split("\n\n")[0], "backtest.py imports costs — was that approved?"
     assert "cost_model(" not in src
+
+
+def test_the_two_sign_conventions_are_locked_and_documented():
+    """`bps_per_leg` is a COST, `bps_carry` is a P&L term. They point opposite ways.
+
+    A caller that adds them gets the funding backwards, and that is not hypothetical — the
+    first cost sweep did exactly that and reported buy_and_hold as cheaper on a perp than on
+    spot, because a long's 269 bps/yr of funding was subtracted from its cost. This pins the
+    convention so the next caller reads it instead of rediscovering it.
+    """
+    c = costs.cost_model("binancef", "perp", 5.0, "taker", 100_000, 10.0, +1.0, 0.7374)
+    assert c["bps_per_leg"] > 0, "a fee is a positive COST"
+    assert c["bps_carry"] < 0, "a long paying funding is a NEGATIVE P&L term"
+    total_cost = c["bps_per_leg"] - c["bps_carry"]
+    assert total_cost > c["bps_per_leg"], (
+        "paying funding must INCREASE total cost; if this fails the conventions were merged")
+    assert "OPPOSITE sign conventions" in costs.cost_model.__doc__

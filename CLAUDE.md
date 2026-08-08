@@ -99,6 +99,25 @@ grep `Born wrong, not rotted`). Read the classes — the incidents are in the le
 - **`data.get_ohlcv` defaults to 300 bars.** A correlation was nearly published from 300 bars as
   if it were 8.6 years. Always pass `start=`.
 
+## Forbidden pattern: a wait-loop that matches itself
+
+```bash
+until ! pgrep -f "pytest -q -rs tests"; do sleep 5; done     # NEVER — spins forever
+while kill -0 "$PID" 2>/dev/null; do sleep 5; done           # correct — wait on the PID
+```
+
+`pgrep -f` matches against **full command lines**, and the waiting shell's own command line
+contains the pattern as literal text. The loop therefore matches itself and its condition can
+never become false. It is silent: no error, no output, just a process that never exits.
+
+Get the PID from the thing you actually started (`$!`, or the `ps -eo pid,command` line for it)
+and wait on that. Where a PID is not available, match on something the waiter cannot contain —
+a marker file the job removes on exit.
+
+**Why this is a rail and not a note.** It was written up as a lesson twice and repeated three
+times anyway. What failed was not the knowledge; it was where the knowledge was kept. A note in
+a report is read once by whoever wrote it; a rail in this file is loaded into every session.
+
 ## Labels, everywhere
 
 `[DIUKUR]` measured · `[DISIMPULKAN]` inferred · `[DIASUMSIKAN]` assumed · `[UNVERIFIED]` claimed
