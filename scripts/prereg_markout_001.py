@@ -28,7 +28,7 @@ HORIZONS = [1, 5, 15, 60, 300, 900, 3600, 14400]            # seconds
 OFFSETS_MS = [0, 10, 50, 200]
 ANCHORS_PER_DAY = 20_000
 SEED_BASE = 20260808
-NEG_SEED = 424242
+NEG_SEED = 424243        # amendment 3: fresh realization, not the one that motivated the rule change
 NEG_DAYS = 30
 BOOT = 400
 BPS = 1e-4
@@ -194,8 +194,14 @@ def negative_control(days: list[str], con) -> tuple[bool, list]:
             say(f"  [{i+1:>3}/{len(days)}]")
     res = pooled(day_stats)
     show(res, "markout ACAK (harus ~0 di seluruh 32 sel):")
-    ok = all(abs(res[(h, L)]["median"]) < 0.1 and res[(h, L)]["lo"] <= 0 <= res[(h, L)]["hi"]
-             for h in HORIZONS for L in OFFSETS_MS if np.isfinite(res[(h, L)]["median"]))
+    # PASS rule v2 (amendment 3): the CI clause for every cell; the 0.1 bps magnitude
+    # clause only where the statistic's own noise is measured well below it (h <= 900 s).
+    # At 4 h a day holds ~6 independent windows and the CI half-width is ~0.5 bps — the
+    # old rule demanded sub-noise precision, the third instance of that class in this file.
+    ok = all(
+        (res[(h, L)]["lo"] <= 0 <= res[(h, L)]["hi"])
+        and (h > 900 or abs(res[(h, L)]["median"]) < 0.1)
+        for h in HORIZONS for L in OFFSETS_MS if np.isfinite(res[(h, L)]["median"]))
     say(f"\n  >>> kontrol negatif: {'PASS — pipeline tidak bocor' if ok else 'FAIL — pipeline BOCOR, berhenti'}")
     return ok, day_stats
 

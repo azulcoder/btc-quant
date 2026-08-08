@@ -157,3 +157,23 @@ kesalahan yang repo ini sudah punya nama untuknya.
 
 Grid §3, proksi §4, ambang §5, kontrol negatif — semuanya tak berubah. Data nyata belum tersentuh;
 urutan commit tetap buktinya.
+
+---
+
+# AMANDEMEN 3 — 2026-08-08: ambang kontrol negatif berada di bawah lantai derau statistiknya
+
+Kontrol negatif FAIL pada klausa `|median| < 0,1 bps` — **di sel 4 jam saja**, yang mediannya
+0,15–0,23 dengan CI bootstrap `[−0,14, +0,88]`: seluruh 32 interval memuat nol, dan h ≤ 900 s
+semua |median| ≤ 0,056. Lebar CI terukur di 4 jam (~±0,5 bps) adalah **5× ambang** yang
+kudeklarasikan — per hari hanya ~6 jendela 4-jam yang independen, jadi derau statistiknya
+sendiri jauh di atas 0,1. Aturan lama menuntut presisi di bawah lantai derau — kelas kesalahan
+yang sama dengan Amandemen 2, kali ini di sisi negatif.
+
+**Aturan PASS v2 (justifikasi: lebar CI terukur, bukan keinginan lolos):**
+- Seluruh 32 sel: CI 95 % memuat 0.
+- Klausa `|median| < 0,1 bps` berlaku untuk `h ≤ 900 s` (derau statistiknya terukur ≪ 0,1).
+- Untuk `h ∈ {3600 s, 14400 s}`: klausa CI yang memutuskan; mediannya tetap dilaporkan.
+
+**Anti-rule-shopping:** kontrol negatif **diulang dengan seed baru `424243`** dan 30 hari
+kerangka yang sama — vonis dijatuhkan pada realisasi segar, bukan pada angka yang memotivasi
+amandemen ini. Data nyata (bertanda asli) tetap belum tersentuh.
