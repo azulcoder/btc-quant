@@ -1,0 +1,51 @@
+{
+ "digests": {
+  "full": "97e54dc1ab1d84e51c78c176263ddb50119ad463f2e019eed22e7d7e5df20420",
+  "alerts": "0a78ee9fb4091f5d3dccef8ce82b8b101748b252624afefd01ab97efb6d32c2e",
+  "auct": "42fb2a298e3780d3931d4c5cc2badcba5d649f0050bb4a817a78959c7e64a208",
+  "basis": "c4da631673a4ba2b5b92044e9c59a6faebca9f3b5e96c41d168e2efdb0b0de04",
+  "cal": "8a5d607c340004cb24ef809f41743d011d0d6551efade2fd4fec5175e70d0fe8",
+  "conf": "dab07a666dd7a945a3341b9e27e55aa8d53d97aa011e02376e95dd99fac0fcef",
+  "cvd": "eef1c37a6cc7405d1ebbbc54138877a95aa3f04cdf62e8a2c9a7ac3b591542a5",
+  "econ": "a2b4bbe9a8d4efc28db225a7dc885debb80156ca9b6ab8afdd0438ecd76ad7f7",
+  "farb": "2b2ca02cdf0f0af90ec310fefbd179c68ad7067cfebd09c13f15cef27d17a212",
+  "fp": "67cf9d0c06cdca1451793a76ded36b86e04fc1865deae8d8878b4ece94dc769d",
+  "heat": "e3d0bad7d01ed6e03985c086a25e3d0ea55f10a9be9520a2735e7384d92d42a5",
+  "hist": "2aa1c60eb3632135c2656925873087e847f427df511839175d9d003dfd215b47",
+  "jour": "47698ea5c181a30e16f785b0a21a5d2d50b27d141c29b7911aa07e5b013de779",
+  "klev": "1362b8b9675544af08ed567b207595e8ec7d585718d535d484c9e0d8bc920944",
+  "lvls": "ac238b929425630bfc9befb3915793cd1a67cd0e34c382fe91c67b1f2aa33a56",
+  "macro": "8a0ac9ddaaa20ef26fecafa4afadef6cce215145d52c1b2619bd868c2174fb83",
+  "micro": "9948ee4d60d73ea910f61576c0b5f7c989edaf13d33797b1174ecf6a7818bd40",
+  "news": "56a0c68e752c2aa7e8a75f5978de35662312f8bf6d7c8e57d06cfa4467321132",
+  "opts": "b6aac36aaf9baf00929a7a937d6a0b618f56b107b7001cc6031a9612955a54b1",
+  "poly": "ea2e888bfd7365e603d5db5af9a2902f98040877490bd1caa894dd16cf5245d4",
+  "rsi": "91434b22ce4305244fbcf8ab22c76c3c0b761a5cae89a559fb673e33d6828c00",
+  "scr": "bb05f9c87f3db48e098c7b0bc883e97c1f4384de3eaae79a69060258a9c311a1",
+  "set": "e2f4987227c79f1216523f0d7a1e0feae3931e0e6ab1eb927be0d65cd17970a9",
+  "spcvd": "4ce0acaaf203b3e93823e7dffe66037398272e47c7d9b8993eef569896a69d63",
+  "stats": "c9238093b9e3ead08ece904d246c3f3ca6656ec8bfafffdf225209ea60c679fc",
+  "tpo": "e200d84ad904ff174b7d38e446b15ea0928707f6a0d6b05cf8d694f2397e006d",
+  "vp": "fc3751d20d8c7f4776b3c0d631dc5afe4ef375eaeb26b1a750d82886c5980409",
+  "vpin": "1a8de1dc0c5d77f8407cbd70fea519398b00406bd71abf3009fb2b86c1c29097",
+  "whale": "4ecd9129a15e94ec7a37f91d1ae0d65a9ad8f801eabad9e52b1eaa596e882e28"
+ },
+ "rerun_identical": true,
+ "differing_on_rerun": [],
+ "colour_change_caught": [
+  "full",
+  "stats"
+ ],
+ "timings": {
+  "dom_content_loaded_s": 0.148,
+  "first_panel_filled_s": 0.155,
+  "frame_ms": {
+   "n": 59,
+   "p50": 16.699999999999818,
+   "p95": 17.5,
+   "max": 17.600000000000364
+  },
+  "page_errors": [],
+  "n_page_errors": 0
+ }
+}
