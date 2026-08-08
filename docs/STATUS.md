@@ -148,6 +148,27 @@ live at once. Hence detection per connection rather than a remembered rule.
 opens still lacks the constraint. Confirmed on `2026-08-06.duckdb`: constraint **NO**, 758
 duplicates. Activation requires a restart, which costs a real gap and is not taken here.
 
+## 5a-ter. External report ingested; the un-backfillable gap is now recording (2026-08-08)
+
+- **External feasibility report** audited claim-by-claim in `docs/EXTERNAL-scalping-feasibility-001.md`:
+  every back-quote of this repo's numbers is accurate; two framings corrected (its MinBTL alarm is
+  backwards for the daily board and understated for the 30-day slice, which supports exactly N=1
+  trial; its PBO<0.2 recipe is behind the calibrated-null replacement). Its core negative thesis
+  converges with three verdicts this repo reached independently.
+- **Raw L2 depth-diff recorder is LIVE** on a GCP e2-small in Tokyo (`btcq-depth-rec-1`,
+  asia-northeast1-b): keyless, **no service account, no scopes, no secrets on the VM**, SSH via
+  IAP only, shielded boot. Verified `active (running)` via serial console 2026-08-08T00:55:49Z.
+  ~164 MB/day compressed measured in smoke; 50 GB disk ≈ ten months of headroom. The VM runs
+  commit `c344d3f`; the three post-refutation recorder fixes land with the next push and need a
+  `git pull` + service restart there (bootstrap script is idempotent).
+- **Movement census** (`DIAG-movement-census-001`): near-pure diffusion (RMS/√τ 0.53–0.60);
+  median |move| crosses the taker RT between 15 m and 1 h — converging with the existing
+  30-minute crossing measurement from a different route.
+- **Named, deliberately not written**: `PREREG-markout-001`, `PREREG-obi-predictive-001`,
+  `PREREG-funding-carry-001` — each is a predictive look needing declaration + N_trials cap.
+- **Cloud safety notes** (not in any committed file by design): the deploy docs use placeholders
+  only; no real project id or account identity enters this public repo.
+
 ## 5b. Structural anti-rot (added 2026-08-06, after the audit found rot 12 ways)
 
 Rot here was never a vigilance failure, so the mitigation is not vigilance:

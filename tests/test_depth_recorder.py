@@ -74,3 +74,37 @@ def test_sink_appends_valid_multi_member_gzip(tmp_path, monkeypatch):
     assert len(lines) == 5
     import json as _j
     assert [_j.loads(x)["i"] for x in lines] == [0, 1, 2, 10, 11]
+
+
+def test_reader_survives_a_truncated_final_member(tmp_path, monkeypatch):
+    """A kill mid-flush truncates the last gzip member. The tolerant reader must return
+    every row of every complete member and stop — never raise, never invent."""
+    monkeypatch.setattr(rdd, "OUT_ROOT", tmp_path)
+    s = rdd.Sink()
+    for i in range(4):
+        s.add({"kind": "frame", "recv_ms": 1785455999_000, "i": i})
+    s.flush()
+    for i in range(3):
+        s.add({"kind": "frame", "recv_ms": 1785455999_400, "i": 10 + i})
+    s.flush()
+    p = tmp_path / "date=2026-07-30" / "frames.jsonl.gz"
+    whole = p.read_bytes()
+    p.write_bytes(whole[:-9])                    # tear the tail of the second member
+    rows = list(rdd.read_frames(p))
+    assert [r["i"] for r in rows] == [0, 1, 2, 3], (
+        "the complete first member must survive; the torn second must vanish loudly-by-absence")
+
+
+def test_classify_is_total_and_the_raising_layer_is_the_coercion():
+    """Two layers, and the first version of this test confused them.
+
+    `classify_frame` itself is TOTAL — garbage compares unequal and comes back "gap",
+    it never raises. What raises on a malformed frame is the CALLER's `int(ev["U"])`
+    coercion, which is exactly why the writer records the raw frame BEFORE attempting
+    it and tags `malformed:<Exc>` instead of tearing down the connection."""
+    assert rdd.classify_frame(None, None, None, 100, 105) == "gap"  # type: ignore[arg-type]
+    import pytest
+    with pytest.raises(KeyError):
+        int({"u": 1}["U"])                      # the caller's actual raising expression
+    with pytest.raises(ValueError):
+        int("not-a-number")

@@ -125,6 +125,32 @@ class Sink:
         self.buf_first_ms = None
 
 
+def read_frames(path: Path):
+    """Member-tolerant reader for the tape this module writes.
+
+    A SIGKILL mid-flush can leave a TRUNCATED final gzip member; `gzip.decompress` over the
+    whole file then raises EOFError and a naive reader concludes the whole day is corrupt,
+    when at most the last unflushed batch (<= FLUSH_EVERY rows, ~20 s) is gone. This reader
+    decompresses member by member and stops cleanly at a truncated tail, yielding every row
+    of every COMPLETE member. The truncation is data loss and is not hidden: the caller can
+    compare the last row's recv_ms against the next day's first to bound it.
+    """
+    import zlib
+    buf = path.read_bytes()
+    while buf:
+        d = zlib.decompressobj(wbits=31)
+        try:
+            chunk = d.decompress(buf)
+        except zlib.error:
+            return                                    # truncated tail: stop, do not invent
+        if not d.eof:
+            return                                    # incomplete member at the end
+        for line in chunk.decode().splitlines():
+            if line:
+                yield json.loads(line)
+        buf = d.unused_data
+
+
 def rest_snapshot() -> dict:
     with urllib.request.urlopen(
             urllib.request.Request(SNAP_URL, headers=UA), timeout=15) as r:
@@ -161,12 +187,13 @@ async def run(smoke_s: float | None) -> dict:
         return int(snap["lastUpdateId"])
 
     deadline = time.time() + smoke_s if smoke_s else None
+    prev_u: int | None = None          # visible to the reconnect gap rows above
     while not stop.is_set() and (deadline is None or time.time() < deadline):
         try:
             async with websockets.connect(WS_URL, ping_interval=20,
                                           ping_timeout=20, max_size=2**22) as ws:
                 last_id = await take_snapshot("connect")
-                prev_u: int | None = None
+                prev_u = None
                 next_snap = time.time() + SNAPSHOT_EVERY_S
                 while not stop.is_set() and (deadline is None or time.time() < deadline):
                     raw = await asyncio.wait_for(ws.recv(),
@@ -177,10 +204,23 @@ async def run(smoke_s: float | None) -> dict:
                     ev = msg.get("data", msg)
                     if ev.get("e") != "depthUpdate":
                         continue
-                    verdict = classify_frame(int(ev["U"]), int(ev["u"]), int(ev["pu"]),
-                                             last_id, prev_u)
-                    sink.add({"kind": "frame", "recv_ms": recv_ms, "chain": verdict,
-                              "data": ev})
+                    # Record FIRST, classify second. The refutation pass found the original
+                    # order (classify -> add) meant a malformed frame — one passing the
+                    # e == "depthUpdate" check but missing U/u/pu — raised BEFORE it was
+                    # written, vanishing from the tape and tearing down the connection for
+                    # one bad frame. "EVERY frame is recorded" has to include the broken ones.
+                    row = {"kind": "frame", "recv_ms": recv_ms, "chain": "unclassified",
+                           "data": ev}
+                    try:
+                        verdict = classify_frame(int(ev["U"]), int(ev["u"]), int(ev["pu"]),
+                                                 last_id, prev_u)
+                    except (KeyError, TypeError, ValueError) as e:
+                        row["chain"] = f"malformed:{type(e).__name__}"
+                        sink.add(row)
+                        stats["frames"] += 1
+                        continue                       # one bad frame is not a connection fault
+                    row["chain"] = verdict
+                    sink.add(row)
                     stats["frames"] += 1
                     if verdict in ("first_ok", "ok"):
                         prev_u = int(ev["u"])
@@ -204,11 +244,11 @@ async def run(smoke_s: float | None) -> dict:
             if deadline and time.time() >= deadline:
                 break
             sink.add({"kind": "gap", "recv_ms": int(time.time() * 1000),
-                      "expected_pu": None, "got_pu": None, "action": "ws_timeout_reconnect"})
+                      "expected_pu": prev_u, "got_pu": None, "action": "ws_timeout_reconnect"})
             stats["gaps"] += 1
         except Exception as e:  # noqa: BLE001 — the tape must survive transient wire faults
             sink.add({"kind": "gap", "recv_ms": int(time.time() * 1000),
-                      "expected_pu": None, "got_pu": None,
+                      "expected_pu": prev_u, "got_pu": None,
                       "action": f"reconnect:{type(e).__name__}"})
             stats["gaps"] += 1
             await asyncio.sleep(2.0)
