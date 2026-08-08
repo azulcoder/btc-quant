@@ -1,0 +1,20 @@
+# btcquant-tape-sync — push closed gzip members of the depth tape to the append-only
+# GCS bucket, verify by stored md5, retain local 3 days after the day's manifest.
+# The bucket name comes from instance metadata `tape-bucket`; without it this is a no-op,
+# so the unit is safe on a keyless VM.
+[Unit]
+Description=btc-quant tape sync to GCS (write-only service account)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=btcq
+Group=btcq
+WorkingDirectory=/opt/btc-quant
+ExecStart=/opt/btcq-venv/bin/python3 deploy/gcp/tape_sync.py
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/btc-quant/data
+ProtectHome=true
+PrivateTmp=true

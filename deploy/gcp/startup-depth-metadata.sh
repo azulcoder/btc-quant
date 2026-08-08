@@ -14,3 +14,11 @@ if [ -x /opt/btc-quant/deploy/gcp/bootstrap-depth.sh ]; then
 else
   curl -fsSL https://raw.githubusercontent.com/azulcoder/btc-quant/main/deploy/gcp/bootstrap-depth.sh | bash
 fi
+# Measurement to the serial console at every boot: disk truth and a tape QC census.
+# This is the ONLY no-SSH read path for current disk usage, so it prints unconditionally.
+echo "=== TAPE CENSUS $(date -u +%FT%TZ) ==="
+df -h / | tail -1
+du -sh /opt/btc-quant/data/depth_diffs 2>/dev/null || true
+du -sh /opt/btc-quant/data/depth_diffs/binancef/BTCUSDT/date=* 2>/dev/null || true
+/opt/btcq-venv/bin/python3 /opt/btc-quant/deploy/gcp/tape_qc.py --upload 2>&1 || true
+echo "=== TAPE CENSUS END ==="

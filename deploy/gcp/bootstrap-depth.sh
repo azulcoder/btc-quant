@@ -33,8 +33,16 @@ chown -R btcq:btcq /opt/btc-quant
 
 cp /opt/btc-quant/deploy/gcp/depth-recorder.service \
    /etc/systemd/system/btcquant-depth-recorder.service
+# Backup + visibility: sync every 15 min, heartbeat every 5 min. Both are no-ops unless
+# the instance carries a `tape-bucket` metadata key, so this bootstrap stays valid for a
+# keyless VM too.
+cp /opt/btc-quant/deploy/gcp/tape-sync.service      /etc/systemd/system/btcquant-tape-sync.service
+cp /opt/btc-quant/deploy/gcp/tape-sync.timer        /etc/systemd/system/btcquant-tape-sync.timer
+cp /opt/btc-quant/deploy/gcp/tape-heartbeat.service /etc/systemd/system/btcquant-tape-heartbeat.service
+cp /opt/btc-quant/deploy/gcp/tape-heartbeat.timer   /etc/systemd/system/btcquant-tape-heartbeat.timer
 systemctl daemon-reload
 systemctl enable btcquant-depth-recorder
+systemctl enable --now btcquant-tape-sync.timer btcquant-tape-heartbeat.timer
 # enable --now does NOT restart an already-running service, so a re-run would leave
 # old code live. Restart is idempotent and costs one bounded, recorded gap.
 systemctl restart btcquant-depth-recorder

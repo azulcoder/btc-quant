@@ -1,0 +1,19 @@
+# btcquant-tape-heartbeat — one small status object every 5 minutes, so the recorder is
+# visible from the GCS console with no SSH. Counts come from the tape bytes, not from the
+# recorder's own opinion of itself.
+[Unit]
+Description=btc-quant tape heartbeat to GCS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=btcq
+Group=btcq
+WorkingDirectory=/opt/btc-quant
+ExecStart=/opt/btcq-venv/bin/python3 deploy/gcp/tape_heartbeat.py
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/btc-quant/data
+ProtectHome=true
+PrivateTmp=true

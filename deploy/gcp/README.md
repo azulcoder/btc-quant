@@ -248,3 +248,76 @@ one that costs five boots.
 What is deliberately NOT here: HF sync of the diff tape. That needs a write token on the VM,
 and the safe version (fine-grained token scoped to one dataset, rotated) is a separate
 decision — the disk buys ~10 months to make it.
+
+## Phase 2c — backup + visibility: append-only GCS, write-only identity (2026-08-08)
+
+The tape was accumulating with **no copy** — the one class of data this project cannot buy
+back. Phase 2c gives the VM exactly one new power: *append bytes to one bucket*.
+
+```bash
+BUCKET=<YOUR_TAPE_BUCKET>          # globally unique; no project id needed in the name
+SA=btcq-tape-writer@<YOUR_PROJECT_ID>.iam.gserviceaccount.com
+
+# Bucket: same region as the VM (zero egress), uniform IAM, versioned, no public access.
+gcloud storage buckets create "gs://$BUCKET" --location=asia-northeast1 \
+  --uniform-bucket-level-access --public-access-prevention
+gcloud storage buckets update "gs://$BUCKET" --versioning
+# lifecycle: Nearline at 30 d, Coldline at 90 d (see lifecycle JSON in the session log)
+
+# Identity: ONE binding, on the bucket, not the project.
+gcloud iam service-accounts create btcq-tape-writer
+gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
+  --member="serviceAccount:$SA" --role=roles/storage.objectCreator
+
+# Attach: requires a STOP (the API refuses set-service-account on a running instance).
+# Scope is devstorage.write_only — the OAuth layer repeats the IAM restriction.
+gcloud compute instances stop btcq-depth-rec-1 --zone="$ZONE"
+gcloud compute instances set-service-account btcq-depth-rec-1 --zone="$ZONE" \
+  --service-account="$SA" \
+  --scopes=https://www.googleapis.com/auth/devstorage.write_only
+gcloud compute instances add-metadata btcq-depth-rec-1 --zone="$ZONE" \
+  --metadata=tape-bucket="$BUCKET"
+gcloud compute instances start btcq-depth-rec-1 --zone="$ZONE"
+```
+
+**The posture change, stated honestly.** "No service account, no scopes, nothing to steal"
+was true and is now false in one narrow way. What an attacker who fully owns the VM gains:
+the ability to **create objects in this one bucket** — pollute the tape with fabricated
+objects (they cannot replace real ones; creation of new names only), and run up storage
+cost without bound (mitigate with a budget alert, which is a console click, not IAM). What
+they still **cannot** do, each enforced twice (bucket IAM `objectCreator` AND instance
+scope `devstorage.write_only`): read any object back, list the bucket, overwrite or delete
+anything already written, touch any other bucket or GCP resource, or reach the project's
+IAM. Every sync run PROBES this live: it attempts to read back its own upload and expects
+HTTP 403; the heartbeat publishes `readback_denied` so posture drift would be visible in
+the data, not in an audit nobody re-runs. Versioning is belt-and-braces: even a future
+IAM mistake leaves noncurrent versions behind.
+
+**What lands in the bucket** (all written by the units `btcquant-tape-sync.timer` /
+`btcquant-tape-heartbeat.timer`, installed by the bootstrap):
+
+- `tape/binancef/BTCUSDT/date=*/chunk-<start>-<end>.gz` — byte-ranges of the day file cut
+  at complete gzip-member boundaries; concatenated in offset order they reproduce the
+  local file **byte-for-byte**. Verified per chunk against the `md5Hash` the create
+  response returns (a write-only principal's only readable fact), and per day against a
+  whole-file md5 in `manifest.json`. A torn tail from a mid-flush kill uploads verbatim
+  as `.trunc` — recorded, never repaired.
+- `heartbeat/date=*/hb-*.json` every 5 min — service state, frames/gaps today (counted
+  from the tape bytes, not from the process's own opinion), disk free, sync watermark,
+  `readback_denied`. **This is the no-SSH visibility surface**; watch it at:
+  `https://console.cloud.google.com/storage/browser/<YOUR_TAPE_BUCKET>/heartbeat?project=<YOUR_PROJECT_ID>`
+- `qc/qc-*.json` at each boot — per-hour frame rate, chain verdicts, gap rows, resyncs,
+  and `recv_ms − E` latency-proxy percentiles (`deploy/gcp/tape_qc.py`).
+
+Local retention: a day file is deleted **3 days after** its manifest verified — declared
+in `tape_sync.py` (`RETAIN_DAYS`), one place, changeable. Until then every byte exists in
+two places; after, in one durable versioned place plus the ledger row that says so.
+
+**When the trial ends** (numbers, not reassurance): a $300/90-day trial that ends without
+upgrading to a paid account **stops the VM immediately and deletes the project's data
+after a grace window** — the tape included. Upgrading keeps everything and starts charging
+the card: at current volume that is the VM (~$18-22/mo) plus storage that starts at
+pennies (~5 GB/mo of new tape: ≈ $0.12/mo Standard, aging into Nearline ≈ $0.10/mo and
+Coldline ≈ $0.04/mo per accumulated month-slab). Evacuating instead is one command from
+any machine with read access (`gcloud storage cp -r "gs://$BUCKET/tape" ...`) at ~$0.12/GB
+egress — do it BEFORE expiry; a suspended billing account may refuse even reads.
