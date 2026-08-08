@@ -230,14 +230,20 @@ Cost, order of magnitude [DIASUMSIKAN — verify in your console]: e2-small ≈ 
 Well inside a $300 trial. Set a budget alert in the console (Billing → Budgets) at e.g. $50;
 the budgets API needs its own enablement and is easier clicked than scripted.
 
-**Boot path, learned the hard way [DIUKUR 2026-08-08]:** the first metadata script was a
-one-liner `curl raw.githubusercontent.com/... | bash`, and the raw CDN served a STALE
-bootstrap through four consecutive resets (~10 minutes past its nominal TTL), each failing
-`git pull` with exit 128 while the service kept running old code from the persistent unit.
-The startup script now lives in `deploy/gcp/startup-depth-metadata.sh` and is passed via
-`--metadata-from-file` — instance metadata has no CDN — pulling from the LOCAL checkout
-first and falling back to curl only on a fresh disk. Changing the bootstrap therefore
-deploys on the next boot with no cache in the path.
+**Boot path, learned the hard way [DIUKUR 2026-08-08]:** five consecutive boots failed
+exit 128 while the persistent unit kept the OLD recorder running — a silent partial
+failure. The first diagnosis blamed raw.githubusercontent CDN caching; that was WRONG, or
+at least never proven: a boot running entirely from instance metadata (no CDN in the path)
+reproduced the same failure, and the serial console then showed the literal cause —
+`git config --global` under the metadata script runner has **no HOME**, so the
+safe.directory exception landed nowhere, and the `2>/dev/null` on that very line swallowed
+the only warning. The fix is HOME-independent three ways (HOME exported, `--system` config
+in /etc/gitconfig, `GIT_CONFIG_*` env vars binding every child git), the startup script
+ships in the repo (`deploy/gcp/startup-depth-metadata.sh`) and is passed via
+`--metadata-from-file`, and the recovery was verified on the serial console:
+`Updating c344d3f..7b24df5, Fast-forward`, service restarted. The durable lessons: a boot
+that LOOKS healthy can be running stale code, and an error you silence yourself is the
+one that costs five boots.
 
 What is deliberately NOT here: HF sync of the diff tape. That needs a write token on the VM,
 and the safe version (fine-grained token scoped to one dataset, rotated) is a separate
