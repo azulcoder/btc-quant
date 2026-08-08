@@ -8,12 +8,30 @@ usulan menyebut angka dari `docs/DIAG-orderflow-ui-audit-001.md`; §6 mencatat a
 hijau, atau perbedaannya dijelaskan per-panel.** Baseline itu sudah ada dan kontrolnya sudah
 terbukti menyala (audit §6).
 
+> **REVISI 2026-08-08 (kedua), setelah `DIAG-orderflow-canvas-001` dan
+> `DIAG-orderflow-hierarchy-001`.** Tiga hal di rencana v1 dibatalkan oleh angka baru, dan
+> pembatalannya ditulis di tempatnya masing-masing, bukan dirapikan: Lapis 1 **tidak punya
+> pekerjaan** (ketiga kegagalan kontras adalah artefak scanner), prasyarat "kanvas liar"
+> untuk Lapis 0 **tidak terbukti** (kanvas 100 % token-sourced), dan Lapis 3 mendapat angka
+> per-panel yang jauh lebih kecil dari agregatnya — beserta alasan kenapa angka itu menjawab
+> pertanyaan yang lebih kecil.
+
 **Temuan yang membentuk seluruh rencana ini: sistem token SUDAH ADA dan sedang dilangkahi.**
 Ini bukan proyek "bangun design system dari nol" — ini proyek "tutup kebocoran".
 
 ---
 
 ## LAPIS 0 — token: menyerap literal yang melangkahi sistem yang sudah ada
+
+> **PRASYARAT v1 DICABUT [2026-08-08].** v1 mensyaratkan Lapis 0 menunggu audit kanvas,
+> dengan alasan: kalau kanvas memuat mayoritas warna, merapikan CSS saja akan membuat
+> inkonsistensi **lebih** terlihat. Auditnya sudah dijalankan dan **membalik premisnya**
+> [DIUKUR 2026-08-08]: dari **174 assignment warna kanvas, LITERAL = 0**; 109 membaca token
+> langsung, 65 sisanya tetap berujung token; 20 hex literal yang ada semuanya duduk di posisi
+> *fallback* `cssVar('--x', '#hex')` dan **cocok persis** dengan nilai tokennya (nol drift).
+> **Total warna distinct terminal tetap 74** — kanvas tidak menambah satu hue pun, jadi angka
+> 74 itu **bukan batas bawah**. Kanvas sudah berada di ujung yang benar; **CSS-lah yang
+> tertinggal**, dan Lapis 0 boleh berjalan tanpa menunggu apa pun.
 
 **Angka yang membenarkannya** (audit §1): spacing **82 distinct** (10× patokan), warna **74**
 (5×), font-size **27** (4×), radius **11** (3×) — sementara `var(--fs-xs)` sudah dipakai 88×,
@@ -42,29 +60,70 @@ Ini bukan proyek "bangun design system dari nol" — ini proyek "tutup kebocoran
 `3px` → `var(--sp-1)` kalau `--sp-1` ternyata 4px). **Verifikasi:** paritas screenshot 27
 panel; setiap panel yang berubah harus dibenarkan satu per satu atau substitusinya dibatalkan.
 
+### LAPIS 0b — token yang bisa dibaca kanvas: **sudah ada, jangan bangun ulang**
+
+Diminta sebagai lapis baru: satu sumber token yang dibaca kanvas lewat `getPropertyValue`
+saat init, bukan disalin sebagai literal. **Terukur, mekanismenya sudah persis itu**
+[DIUKUR 2026-08-08]: `cssVar()` memanggil
+`getComputedStyle(document.documentElement).getPropertyValue(name)`, dan `pal()` membangun
+peta **17 token setiap draw** — sengaja tidak di-cache agar toggle tema langsung terpakai.
+
+Jadi yang tersisa untuk 0b bukan membangun, melainkan **dua kebersihan kecil dengan
+angkanya**:
+
+1. **20 fallback literal** di `cssVar('--x', '#hex')` adalah duplikasi nilai token. Semuanya
+   saat ini **cocok persis**, jadi mereka tidak berbahaya hari ini — bahayanya muncul kalau
+   token berubah dan fallback tidak. **Usul: satu test yang menegakkan kecocokan itu**, bukan
+   penghapusan fallback (fallback melindungi dari `getPropertyValue` kosong saat init).
+2. **Dua ukuran font kanvas, 6px dan 7px, berada DI BAWAH `--fs-3xs: 9px`** — literal yang
+   melangkahi skala, dan letaknya di kanvas, bukan CSS. Ini satu-satunya kebocoran token
+   nyata yang ditemukan di sisi kanvas.
+
+**Verifikasi 0b:** test kecocokan fallback↔token berjalan tanpa browser (parsing CSS + JS),
+jadi ia bisa masuk CI — tidak seperti paritas piksel.
+
 ---
 
 ## LAPIS 1 — perbaikan satu-baris berdampak besar
 
-**Tabular numerals: TIDAK ADA PEKERJAAN.** Audit §2 mengukur **49 kemunculan**
-`tabular-nums`/`font-variant-numeric`/`tnum` di tiga berkas. Premis bahwa ia hilang **salah**,
-dan aku tidak mengusulkan pekerjaan untuk masalah yang tidak ada.
+**Tabular numerals: TIDAK ADA PEKERJAAN — dan sekarang diperiksa DUA KALI.** Audit §2
+mengukur 49 kemunculan di CSS. Pemeriksaan kanvas yang terpisah [DIUKUR 2026-08-08]
+menemukan **nol** flag fitur font di kanvas, **tetapi** angka kanvas tetap tabular karena
+woff2 yang dikirim diukur langsung: kesepuluh digit ber-advance identik **600/1000-em**,
+`post.isFixedPitch = 1`. Tabularitas datang dari font monospace-nya, bukan dari flag.
 
-**Kontras: tiga perbaikan, semuanya marginal** (audit §3):
+**Defect font yang NYATA, ditemukan menggantikan yang tidak ada:** woff2 IBM Plex Mono yang
+di-subset hanya memapar GSUB `['ccmp','dnom','frac','numr']` — **tidak ada fitur `zero`,
+tidak ada glyph slashed-zero**. Maka `slashed-zero` di **16 lokasi CSS** dan
+`font-feature-settings: 'zero' 1` **INERT di DOM maupun kanvas**. Perbaikannya bukan CSS:
+**subset font harus menyertakan fitur `zero`**, atau ke-16 deklarasi itu dihapus karena
+berbohong tentang apa yang dirender. **Usul: hapus deklarasinya** — lebih murah, dan sebuah
+deklarasi yang tidak berefek adalah dokumentasi yang salah.
 
-| lokasi | sekarang | lantai | perbaikan minimum |
-|---|---|---|---|
-| `styles.css :: button` | 4,31:1 | 4,5 | gelapkan `#07101f` atau terangkan `--accent` sedikit |
-| `terminal.css :: #set-pause[aria-pressed="true"]` | 4,31:1 | 4,5 | idem (token yang sama) |
-| `hasbrouck.html :: .themer button:hover` | 4,46:1 | 4,5 | idem |
+**Kontras: ~~tiga perbaikan~~ NOL pekerjaan — ketiganya artefak scanner** (§di bawah):
 
-Ketiganya menyentuh **satu token** (`--accent`) plus satu warna teks. **Dampak: 3 dari 3
-kegagalan kontras yang terukur hilang dengan satu perubahan token.** Tidak ada teks data yang
-gagal, jadi ini memperbaiki kontrol interaktif, bukan keterbacaan angka.
+> **[PEMBATALAN 2026-08-08]** Ketiga "kegagalan" di v1 adalah **artefak scanner-ku sendiri**,
+> bukan cacat produk. Dua sebab, keduanya terukur:
+> 1. **Bocor variabel antar-halaman.** Scanner v1 membangun satu peta `var()` global atas
+>    seluruh folder dengan urutan nama berkas, dan `hasbrouck.html` — halaman terpisah dengan
+>    temanya sendiri — mendeklarasikan `--accent: #2a78d6`. Maka setiap `var(--accent)` di
+>    terminal ter-resolve ke **biru hasbrouck**, bukan **amber `#E0A33E`** milik terminal.
+>    Pasangan sebenarnya `#07101f` atas `#E0A33E` = **8,59:1, LOLOS**.
+> 2. **Alpha tidak dikomposisi**, yang menghasilkan "1,0:1" untuk warna di atas tint 10 %
+>    dirinya sendiri.
+>
+> Scanner sudah diperbaiki (scope per-halaman + komposisi alpha) dan **diuji punya daya**:
+> 51 pasangan `fg/bg` benar-benar dinilai, dan pasangan buruk yang sengaja disuntik ke
+> **salinan** terdeteksi pada 1,19:1. Pada dashboard nyata: **0 kegagalan kontras.**
+>
+> **Tidak ada satu berkas `dashboard/` yang diubah**, dan paritas piksel dijalankan untuk
+> membuktikannya: **27/27 panel identik** terhadap baseline yang sudah di-commit.
+> Memperbaiki produk untuk menyenangkan instrumen yang rusak adalah kerusakan, bukan
+> perbaikan.
 
-**Risiko.** Mengubah `--accent` menyentuh setiap permukaan beraksen. **Verifikasi:** paritas
-screenshot akan menyala di banyak panel **secara sengaja** — di sinilah baseline harus dibaca
-sebagai daftar-untuk-ditinjau, bukan lampu merah.
+**Sisa Lapis 1 setelah pembatalan:** satu item, yaitu menghapus 16 deklarasi `slashed-zero`
+yang inert (atau menambah fitur `zero` ke subset font). Dampaknya bukan visual — ia
+menghapus kebohongan dari stylesheet.
 
 ---
 
@@ -87,18 +146,35 @@ terbukti ada.
 
 ## LAPIS 3 — hierarki
 
-**Angka** (audit §5): **56 % selector `terminal.css` (62 dari 110) berbagi satu kombinasi
-penekanan** `size=var(--fs-xs)`, `weight=(inherit)`. Tiga bobot tersedia (400/600/700) tetapi
-hanya dipakai di 10 dari 110 selector.
+**Angka v1** (audit §5): 56 % selector `terminal.css` berbagi satu kombinasi penekanan.
 
-**Panel dan elemen mana** — dari audit, panel terpadat yang punya baseline dan terbukti
-sensitif terhadap perubahan token adalah **`stats`** (satu dari dua yang menangkap perubahan
-warna) dan halaman penuh.
+**Angka BARU, per panel** (`DIAG-orderflow-hierarchy-001`, [DIUKUR 2026-08-08]) — dan ini
+yang menggantikan agregat itu sebagai dasar rencana:
 
-**Usul: turunkan, jangan naikkan.** Yang harus **turun** penekanannya adalah label dan satuan
-— elemen yang saat ini berbagi `--fs-xs` dengan angkanya sendiri. Menaikkan yang penting akan
-memperbesar 27 ukuran font distinct menjadi lebih banyak lagi; menurunkan yang tidak penting
-memakai token yang sudah ada (`--fs-2xs`, `--fs-3xs`, yang sudah dipakai 24× dan 15×).
+| panel | elemen teks | tidak sesuai peran | % |
+|---|---|---|---|
+| `area-hist` | 20 | 3 | **15 %** |
+| `area-auct` | 15 | 0 | **0 %** |
+| `area-set` | 13 | 1 | **8 %** |
+| total | 48 | 4 | **8 %** |
+
+Keempat ketidaksesuaian berbentuk sama: **kontrol interaktif** (`step ›`, `live edge`,
+`pause`) digambar pada `var(--fs-base)` bobot **700** — lebih menonjol dari angka di
+sekitarnya. Jadi usulan v1 "turunkan label" **salah sasaran**: yang terlalu menonjol adalah
+**tombol**, bukan label.
+
+> **Batas yang harus dibaca bersama angkanya:** ketiga panel itu hampir seluruhnya **chrome
+> statis**, dan `area-set` bahkan tidak punya JS view. **PRIMER nyaris tidak ada** di 48
+> elemen tersebut — angka yang dibaca trader disuntikkan saat runtime, dan **14 dari 28 panel
+> adalah kanvas** dengan 103 `fillText`. **8 % itu jujur untuk chrome statis, dan chrome
+> statis bukan tempat keputusan diambil.** Lapis 3 karena itu **tidak boleh dieksekusi**
+> sampai hierarki diukur pada DOM runtime + teks kanvas; harness-nya sudah ada, pengukurannya
+> belum.
+
+**Usul yang direvisi: turunkan TOMBOL, bukan label.** Empat elemen terukur, semuanya kontrol
+interaktif pada `var(--fs-base)`/700. Menurunkannya ke `var(--fs-sm)`/600 memakai token yang
+sudah ada. Ini menyentuh 4 elemen, bukan sebuah kelas selebar stylesheet — dan itu justru
+kelebihannya: dampaknya bisa dilihat panel per panel di baseline.
 
 **Risiko.** Hierarki adalah penilaian, dan angka 56 % **tidak memberitahu elemen mana** yang
 salah — ia hanya membuktikan bahwa pembedaannya tidak dibuat. **Verifikasi:** paritas
@@ -139,7 +215,25 @@ pengukuran deuteranopia ada.
 
 ## 6. Yang DIKELUARKAN karena tidak punya angka pendukung
 
-- **Menambah tabular-nums.** Sudah ada 49 kemunculan. Keluar.
+**Dipindahkan ke sini oleh revisi kedua [2026-08-08], karena angka baru membatalkannya:**
+
+- **Memperbaiki tiga kegagalan kontras.** Ketiganya artefak scanner (bocor variabel
+  antar-halaman + alpha tak dikomposisi). Pasangan sebenarnya 8,59:1. Setelah scanner
+  diperbaiki dan diuji punya daya: **0 kegagalan**. Keluar.
+- **Prasyarat "tunggu audit kanvas" untuk Lapis 0.** Kanvas 100 % token-sourced, 0 literal,
+  total warna tetap 74. Prasyaratnya tidak berlaku. Keluar.
+- **Membangun token yang bisa dibaca kanvas (Lapis 0b versi v1).** `cssVar()` + `pal()` sudah
+  melakukannya persis. Yang tersisa hanya dua kebersihan kecil, dicatat di 0b. Keluar sebagai
+  pekerjaan pembangunan.
+- **"Turunkan label" di Lapis 3.** Terukur per panel: yang terlalu menonjol adalah **tombol**,
+  bukan label. Usulan v1 salah sasaran dan diganti. Keluar.
+- **Mengeksekusi Lapis 3 sekarang.** 8 % diukur pada chrome statis, sementara PRIMER hidup di
+  runtime DOM dan di 14 panel kanvas. Keluar sampai hierarki diukur pada permukaan yang benar.
+
+**Tetap keluar dari revisi pertama:**
+
+- **Menambah tabular-nums.** Sudah ada 49 kemunculan, dan kanvas tabular lewat font monospace
+  (advance 600/1000-em terukur). Keluar.
 - **Menulis ulang encoding warna.** Palet colorblind-safe sudah terdeklarasi dan 291 pembeda
   kedua sudah terukur. Keluar sampai simulasi deuteranopia menunjukkan celah nyata.
 - **Optimasi render.** p50 frame time **16,7 ms = 60 fps**, DOMContentLoaded 0,151 s, panel

@@ -117,25 +117,35 @@ def contrast(a, b) -> float:
     return (hi + 0.05) / (lo + 0.05)
 
 
-def css_vars() -> dict[str, str]:
-    """Resolve `--name: value` declarations, following var() chains.
+def page_scopes() -> dict[str, dict]:
+    """Variable maps scoped PER PAGE, not globally across the folder.
 
-    Without this the contrast scan is blind: this codebase declares its palette as custom
-    properties and almost never writes a literal colour next to a literal background, so a
-    literal-only scan reports ZERO failures and that zero means "nothing looked", not
-    "nothing wrong" (class B).
+    v1 built one flat map over every file in sorted order and let the first declaration
+    win. `hasbrouck.html` sorts before `styles.css` and declares its own `--accent: #2a78d6`
+    for a completely separate page, so every `var(--accent)` in the terminal resolved to
+    hasbrouck's blue instead of the terminal's amber `#E0A33E`. That single bleed produced
+    all three "contrast failures" v1 reported: the real pair is 8.59:1, which passes
+    comfortably [DIUKUR 2026-08-08]. Custom properties cascade through the DOM at runtime,
+    never across pages, so the scope here is the PAGE: the stylesheets an HTML file actually
+    links plus its own inline <style>.
     """
-    raw: dict[str, str] = {}
-    for p in files():
-        txt = p.read_text(encoding="utf-8", errors="ignore")
-        for m in re.finditer(r"(--[\w-]+)\s*:\s*([^;}\n]+)", txt):
-            raw.setdefault(m.group(1), m.group(2).strip())
-    for _ in range(6):                                    # follow var() chains
-        for k, v in list(raw.items()):
-            m = re.fullmatch(r"var\((--[\w-]+)\)", v.strip())
-            if m and m.group(1) in raw:
-                raw[k] = raw[m.group(1)]
-    return raw
+    scopes: dict[str, dict] = {}
+    for html in sorted(DASH.glob("*.html")):
+        txt = html.read_text(encoding="utf-8", errors="ignore")
+        sheets = [DASH / m for m in re.findall(r'<link[^>]+href="([^"]+\.css)"', txt)]
+        members = [p for p in sheets if p.exists()] + [html]
+        raw: dict[str, str] = {}
+        for p in members:                       # later declaration wins, as CSS does
+            t = p.read_text(encoding="utf-8", errors="ignore")
+            for m in re.finditer(r"(--[\w-]+)\s*:\s*([^;}\n]+)", t):
+                raw[m.group(1)] = m.group(2).strip()
+        for _ in range(6):
+            for k, v in list(raw.items()):
+                m = re.fullmatch(r"var\((--[\w-]+)\)", v.strip())
+                if m and m.group(1) in raw:
+                    raw[k] = raw[m.group(1)]
+        scopes[html.name] = {"vars": raw, "members": [str(p.relative_to(REPO)) for p in members]}
+    return scopes
 
 
 def resolve(val: str, vars_: dict[str, str]) -> str:
@@ -148,38 +158,64 @@ def resolve(val: str, vars_: dict[str, str]) -> str:
     return v.strip()
 
 
+def composite(fg_tok: str, bg_tok: str, page_bg):
+    """Composite an alpha background over the page background before scoring.
+
+    v1 ignored alpha and reported `--up` on `rgba(38,166,154,0.1)` as 1.0:1 — the same
+    colour on a 10 % tint of itself. That is an artifact of not compositing, and it was
+    counted as a failure it never was.
+    """
+    a = to_rgb(fg_tok)
+    m = re.match(r"rgba?\(\s*([\d.]+)\s*[, ]\s*([\d.]+)\s*[, ]\s*([\d.]+)\s*[,/]\s*([\d.]+)",
+                 bg_tok.strip().lower())
+    if m:
+        r, g, b, al = (float(x) for x in m.groups())
+        b_rgb = tuple(round(c * al + p * (1 - al)) for c, p in zip((r, g, b), page_bg))
+    else:
+        b_rgb = to_rgb(bg_tok)
+    return a, b_rgb
+
+
 def contrast_pairs() -> list[dict]:
-    """Pairs actually used together: a `color` and a `background` in the same CSS rule,
-    with custom properties resolved first. Only real pairs are scored — enumerating every
-    combination would manufacture failures no user can see."""
+    """Real `color` + `background` pairs inside one rule, resolved in the PAGE's own scope
+    and with alpha composited over that page's background."""
     out = []
-    vars_ = css_vars()
-    for p in files():
-        if p.suffix not in (".css", ".html"):
-            continue
-        txt = p.read_text(encoding="utf-8", errors="ignore")
-        for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", txt):
-            sel, body = m.group(1).strip(), m.group(2)
-            fg = re.search(r"(?<!-)\bcolor\s*:\s*([^;}\n]+)", body)
-            bg = re.search(r"background(?:-color)?\s*:\s*([^;}\n]+)", body)
-            if not (fg and bg):
-                continue
-            a, b = to_rgb(resolve(fg.group(1), vars_)), to_rgb(resolve(bg.group(1), vars_))
-            if not (a and b):
-                continue
-            fs = re.search(r"font-size\s*:\s*([\d.]+)px", body)
-            fw = re.search(r"font-weight\s*:\s*(\d+)", body)
-            px = float(fs.group(1)) if fs else None
-            large = bool(px and (px >= 24 or (px >= 18.66 and fw and int(fw.group(1)) >= 700)))
-            r = contrast(a, b)
-            floor = 3.0 if large else 4.5
-            if r < floor:
-                out.append({"file": str(p.relative_to(REPO)),
-                            "selector": re.sub(r"\s+", " ", sel)[:90],
-                            "fg": fg.group(1).strip(), "bg": bg.group(1).strip(),
-                            "ratio": round(r, 2), "floor": floor,
-                            "font_px": px, "large": large})
-    return sorted(out, key=lambda d: d["ratio"])
+    for page, scope in page_scopes().items():
+        vars_ = scope["vars"]
+        page_bg = to_rgb(resolve(vars_.get("--bg") or vars_.get("--page") or "#000", vars_)) \
+            or (0, 0, 0)
+        for rel in scope["members"]:
+            p = REPO / rel
+            txt = p.read_text(encoding="utf-8", errors="ignore")
+            for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", txt):
+                sel, body = m.group(1).strip(), m.group(2)
+                fg = re.search(r"(?<!-)\bcolor\s*:\s*([^;}\n]+)", body)
+                bg = re.search(r"background(?:-color)?\s*:\s*([^;}\n]+)", body)
+                if not (fg and bg):
+                    continue
+                a, b = composite(resolve(fg.group(1), vars_), resolve(bg.group(1), vars_),
+                                 page_bg)
+                if not (a and b):
+                    continue
+                fs = re.search(r"font-size\s*:\s*([\d.]+)px", body)
+                fw = re.search(r"font-weight\s*:\s*(\d+)", body)
+                px = float(fs.group(1)) if fs else None
+                large = bool(px and (px >= 24 or (px >= 18.66 and fw and int(fw.group(1)) >= 700)))
+                r = contrast(a, b)
+                floor = 3.0 if large else 4.5
+                if r < floor:
+                    out.append({"page": page, "file": rel,
+                                "selector": re.sub(r"\s+", " ", sel)[:90],
+                                "fg": fg.group(1).strip(), "bg": bg.group(1).strip(),
+                                "ratio": round(r, 2), "floor": floor,
+                                "font_px": px, "large": large})
+    seen, uniq = set(), []
+    for d in sorted(out, key=lambda d: d["ratio"]):
+        k = (d["file"], d["selector"], d["fg"], d["bg"])
+        if k not in seen:
+            seen.add(k)
+            uniq.append(d)
+    return uniq
 
 
 def tabular_numerals() -> dict:

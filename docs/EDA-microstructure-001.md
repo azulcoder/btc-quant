@@ -2285,7 +2285,8 @@ column (81), which is what enters DSR deflation, was never affected.
 | DIAG-control-a-regime-001 (day-selection rule applied over 3 years of klines, 9 regime days x 4 depths, 1 negative control, Binance 8-hour within-day split, 9 correlation computations, 3 throughput measurements) | 33 | 0 |
 | DIAG-orderflow-terminal-census-001 + DIAG-orderflow-profile-001 (5-agent read-only census: 44 files enumerated, 5 data chains traced, 53 columns audited for test/control/independent-verification, 11 standard metrics checked for existence and data availability, mechanical tech-debt sweep; plus 2 end-to-end profiles, 1 memory measurement, 1 format conversion experiment, 3 network destinations x 3 samples, 26 derived VM-throughput observations) | 39 | 0 |
 | DIAG-orderflow-ui-audit-001 (design inventory over 17 files x 6 dimensions, CSS-variable resolution + WCAG scan, tabular-numeral scan, colour-only-encoding scan, hierarchy distribution, 29-panel screenshot baseline with a two-way class-I control run three times, render timings, /v1/profile x3, 60 s network split, 2 memory runs incl. an instrument-resolution control) | 31 | 0 |
-| **running total** | **876** | **113** |
+| DIAG-orderflow-canvas-001 + DIAG-orderflow-hierarchy-001 (174 canvas colour assignments bucketed, 6 canvas properties counted across 10 files, 20 ctx.font strings + woff2 metric/GSUB inspection, 28 panels classified canvas-vs-DOM via mount-target resolution, text-density ranking by two independent methods, 48 elements role-classified across 3 panels, contrast scanner rebuilt with per-page scoping + alpha compositing and re-controlled, pixel parity re-verified) | 34 | 0 |
+| **running total** | **910** | **113** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 
