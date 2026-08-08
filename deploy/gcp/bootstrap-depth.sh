@@ -14,7 +14,10 @@ apt-get install -qy git python3-venv
 # "dubious ownership" (exit 128) — measured on the first VM reset, where the pull
 # failed and the service silently kept running the OLD code. Declare the directory
 # safe for root before touching it.
-git config --global --add safe.directory /opt/btc-quant
+# --system, not --global: the metadata script runner has no HOME, so a --global write
+# lands nowhere and its error is easy to swallow. /etc/gitconfig is HOME-independent.
+export HOME="${HOME:-/root}"
+git config --system --add safe.directory /opt/btc-quant ||   git config --global --add safe.directory /opt/btc-quant
 if [ ! -d /opt/btc-quant/.git ]; then
   git clone --depth 1 https://github.com/azulcoder/btc-quant /opt/btc-quant
 else
