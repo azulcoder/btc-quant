@@ -13,6 +13,20 @@ follow-up, where is the room for improvement). Converge fast, solve precisely.
 
 ---
 
+## 0. The program's own stopping rule — azul's decision, 2026-08-08
+
+Every measurement in this repo must declare a kill criterion before it runs. The PROGRAM had
+none. Asked what a sixth and seventh consecutive negative verdict would mean, azul decided:
+
+> **Kesimpulan: batasnya di DATA, bukan di pasar — alihkan ke membangun aset data.**
+>
+> Tujuh GAGAL dibaca sebagai bukti bahwa data keyless tidak cukup kaya untuk menemukan edge,
+> bukan bahwa edge tidak ada. Program beralih: berhenti menguji hipotesis, fokus penuh pada
+> mengumpulkan tape resolusi tertinggi (L2 diff, multi-venue) sampai ada N tahun, lalu
+> tinjau ulang.
+
+Trigger: `PREREG-obi-predictive-001` and `PREREG-funding-carry-001` both closing GAGAL.
+
 ## 1. Where this stands (honest verdict)
 
 Strong foundation, not amateur. Already best-in-class on two specific axes —
