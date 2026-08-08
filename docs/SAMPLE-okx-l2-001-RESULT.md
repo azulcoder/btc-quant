@@ -4,10 +4,19 @@
 `docs/SAMPLE-okx-l2-001.md`, yang di-commit sebelum satu byte pun diunduh. Tidak ada satu
 pun angka prediktif dihitung di sini (§6 deklarasi).
 
-**Vonis satu kalimat: arsip L2 OKX bisa diunduh dan dibaca, harga best bid/ask-nya
+> **[PENCABUTAN 2026-08-08 — baca ini lebih dulu]** Vonis GAGAL di bawah **DICABUT sebagai
+> BELUM-TERBUKTI**. Kontrol A kemudian diuji pada kasus yang seharusnya lolos — tape Tokyo
+> binancef, yang rantainya diatestasi terpisah dengan 0 gap dan 0 resync — dan **mencetak
+> 29,3 % pada top-20 di sana, lebih buruk dari OKX di setiap kedalaman**. Instrumennya yang
+> rusak. Angka-angka di §2 tetap tercatat karena terukur, tetapi **tidak boleh dibaca
+> sebagai pernyataan tentang arsip OKX**. Bukti dan tabel berdampingannya:
+> `docs/DIAG-control-a-validation-001.md`. Kalimat aslinya dipertahankan di bawah, tidak
+> dihapus.
+
+**~~Vonis satu kalimat: arsip L2 OKX bisa diunduh dan dibaca, harga best bid/ask-nya
 terekonstruksi PERSIS, tetapi UKURAN level tidak — kontrol A yang kudeklarasikan GAGAL di
 52,2 %, dan tidak ada riset yang boleh berdiri di atas ukuran book OKX sampai penyebabnya
-diketahui.**
+diketahui.~~** [DICABUT — lihat kotak di atas]
 
 ## 1. Skema sebenarnya (item 2d)
 

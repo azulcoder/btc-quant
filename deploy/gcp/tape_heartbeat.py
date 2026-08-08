@@ -81,6 +81,15 @@ def main() -> int:
                                   for s in sync.get("files", {}).values()),
         "readback_denied": (sync.get("readback") or {}).get("readback_denied"),
     }
+    # A MONOTONIC COUNTER, not a finer clock. Objects here are un-overwritable by design,
+    # so a duplicate name is a 403, and the first fix — appending milliseconds — only made
+    # the collision rarer: two runs inside one millisecond still collide, which is exactly
+    # how the test that models the constraint failed [DIUKUR 2026-08-08]. A counter kept in
+    # the state file cannot collide however fast the runs are, and it survives the clock
+    # moving backwards, which milliseconds do not. It is incremented and PERSISTED before
+    # the upload, so a crash between the two burns a number rather than reusing one.
+    seq = int(st.get("seq", 0)) + 1
+    st["seq"] = seq
     st["day"] = day
     HB_STATE.write_text(json.dumps(st))
     line = (f"hb {hb['ts']} svc={svc} frames_today={hb['frames_today']:,} "
@@ -89,11 +98,8 @@ def main() -> int:
     if not bucket:
         print(line + " (no bucket configured — heartbeat local only)")
         return 0
-    # Milliseconds in the name: objects here are un-overwritable by design, and the test
-    # that models that constraint produced two heartbeats in one second — which the real
-    # bucket would refuse with a 403. Persistent=true timer catch-ups make that reachable.
-    ms = int(time.time() * 1000) % 1000
-    name = f"heartbeat/date={today}/hb-{time.strftime('%H%M%S', now)}{ms:03d}Z.json"
+    name = (f"heartbeat/date={today}/"
+            f"hb-{time.strftime('%H%M%S', now)}-{seq:08d}Z.json")
     upload(bucket, name, json.dumps(hb, indent=1).encode(), "application/json",
            timeout=60)
     print(line + f" -> gs://{bucket}/{name}")

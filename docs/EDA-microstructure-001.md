@@ -2279,7 +2279,9 @@ column (81), which is what enters DSR deflation, was never affected.
 | GCS->HF tape chain (6 archive round-trips + 16 tape-object round-trips + 1 cross-machine reassembly control + 1 validation of HF's own receipt hash against a local file) | 24 | 0 |
 | SAMPLE-okx-l2-001 acquisition + controls (3 HEAD liveness probes, schema/tick/cadence measurement, control A at 4 depths, control B intact + shuffled, trades-archive read) | 13 | 0 |
 | Recorder cadence upgrade (2 pre-switch stream probes, 5 post-switch heartbeat rate windows, 1 QC census) | 8 | 0 |
-| **running total** | **727** | **113** |
+| DIAG-control-a-validation-001 (control A re-run on the Binance tape: 4 selection modes x 4 depths, plus frame/snapshot structure inspection and one interval trace) | 18 | 0 |
+| HF reassembly control closed (1 quiet-link reassembly + 1 heartbeat bracket) | 2 | 0 |
+| **running total** | **747** | **113** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 

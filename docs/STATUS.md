@@ -229,12 +229,14 @@ from HF over a plain-HTTPS path that shares no library with the uploader. `data/
 round-trip verified. Ledger: `reports/tape-hf-ledger.jsonl`.
 
 **Per-object verification PASSED for all of it** (22 objects: 16 tape + 6 archive, each
-byte-exact on read-back against the md5 GCS recorded at creation). The **full
-reassemble-from-HF control has NOT passed yet** — `scripts/verify_tape_hf.py` exists and is
-runnable, but it did not complete while the OKX acquisition was saturating the same link and
-HF's CDN truncated the 26 MB object repeatedly under that contention. Recorded as NOT YET
-PASSED rather than waved through; the GCS-side equivalent of the same control did pass
-(131,569 frames, matching the heartbeat).
+byte-exact on read-back against the md5 GCS recorded at creation). ~~The full
+reassemble-from-HF control has NOT passed yet~~ — **CLOSED PASSED 2026-08-08 on a quiet
+link**: reassembled 0..49,125,861 B across 16 objects with no gap, and counted **257,739
+frames**, which is byte-for-byte and frame-for-frame the same as the VM heartbeat at
+07:30:39Z (`day_file_bytes` 49,125,861, `frames_today` 257,739). It ran in **55 seconds**
+against 25+ minutes of hanging under contention, so the earlier failure is now measured as
+bandwidth contention rather than a data problem — the two network jobs were sabotaging each
+other, and that is a scheduling rule, not a defect in the mirror.
 
 **Mac uptime requirement, measured**: none, week to week. VM->GCS is a systemd timer every
 15 minutes and nothing in GCS ever deletes (`objectCreator` cannot, and lifecycle only
@@ -254,6 +256,16 @@ by month 12 (published rates).
 > projection was **wrong twice** and is kept for the trail: it scaled bytes linearly with
 > frames (measured 1.62x, not 3.78x), and it assumed the tape lives on the VM forever, which
 > stopped being true when local days began expiring 3 days after their manifest verifies.
+
+**Control A is BROKEN and the OKX verdict is RETRACTED** (`docs/DIAG-control-a-validation-001.md`):
+run unchanged against the Tokyo tape — whose diff chain is separately attested at 0 sequence
+gaps and 0 resyncs — it scores **29.3 % at top-20, worse than OKX at every depth**. Two real
+defects inside the control were then found and measured (positional frame selection loses
+frames that arrive while the REST snapshot is in flight; the event straddling the closing
+`lastUpdateId` is discarded), and repairing each one RAISED the score on unchanged data
+(29.3 -> 34.1 -> 41.5 %), which is what a broken instrument looks like. A third defect
+remains unfound and is recorded as unknown rather than patched with a tolerance. The
+H1/H2 hypothesis split for OKX is therefore moot and was deliberately not run.
 
 **OKX L2 sample**: rule declared and committed before any download
 (`docs/SAMPLE-okx-l2-001.md`, 62 days = the 7th and 21st of each month 2024-01..2026-07,

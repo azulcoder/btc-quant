@@ -286,3 +286,28 @@ def test_qc_fps_uses_measured_coverage_not_calendar_hour(sandbox):
     hour = qc["tape_days"]["2026-08-07"]["hours"]["05"]
     assert hour["coverage_s"] == 350              # (36-1) * 10 s span
     assert abs(hour["fps"] - 36 / 350) < 0.01
+
+
+def test_heartbeat_names_never_collide_however_fast_the_runs(sandbox, monkeypatch):
+    """The bucket refuses an overwrite, so a colliding name is a 403 in production. The
+    first fix appended milliseconds and only made collisions rarer — the suite caught two
+    heartbeats inside one millisecond anyway. Uniqueness now comes from a persisted
+    counter, so back-to-back runs cannot collide no matter what the clock does.
+
+    Note the clock is NOT frozen here: patching `time` reaches the shared stdlib module and
+    hangs pytest itself, which is its own small lesson about where a seam belongs.
+    """
+    tape, fake = sandbox
+    monkeypatch.setattr(tape_heartbeat.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"stdout": "active\n"})())
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    f = tape / f"date={today}" / "frames.jsonl.gz"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(members(rows({"kind": "frame", "recv_ms": int(time.time() * 1000)})))
+    for _ in range(6):
+        assert tape_heartbeat.main() == 0          # FakeGCS asserts on overwrite
+    names = [n for n in fake.objects if n.startswith("heartbeat/")]
+    assert len(names) == 6
+    seqs = sorted(int(n.rsplit("-", 1)[1].split("Z")[0]) for n in names)
+    assert seqs == [1, 2, 3, 4, 5, 6]              # monotonic and persisted
+    assert json.loads(tape_heartbeat.HB_STATE.read_text())["seq"] == 6
