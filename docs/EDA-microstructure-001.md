@@ -2273,7 +2273,10 @@ column (81), which is what enters DSR deflation, was never affected.
 | BOOK-003 paired funding test + cost sweep (3,760 cells, variance decomposition; PROVENANCE, no returns) | 1 | 0 |
 | DIAG-movement-census-001 (realized |move| per horizon vs declared fee constants, 25 usable days; PROVENANCE, no verdict attached) | 1 | 0 |
 | **PREREG-markout-001** (declared cap: 8 horizons × 4 latency offsets = 32 cells, one venue, no conditioning; verdict **GAGAL** — all 32 CI upper bounds below the 4 bps maker hurdle; the 6 diagnostic looks are the control runs: positive v1 + brute-force verification + v2 + v3, negative on seed 424242, negative on fresh seed 424243 — the first four caught my own wrong control algebra and two sub-noise thresholds before any real signed row was evaluated) | 6 | **32** |
-| **running total** | **574** | **113** |
+| DIAG-data-ceiling-001 (venue census, read-only, NO forward returns: Vision 20 listing probes + 11 per-type earliest/size + 3 file downloads = 34; Binance WS gap 10; bybit 12; okx 14; coinbase 11; perp-DEX 15; storage map 4) | 100 | 0 |
+| DIAG-recorder-quality-001 (tape census + independent cross-machine reassembly control) | 2 | 0 |
+| GCP tape-backup posture verifications (bucket config, bucket IAM, project-IAM negative control, instance scope, live readback negative control, billing-permission control) | 6 | 0 |
+| **running total** | **682** | **113** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 

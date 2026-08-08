@@ -9,6 +9,18 @@ Binance Vision publishes aggTrades only, and no venue here publishes historical 
 Every day this is not recording is microstructure history lost permanently. This script closes
 the gap FORWARD by recording the raw `depthUpdate` wire, unmerged and undownsampled.
 
+[CORRECTION 2026-08-08, `docs/DIAG-data-ceiling-001.md`] The sentence above is kept verbatim
+because it is what this file claimed, and half of it is wrong. "Binance Vision publishes
+aggTrades only" is FALSE: the complete listing carries nine daily USDS-M dataset families
+(aggTrades, bookDepth, bookTicker, indexPriceKlines, klines, markPriceKlines, metrics,
+premiumIndexKlines, trades). The load-bearing clause survives measurement: no depth-diff
+dataset exists anywhere in that bucket — bookTicker is L1 quotes whose archive stopped at
+2024-03-30, and bookDepth is 12 percentage bands sampled every ~30 s, neither of which is a
+diff stream. So this recorder's reason to exist is unchanged; only its premise was too narrow.
+One venue-level exception, also measured that day: OKX DOES publish keyless daily L2
+400-level snapshot+update archives back to 2023-12-04. That is a different venue and changes
+nothing here.
+
 What it records (and what it never does)
 ----------------------------------------
 One JSONL.GZ file per UTC day under `data/depth_diffs/binancef/BTCUSDT/date=*/frames.jsonl.gz`

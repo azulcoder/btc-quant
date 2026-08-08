@@ -2,7 +2,7 @@
 
 **Maintained, not archival: this file says where everything stands NOW and where its full
 record lives.** Superseded facts get struck through with a pointer, never silently removed.
-Last update: **2026-08-08, PREREG-markout-001 closed (GAGAL) + backfill26 + recorder VM verified current** (previous stamp: 2026-08-06 post-buildout audit).
+Last update: **2026-08-08, tape backup live (append-only GCS, write-only identity) + venue data-ceiling census + PREREG-markout-001 closed GAGAL** (previous stamp: 2026-08-06 post-buildout audit).
 
 ---
 
@@ -174,6 +174,49 @@ duplicates. Activation requires a restart, which costs a real gap and is not tak
 - **Named, deliberately not written**: ~~`PREREG-markout-001`~~ (**written, run, and CLOSED
   GAGAL 2026-08-08** — see §3), `PREREG-obi-predictive-001`, `PREREG-funding-carry-001` — the
   remaining two are each a predictive look needing declaration + N_trials cap + approval.
+
+## 5a-quater. Tape backup + venue data-ceiling census (2026-08-08)
+
+**The tape is no longer single-copy.** `gs://btcq-depth-tape-1` (asia-northeast1, same region
+as the VM so egress is zero; uniform bucket-level access; versioning on; public access
+prevention enforced; lifecycle Nearline at 30 d, Coldline at 90 d). The VM holds **one** new
+power — `roles/storage.objectCreator` on that bucket alone, doubled at the OAuth layer by a
+`devstorage.write_only` instance scope. It cannot read back, list, overwrite, or delete;
+every sync run probes its own upload expecting HTTP 403 and the heartbeat publishes
+`readback_denied`, so posture drift would appear in the data rather than in an audit nobody
+re-runs. Verified end-to-end 2026-08-08: the whole day's tape was downloaded from the bucket
+to a DIFFERENT machine, reassembled from its 5 objects, and re-counted — **131,569 frames,
+2 holes, 70,627 hole bytes, matching the VM's heartbeat number-for-number**. Local copies are
+deleted only 3 days after their day-manifest verifies. Full runbook incl. the honest posture
+change: `deploy/gcp/README.md` (grep `Phase 2c`).
+
+**Recorder is now visible with no SSH** — a 5-minute heartbeat object plus a per-boot QC
+census, both in the bucket. Before this, current disk usage was **not** readable without SSH
+(only the kernel's boot-time disk SIZE appeared on the serial console); that gap is closed
+from two directions now. Console:
+`https://console.cloud.google.com/storage/browser/<YOUR_TAPE_BUCKET>/heartbeat?project=<YOUR_PROJECT_ID>`
+
+**Measured that day** (details + what they do not prove: `docs/DIAG-recorder-quality-001.md`):
+178.3 MB/day compressed over a 3.83 h window [DIUKUR 2026-08-08] — the earlier ~164 MB/day
+came from a 45 s smoke; 9.55 fps average; **0 sequence gaps, 0 resyncs**; latency proxy
+p50 2 ms / p99 11 ms; 97.40 % recording uptime, with all 6.0 minutes of downtime caused by
+this session's own deploys. Disk runway at that rate: ~269 days on the free 47.9 GB.
+
+**Venue data-ceiling census**: `docs/DIAG-data-ceiling-001.md` — eight parallel read-only
+probes, nothing ingested. Headlines: Binance Vision publishes **nine** daily USDS-M families
+(not aggTrades only — dated correction recorded, old sentence kept), but **no depth diffs
+anywhere**, so the recorder's rationale stands; `bookTicker` history is a frozen
+2023-05-16..2024-03-30 window and BBO is forward-only since 2024-05; `metrics` gives 5-minute
+OI and long/short ratios back to 2020-09-01; **OKX publishes keyless daily L2 400-level
+snapshot+update archives back to 2023-12-04**; Coinbase's L3 `full` channel now **requires
+auth** (repo's earlier note superseded); Bybit stays trades-only; perp-DEX splits between
+open (dYdX, Drift) and gated (Hyperliquid requester-pays, Lighter auth).
+
+**Two contradictions surfaced and deliberately NOT fixed this turn** (fixing them needs
+evidence, not a guess): current Bybit docs say a `Buy` liquidation update means a LONG was
+liquidated, which is the opposite of the collector's stored mapping; and the collector's
+"only depth20@100ms flows on this network" comment is too narrow — `bookTicker` flows too,
+measured twice with same-run zero controls on aggTrade/markPrice.
 - **Cloud safety notes** (not in any committed file by design): the deploy docs use placeholders
   only; no real project id or account identity enters this public repo.
 
