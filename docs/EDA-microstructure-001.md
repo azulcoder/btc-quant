@@ -2272,7 +2272,8 @@ column (81), which is what enters DSR deflation, was never affected.
 | BOOK-002 settled funding history (3 venue REST backfills, per-calendar-year census, positive control vs route B — FAILED on bybit; PROVENANCE) | 1 | 0 |
 | BOOK-003 paired funding test + cost sweep (3,760 cells, variance decomposition; PROVENANCE, no returns) | 1 | 0 |
 | DIAG-movement-census-001 (realized |move| per horizon vs declared fee constants, 25 usable days; PROVENANCE, no verdict attached) | 1 | 0 |
-| **running total** | **568** | **81** |
+| **PREREG-markout-001** (declared cap: 8 horizons × 4 latency offsets = 32 cells, one venue, no conditioning; verdict **GAGAL** — all 32 CI upper bounds below the 4 bps maker hurdle; the 6 diagnostic looks are the control runs: positive v1 + brute-force verification + v2 + v3, negative on seed 424242, negative on fresh seed 424243 — the first four caught my own wrong control algebra and two sub-noise thresholds before any real signed row was evaluated) | 6 | **32** |
+| **running total** | **574** | **113** |
 
 **§4 is the first non-zero entry, and it is counted conservatively at 45.**
 

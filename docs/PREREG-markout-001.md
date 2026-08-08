@@ -1,7 +1,8 @@
 # PREREG-markout-001 — apakah sisi agresor memprediksi pergerakan harga berikutnya?
 
-**Status:** DIDEKLARASIKAN, belum dijalankan. Di-commit sebelum runner-nya berjalan; riwayat git
-adalah buktinya.
+**Status:** ~~DIDEKLARASIKAN, belum dijalankan~~ **CLOSED 2026-08-08 — vonis GAGAL** (hasil di
+bagian HASIL, akhir dokumen). Deklarasi di-commit sebelum runner-nya berjalan; riwayat git
+adalah buktinya (deklarasi → 3 amandemen berstempel → hasil).
 **Look accounting:** ini look **PREDIKTIF** pertama sejak `PREREG-microstructure-001`. Dicatat di
 kolom **predictive** counter (pemilik: `docs/EDA-microstructure-001.md`), pada commit yang sama
 dengan hasilnya. **`N_trials` cap = 32**, rincian di §3 — cap ini kuterima tanpa keberatan.
@@ -177,3 +178,69 @@ yang sama dengan Amandemen 2, kali ini di sisi negatif.
 **Anti-rule-shopping:** kontrol negatif **diulang dengan seed baru `424243`** dan 30 hari
 kerangka yang sama — vonis dijatuhkan pada realisasi segar, bukan pada angka yang memotivasi
 amandemen ini. Data nyata (bertanda asli) tetap belum tersentuh.
+
+---
+
+# HASIL — 2026-08-08, dijalankan persis sebagaimana dideklarasikan
+
+Runner: `scripts/prereg_markout_001.py`. Artefak mesin: `reports/prereg-markout-001-result.json`.
+Urutan eksekusi sesuai §6: kontrol positif dulu, kontrol negatif kedua, data nyata terakhir —
+data bertanda asli baru dievaluasi setelah kedua kontrol PASS.
+
+## Kontrol (semuanya PASS sebelum data nyata disentuh)
+
+- **Kontrol positif v3** (Amandemen 2): nol-recovery iid λ=0 → `+0.002` bps, iid λ=2 →
+  `-0.015` bps (keduanya |·| < 0,3); sinyal-tanam AR(1) ρ=0,6 → terukur `+1.411` vs plateau
+  teoretis `+1.50` (dalam ±25 %, SE gabungan ≈ 2 % dari sinyal). **PASS.**
+- **Kontrol negatif, seed segar `424243`** (Amandemen 3): sisi agresor diacak dalam-hari, 30 hari
+  kerangka, pipeline identik. Seluruh 32 CI memuat nol; semua `h ≤ 900 s` ber-|median| ≤ 0,052.
+  **PASS — pipeline tidak bocor.**
+
+## Matriks 8×4 [DIUKUR] — 277 hari, median-dari-median-harian [95 % CI bootstrap per-hari], bps
+
+```
+    h                     L=0ms                    L=10ms                    L=50ms                   L=200ms
+   1s   +0.074 [ +0.059, +0.097]   +0.047 [ +0.041, +0.062]   +0.014 [ +0.010, +0.017]   +0.000 [ +0.000, +0.000]
+   5s   +0.157 [ +0.138, +0.180]   +0.147 [ +0.123, +0.172]   +0.052 [ +0.044, +0.069]   +0.009 [ +0.000, +0.010]
+  15s   +0.129 [ +0.111, +0.152]   +0.134 [ +0.113, +0.150]   +0.045 [ +0.038, +0.060]   +0.000 [ +0.000, +0.010]
+  60s   +0.142 [ +0.118, +0.161]   +0.132 [ +0.102, +0.162]   +0.069 [ +0.049, +0.093]   +0.000 [ +0.000, +0.011]
+ 300s   +0.080 [ +0.043, +0.103]   +0.064 [ +0.043, +0.079]   +0.015 [ +0.000, +0.037]   -0.048 [ -0.095, -0.023]
+ 900s   +0.065 [ +0.011, +0.107]   +0.065 [ +0.030, +0.096]   +0.000 [ -0.038, +0.026]   -0.081 [ -0.139, -0.047]
+3600s   +0.000 [ -0.042, +0.107]   +0.011 [ -0.052, +0.072]   -0.050 [ -0.117, +0.012]   -0.124 [ -0.235, -0.052]
+14400s  -0.018 [ -0.230, +0.160]   -0.045 [ -0.257, +0.178]   -0.087 [ -0.324, +0.092]   -0.192 [ -0.395, +0.017]
+n/sel                 3,794,721                 3,777,646                 3,759,105                 3,715,103   (baris h=1s; sel lain sebanding)
+```
+
+Tidak ada sel yang ditambah, dihapus, atau dipilih. 32 sel = 32 trial prediktif yang
+dideklarasikan; pencatatannya di pemilik counter (`docs/EDA-microstructure-001.md`), commit
+yang sama dengan hasil ini.
+
+## Vonis, per tabel §5 yang dideklarasikan sebelum angka ada
+
+**GAGAL.** Tidak satu pun sel bermedian > 4 bps — dan lebih kuat dari itu: **seluruh 32 batas
+atas CI berada di bawah 4 bps** (maksimum batas atas: `+0.180` pada h=5 s, L=0 ms), jadi ini
+GAGAL yang tegas, bukan INDETERMINATE. Ambang maker (4 bps) tidak tercapai di sel mana pun;
+ambang taker (10 bps) apalagi.
+
+Deskripsi jujur atas polanya (deskripsi, bukan vonis baru): sisi agresor MEMANG membawa
+informasi — median positif dengan CI yang mengecualikan nol pada h ≤ 900 s untuk L ≤ 10 ms,
+puncaknya `+0.157` bps pada 5 s — tetapi magnitudonya ~25× di bawah hurdle maker dan ~64× di
+bawah hurdle taker, meluruh cepat terhadap offset latensi (pada L=200 ms praktis nol atau
+negatif), dan berbalik tanda pada horizon panjang. Ini konsisten dengan temuan repo yang sudah
+ada (`RESEARCH.md`: prediktabilitas nyata tapi kecil dan berumur pendek; sensus gerakan
+`DIAG-movement-census-001`): informasi arah ada, ekonominya tidak.
+
+## Apa yang vonis ini TIDAK buktikan (item 4, deklarasi §7)
+
+Vonis GAGAL ini mengubur satu klaim spesifik — bahwa sisi agresor trade `binancef` BTCUSDT,
+tanpa conditioning, memprediksi pergerakan mid dengan magnitudo yang melampaui biaya pada
+latensi VPS Tokyo — dan TIDAK mengubur yang lain. Ia bukan bukti bahwa microstructure alpha
+tidak ada: conditioning apa pun (ukuran trade, rezim volatilitas, jam, sekuens order-flow,
+book state dari perekam L2 yang sedang berjalan) adalah pertanyaan berbeda yang masing-masing
+butuh PREREG sendiri dengan cap sendiri. Sebaliknya pun berlaku: seandainya vonisnya LOLOS,
+markout positif tetap bukan strategi — ia diukur pada trade orang lain, bukan trade-mu; ia
+tidak memuat sizing, manajemen risiko, adverse selection saat kamu yang menjadi sisi pasif,
+antrian maker yang terukur ~$445k di touch, ataupun fill nyata. Angka `+0.157` bps terbaik di
+matriks ini adalah properti informasi tape, bukan P&L yang bisa dipanen — dan kegagalannya
+melampaui 4 bps adalah pernyataan tentang ekonomi eksekusi, bukan tentang ada-tidaknya
+informasi di sisi agresor.
