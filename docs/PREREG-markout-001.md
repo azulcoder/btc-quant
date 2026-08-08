@@ -92,3 +92,46 @@ mereka. Proksi harga-trade menggeser level semua angka relatif mid. Dan satu ven
 conditioning berarti hasilnya rata-rata atas seluruh kondisi — sinyal yang hidup hanya di
 subset kondisi akan tampak mati di sini, dan menemukannya adalah PREREG lain, bukan revisi
 yang ini.
+
+---
+
+# AMANDEMEN 1 — 2026-08-08: ekspektasi kontrol positif adalah aljabar yang salah
+
+**Data nyata BELUM tersentuh.** Runner berhenti di kontrol positif sebagaimana dideklarasikan
+(§6: kegagalan mana pun = berhenti total), dan urutan commit membuktikan deklarasi → kegagalan
+kontrol → amandemen ini, sebelum satu markout nyata pun dihitung.
+
+## Yang salah, dengan turunannya
+
+§6 mendeklarasikan bahwa pada aliran iid, `λ=0` harus memulihkan `≈ −c` dan `λ=2` memulihkan
+`≈ λ−c`. **Itu salah untuk proksi yang §4 sendiri deklarasikan.** Reversal `−c` muncul ketika
+referensinya adalah harga trade anchor **sendiri**; proksi kita memakai **trade pertama
+SETELAH** `t+L`, yang sisinya independen dari sisi anchor pada aliran iid:
+
+```
+E[markout | iid, λ apa pun] = λ·Σ E[q_j|q_0] + c·E[s_0(q_tgt − q_ref)] = 0 + 0 = 0
+```
+
+Diverifikasi tiga jalur `[DIUKUR]`: pipeline penuh memberi −0,037 bps (λ=0); brute-force
+independen satu sel memberi −0,16 ± 0,44 (λ=2, konsisten nol); dan pemisahan per-sisi
+menunjukkan drift pasar (+2,3 bps kedua sisi) yang justru **dibatalkan** dengan benar oleh
+tanda. Instrumen melihat nol karena **nilai sebenarnya memang nol** — kontrol lama menuntut
+instrumen memulihkan angka yang salah.
+
+Kegagalan kedua kontrol lama: sel horizon panjang (1 h, 4 h) dalam SATU hari simulasi ~11 jam
+punya jendela yang tumpang tindih masif — ill-conditioned, dan ikut mencemari agregat kontrol.
+
+## Kontrol positif v2 — dideklarasikan di sini, sebelum rerun
+
+Kontrol dibatasi ke sel `h ∈ {15 s, 60 s, 300 s}` (terkondisi baik dalam satu hari simulasi):
+
+1. **Pemulihan nol** (dua kasus): aliran iid dengan `λ=0` dan `λ=2 bps` → |median| < 0,3 bps.
+   Instrumen tidak boleh menemukan sinyal yang tidak ada.
+2. **Pemulihan sinyal tanam**: aliran agresor **berautokorelasi** AR(1) `ρ=0,6` (persistensi
+   order-splitting — mekanisme nyata yang terukur di tape ini), `λ=2 bps`, `c=0,5 bps`.
+   Bentuk tertutup, diturunkan tangan: markout(k trade) =
+   `λ(ρ²−ρ^{k+1})/(1−ρ) + c(ρ^k − ρ)` → plateau `λρ²/(1−ρ) − cρ = 1,8 − 0,3 = +1,5 bps`
+   untuk `k ≳ 150` (yaitu `h ≥ 15 s` pada ~10 trade/s). **PASS** = median terukur pada ketiga
+   horizon dalam ±25 % dari +1,5 dan interval bebas dari nol.
+
+Ambang vonis §5, grid §3, proksi §4, dan kontrol negatif §6 **tidak berubah**.
