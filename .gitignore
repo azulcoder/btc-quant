@@ -73,3 +73,4 @@ data/funding_history/
 # and NOT regenerable — but a sync/retention decision has not been made, so it
 # stays out of git like every other data store.
 data/depth_diffs/
+data/okx-stage/
