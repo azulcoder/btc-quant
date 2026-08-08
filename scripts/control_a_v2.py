@@ -224,3 +224,99 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# --------------------------------------------------------------------------- #
+# Streaming path: a FULL day, in constant memory                              #
+# --------------------------------------------------------------------------- #
+def okx_stream(tar_path, shuffle_seed=None, max_pairs=None):
+    """Control A v2 over a whole OKX day without holding the rows.
+
+    A full day decompresses to ~2.9 GB and ~8.5 M JSON lines; materialising them was never
+    an option, and quietly falling back to a 24 MB prefix would have been the dishonest
+    version of the same constraint. The book itself is ~800 entries, so streaming one line
+    at a time keeps memory flat regardless of how long the day is: rows are consumed, a
+    book is carried, and each `snapshot` row closes the pair before the next one opens.
+
+    `shuffle_seed` cannot be honestly supported in a single pass — shuffling requires the
+    updates of an interval in hand — so it buffers ONE interval at a time, which is bounded
+    by the 60 s snapshot cadence rather than by the day.
+    """
+    import tarfile
+    per_depth = {k: [0, 0] for k in DEPTHS}
+    diffs, mis_rank, mis_touched = [], [], []
+    pairs = 0
+    book = None
+    touched = {"bids": set(), "asks": set()}
+    buf = []
+    with tarfile.open(tar_path, "r|gz") as tf:
+        for member in tf:
+            if not member.isfile():
+                continue
+            fh = tf.extractfile(member)
+            if fh is None:
+                continue
+            # Hand-rolled line splitting, not TextIOWrapper: a "r|gz" stream member is not
+            # seekable and TextIOWrapper asks it whether it is, which raises. Reading fixed
+            # blocks and carrying the partial last line keeps memory flat and works on a
+            # non-seekable stream, which is the whole point of streaming a 2.9 GB day.
+            def _lines(f):
+                tail = b""
+                while True:
+                    blk = f.read(1 << 22)
+                    if not blk:
+                        if tail:
+                            yield tail
+                        return
+                    blk = tail + blk
+                    *whole, tail = blk.split(b"\n")
+                    for ln in whole:
+                        yield ln
+            for raw_b in _lines(fh):
+                raw = raw_b.decode("utf-8", "ignore").strip()
+                if not raw.startswith("{"):
+                    continue
+                try:
+                    r = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if r.get("action") == "snapshot":
+                    if book is not None:
+                        if shuffle_seed is not None:
+                            random.Random(shuffle_seed + pairs).shuffle(buf)
+                        for u in buf:
+                            apply(book, u)
+                        pairs += 1
+                        want = {"bids": {l[0]: l[1] for l in r["bids"]},
+                                "asks": {l[0]: l[1] for l in r["asks"]}}
+                        for k in DEPTHS:
+                            for side in ("bids", "asks"):
+                                for rank, px in enumerate(top(want, side, k), 1):
+                                    w = float(want[side][px])
+                                    g = float(book[side].get(px, 0.0))
+                                    per_depth[k][1] += 1
+                                    if abs(w - g) < 1e-12:
+                                        per_depth[k][0] += 1
+                                    elif k == max(DEPTHS):
+                                        diffs.append(w - g)
+                                        mis_rank.append(rank)
+                                        mis_touched.append(px in touched[side])
+                        if max_pairs and pairs >= max_pairs:
+                            book = None
+                            break
+                    book = {"bids": {l[0]: l[1] for l in r["bids"]},
+                            "asks": {l[0]: l[1] for l in r["asks"]}}
+                    touched = {"bids": set(), "asks": set()}
+                    buf = []
+                elif book is not None:
+                    u = {"bids": r.get("bids", []), "asks": r.get("asks", [])}
+                    for side in ("bids", "asks"):
+                        for lv in u[side]:
+                            touched[side].add(lv[0])
+                    if shuffle_seed is None:
+                        apply(book, u)
+                    else:
+                        buf.append(u)
+            break                                   # one data member per archive
+    return {"pairs": pairs, "per_depth": per_depth, "diffs": diffs,
+            "mis_rank": mis_rank, "mis_touched": mis_touched}

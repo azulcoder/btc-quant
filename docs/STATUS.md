@@ -283,6 +283,22 @@ frames that arrive while the REST snapshot is in flight; the event straddling th
 remains unfound and is recorded as unknown rather than patched with a tolerance. The
 H1/H2 hypothesis split for OKX is therefore moot and was deliberately not run.
 
+**Regime test of the reconstruction control: INDETERMINATE** (`docs/DIAG-control-a-regime-001.md`).
+Nine days selected by a rule committed first (MAX/MED/MIN realized range per year, ranked by
+klines from a venue that is not the one tested), spanning 6.6x in volatility. Per-level
+agreement at top-20 runs **91.8-98.2 %** across that whole range, so the earlier 97.9 % is the
+good end of a spread rather than a constant. The correlation with volatility cannot be
+established either way: Spearman is ~0 across all nine days and -0.20 to -0.60 among the five
+with usable pair counts, where the n=5 critical value is ~0.90. A measured confound explains
+part of it — a fixed-BYTE prefix covers less TIME on busy days, Spearman(pairs, range) = -0.417
+— and the Binance within-day companion test points the other way (+0.543, n=6). **Full-day
+coverage was blocked by throughput, not memory**: the streaming control handles a 2.9 GB day in
+constant memory, but the OKX CDN fell to 0.07 MB/s and HF to 0.02 MB/s mid-session, making a
+single full day a 5.6-hour download. The declared warning therefore STANDS unresolved: if
+reconstruction noise tracks volatility it is not conservative attenuation — it can manufacture
+a relationship in any volatility-linked quantity, which is nearly all of them. Every PREREG
+using reconstructed book sizes must cite it until a powered test closes it.
+
 **OKX L2 sample**: rule declared and committed before any download
 (`docs/SAMPLE-okx-l2-001.md`, 62 days = the 7th and 21st of each month 2024-01..2026-07,
 two named tranches). Result doc `docs/SAMPLE-okx-l2-001-RESULT.md`: schema measured (400
