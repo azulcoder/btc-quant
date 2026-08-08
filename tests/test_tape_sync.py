@@ -206,3 +206,83 @@ def test_qc_census_hours_resyncs_latency(sandbox):
     hour = next(iter(day["hours"].values()))
     assert hour["chain"] == {"ok": 1, "gap": 1}
     assert hour["lat_ms_p50_p90_p99"][0] in (40, 100)        # both frames carry E
+
+
+# --------------------------------------------------------------------------- #
+# mid-file tear (the 2026-08-08 production incident)                           #
+# --------------------------------------------------------------------------- #
+def torn_tape(now_ms):
+    """[good member][torn half-member][good][good] — what a hard reset mid-write
+    followed by a restart's appends actually leaves on disk."""
+    m1 = rows({"kind": "frame", "recv_ms": now_ms, "chain": "ok", "data": {"E": now_ms}})
+    torn = members(rows({"kind": "frame", "recv_ms": now_ms}))[:-9]
+    m3 = rows({"kind": "frame", "recv_ms": now_ms + 1000, "chain": "ok",
+               "data": {"E": now_ms + 999}},
+              {"kind": "frame", "recv_ms": now_ms + 2000, "chain": "ok",
+               "data": {"E": now_ms + 1998}})
+    m4 = rows({"kind": "snapshot", "recv_ms": now_ms + 3000, "reason": "connect"})
+    return members(m1) + torn + members(m3) + members(m4), (m1, torn, m3, m4)
+
+
+def test_walk_tape_recovers_members_after_midfile_tear(tmp_path):
+    now = int(time.time() * 1000)
+    blob, (m1, torn, m3, m4) = torn_tape(now)
+    f = tmp_path / "t.gz"
+    f.write_bytes(blob)
+    got = list(gcs_common.walk_tape(f, 0))
+    kinds = [k for k, _, _ in got]
+    assert kinds == ["member", "hole", "member", "member"]
+    assert got[1][2] == torn                      # the hole is byte-exact, not repaired
+    assert got[2][2] == m3 and got[3][2] == m4    # everything AFTER the tear is seen
+    assert got[-1][0] == "member" and got[-1][1] == len(blob)
+    # the old walker's behavior — stopping at the tear — is the bug this guards against
+    assert [p for _, p in gcs_common.walk_members(f, 0)] == [m1, m3, m4]
+
+
+def test_sync_uploads_hole_and_reassembles_torn_file(sandbox):
+    tape, fake = sandbox
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    blob, _ = torn_tape(int(time.time() * 1000))
+    f = tape / f"date={today}" / "frames.jsonl.gz"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(blob)
+    assert tape_sync.main() == 0
+    names = sorted(n for n in fake.objects if "/chunk-" in n)
+    assert any(n.endswith(".hole") for n in names)
+    assert b"".join(fake.objects[n] for n in names) == blob
+    st = json.loads(tape_sync.STATE.read_text())
+    assert st["files"][today]["offset"] == len(blob)   # reader no longer stalls at the tear
+
+
+def test_heartbeat_sees_frames_after_tear(sandbox, monkeypatch):
+    tape, fake = sandbox
+    monkeypatch.setattr(tape_heartbeat.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"stdout": "active\n"})())
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    blob, _ = torn_tape(int(time.time() * 1000))
+    f = tape / f"date={today}" / "frames.jsonl.gz"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(blob)
+    assert tape_heartbeat.main() == 0
+    hbs = sorted(n for n in fake.objects if n.startswith("heartbeat/"))
+    hb = json.loads(fake.objects[hbs[-1]])
+    assert hb["frames_today"] == 3                # 1 before tear + 2 after: all counted
+    assert hb["tape_holes_today"] == 1 and hb["tape_hole_bytes_today"] > 0
+
+
+def test_qc_fps_uses_measured_coverage_not_calendar_hour(sandbox):
+    tape, _ = sandbox
+    import calendar
+    base = calendar.timegm(time.strptime("2026-08-07 05:00:00", "%Y-%m-%d %H:%M:%S"))
+    ms = int(base * 1000)
+    f = tape / "date=2026-08-07" / "frames.jsonl.gz"
+    f.parent.mkdir(parents=True)
+    # 6 minutes of tape inside the hour: the old /3600 denominator would report
+    # a 10x-too-low fps for exactly this shape (the production false alarm)
+    frames = [{"kind": "frame", "recv_ms": ms + i * 10_000, "chain": "ok",
+               "data": {"E": ms + i * 10_000 - 5}} for i in range(36)]
+    f.write_bytes(members(rows(*frames)))
+    qc = tape_qc.census()
+    hour = qc["tape_days"]["2026-08-07"]["hours"]["05"]
+    assert hour["coverage_s"] == 350              # (36-1) * 10 s span
+    assert abs(hour["fps"] - 36 / 350) < 0.01

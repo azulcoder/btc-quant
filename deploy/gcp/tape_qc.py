@@ -25,7 +25,7 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gcs_common import bucket_name, upload, walk_members  # noqa: E402
+from gcs_common import bucket_name, upload, walk_tape  # noqa: E402
 
 TAPE = Path("/opt/btc-quant/data/depth_diffs/binancef/BTCUSDT")
 
@@ -44,15 +44,25 @@ def census() -> dict:
             continue
         hours: dict[int, dict] = defaultdict(lambda: {
             "frames": 0, "chain": defaultdict(int), "gap_rows": defaultdict(int),
-            "resyncs": 0, "snapshots": 0, "lat": []})
-        for _end, payload in walk_members(f, 0):
+            "resyncs": 0, "snapshots": 0, "lat": [], "recv_span": [None, None]})
+        holes = 0
+        hole_bytes = 0
+        for kind, _end, payload in walk_tape(f, 0):
+            if kind == "hole":
+                holes += 1
+                hole_bytes += len(payload)
+                continue
             for line in payload.splitlines():
                 try:
                     row = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                h = time.gmtime(row.get("recv_ms", 0) / 1000).tm_hour
+                rms = row.get("recv_ms", 0)
+                h = time.gmtime(rms / 1000).tm_hour
                 b = hours[h]
+                sp = b["recv_span"]
+                sp[0] = rms if sp[0] is None else min(sp[0], rms)
+                sp[1] = rms if sp[1] is None else max(sp[1], rms)
                 kind = row.get("kind")
                 if kind == "frame":
                     b["frames"] += 1
@@ -69,9 +79,16 @@ def census() -> dict:
         out = {}
         for h, b in sorted(hours.items()):
             lat = sorted(b["lat"])
+            # fps over MEASURED coverage, not the calendar hour: the first run of this
+            # census divided by 3600 and reported "0.68 fps" for an hour that held six
+            # minutes of tape — a denominator artifact that read as a 13x throughput
+            # collapse (class D). Coverage is printed beside it so nobody re-infers.
+            span = b["recv_span"]
+            coverage_s = max(1.0, (span[1] - span[0]) / 1000) if span[0] is not None else 0
             out[f"{h:02d}"] = {
                 "frames": b["frames"],
-                "fps": round(b["frames"] / 3600, 2),
+                "coverage_s": round(coverage_s),
+                "fps": round(b["frames"] / coverage_s, 2) if coverage_s else 0.0,
                 "chain": dict(b["chain"]),
                 "gap_rows": dict(b["gap_rows"]),
                 "resyncs": b["resyncs"],
@@ -84,6 +101,7 @@ def census() -> dict:
             "frames": sum(b["frames"] for b in hours.values()),
             "gap_rows": sum(sum(b["gap_rows"].values()) for b in hours.values()),
             "resyncs": sum(b["resyncs"] for b in hours.values()),
+            "tape_holes": holes, "tape_hole_bytes": hole_bytes,
         }
     return {"generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "tape_days": days}
@@ -96,9 +114,11 @@ def main() -> int:
     qc = census()
     for d, info in qc["tape_days"].items():
         print(f"QC {d}: {info['frames']:,} frames · {info['gap_rows']} gap rows · "
-              f"{info['resyncs']} resyncs · {info['file_bytes']/1e6:.1f} MB")
+              f"{info['resyncs']} resyncs · {info['tape_holes']} tape holes "
+              f"({info['tape_hole_bytes']:,} B) · {info['file_bytes']/1e6:.1f} MB")
         for h, b in info["hours"].items():
-            print(f"  {h}h {b['fps']:6.2f} fps · lat p50/p90/p99 "
+            print(f"  {h}h {b['fps']:6.2f} fps over {b['coverage_s']:>4}s covered · "
+                  f"frames {b['frames']:,} · lat p50/p90/p99 "
                   f"{b['lat_ms_p50_p90_p99']} ms · gaps {sum(b['gap_rows'].values())} "
                   f"· resyncs {b['resyncs']}")
     if a.upload:

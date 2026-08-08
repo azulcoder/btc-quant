@@ -80,33 +80,85 @@ def probe_readback(bucket: str, name: str) -> dict:
         return {"readback_denied": None, "detail": f"probe error: {type(e).__name__}"}
 
 
-def walk_members(path, start: int = 0):
+GZIP_MAGIC = b"\x1f\x8b\x08"
+
+
+def walk_tape(path, start: int = 0):
     """Stream the append-only multi-member gzip from byte `start`, yielding
-    (member_end_offset, decompressed_bytes) per COMPLETE member. Stops cleanly at a
-    truncated tail (the recorder may be mid-flush); the caller sees only what is whole.
-    Memory stays bounded: 1 MiB compressed blocks in, one member's payload out."""
+    ("member", end_offset, payload) per complete member and ("hole", end_offset,
+    raw_bytes) per unreadable span. Stops at EOF or at a truncated TAIL.
+
+    Holes are real on this tape: a hard reset (power cycle, not SIGTERM) can cut a
+    member mid-write, and the restarted recorder then APPENDS healthy members after
+    the torn one. The first version of this walker assumed tears only occur at the
+    tail and stopped at the first zlib error — which blinded sync, heartbeat, and QC
+    to 96.6% of a real day file (measured 2026-08-08: all three readers stalled at
+    byte 912,208 of a 26.4 MB tape). Recovery = scan for the next gzip magic and
+    hand the skipped bytes back as an explicit hole — recorded, never repaired, so
+    the GCS copy stays byte-identical and the loss is visible instead of silent.
+    A magic match inside torn garbage is possible (3-byte pattern); a false match
+    fails to decompress and simply extends the hole to the next candidate.
+    """
     import zlib
+    size = path.stat().st_size
     with open(path, "rb") as fh:
+        mstart = start
+        carry = b""
         fh.seek(start)
-        pos = start
-        pending = b""
         while True:
             d = zlib.decompressobj(wbits=31)
             out = []
-            feed = pending
-            pending = b""
-            while True:
-                if not feed:
-                    feed = fh.read(1 << 20)
-                    if not feed:
-                        return                      # clean EOF or truncated member: stop
+            fed = 0
+            feed = carry or fh.read(1 << 20)
+            carry = b""
+            status = "eof"                       # ran out of file mid/at member start
+            while feed:
                 try:
                     out.append(d.decompress(feed))
                 except zlib.error:
-                    return                          # corrupt/truncated tail: stop, do not invent
-                pos += len(feed) - len(d.unused_data)
-                if d.eof:
-                    pending = d.unused_data
-                    yield pos, b"".join(out)
+                    status = "torn"
                     break
-                feed = b""
+                fed += len(feed)
+                if d.eof:
+                    end = mstart + fed - len(d.unused_data)
+                    yield "member", end, b"".join(out)
+                    carry = bytes(d.unused_data)
+                    mstart = end
+                    status = "ok"
+                    break
+                feed = fh.read(1 << 20)
+            if status == "ok":
+                if not carry and fh.tell() >= size:
+                    return
+                continue
+            if status == "eof":
+                return                           # truncated tail: stop, do not invent
+            # torn member at mstart: find the next magic strictly after it
+            fh.seek(mstart + 1)
+            scan_pos = mstart + 1
+            tail2 = b""
+            found = -1
+            while found < 0:
+                blk = fh.read(1 << 20)
+                if not blk:
+                    return                       # tear runs to EOF: it IS the tail
+                probe = tail2 + blk
+                i = probe.find(GZIP_MAGIC)
+                if i >= 0:
+                    found = scan_pos - len(tail2) + i
+                else:
+                    scan_pos += len(blk)
+                    tail2 = probe[-2:]
+            fh.seek(mstart)
+            raw = fh.read(found - mstart)
+            yield "hole", found, raw
+            mstart = found
+            fh.seek(found)
+
+
+def walk_members(path, start: int = 0):
+    """Members only — the original interface. Holes are skipped HERE; callers that
+    must count or preserve them (sync, heartbeat, QC) use walk_tape directly."""
+    for kind, end, payload in walk_tape(path, start):
+        if kind == "member":
+            yield end, payload

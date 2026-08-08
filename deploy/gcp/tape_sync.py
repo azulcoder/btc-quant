@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gcs_common import bucket_name, probe_readback, upload, walk_members  # noqa: E402
+from gcs_common import bucket_name, probe_readback, upload, walk_tape  # noqa: E402
 
 TAPE = Path("/opt/btc-quant/data/depth_diffs/binancef/BTCUSDT")
 STATE = TAPE.parent.parent / ".gcs-sync-state.json"
@@ -62,20 +62,37 @@ def main() -> int:
         if st.get("deleted"):
             continue
 
-        # advance to the last complete-member boundary past the recorded offset
-        end = st["offset"]
-        for member_end, _payload in walk_members(f, st["offset"]):
-            end = member_end
-        if end > st["offset"]:
+        # walk from the recorded offset, grouping contiguous complete members into .gz
+        # chunks and handing torn spans over as explicit .hole objects — the bucket
+        # copy stays byte-identical to the local file either way, and a hole is a
+        # RECORDED loss, never a silently skipped one.
+        segs = []
+        cur = st["offset"]
+        run_start = None
+        for kind, end, _payload in walk_tape(f, st["offset"]):
+            if kind == "member":
+                if run_start is None:
+                    run_start = cur
+                cur = end
+            else:
+                if run_start is not None:
+                    segs.append(("chunk", "gz", run_start, cur))
+                    run_start = None
+                segs.append(("hole", "hole", cur, end))
+                cur = end
+        if run_start is not None:
+            segs.append(("chunk", "gz", run_start, cur))
+        for ledger_kind, ext, s0, s1 in segs:
             with open(f, "rb") as fh:
-                fh.seek(st["offset"])
-                body = fh.read(end - st["offset"])
-            name = f"{PREFIX}/date={date}/chunk-{st['offset']:012d}-{end:012d}.gz"
-            meta = upload(bucket, name, body, "application/gzip")
-            log_ledger({"kind": "chunk", "date": date, "object": name,
+                fh.seek(s0)
+                body = fh.read(s1 - s0)
+            name = f"{PREFIX}/date={date}/chunk-{s0:012d}-{s1:012d}.{ext}"
+            meta = upload(bucket, name, body,
+                          "application/gzip" if ext == "gz" else "application/octet-stream")
+            log_ledger({"kind": ledger_kind, "date": date, "object": name,
                         "bytes": len(body), "md5": meta["md5Hash"],
                         "generation": meta.get("generation")})
-            st["offset"] = end
+            st["offset"] = s1
             st["chunks"] += 1
             if not probe_done:       # live negative control: our own upload must be unreadable
                 state["readback"] = probe_readback(bucket, name)

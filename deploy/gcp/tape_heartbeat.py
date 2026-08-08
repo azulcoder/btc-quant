@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gcs_common import bucket_name, upload, walk_members  # noqa: E402
+from gcs_common import bucket_name, upload, walk_tape  # noqa: E402
 
 TAPE = Path("/opt/btc-quant/data/depth_diffs/binancef/BTCUSDT")
 HB_STATE = TAPE.parent.parent / ".hb-state.json"
@@ -26,10 +26,15 @@ SYNC_STATE = TAPE.parent.parent / ".gcs-sync-state.json"
 
 
 def count_new(f: Path, offset: int) -> tuple[int, dict]:
-    kinds = {"frame": 0, "gap": 0, "snapshot": 0, "start": 0, "stop": 0}
+    kinds = {"frame": 0, "gap": 0, "snapshot": 0, "start": 0, "stop": 0,
+             "hole": 0, "hole_bytes": 0}
     end = offset
-    for member_end, payload in walk_members(f, offset):
-        end = member_end
+    for kind, span_end, payload in walk_tape(f, offset):
+        end = span_end
+        if kind == "hole":       # torn span: count it loudly, decode nothing from it
+            kinds["hole"] += 1
+            kinds["hole_bytes"] += len(payload)
+            continue
         for line in payload.splitlines():
             try:
                 k = json.loads(line).get("kind", "?")
@@ -45,7 +50,8 @@ def main() -> int:
     st = json.loads(HB_STATE.read_text()) if HB_STATE.exists() else {}
     day = st.get("day", {})
     if day.get("date") != today:
-        day = {"date": today, "offset": 0, "frames": 0, "gaps": 0, "snapshots": 0}
+        day = {"date": today, "offset": 0, "frames": 0, "gaps": 0, "snapshots": 0,
+               "holes": 0, "hole_bytes": 0}
 
     f = TAPE / f"date={today}" / "frames.jsonl.gz"
     fresh = {}
@@ -54,6 +60,8 @@ def main() -> int:
         day["frames"] += fresh.get("frame", 0)
         day["gaps"] += fresh.get("gap", 0)
         day["snapshots"] += fresh.get("snapshot", 0)
+        day["holes"] = day.get("holes", 0) + fresh.get("hole", 0)
+        day["hole_bytes"] = day.get("hole_bytes", 0) + fresh.get("hole_bytes", 0)
 
     vfs = os.statvfs("/")
     svc = subprocess.run(["systemctl", "is-active", "btcquant-depth-recorder"],
@@ -65,6 +73,8 @@ def main() -> int:
         "frames_today": day["frames"], "gaps_today": day["gaps"],
         "snapshots_today": day["snapshots"],
         "frames_since_last_hb": fresh.get("frame", 0),
+        "tape_holes_today": day.get("holes", 0),
+        "tape_hole_bytes_today": day.get("hole_bytes", 0),
         "day_file_bytes": f.stat().st_size if f.exists() else 0,
         "disk_free_gb": round(vfs.f_bavail * vfs.f_frsize / 1e9, 2),
         "synced_bytes_total": sum(s.get("offset", 0)
